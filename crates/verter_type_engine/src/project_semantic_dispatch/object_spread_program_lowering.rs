@@ -111,7 +111,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         infer_binders: &crate::semantic_query::InferBinderFactory,
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
-        name_resolution: &FxHashMap<Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         shadowing: &ScopeShadowing,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
@@ -292,7 +292,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         self.graph().intern_node_with_scope(
             SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-                effects: Arc::from(effects),
+                effects: crate::semantic_query::PayloadArray::from(effects),
             }),
             scope.clone(),
         )

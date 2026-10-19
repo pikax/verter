@@ -14,10 +14,13 @@
 //!   with no tsc counterpart.
 //!
 //! Every request is timed alone; each step's answers are observed right
-//! after the step, outside every timer. Engine statistics are read once,
-//! after the last step, so in a session they include observation (both
-//! tools observe the same way). The record is written when the script
-//! completes; the phase marker names the step running.
+//! after the step, outside every timer. The host's retention counters are
+//! read after the init request and after every step, outside every timer,
+//! so a session can show what one step leaves retained. OS statistics are
+//! read once, after the last step, so in a session they include
+//! observation (both tools observe the same way). Completed steps are
+//! flushed to a journal; the final record adds statistics, and the phase
+//! marker names the step running.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -170,6 +173,10 @@ pub struct SessionResult {
     pub after_steps: Option<process_stats::ProcessStats>,
     pub stats_errors: Vec<String>,
     pub retention: RetentionCounts,
+    /// The host's retention counters after the init request.
+    pub init_retention: RetentionCounts,
+    /// The host's retention counters after each step, in script order.
+    pub step_retention: Vec<RetentionCounts>,
 }
 
 fn canonical(file: &str) -> String {
@@ -188,9 +195,9 @@ fn demand_record(
     host: &VerterHost,
     demand: &Demand,
     record: super::RequestRecord,
-    node: Option<super::SemanticNodeId>,
+    node: Option<super::NodeRoot>,
 ) -> DemandRecord {
-    let bytes = wire_bytes(host, node);
+    let bytes = wire_bytes(host, node.as_ref());
     DemandRecord {
         file: demand.file.clone(),
         alias: demand.alias.clone(),
@@ -303,6 +310,18 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
     if job.steps.is_empty() {
         return Err(JobError("a session runs at least one step".into()));
     }
+    for path in [
+        sink.out.to_path_buf(),
+        sink.sibling(".steps.jsonl"),
+        sink.sibling(".phase"),
+    ] {
+        super::disk::remove_if_present(&path).map_err(|err| {
+            JobError(format!(
+                "remove previous session output {}: {err}",
+                path.display()
+            ))
+        })?;
+    }
     let mut stats_errors = Vec::new();
 
     sink.phase("engine-start")?;
@@ -331,10 +350,25 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
 
     sink.phase("init")?;
     let (init, _) = request(&host, &canonical(&job.init_file), &job.init_alias, false);
+    let init_retention = retention(&host);
+
+    let journal = sink.sibling(".steps.jsonl");
+    let header = serde_json::json!({
+        "schema": SESSION_RESULT_SCHEMA, "tool": "verter", "kind": "session",
+        "stage": "partial", "observability": job.observability,
+        "captureAvailable": capture_available(), "pid": std::process::id(),
+        "phases": { "engineStart": engine_start, "setup": setup, "init": init.micros },
+        "initOutcome": init.outcome, "initRetention": init_retention,
+    });
+    super::disk::write(&journal, format!("{header}\n").as_str())
+        .map_err(|err| JobError(format!("create the session journal: {err}")))?;
 
     let mut steps = Vec::with_capacity(job.steps.len());
+    let mut step_retention = Vec::with_capacity(job.steps.len());
     for (index, step) in job.steps.iter().enumerate() {
         sink.phase(&format!("step-{index}"))?;
+        #[cfg(test)]
+        super::session_tests::before_step(index);
         steps.push(match step {
             Step::Demand {
                 requests,
@@ -354,6 +388,14 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
             }
             Step::Meta { file } => meta_step(&host, file),
         });
+        step_retention.push(retention(&host));
+        let entry = serde_json::json!({
+            "index": index,
+            "step": steps.last(),
+            "retention": step_retention.last(),
+        });
+        super::disk::append_line(&journal, &entry.to_string())
+            .map_err(|err| JobError(format!("flush step {index}: {err}")))?;
     }
 
     sink.phase("stats")?;
@@ -379,6 +421,8 @@ pub fn run_session(job: &SessionJob, sink: &Sink<'_>) -> Result<SessionResult, J
         after_steps,
         stats_errors,
         retention,
+        init_retention,
+        step_retention,
     };
     sink.record(&result)?;
     sink.phase("done")?;

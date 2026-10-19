@@ -82,6 +82,34 @@ struct InferSyntaxPathLink {
     len: usize,
 }
 
+impl super::node_payload_footprint::PayloadHeap for InferSyntaxPath {
+    /// Each link is a shared allocation; the walk climbs to a link's parent
+    /// only while the visitor descends, so a prefix several paths share is
+    /// offered once per enclosing link.
+    fn visit_payload_heap(
+        &self,
+        visitor: &mut dyn super::node_payload_footprint::PayloadHeapVisitor,
+    ) {
+        let mut next = self.0.as_ref();
+        while let Some(link) = next {
+            let key = Arc::as_ptr(link).cast::<()>() as usize;
+            let block =
+                verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
+                    InferSyntaxPathLink,
+                >());
+            if !visitor.shared(key, block) {
+                return;
+            }
+            let InferSyntaxPathLink {
+                parent,
+                step: _,
+                len: _,
+            } = &**link;
+            next = parent.0.as_ref();
+        }
+    }
+}
+
 impl InferSyntaxPath {
     #[must_use]
     pub(crate) fn root() -> Self {

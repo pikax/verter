@@ -21,6 +21,9 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+mod compile_fixture;
+pub use compile_fixture::{compile_fixture, fixture_diagnostic_source};
+
 /// Resolve a sibling Cargo binary to the copy belonging to the current test run.
 ///
 /// `CARGO_BIN_EXE_*` is expanded at compile time, so its absolute build-tree

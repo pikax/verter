@@ -446,7 +446,7 @@ fn props_emits_slots_share_path_independent_cache() {
         .expect("typeinfo must resolve `Props` to a node");
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(node)
+        .node_data(node.id())
         .expect("resolved node must be interned");
     let typeinfo_names: Vec<String> = match data.as_ref() {
         SemanticNodeData::Object(surface) => {
@@ -546,7 +546,7 @@ fn evaluate_type_expression_for_vue_default_export_matches_props() {
 
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(node)
+        .node_data(node.id())
         .expect("evaluated node must be interned");
 
     let typeinfo_prop_names: Vec<String> = match data.as_ref() {
@@ -624,7 +624,7 @@ fn evaluate_indexed_access_terminal_in_navigate_stays_shallow() {
 
     let store = host.project_type_store().semantic_graph();
     let data = store
-        .node_data(node)
+        .node_data(node.id())
         .expect("evaluated `$props` terminal must be interned");
 
     // Bounded contract: a Navigate terminal stays a SHALLOW carrier.

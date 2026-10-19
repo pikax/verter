@@ -110,9 +110,9 @@ fn request(basis: u8) -> FlowDemandRequest {
         query: SemanticQueryKey::FlowReturn(Box::new(FlowReturnKey {
             function: FlowFunctionSlotIdentity {
                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                    Arc::from("/flow_solve_fixture.ts"),
+                    verter_type_expr::OwnedStr::from("/flow_solve_fixture.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("products"),
+                    verter_type_expr::OwnedStr::from("products"),
                     0,
                     [0; 16],
                     [0; 16],
@@ -120,7 +120,7 @@ fn request(basis: u8) -> FlowDemandRequest {
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 overload_ordinal: 0,
             },
-            normalized_type_args: Arc::from([]),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
             context: FlowReturnContext {
                 parse_env_hash: [0; 16],
                 resolve_env_hash: [0; 16],
@@ -222,7 +222,8 @@ fn nonbinding_product_keys_preserve_graph_version_demand_and_execution_scope() {
     let inputs = fixture.product_inputs();
     let plan = fixture.build_plan(request(0)).unwrap();
     let foreign_basis = fixture.build_plan(request(1)).unwrap();
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let mut first =
         FlowProductExecution::new(&inputs, &plan, FlowProductBudget::default()).unwrap();
     let key = first
@@ -276,7 +277,8 @@ fn nonbinding_product_keys_preserve_graph_version_demand_and_execution_scope() {
 
 #[test]
 fn unrelated_declarations_do_not_consume_the_product_budget() {
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let mut sizes = Vec::new();
     for source in [
         "function products() { return 1; }",
@@ -315,7 +317,8 @@ fn unrelated_declarations_do_not_consume_the_product_budget() {
 #[test]
 fn writes_replace_reaching_state_and_kill_only_explicit_narrowing() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
     let narrow = execution.key(FlowDomain::Narrowing, key.node()).unwrap();
     let fact = FlowNarrowingFact {
@@ -367,7 +370,8 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
     let narrow = execution.key(FlowDomain::Narrowing, key.node()).unwrap();
     let mut store = execution.empty_state();
@@ -410,7 +414,8 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
 #[test]
 fn successful_unchanged_transfers_prove_only_their_exact_domain_and_binding() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
     let other = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
     let declared = execution.key(FlowDomain::DeclaredType, key.node()).unwrap();
@@ -431,6 +436,7 @@ fn successful_unchanged_transfers_prove_only_their_exact_domain_and_binding() {
 fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
     let (graph, number, string) = types();
+    let _scope = graph.enter_node_root_scope();
     let algebra = GraphSemanticAlgebra(&graph);
     let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
     let assignment = execution
@@ -491,6 +497,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
     let plan = fixture.build_plan(request(0)).unwrap();
     let inputs = fixture.product_inputs();
     let (graph, number, string) = types();
+    let _scope = graph.enter_node_root_scope();
     let algebra = GraphSemanticAlgebra(&graph);
     let domains = [
         FlowDomain::ReachingValue,
@@ -614,7 +621,8 @@ fn hoisted_declaration_aliases_share_runtime_state_but_keep_exact_evidence() {
         1,
         FlowProductBudget::default(),
     );
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let keys: Vec<_> = inputs
         .graph()
         .nodes()
@@ -646,7 +654,8 @@ fn iteration_and_product_caps_are_exact_without_counting_acyclic_work() {
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&exact, &inputs, "y", FlowDomain::ReachingType);
     let mut state = exact.empty_state();
     exact.note_iteration().unwrap();
@@ -699,6 +708,7 @@ fn iteration_and_product_caps_are_exact_without_counting_acyclic_work() {
 #[test]
 fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
     let (graph, number, string) = types();
+    let _scope = graph.enter_node_root_scope();
     let algebra = GraphSemanticAlgebra(&graph);
     let budget = FlowProductBudget::default();
     let a = FlowProductValue::DeclaredType(DeclaredTypeProduct::of(number));
@@ -755,6 +765,7 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
 #[test]
 fn widening_joins_preserve_pinned_values_and_only_surviving_literal_arms() {
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let algebra = GraphSemanticAlgebra(&graph);
     let literal = |n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n)));
     let [one, two, three] = [1.0, 2.0, 3.0].map(literal);
@@ -814,7 +825,8 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
         1,
         FlowProductBudget::default(),
     );
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let keys: Vec<_> = inputs
         .graph()
         .nodes()
@@ -847,7 +859,8 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
 #[test]
 fn executing_a_transfer_does_not_credit_the_unrelated_execution_site() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let x = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
     let y = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
     let mut state = execution.empty_state();
@@ -875,7 +888,8 @@ fn declared_authority_survives_snapshot_restore_and_cannot_be_erased() {
         )),
     ] {
         let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-        let (_, number, string) = types();
+        let (_graph, number, string) = types();
+        let _scope = _graph.enter_node_root_scope();
         let key = binding(&execution, &inputs, "y", FlowDomain::DeclaredType);
         let mut before = execution.empty_state();
         let mut branch = before.clone();
@@ -915,7 +929,8 @@ fn declared_types_belong_to_source_declarations_even_when_runtime_bindings_alias
         1,
         FlowProductBudget::default(),
     );
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let keys: Vec<_> = inputs
         .graph()
         .nodes()
@@ -962,7 +977,8 @@ fn alias_normalization_precedes_narrowing_width_accounting() {
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let keys: Vec<_> = inputs
         .graph()
         .nodes()
@@ -992,6 +1008,7 @@ fn alias_normalization_precedes_narrowing_width_accounting() {
 #[test]
 fn all_fresh_identity_join_does_not_expand_membership_or_exceed_width() {
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(1.0)));
     let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(2.0)));
     let algebra = GraphSemanticAlgebra(&graph);
@@ -1050,7 +1067,8 @@ fn execution_evidence_requires_the_exact_attached_plan_and_cold_completion_seals
         .unwrap()
         .key(FlowDomain::ReachingType)
         .unwrap();
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let mut store = cold.empty_state();
     put(&mut cold, &mut store, &key, reaching(number)).unwrap();
     assert_eq!(cold.finish().unwrap().iterations(), 0);
@@ -1077,7 +1095,8 @@ fn execution_evidence_requires_the_exact_attached_plan_and_cold_completion_seals
 #[test]
 fn snapshots_share_runtime_storage_and_writes_preserve_other_continuations() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
     let mut state = execution.empty_state();
     put(&mut execution, &mut state, &key, reaching(number)).unwrap();
@@ -1123,7 +1142,8 @@ fn predecessor_joins_follow_domain_order_and_a_failure_permanently_seals_evidenc
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let early = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
     let late = binding(&execution, &inputs, "y", FlowDomain::ReachingValue);
     assert!(early.node().index() < late.node().index());
@@ -1175,7 +1195,8 @@ fn declarations_have_an_execution_lifetime_budget_and_publish_bundles_atomically
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let x = binding(&execution, &inputs, "x", FlowDomain::DeclaredType);
     let y = binding(&execution, &inputs, "y", FlowDomain::DeclaredType);
     let mut old = execution.empty_state();
@@ -1224,7 +1245,8 @@ fn source_authority_cannot_be_replaced_through_an_old_healthy_snapshot() {
             ..FlowProductBudget::default()
         },
     );
-    let (_, number, string) = types();
+    let (_graph, number, string) = types();
+    let _scope = _graph.enter_node_root_scope();
     let declared = binding(&execution, &inputs, "x", FlowDomain::DeclaredType);
     let runtime = declared.for_domain(FlowDomain::ReachingType).unwrap();
     let mut old = execution.empty_state();
@@ -1252,7 +1274,8 @@ fn source_authority_cannot_be_replaced_through_an_old_healthy_snapshot() {
 #[test]
 fn successful_unchanged_transfer_retains_shared_storage_and_still_proves_work() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
-    let (_, number, _) = types();
+    let (_graph, number, _) = types();
+    let _scope = _graph.enter_node_root_scope();
     let key = binding(&execution, &inputs, "x", FlowDomain::ReachingType);
     let mut state = execution.empty_state();
     put(&mut execution, &mut state, &key, reaching(number)).unwrap();
@@ -1291,6 +1314,7 @@ fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_b
     }
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let values = [1.0, 2.0, 3.0]
         .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n))));
     let algebra = Counting {
@@ -1331,6 +1355,7 @@ fn actual_multiway_type_join_constructs_one_canonical_union_and_one_provenance_b
 fn actual_multiway_join_cannot_reset_the_canonical_work_budget_for_each_predecessor() {
     let (inputs, mut execution) = execution(SOURCE, 1, FlowProductBudget::default());
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let values: Vec<_> = (0..64)
         .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
         .collect();

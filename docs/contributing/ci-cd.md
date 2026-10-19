@@ -18,32 +18,80 @@ Filter globs are plain positive globs (`**` spans path segments, `*` stays in on
 
 **A merge is not tested twice.** On a push to `main`, `detect-changes` first runs `scripts/release-proof.mjs --landed`: when the pushed commit is the squash of a pull request, and a successful CI run of THAT pull request recorded testing exactly the squash's tree, every lane is off and `CI Required` passes on that proof, so the commit on `main` keeps its green tick without re-running the pull request's lanes. The record is a `ci-tested` notice (`pull=<number> tree=<sha>`) that `detect-changes` leaves on every pull request run: a `pull_request` run tests `refs/pull/N/merge`, not the head, and GitHub forgets which pull request a run belonged to once it merges. Another pull request sharing the head tested another base, so its run never counts. A force-push, a direct push, a run that tested another tree, or any commit the proof cannot vouch for runs CI as usual.
 
-- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` job (serial tsserver then tsgo libtest lanes in one job, compiled once), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
+- **Rust changes** (`crates/**`, `Cargo.toml`, etc.) -- `rust-fmt`, `rust-clippy`, `rust-build-configs`, one provider-free `rust-test-build` archive consumed by `rust-test`; the closure-gated `rust-providers-live` job (the serial tsgo libtest lane; the tsserver lane runs in `tsserver-nightly.yml`), the standalone `compiler-contracts` lane, BF2 and the Svelte conformance lane run when their root crates' closure is touched
 - **Proto changes** -- `proto-fmt` regenerates with the pinned `buf`/`oxfmt` tools and byte-compares the complete committed TypeScript binding tree
 - **JS changes** (`packages/**`, `package.json`, etc.) -- `js-build-test`, plus the native binding's workspace suites; its script self-tests run `test:scripts:ci`, which omits the tests another required lane already owns (the ARH dirty twins in `architecture-health`, the lane self-tests in their lanes, the sfc-projection verifiers in `sfc-projection`, the aggregate test in its own step)
 - **Script changes** (`scripts/**`) -- `js-build-test` for the scripts' self-tests; a script a lane executes also selects that lane
-- **SFC projection changes** (`tests/sfc-projection/**`, `scripts/sfc-projection/**`, the lockfile, and the verter_compiler / verter_language / verter_session / verter_validation_probe crate closure) -- `sfc-projection` runs `pnpm run test:sfc-projection`: each node's protocol runs `cargo test` and typechecks its probes on both TypeScript engines
+- **SFC projection changes** (`tests/sfc-projection/**`, `scripts/sfc-projection/**`, the lockfile, and the verter_compiler / verter_language / verter_session / verter_validation_probe crate closure) -- `sfc-projection` runs `pnpm run test:sfc-projection` on two shards: each node's protocol runs `cargo test` and typechecks its probes on both TypeScript engines. Shard 1 runs the node verifiers its `SFC_SHARD_1` title pattern names; shard 2 runs the whole chain with that pattern skipped, so a new or renamed verifier runs in shard 2
 - **Docs and other CI-inert paths only** -- no lane; `CI Required` passes
-- **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`
+- **WASM changes** (verter_wasm's crate closure plus `packages/wasm/**`, `packages/browser-host/**`) -- `wasm-build`; on a pull request it skips `wasm-opt` (the optimised module is built and checked on pushes to `main`, by the daily `Nightly` playground build and by `release.yml`)
 - **Browser-host changes** (`packages/browser-host/**`, `scripts/browser-host-gate*.mjs`, `tests/browser-host/**`, plus the wasm filter) -- `browser-host` runs `node scripts/browser-host-gate.mjs --skip-build` after `wasm-build`: wasm32 census, native same-fixture probe, Chromium/Firefox/WebKit workers; missing browsers, exports, tests or empty operation arrays fail
 - **JetBrains plugin changes** (`extensions/jetbrains/**`, `scripts/jetbrains-gate*.mjs`, `tests/jetbrains-product/**`) -- `jetbrains-plugin` runs `node scripts/jetbrains-gate.mjs` on a JDK 21 runner: the pinned Gradle build's real JVM tests (including JBT1H real-IDE capture hooks), the IntelliJ plugin verifier (every failure level, pinned WebStorm build only) and installable packaging, failing closed on missing JDK/SDK, build output or test evidence. The comparison recorder (`packages/dx-harness/jetbrains`) is typechecked and unit-tested on the `dx-harness-hermetic` lane; that job is the Node side of the jetbrains-product profile.
 
 Most jobs run independently. Core nextest alone consumes the shared archive.
-Real tsserver/tsgo provider tests run serially with libtest in their own job so
-third-party engines have explicit initialization and lifecycle ownership; that
+Caches are restored on every ref and saved only from `main` (`save-if` on
+rust-cache, a restore/save split for Playwright and Gradle): the repository's
+cache is capped at 10 GB, and a pull request's saves, readable by that pull
+request alone, used to evict the `main` entries every other pull request
+restores. The VS Code host and sccache's per-compile entries are the exceptions.
+Real tsgo provider tests run serially with libtest in their own job so the
+third-party engine has explicit initialization and lifecycle ownership; that
 job and the editor-contracts job run every engine or editor even after an
 earlier one failed and decide with a final verdict step, so one run reports
 every regression. The
-Svelte compiler benchmark's measurement (the 1.10x wall-time and RSS fences)
+provider runner also prints `PROVIDER TEST TIME` for each serial libtest result
+and writes `target/provider-timings/{tsserver,tsgo}.json` (under
+`CARGO_TARGET_DIR` when set). CI uploads these as `provider-test-timings`
+(`provider-test-timings-tsserver` in the tsserver nightly).
+Durations measure the stdout stream edges from the flushed test name to its
+terminal status; Cargo compilation and failure-detail output are excluded.
+Pipe batching can round very short tests down to zero, so timings are advisory
+and never change a test verdict or timeout.
+The Svelte compiler benchmark's measurement (the 1.10x wall-time and RSS fences)
 runs nightly; the PR-side `svelte-compiler-benchmark` job proves only the
 benchmark contract, the corpus against the official goldens and the manifest's
 oracle proof.
 Compile-fail fixtures run through `node scripts/compile-contracts.mjs`, outside
 Rust test discovery; Svelte conformance is also a dedicated Cargo/libtest job.
 
+### tsserver nightly (`tsserver-nightly.yml`)
+
+tsgo is the main platform and pull request CI tests it in full; tsserver is the
+legacy engine. Every tsserver-specific lane runs once a day on `main` (04:30 UTC,
+and on `workflow_dispatch`) in this workflow instead of on every pull request:
+the serial tsserver provider lane (`provider-ci.mjs run tsserver`), the
+`@verter/typescript-plugin` suites (native-free, including the carrier-routing
+guard, and the native-backed `src/tsc` specs after a release native build), the
+VS Code E2E routes on tsserver (`@tsserver` and
+`editor-owned-project@editor-tsserver`, from `printCiMatrix.js --tier=tsserver`;
+pull requests run `--tier=pr`, every other required route) and the editor-neutral
+LSP contract's tsserver route (`VERTER_EDITOR_NEUTRAL_ROUTES=tsserver`; pull
+requests run `tsgo,shared-tsgo`). Its workflow and job names are stable, and the
+`tsserver nightly result` job fails when any lane did not succeed. The DX
+harness still runs on pull requests: its pinned tsserver is the reference
+baseline verter-lsp is compared against, not the engine under test.
+
 ### Benchmark (`benchmark.yml`)
 
 Triggered via `/benchmark` PR comment or manual dispatch. Compares Verter compilation performance against Vue's official compiler.
+
+### Perf Gate (`perf-gate.yml`)
+
+Pull requests run the perf harness correctness specs and corpus manifest check.
+Scheduled and manual comparisons build separate candidate and baseline native
+packages and binaries, then measure them interleaved on the same runner. The
+scheduled baseline is the candidate's immediate parent; manual dispatch may
+supply `baseline-ref`. Both refs resolve once before building. Resolved checkout
+identities belong in the run artifact, never in the committed corpus manifest.
+The gate refuses a baseline equal to the candidate, missing or equal build
+paths, engine mismatches, skipped workloads, incomplete coverage and content
+differences. Immediate-parent comparisons detect changes against that parent;
+they do not establish cumulative performance against a historical release.
+Local predicate self-checks remain labeled as self-checks.
+Both CI lanes build `@verter/lsp-test-client` and import the runtime LSP driver
+before running the harness. The driver's package entry is generated `dist`,
+which a frozen dependency install alone does not produce; Vitest's source alias
+does not verify that runtime prerequisite.
 
 ### LSP Benchmark (`lsp-benchmark.yml`)
 
@@ -400,9 +448,9 @@ them:
    commit: `release(ide): v<version>`. No tag, no push.
 3. Review the commit, push it on a branch and open a pull request titled
    `release(ide): v<version>`. Its CI runs the lanes and the `Release IDE
-   Check` rehearsal: seven LSP and MCP targets and five napi targets are
+Check` rehearsal: seven LSP and MCP targets and five napi targets are
    cross-compiled and five VSIXes are packaged. Squash-merge it once `CI
-   Required` is green, with the subject exactly `release(ide): v<version>`; as for the monorepo release, a version commit pushed
+Required` is green, with the subject exactly `release(ide): v<version>`; as for the monorepo release, a version commit pushed
    straight to `main` can never publish.
 4. `release-tag.yml` tags `ide/v<version>`.
 5. The tag triggers `release-ide.yml`, which proves the release pull request's
@@ -508,12 +556,12 @@ native -> lsp -> wasm (bindgen + wasm-opt) -> ts packages
 
 ## Required GitHub Secrets
 
-| Secret                 | Purpose                                                                                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment                                                                                                             |
-| `NETLIFY_SITE_ID`      | Netlify site identification                                                                                                               |
-| `NPM_TOKEN`            | npm publishing (with `--provenance`)                                                                                                      |
-| `VSCE_PAT`             | VS Code Marketplace publishing (`verter.verter-vscode`)                                                                                   |
-| `RELEASE_TAG_SSH_KEY`  | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
+| Secret                | Purpose                                                                                                                                   |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `NETLIFY_AUTH_TOKEN`  | Netlify playground deployment                                                                                                             |
+| `NETLIFY_SITE_ID`     | Netlify site identification                                                                                                               |
+| `NPM_TOKEN`           | npm publishing (with `--provenance`)                                                                                                      |
+| `VSCE_PAT`            | VS Code Marketplace publishing (`verter.verter-vscode`)                                                                                   |
+| `RELEASE_TAG_SSH_KEY` | the deploy key `release-tag.yml` pushes tags with, so the tag push starts a release workflow (a push made with `GITHUB_TOKEN` never does) |
 
 The `GITHUB_TOKEN` is automatically provided for GitHub Release creation, nightly asset management, and PR comments.

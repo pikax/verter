@@ -55,16 +55,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         else {
             return true;
         };
-        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-            self.dispatch.graph(),
-            product.hot.node(),
-        ) else {
+        let Some(data) = self.dispatch.graph().read_in_scope(product.hot.node()) else {
             return true;
         };
         let Some(scope_owner) = self
             .dispatch
             .graph()
-            .node_scope(product.hot.node())
+            .node_scope_in_scope(product.hot.node())
             .and_then(|scope| scope.top_level_owner())
         else {
             return true;
@@ -75,7 +72,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let Some((name, _)) = data.bare_ref_head() else {
             return true;
         };
-        let name = std::sync::Arc::clone(name);
+        let name = std::sync::Arc::<str>::from(name);
         let Some(root_identity) =
             self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
         else {
@@ -112,12 +109,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             .collect();
         let dispatch = self.dispatch;
         let Some(member_node) = dispatch
-            .raise_authored_locator_to_hot(
+            .owning().raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            )
+            ).into_value_in(self.builder())
             .at_optional_boundary()
         else {
             return true;
@@ -182,10 +179,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             return symbolic_preserve(field_value);
         }
 
-        let root_data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            self.dispatch.graph(),
-            field_value.node(),
-        )?;
+        let root_data = self.dispatch.graph().read_in_scope(field_value.node())?;
 
         // (2) Imported generic reference root.
         if let Some((name, _)) = root_data.bare_ref_head() {
@@ -193,7 +187,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 && self.bare_ref_origin_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                     == BareRefOrigin::Imported
             {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 let _ =
                     self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
                 return symbolic_preserve(field_value);
@@ -221,15 +215,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             index: verter_type_engine::semantic_query::IndexKey::String(member_name),
         } = root_data.as_ref()
         {
-            let object_data = verter_type_engine::project_semantic_dispatch::node_data_for(
-                self.dispatch.graph(),
-                *object,
-            );
+            let object_data = self.dispatch.graph().read_in_scope(*object);
             let root_name = object_data.as_deref().and_then(|data| {
                 data.bare_ref_head().and_then(|(name, _)| {
                     data.carrier_type_args()
                         .is_empty()
-                        .then(|| std::sync::Arc::clone(name))
+                        .then(|| std::sync::Arc::<str>::from(name))
                 })
             });
             if let Some(root_name) = root_name {
@@ -247,7 +238,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     if is_package_canonical(self.ctx, &root_identity.canonical_id) {
                         return symbolic_preserve(field_value);
                     }
-                    let member_name = std::sync::Arc::clone(member_name);
+                    let member_name = member_name.clone();
                     let prepared = self.prepared_type_decl(
                         &root_identity.canonical_id,
                         root_identity.owner,
@@ -263,14 +254,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         .collect();
                     let dispatch = self.dispatch;
                     let member_node = dispatch
-                        .raise_authored_locator_to_hot(
+                        .owning().raise_authored_locator_to_hot(
                             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                 member.ty.clone(),
                             ),
                             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
                             ),
-                        )
+                        ).into_value_in(self.builder())
                         .at_optional_boundary()?;
                     if node_references_type_param_names(
                         self.dispatch,
@@ -309,7 +300,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                     BareRefOrigin::Imported | BareRefOrigin::Local
                 )
             {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 if let Some(root_identity) =
                     self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())
                 {
@@ -322,14 +313,14 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             if prepared.type_parameters.is_empty() {
                                 let body_slot = prepared.body_facts.body_slot.clone();
                                 let dispatch = self.dispatch;
-                                if let Some(body_node) = dispatch.raise_authored_locator_to_hot(
+                                if let Some(body_node) = dispatch.owning().raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot.clone(),
                                     ),
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).at_optional_boundary() {
+                                ).into_value_in(self.builder()).at_optional_boundary() {
                                     let exactness =
                                         match crate::meta_resolve::exactness::classify_node(
                                             dispatch,
@@ -396,12 +387,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let scope_owner = self
             .dispatch
             .graph()
-            .node_scope(product.hot.node())?
+            .node_scope_in_scope(product.hot.node())?
             .top_level_owner()?;
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            self.dispatch.graph(),
-            product.hot.node(),
-        )?;
+        let data = self.dispatch.graph().read_in_scope(product.hot.node())?;
         if let verter_type_engine::semantic_query::SemanticNodeData::Object(surface) = data.as_ref()
         {
             return match surface.project_string_key(field_name.as_ref()) {
@@ -415,7 +403,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         if !data.carrier_type_args().is_empty() {
             return None;
         }
-        let name = std::sync::Arc::clone(name);
+        let name = std::sync::Arc::<str>::from(name);
         let root_identity =
             self.root_identity_in_scope(scope_canonical_id, scope_owner, name.as_ref())?;
         if is_package_canonical(self.ctx, &root_identity.canonical_id) {
@@ -430,12 +418,12 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let member = prepared.member_index.get(&field_key)?;
         let dispatch = self.dispatch;
         dispatch
-            .raise_authored_locator_to_hot(
+            .owning().raise_authored_locator_to_hot(
                 &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     verter_type_engine::semantic_query::ProjectionMode::Navigate,
                 ),
-            )
+            ).into_value_in(self.builder())
             .at_optional_boundary()
     }
 
@@ -456,10 +444,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         verter_type_engine::graph_walk::reaches(UtilityQuestion::Route(node), |question| {
             match question {
                 UtilityQuestion::Route(node) => {
-                    let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-                        self.dispatch.graph(),
-                        node,
-                    ) else {
+                    let Some(data) = self.dispatch.graph().read_in_scope(node) else {
                         return Reach::Parts(Vec::new());
                     };
                     Reach::Parts(match data.as_ref() {
@@ -467,7 +452,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             let args = data_ref.carrier_type_args();
                             let utility = data_ref.bare_ref_head().is_some_and(|(name, _)| {
                             verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
-                                name.as_ref(),
+                                name,
                             )
                             .is_some()
                         });
@@ -497,11 +482,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                                 .positive_members()
                                 .iter()
                                 .map(|member| &member.value)
-                                .chain(surface.index_signatures.iter().flat_map(|signature| {
+                                .chain(surface.index_signatures().iter().flat_map(|signature| {
                                     [&signature.key_type, &signature.value_type]
                                 }))
-                                .chain(surface.call_signatures.iter())
-                                .chain(surface.construct_signatures.iter()),
+                                .chain(surface.call_signatures().iter())
+                                .chain(surface.construct_signatures().iter()),
                         ),
                         SemanticNodeData::Signature {
                             params,
@@ -524,14 +509,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // imported root, a foreign resolved reference, or another imported
                 // utility route.
                 UtilityQuestion::Argument(node) => {
-                    let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-                        self.dispatch.graph(),
-                        node,
-                    ) else {
+                    let Some(data) = self.dispatch.graph().read_in_scope(node) else {
                         return Reach::Parts(Vec::new());
                     };
                     if let Some((name, _)) = data.bare_ref_head() {
-                        let name = std::sync::Arc::clone(name);
+                        let name = std::sync::Arc::<str>::from(name);
                         if data.carrier_type_args().is_empty()
                             && self.bare_ref_origin_in_scope(
                                 scope_canonical_id,
@@ -598,21 +580,23 @@ impl<'a> ComponentMetaQueryEngine<'a> {
 
         // The scopes the walk reads nodes in: the field's, then each local
         // alias declaration's it hops into.
-        let mut scopes: Vec<(std::sync::Arc<str>, verter_type_expr::TopLevelOwnerId)> =
-            vec![(std::sync::Arc::from(scope_canonical_id), scope_owner)];
+        let mut scopes: Vec<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+        )> = vec![(
+            verter_type_expr::OwnedStr::from(scope_canonical_id),
+            scope_owner,
+        )];
         verter_type_engine::graph_walk::reaches((node, 0usize), |(node, scope)| {
             let (scope_canonical_id, scope_owner) = scopes[scope].clone();
             let in_scope = |nodes: &mut dyn Iterator<
                 Item = verter_type_engine::semantic_query::SemanticNodeId,
             >| { nodes.map(|node| (node, scope)).collect::<Vec<_>>() };
-            let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-                self.dispatch.graph(),
-                node,
-            ) else {
+            let Some(data) = self.dispatch.graph().read_in_scope(node) else {
                 return Reach::Parts(Vec::new());
             };
             if let Some((name, _)) = data.bare_ref_head() {
-                let name = std::sync::Arc::clone(name);
+                let name = std::sync::Arc::<str>::from(name);
                 let args_empty = data.carrier_type_args().is_empty();
                 drop(data);
                 return match self.bare_ref_origin_in_scope(
@@ -639,22 +623,20 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                             .and_then(|body_slot| {
                                 let dispatch =
                                     self.dispatch;
-                                dispatch.raise_authored_locator_to_hot(
+                                dispatch.owning().raise_authored_locator_to_hot(
                                     &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
                                         body_slot,
                                     ),
                                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                                     ),
-                                ).at_optional_boundary()
+                                ).into_value_in(self.builder()).at_optional_boundary()
                             });
                         let Some(body) = body else {
                             return Reach::Parts(Vec::new());
                         };
-                        let declaration_scope = (
-                            std::sync::Arc::clone(&root_identity.canonical_id),
-                            root_identity.owner,
-                        );
+                        let declaration_scope =
+                            (root_identity.canonical_id.clone(), root_identity.owner);
                         let declaration_scope =
                             match scopes.iter().position(|known| *known == declaration_scope) {
                                 Some(index) => index,
@@ -818,9 +800,7 @@ fn node_references_type_param_names(
         return false;
     }
     verter_type_engine::graph_walk::reaches(node, |node| {
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             return Reach::Parts(Vec::new());
         };
         Reach::Parts(match data.as_ref() {
@@ -865,12 +845,12 @@ fn node_references_type_param_names(
                 .map(|member| member.value)
                 .chain(
                     surface
-                        .index_signatures
+                        .index_signatures()
                         .iter()
                         .flat_map(|signature| [signature.key_type, signature.value_type]),
                 )
-                .chain(surface.call_signatures.iter().copied())
-                .chain(surface.construct_signatures.iter().copied())
+                .chain(surface.call_signatures().iter().copied())
+                .chain(surface.construct_signatures().iter().copied())
                 .collect(),
             SemanticNodeData::Signature {
                 params,

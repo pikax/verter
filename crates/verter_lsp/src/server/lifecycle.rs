@@ -264,13 +264,12 @@ pub(super) async fn handle_initialize(
         .is_some_and(|tp| tp.supports_completion_resolve());
 
     // The capability surface reads the serving host's own classification
-    // authority for the watcher globs. The `HostRef` borrow (and the
-    // `SemanticActivityGuard` it owns) is scoped to that one call: it must
-    // never outlive the read it covers.
-    let capabilities = {
-        let host = server.documents.host();
-        server_capabilities(&encoding, resolve_provider, host.language_classifier())
-    };
+    // authority for the watcher globs.
+    let capabilities = server_capabilities(
+        &encoding,
+        resolve_provider,
+        server.documents.host().language_classifier(),
+    );
 
     Ok(InitializeResult {
         capabilities,
@@ -475,14 +474,6 @@ pub(super) async fn handle_initialized(server: &VerterLanguageServer, _params: I
     // Watcher globs are derived from the serving host's OWN composed
     // classification authority, so the files this server watches are exactly
     // the files its host classifies as framework carriers.
-    //
-    // `HostRef` owns a `SemanticActivityGuard`, which the guard contract
-    // requires to cover exactly ONE host call (see `documents::guarded_host`).
-    // Reading the classifier is that one call, so the borrow is scoped to the
-    // two glob reads below and the guard is released before the
-    // `client/registerCapability` round trip — holding it across a client
-    // request would park every queued close-time payload release for as long
-    // as the client takes to answer.
     let (carrier_glob, adapter_module_glob) = {
         let host = server.documents.host();
         (

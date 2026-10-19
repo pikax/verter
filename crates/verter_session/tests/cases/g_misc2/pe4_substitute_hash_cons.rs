@@ -93,9 +93,9 @@ fn lower_mapped(host: &Arc<VerterHost>) -> SemanticNodeId {
             let _ = whole_hash;
             let base =
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                    Arc::clone(canonical_id),
+                    canonical_id.clone(),
                     *owner,
-                    Arc::clone(name),
+                    name.clone(),
                 );
             let key = verter_session::for_tests::instantiate_key_for_tests(
                 host,
@@ -155,7 +155,7 @@ fn extract_mapper_inputs(
                 let key = verter_session::for_tests::instantiate_key_for_tests(
                     host,
                     base.to_type_slot_unscoped(),
-                    Arc::clone(args),
+                    Arc::from(&args[..]),
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
@@ -186,6 +186,10 @@ fn intern_literal(host: &Arc<VerterHost>, name: &str) -> SemanticNodeId {
 #[test]
 fn repeated_substitutions_with_identical_triple_hit_hash_cons_memo() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mapped_carrier = lower_mapped(&host);
     let (value_expr, parameter_node) = extract_mapper_inputs(&host, mapped_carrier);
     let arg = intern_literal(&host, "a");
@@ -227,6 +231,10 @@ fn repeated_substitutions_with_identical_triple_hit_hash_cons_memo() {
 #[test]
 fn distinct_triples_miss_hash_cons_memo() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mapped_carrier = lower_mapped(&host);
     let (value_expr, parameter_node) = extract_mapper_inputs(&host, mapped_carrier);
 

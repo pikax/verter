@@ -134,6 +134,7 @@ fn shared(
 fn fresh_answers() -> Vec<Vec<String>> {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let answers: Vec<Vec<String>> = subjects(&d)
         .iter()
         .map(|subject| shared(&d, *subject))
@@ -175,7 +176,7 @@ fn set_key(subject: SemanticNodeId) -> SemanticQueryKey {
 }
 
 fn set_epoch(value: &SignatureSetValue) -> Option<GraphEpoch> {
-    value.set.epoch()
+    value.set().epoch()
 }
 
 fn candidates(
@@ -183,7 +184,7 @@ fn candidates(
     value: &SignatureSetValue,
 ) -> Vec<SignatureCandidate> {
     match SemanticReadView::pin(d.graph().signature_store())
-        .read_set(value.set)
+        .read_set(value.set())
         .expect("a current-epoch set reads")
     {
         BorrowedSet::Empty => Vec::new(),
@@ -204,6 +205,7 @@ fn candidates(
 fn a_warm_signature_set_of_a_retired_epoch_is_a_miss_that_recomputes_the_answer() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let store = d.graph().signature_store();
     for subject in subjects(&d) {
         let before = shared(&d, subject);
@@ -241,6 +243,7 @@ fn a_warm_signature_set_of_a_retired_epoch_is_a_miss_that_recomputes_the_answer(
 fn compaction_evicts_retired_kernel_families_and_the_answers_recompute() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = d.graph();
     let store = graph.signature_store();
     let [overloaded, union] = subjects(&d);
@@ -318,6 +321,7 @@ fn compaction_evicts_retired_kernel_families_and_the_answers_recompute() {
 fn releasing_the_named_nodes_evicts_the_warm_set_and_the_answer_recomputes() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = d.graph();
     let store = graph.signature_store();
     let [overloaded, _] = subjects(&d);
@@ -362,6 +366,7 @@ fn releasing_the_named_nodes_evicts_the_warm_set_and_the_answer_recomputes() {
 fn a_warm_signature_result_of_a_retired_epoch_is_never_served() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let store = d.graph().signature_store();
     let [overloaded, _] = subjects(&d);
     let set = d
@@ -409,6 +414,7 @@ fn a_warm_signature_result_of_a_retired_epoch_is_never_served() {
 fn a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_answer() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = d.graph();
     let expected = fresh_answers();
     for (subject, expected) in subjects(&d).into_iter().zip(expected) {
@@ -455,6 +461,7 @@ fn a_replacement_between_the_memo_read_and_the_pin_is_a_miss_not_an_incomplete_a
 fn a_build_that_straddles_a_replacement_cannot_poison_later_reads() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = Arc::clone(d.graph());
     let [overloaded, _] = subjects(&d);
     let expected = fresh_answers().remove(0);
@@ -508,6 +515,7 @@ fn a_build_that_straddles_a_replacement_cannot_poison_later_reads() {
 fn a_replacement_during_the_walk_is_walked_again_not_an_incomplete_answer() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = Arc::clone(d.graph());
     let expected = fresh_answers();
     for (subject, expected) in subjects(&d).into_iter().zip(expected) {
@@ -541,13 +549,14 @@ fn a_replacement_during_the_walk_is_walked_again_not_an_incomplete_answer() {
 fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let graph = Arc::clone(d.graph());
     let shallow = d
         .ctx
         .shallow_file_state(CANONICAL)
         .expect("the fixture file is indexed");
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from(CANONICAL),
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -557,9 +566,13 @@ fn a_joiner_never_takes_a_retired_epoch_value_from_the_build_it_joined() {
         let sig = graph.intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind: SignatureKind::Call,
-                params: Arc::from(vec![param(string)].into_boxed_slice()),
+                params: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![param(string)].into_boxed_slice(),
+                ),
                 return_type: string,
-                type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+                type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 occurrence: Some(occurrence(name, 0)),
                 return_carrier: SignatureReturnCarrier::Declared(string),
                 signature_span: None,
@@ -703,9 +716,9 @@ fn observe(host: &VerterHost) -> Vec<String> {
         .map(|symbol| {
             let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from(CHURN),
+                    canonical_id: verter_type_expr::OwnedStr::from(CHURN),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(*symbol),
+                    symbol: verter_type_expr::OwnedStr::from(*symbol),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -834,4 +847,266 @@ fn sustained_unique_edits_keep_the_kernel_store_bounded_and_the_answers_fresh() 
         interned > cap + working_set,
         "premise: an unreclaimed store would pass the bound ({interned} records interned)"
     );
+}
+
+/// A signature set owns its candidates in the graph whose walk published
+/// them, whichever graph's construction scope is newest on the thread: a
+/// dispatcher of another graph opened after the publishing one neither
+/// captures the candidates nor lends their ordinals to its own payloads.
+#[test]
+fn a_signature_set_roots_its_candidates_in_the_graph_that_published_them() {
+    use verter_type_engine::semantic_query::QueryOutcome;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let host = host();
+    let d = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
+    // The fixture composes construction ordinals across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = d.enter_construction_scope();
+    let [overloaded, _] = subjects(&d);
+    // Another graph's dispatcher, opened after `d`: its lane is the newest.
+    let other = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
+    let QueryOutcome::Ready(ready) = d.signatures_of_type_with_authored(
+        d.graph().signature_store(),
+        overloaded,
+        SignatureKind::Call,
+        SemanticContextId::production(),
+    ) else {
+        panic!("an overloaded callable answers");
+    };
+    let value = ready.value;
+    let graph = Arc::clone(d.graph());
+    drop(builder);
+    drop(d);
+    graph.invalidate_all();
+    graph.signature_store().replace_epoch().unwrap();
+    let authored: Vec<SemanticNodeId> = value
+        .candidate_nodes()
+        .iter()
+        .map(|candidate| candidate.authored().expect("authored leaves"))
+        .collect();
+    assert_eq!(authored.len(), 2, "both overloads are candidates");
+    for node in &authored {
+        let payload = graph
+            .read(value.node(*node).unwrap())
+            .expect("the candidate is read in the graph that published it");
+        assert!(
+            matches!(&*payload, SemanticNodeData::Signature { .. }),
+            "{payload:?}"
+        );
+        assert!(
+            matches!(
+                other.graph().read(value.node(*node).unwrap()),
+                Err(verter_type_engine::semantic_query::QueryError::ForeignSemanticOperand)
+            ),
+            "the newer graph's store refuses the publisher's candidate"
+        );
+    }
+    drop(other);
+    assert!(authored.iter().all(|node| graph.node_is_live(*node)));
+    drop(value);
+    assert_eq!(
+        graph.node_count(),
+        graph.node_ownership_counts().permanent_nodes,
+        "the final copy releases the candidate topology"
+    );
+}
+
+/// A signature set handed to a consumer owns its candidates' publishing
+/// nodes: a clone of the value reads every authored candidate after the
+/// dispatch scope, the memo and the epoch that produced it are gone, and the
+/// last copy's drop releases them.
+#[test]
+fn a_cloned_signature_set_owns_its_candidate_nodes_through_its_final_holder() {
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let host = host();
+    let d = ProjectSemanticDispatch::with_graph_fixture(host.as_ref(), GraphFixture::new());
+    let graph = Arc::clone(d.graph());
+    let builder = d.enter_construction_scope();
+    let [overloaded, _] = subjects(&d);
+    let value = d
+        .signature_set_value(overloaded, SignatureKind::Call)
+        .expect("an overloaded callable answers")
+        .clone();
+    drop(builder);
+    drop(d);
+    graph.invalidate_all();
+    graph.signature_store().replace_epoch().unwrap();
+    let authored: Vec<SemanticNodeId> = value
+        .candidate_nodes()
+        .iter()
+        .map(|candidate| candidate.authored().expect("authored leaves"))
+        .collect();
+    assert_eq!(authored.len(), 2, "both overloads are candidates");
+    for node in &authored {
+        let payload = value.node(*node).unwrap().read().unwrap();
+        assert!(
+            matches!(&*payload, SemanticNodeData::Signature { .. }),
+            "{payload:?}"
+        );
+    }
+    assert!(authored.iter().all(|node| graph.node_is_live(*node)));
+    drop(value);
+    assert_eq!(
+        graph.node_count(),
+        graph.node_ownership_counts().permanent_nodes,
+        "the final copy releases the candidate topology"
+    );
+}
+
+/// A cloned signature set keeps its candidate table charged — pinned, once
+/// — after the dispatch, the memo and the epoch that delivered it are gone,
+/// and the clone's own drop releases that charge at once.
+#[test]
+fn a_cloned_signature_set_keeps_its_candidate_table_charged_through_its_final_holder() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let host = host();
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        aggregate_ceiling_bytes: usize::MAX / 2,
+        active_ceiling_bytes: usize::MAX / 2,
+        max_entry_bytes: usize::MAX / 2,
+        pin_threshold_bytes: usize::MAX / 2,
+    });
+    let d = ProjectSemanticDispatch::with_graph_fixture(
+        host.as_ref(),
+        GraphFixture::with_account(StoreAccount::new(Arc::clone(&account))),
+    );
+    let graph = Arc::clone(d.graph());
+    // The fixture composes construction ordinals across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = d.enter_construction_scope();
+    let [overloaded, _] = subjects(&d);
+    let value = d
+        .signature_set_value(overloaded, SignatureKind::Call)
+        .expect("an overloaded callable answers")
+        .clone();
+    drop(builder);
+    drop(d);
+    graph.invalidate_all();
+    graph.signature_store().replace_epoch().unwrap();
+    let (table, class) = value
+        .candidate_table_charge_for_tests()
+        .expect("the delivery charged the candidate table");
+    assert!(table > 0);
+    assert_eq!(
+        class,
+        ChargeClass::Pinned,
+        "no cache holds the table any more: the clone's charge is pinned"
+    );
+    let before = account.snapshot().pinned_bytes;
+    drop(value);
+    assert!(
+        before - account.snapshot().pinned_bytes >= table,
+        "the final clone's drop releases the table's charge"
+    );
+}
+
+/// Public delivery, followed by repeated discovery of the same closed
+/// callable, must not accumulate token roots or their charged backing.
+#[test]
+fn repeated_close_and_re_intern_of_a_delivered_callable_keeps_ownership_flat() {
+    use verter_type_engine::semantic_query::ProjectionMode;
+
+    for caller_first in [false, true] {
+        let host = host();
+        for (path, source) in [
+            ("/ws/keeper.ts", "export type Keeper = { (x: { a: string; deep: { token: string } }): { kept: number }; (x: { b: number }): { extra: boolean }; (x: { c: boolean }): { more: string }; };"),
+            ("/ws/closed.ts", "export type Closed = (x: { payload: string }) => { answer: number };")
+        ] {
+            let _ = host.upsert(UpsertRequest {
+                canonical_id: Some(path.into()),
+                input_id: path.into(),
+                source: Arc::from(source),
+                file_language: crate::LanguageRegistry::global().classify_static(path).static_resolution(),
+                aliases: Vec::new(),
+            }).unwrap();
+        }
+        let graph = host.project_type_store().semantic_graph();
+        let empty_kernel = (
+            graph.signature_store().interned_len(),
+            graph.signature_store().current_epoch_storage_charge(),
+        );
+        let keeper = host
+            .resolve_named_symbol("/ws/keeper.ts", "Keeper", Some(ProjectionMode::Expanded))
+            .unwrap();
+        let held = host
+            .semantic_dispatch()
+            .signature_set_value(keeper.id(), SignatureKind::Call)
+            .unwrap()
+            .clone();
+        assert!(!held.candidate_nodes().is_empty());
+        let callable = host
+            .resolve_named_symbol("/ws/closed.ts", "Closed", Some(ProjectionMode::Expanded))
+            .unwrap();
+        let kernel = graph.signature_store();
+        let epoch = kernel.epoch();
+        let mut plateau = None;
+        for cycle in 0..128 {
+            let value = host
+                .semantic_dispatch()
+                .signature_set_value(callable.id(), SignatureKind::Call)
+                .unwrap()
+                .clone();
+            let report = host.project_type_store().close_canonical("/ws/closed.ts");
+            assert!(
+                report.signature_tokens_released > 0,
+                "the public close releases the callable's token roots"
+            );
+            assert!(
+                !report.signature_epoch_replaced,
+                "the unrelated delivery keeps enough live tokens: {report:?}"
+            );
+            assert_eq!(kernel.epoch(), epoch);
+            for candidate in value.candidate_nodes() {
+                let node = candidate.authored().expect("authored callable");
+                assert!(matches!(
+                    &*value.node(node).unwrap().read().unwrap(),
+                    SemanticNodeData::Signature { .. }
+                ));
+            }
+            drop(value);
+            let current = (
+                graph.node_ownership_counts(),
+                kernel.interned_len(),
+                kernel.current_epoch_storage_charge(),
+            );
+            if cycle == 1 {
+                plateau = Some(current);
+            } else if cycle > 1 {
+                assert_eq!(
+                    Some(current),
+                    plateau,
+                    "cycle {cycle}: delivery ownership and backing plateau after warm-up"
+                );
+            }
+        }
+        let version = held.version().clone();
+        drop(held);
+        if caller_first {
+            drop(version);
+            drop(callable);
+            drop(keeper);
+            host.project_type_store().close_canonical("/ws/keeper.ts");
+        } else {
+            host.project_type_store().close_canonical("/ws/keeper.ts");
+            drop(callable);
+            drop(keeper);
+            // The delivered version alone still owns the epoch's token DAG.
+            assert!(graph.node_count() > graph.node_ownership_counts().permanent_nodes);
+            drop(version);
+        }
+        assert_eq!(
+            graph.node_count(),
+            graph.node_ownership_counts().permanent_nodes,
+            "all cache and caller owners drained"
+        );
+        assert_eq!(graph.node_ownership_counts().roots, 0);
+        assert_eq!(
+            (kernel.interned_len(), kernel.current_epoch_storage_charge()),
+            empty_kernel,
+            "retired signature records and backing return to baseline"
+        );
+    }
 }

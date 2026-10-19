@@ -156,7 +156,7 @@ fn project(
 ) -> SemanticNodeId {
     let query = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(path.into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
         context: ProjectionReductionContext::published(mode),
     };
     match for_tests::dispatch_execute_type_node_for_tests(host, query) {
@@ -241,6 +241,10 @@ fn describe(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
 #[test]
 fn remap_dropped_keys_do_not_force_their_value_operands() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, WIDE_REMAP_TS);
 
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
@@ -293,6 +297,10 @@ fn remap_dropped_keys_do_not_force_their_value_operands() {
 #[test]
 fn single_key_demand_through_remapping_mapper_forces_only_the_producing_key() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, WIDE_REMAP_TS);
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
 
@@ -441,6 +449,10 @@ export type Remapped = {
 #[test]
 fn dead_key_edit_preserves_surface_and_forces_no_dead_key_work_on_recompute() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, WIDE_REMAP_TS);
 
     let before_surface = member_names(
@@ -544,6 +556,10 @@ export type OpenRemapped<T> = {
 #[test]
 fn open_key_domain_single_key_demand_preserves_the_mapped_carrier() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, OPEN_REMAP_TS);
 
     let base = carrier(&host, "OpenRemapped", ProjectionMode::Expanded);
@@ -671,6 +687,10 @@ fn is_import_route_floor_fact(fact: &FactVersionRef) -> bool {
 #[test]
 fn demanded_key_value_facts_are_traced_and_dead_key_value_facts_are_not() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_at(&host, "/w/kept.ts", KEPT_VALUE_TS);
     upsert_at(&host, "/w/dead.ts", DEAD_VALUE_TS);
     upsert_at(&host, "/w/owner.ts", CROSS_FILE_REMAP_OWNER_TS);
@@ -770,6 +790,10 @@ fn demanded_key_value_facts_are_traced_and_dead_key_value_facts_are_not() {
 #[test]
 fn shallow_surface_remap_dropped_keys_do_not_force_their_value_operands() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, WIDE_REMAP_TS);
 
     let base = carrier(&host, "Remapped", ProjectionMode::Shallow);
@@ -850,6 +874,10 @@ fn a_mapped_type_with_every_key_dropped_does_not_force_its_shared_value() {
     // contains the mapped BUILD, whose key-domain decision is the subject.
     fn measure(source: &str, alias: &str, mode: ProjectionMode) -> (u64, Vec<String>) {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         upsert(&host, source);
         let base = carrier(&host, alias, mode);
         let before = instantiate_count(&host);
@@ -923,6 +951,10 @@ fn a_mapped_type_with_every_key_dropped_does_not_force_its_shared_value() {
 #[test]
 fn a_proven_absent_produced_name_misses_without_forcing_any_value() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, WIDE_REMAP_TS);
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
 
@@ -1003,6 +1035,10 @@ export type Remapped = { [K in keyof Source as K]: Boxed<Source[K]> };
 fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() {
     fn measure(source: &str) -> (u64, u64, Vec<String>) {
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         upsert(&host, source);
         let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
         let subs_before = substitute_misses(&host);
@@ -1095,7 +1131,7 @@ fn project_result(
         host,
         SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(Vec::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::default(),
             context: ProjectionReductionContext::published(mode),
         },
     )
@@ -1167,6 +1203,10 @@ fn a_cancelled_mapped_build_stops_substituting_keys() {
     );
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, INLINE_REMAP_TS);
     let base = carrier(&host, "Remapped", ProjectionMode::Expanded);
 
@@ -1255,13 +1295,13 @@ fn value_shape(host: &Arc<VerterHost>, node: SemanticNodeId) -> String {
             // to the demanded key's type is invisible, which is precisely
             // the staleness this parity check exists to catch.
             let object = *object;
-            let name = Arc::clone(name);
+            let name = name.clone();
             drop(data);
             match for_tests::dispatch_execute_type_node_for_tests(
                 host,
                 SemanticQueryKey::IndexedAccess {
                     base: object,
-                    index: IndexKey::String(Arc::clone(&name)),
+                    index: IndexKey::String(name.clone()),
                     mode: ProjectionMode::Expanded,
                 },
             ) {
@@ -1391,6 +1431,10 @@ fn fresh_and_incremental_mapped_surfaces_match_after_dead_demanded_and_remap_edi
     for (label, edited, must_change) in cases {
         // Incremental: build the pre-edit surface, edit, rebuild.
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         upsert(&host, WIDE_REMAP_TS);
         let before = surface_shape(&host, carrier(&host, "Remapped", ProjectionMode::Expanded));
         upsert(&host, edited);
@@ -1488,6 +1532,10 @@ export type PlainMapped = {
 #[test]
 fn a_proven_absent_key_on_a_plain_mapper_misses_without_forcing_any_value() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, PLAIN_MAPPED_TS);
     let base = carrier(&host, "PlainMapped", ProjectionMode::Expanded);
 
@@ -1578,6 +1626,10 @@ fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
         // Control: the same evaluation, uninterrupted — the count the
         // cancelled run must come in strictly under.
         let control_host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _scope = control_host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         upsert(&control_host, PLAIN_MAPPED_TS);
         let control_base = carrier(&control_host, "PlainMapped", mode);
         let control_before = per_k_materializations(&control_host);
@@ -1596,6 +1648,10 @@ fn a_cancelled_mapped_key_loop_stops_forcing_values_on_both_rails() {
         );
 
         let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         upsert(&host, PLAIN_MAPPED_TS);
         let base = carrier(&host, "PlainMapped", mode);
 
@@ -1703,6 +1759,10 @@ export type ComputedKeyMapped = {
 #[test]
 fn an_unnameable_source_key_keeps_the_mapped_type_deferred() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert(&host, COMPUTED_KEY_SOURCE_TS);
 
     // Fixture invariant: the source really does carry a member whose key

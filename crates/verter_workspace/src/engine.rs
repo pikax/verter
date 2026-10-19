@@ -166,6 +166,7 @@ pub(crate) struct ResolutionOperation<'a> {
     /// from the flight (the producer runs on for its other subscribers)
     /// and returns a typed `Cancelled` refusal.
     cancelled: Option<&'a dyn Fn() -> bool>,
+    project: Option<&'a verter_session_query::resolution::ProjectOwnership>,
 }
 
 impl<'a> ResolutionOperation<'a> {
@@ -180,6 +181,7 @@ impl<'a> ResolutionOperation<'a> {
             final_validate,
             overlay: None,
             cancelled: None,
+            project: None,
         }
     }
 
@@ -193,6 +195,7 @@ impl<'a> ResolutionOperation<'a> {
             final_validate,
             overlay: None,
             cancelled: None,
+            project: None,
         }
     }
 
@@ -203,6 +206,16 @@ impl<'a> ResolutionOperation<'a> {
         overlay: Option<&'a crate::resolution_currency::ResolutionOverlaySnapshot>,
     ) -> Self {
         self.overlay = overlay.filter(|overlay| !overlay.is_empty());
+        self
+    }
+
+    /// Resolve a program member in its requesting project's context while
+    /// retaining its real importer directory and request overlay.
+    pub(crate) fn in_project(
+        mut self,
+        project: Option<&'a verter_session_query::resolution::ProjectOwnership>,
+    ) -> Self {
+        self.project = project;
         self
     }
 
@@ -3897,6 +3910,7 @@ impl Engine {
             final_validate,
             overlay: request_overlay,
             cancelled,
+            project,
         } = operation;
         verter_session_query::probe_scope!(RESOLVE_IN_PUBLISHED);
         let overlay_reader;
@@ -4030,9 +4044,22 @@ impl Engine {
             #[cfg(test)]
             resolution_test_hooks::fire(resolution_test_hooks::ResolutionPhase::ExactTableLookup);
 
-            let context_fact = ResolutionFactKey::context_importer(importer_id, population);
-            transaction.lock().observe(context_fact);
-            let selected_context = {
+            let selected_context = if let Some(owner) = project {
+                match explicit_context(captured.world.base.as_ref(), owner) {
+                    Ok((identity, context)) => {
+                        transaction
+                            .lock()
+                            .observe(ResolutionFactKey::context_explicit(identity, population));
+                        Some(context)
+                    }
+                    Err(_) => {
+                        transaction.lock().mark_incomplete_provenance();
+                        None
+                    }
+                }
+            } else {
+                let context_fact = ResolutionFactKey::context_importer(importer_id, population);
+                transaction.lock().observe(context_fact);
                 verter_session_query::probe_scope!(RESOLVE_CONTEXT_SELECT);
                 match selected_context_for_path(captured.world.base.as_ref(), importer_id) {
                     Ok(context) => Some(context),
@@ -4213,10 +4240,7 @@ impl Engine {
                             .as_ref()
                             .map(|root| {
                                 root.snapshot.resolver.project_exact_result(
-                                    importer_id,
-                                    specifier,
-                                    id.clone(),
-                                    ctx,
+                                    importer_id, specifier, id.clone(), ctx,
                                 )
                             })
                             .unwrap_or_else(|| {
@@ -4249,12 +4273,13 @@ impl Engine {
                                 kind: ctx.kind,
                                 phase: ctx.phase,
                             };
-                            crate::resolver::resolve_tracked(
+                            crate::resolver::resolve_tracked_in_project(
                                 &root.snapshot.resolver,
                                 &capability,
                                 &tracked,
                                 input_ledger,
                                 &request,
+                                project,
                             )
                         });
                     match driven {
@@ -4298,13 +4323,14 @@ impl Engine {
                     &transaction,
                 );
                 if let Some(complete_context) = complete_context {
-                    transaction.lock().set_query(ResolutionQueryKey::importer(
+                    let query = ResolutionQueryKey::importer(
                         importer_id,
                         specifier,
                         ctx,
                         complete_context,
                         population,
-                    ));
+                    );
+                    transaction.lock().set_query(query);
                 }
             }
             // Admission is decided once, under the publication gate below: a
@@ -5739,6 +5765,10 @@ impl Engine {
 
     pub(crate) fn snapshot_revision(&self) -> u64 {
         self.snapshot.read().revision()
+    }
+
+    pub(crate) fn snapshot_changes_since(&self, since: Option<u64>) -> crate::SnapshotChanges {
+        self.snapshot.read().changes_since(since)
     }
 
     pub(crate) fn snapshot_canonicals(&self) -> Vec<String> {

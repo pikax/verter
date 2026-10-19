@@ -739,7 +739,7 @@ fn invalidate_nodes_removes_last_good() {
     outputs.insert(
         VirtualNodeKind::Main,
         CachedVirtualFile {
-            code: Arc::from("main code"),
+            code: verter_type_expr::OwnedStr::from("main code"),
             source_map: None,
             lang: Some("js".to_string()),
             meta: VirtualMeta::default(),
@@ -748,7 +748,7 @@ fn invalidate_nodes_removes_last_good() {
     outputs.insert(
         VirtualNodeKind::Template,
         CachedVirtualFile {
-            code: Arc::from("template code"),
+            code: verter_type_expr::OwnedStr::from("template code"),
             source_map: None,
             lang: Some("tsx".to_string()),
             meta: VirtualMeta::default(),
@@ -757,7 +757,7 @@ fn invalidate_nodes_removes_last_good() {
     let last_good = Some(outputs.clone());
     slots.insert(
         42u64,
-        CompileSlot {
+        crate::types::CompileSlotFixture {
             semantic_hash: [0; 16],
             content_override_hash: 0,
             css_hash_override: None,
@@ -770,7 +770,8 @@ fn invalidate_nodes_removes_last_good() {
             diagnostics: DiagnosticsSnapshot::default(),
             last_access_tick: 1,
             fact_dep_signature: verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-        },
+        }
+        .into_slot(),
     );
 
     invalidate_nodes(
@@ -3484,11 +3485,17 @@ mod phase1_structural_tests {
         // Verify Arc sharing: clone and check pointer equality
         let arcs_clone = hd.arcs.clone();
         assert!(
-            Arc::ptr_eq(&hd.arcs.module_references, &arcs_clone.module_references),
+            verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+                &hd.arcs.module_references,
+                &arcs_clone.module_references
+            ),
             "Arc::clone should be pointer-eq (no deep copy)"
         );
         assert!(
-            Arc::ptr_eq(&hd.arcs.macros, &arcs_clone.macros),
+            verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+                &hd.arcs.macros,
+                &arcs_clone.macros
+            ),
             "macros Arc should be pointer-eq"
         );
     }
@@ -3631,7 +3638,7 @@ mod upsert_compile_cache_tests {
             let mut cc = host.compile_cache().get_mut("/src/App.vue").unwrap();
             cc.compile_slots.insert(
                 42,
-                CompileSlot {
+                crate::types::CompileSlotFixture {
                     semantic_hash: [0; 16],
                     content_override_hash: 0,
                     css_hash_override: None,
@@ -3645,7 +3652,8 @@ mod upsert_compile_cache_tests {
                     last_access_tick: 0,
                     fact_dep_signature:
                         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
-                },
+                }
+                .into_slot(),
             );
         }
 

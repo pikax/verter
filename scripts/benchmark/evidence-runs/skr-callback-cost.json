@@ -1,0 +1,68 @@
+{
+  "name": "skr-callback-cost",
+  "description": "Repeated contravariant callbacks retain equivalent answers with linear relation work; cold release cost is compared with a whole-program TypeScript check.",
+  "tier": "standard",
+  "scenarios": [
+    "contravariant-callbacks-10",
+    "contravariant-callbacks-100",
+    "contravariant-callbacks-500"
+  ],
+  "settings": ["strict"],
+  "arms": ["verter", "tsc-cli"],
+  "modes": ["cold"],
+  "threads": ["default"],
+  "noise": [
+    "docs/contributing/semantic-benchmark.md#verdicts",
+    "docs/contributing/semantic-benchmark.md#schedule"
+  ],
+  "requiredCells": [
+    {
+      "scenario": "contravariant-callbacks-10",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "contravariant-callbacks-10",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    },
+    {
+      "scenario": "contravariant-callbacks-100",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "contravariant-callbacks-100",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    },
+    {
+      "scenario": "contravariant-callbacks-500",
+      "setting": "strict",
+      "arm": "verter",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["coldMs", "peakBytes"]
+    },
+    {
+      "scenario": "contravariant-callbacks-500",
+      "setting": "strict",
+      "arm": "tsc-cli",
+      "mode": "cold",
+      "threads": "default",
+      "metrics": ["wallMs"]
+    }
+  ]
+}

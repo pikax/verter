@@ -7,10 +7,18 @@ use std::process::Command;
 
 use serde::Deserialize;
 
+#[allow(clippy::duplicate_mod)]
+#[path = "../../../verter_session/tests/cases/support/map_in_parallel.rs"]
+mod map_in_parallel;
+
 /// One feature, keyed by the full Cargo package id of the package that owns
 /// it, so distinct versions or sources of one package never share a
 /// comparison identity.
 type PackageFeature = (String, String);
+
+thread_local! {
+    static TREE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Deserialize)]
 struct Metadata {
@@ -39,6 +47,9 @@ struct ManifestDependency {
     #[serde(default)]
     rename: Option<String>,
     features: Vec<String>,
+    optional: bool,
+    uses_default_features: bool,
+    target: Option<String>,
     #[serde(default)]
     kind: Option<String>,
 }
@@ -65,6 +76,7 @@ struct Dependency {
 #[derive(Deserialize)]
 struct DepKind {
     kind: Option<String>,
+    target: Option<String>,
 }
 
 impl Dependency {
@@ -77,16 +89,30 @@ impl Dependency {
     }
 }
 
+fn repository_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("repository root above the crate manifest")
+}
+
 fn cargo(root: &Path, args: &[&str]) -> String {
     // Keep toolchain discovery in the repository even for fixture manifests.
     // A fresh runner need not have a rustup default outside the pinned tree.
-    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args(args)
         .arg("--manifest-path")
-        .arg(root.join("Cargo.toml"))
-        .output()
-        .expect("launch Cargo feature resolver");
+        .arg(root.join("Cargo.toml"));
+    // A fixture resolves only path members and its in-fixture directory
+    // registry, so it gets a private Cargo home. Cargo's package-cache lock is
+    // per home, and the shared one is held by any concurrent Cargo process
+    // resolving the real workspace, for the whole download on a cold registry.
+    if root != repository_root() {
+        command.env("CARGO_HOME", root.join("cargo-home"));
+    }
+    let output = command.output().expect("launch Cargo feature resolver");
     assert!(
         output.status.success(),
         "cargo {args:?} failed: {}",
@@ -101,16 +127,22 @@ fn cargo(root: &Path, args: &[&str]) -> String {
 // adds for other platforms never survive the per-target activation
 // intersection in `forbidden_closure`.
 fn metadata(root: &Path, config: &[String]) -> Metadata {
-    let mut args: Vec<String> = [
-        "metadata",
-        "--locked",
-        "--all-features",
-        "--format-version",
-        "1",
-    ]
-    .iter()
-    .map(|arg| arg.to_string())
-    .collect();
+    resolve_metadata(root, config, true)
+}
+
+fn resolve_metadata(root: &Path, config: &[String], locked: bool) -> Metadata {
+    let mut args: Vec<String> = ["metadata", "--all-features", "--format-version", "1"]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect();
+    if locked {
+        args.push("--locked".into());
+    } else {
+        // Fresh fixtures have only staged path/registry dependencies with
+        // exact versions. Metadata creates their lockfile in the same call;
+        // all subsequent activation trees still require that lockfile.
+        args.push("--offline".into());
+    }
     args.extend(config.iter().cloned());
     serde_json::from_str(&cargo(
         root,
@@ -137,9 +169,11 @@ fn closure(
     config: &[String],
     metadata: &Metadata,
 ) -> BTreeSet<PackageFeature> {
+    TREE_RUNS.set(TREE_RUNS.get() + 1);
     let mut args: Vec<String> = [
         "tree",
         "--locked",
+        "--offline",
         "-p",
         package,
         "--target",
@@ -375,23 +409,118 @@ fn activate_edge(
     }
 }
 
+/// Defaults on unconditional mandatory paths from the selected root are active
+/// in its without-seed tree. This is a lower bound only: optional/target-gated
+/// paths remain Cargo's responsibility. Default implications stay in the firm
+/// declaration set; only the default activation rows can be subtracted here.
+fn mandatory_defaults(metadata: &Metadata, root: &str) -> BTreeSet<PackageFeature> {
+    let packages: BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|p| (p.id.as_str(), p))
+        .collect();
+    let nodes: BTreeMap<_, _> = metadata
+        .resolve
+        .nodes
+        .iter()
+        .map(|n| (n.id.as_str(), n))
+        .collect();
+    let root = metadata
+        .packages
+        .iter()
+        .find(|p| p.name == root)
+        .expect("seed owner exists");
+    let mut defaults = BTreeSet::new();
+    if root.features.contains_key("default") {
+        defaults.insert((root.id.clone(), "default".to_owned()));
+    }
+    let mut visited = BTreeSet::new();
+    let mut pending = vec![root.id.as_str()];
+    while let Some(id) = pending.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        for edge in &nodes[id].deps {
+            for kind in &edge.dep_kinds {
+                if kind.kind.as_deref() == Some("dev") || kind.target.is_some() {
+                    continue;
+                }
+                let declarations: Vec<_> = packages[id]
+                    .dependencies
+                    .iter()
+                    .filter(|dep| {
+                        dep.target.is_none()
+                            && dep.kind == kind.kind
+                            && dep.rename.as_deref().unwrap_or(&dep.name).replace('-', "_")
+                                == edge.name.replace('-', "_")
+                    })
+                    .collect();
+                // Cargo permits target-specific declarations of one alias.
+                // Only a nonempty, wholly unconditional mandatory set proves
+                // this exact resolved package is reached without the seed.
+                if declarations.is_empty() || declarations.iter().any(|dep| dep.optional) {
+                    continue;
+                }
+                pending.push(edge.pkg.as_str());
+                if declarations.iter().all(|dep| dep.uses_default_features)
+                    && packages[edge.pkg.as_str()].features.contains_key("default")
+                {
+                    defaults.insert((edge.pkg.clone(), "default".to_owned()));
+                }
+            }
+        }
+    }
+    defaults
+}
+
 // The forbidden set is what the seed's declarations can turn on, restricted
-// to features Cargo actually activates with the seed. Firm rows stay
-// forbidden even when the without-seed closure already contains them — the
-// owner that enables the seed (or an ambient edge request) by default is the
-// default-on configuration the policy rejects, not a reason to subtract the
-// feature. The activation difference still arbitrates the `default` pushes,
-// dropping a `default` the edge suppresses instead of fabricating one.
+// to features Cargo actually activates with the seed. Firm rows stay forbidden
+// even when the without-seed closure already contains them. Activation rows
+// require the with/without difference, after removing defaults proved active
+// through unconditional mandatory paths. Default implications remain firm.
 fn forbidden_closure(
     root: &Path,
     target: &str,
     metadata: &Metadata,
     seeds: &BTreeSet<(String, String)>,
     config: &[String],
+    enabled: &BTreeSet<PackageFeature>,
+    defaults: &mut BTreeMap<String, BTreeSet<PackageFeature>>,
 ) -> BTreeSet<PackageFeature> {
     let mut forbidden = BTreeSet::new();
     for seed @ (package, feature) in seeds {
         let (declared, activation) = declared_closure(metadata, &BTreeSet::from([seed.clone()]));
+        let activation: BTreeSet<_> = activation
+            .difference(&mandatory_defaults(metadata, package))
+            .cloned()
+            .collect();
+        // The original forbidden set is a subset of these two declared sets.
+        // A seed disjoint from every production closure cannot affect any
+        // verdict. Keep full package identities and let Cargo settle every
+        // potentially overlapping activation, including weak/default edges.
+        if declared.is_disjoint(enabled) && activation.is_disjoint(enabled) {
+            continue;
+        }
+        let without =
+            if !activation.is_disjoint(enabled) {
+                Some(defaults.entry(package.clone()).or_insert_with(|| {
+                    closure(root, package, target, None, false, config, metadata)
+                }))
+            } else {
+                None
+            };
+        // Only Cargo proves which defaults are active without the seed. If
+        // all relevant activation rows are already present and no firm row
+        // overlaps production, the enabled-seed tree cannot affect a verdict.
+        if declared.is_disjoint(enabled)
+            && without.as_ref().is_some_and(|without| {
+                activation
+                    .intersection(enabled)
+                    .all(|row| without.contains(row))
+            })
+        {
+            continue;
+        }
         let with = closure(
             root,
             package,
@@ -401,10 +530,11 @@ fn forbidden_closure(
             config,
             metadata,
         );
-        let without = closure(root, package, target, None, false, config, metadata);
         forbidden.extend(declared.intersection(&with).cloned());
-        let activated: BTreeSet<PackageFeature> = with.difference(&without).cloned().collect();
-        forbidden.extend(activation.intersection(&activated).cloned());
+        if let Some(without) = without {
+            let activated: BTreeSet<PackageFeature> = with.difference(without).cloned().collect();
+            forbidden.extend(activation.intersection(&activated).cloned());
+        }
     }
     forbidden
 }
@@ -429,6 +559,11 @@ fn violations(
 }
 
 fn host_target(root: &Path) -> String {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| read_host_target(root)).clone()
+}
+
+fn read_host_target(root: &Path) -> String {
     // Cargo's target-aware resolver accepts the host triple without requiring
     // the target's standard library to be installed (metadata/tree do not build).
     let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
@@ -446,11 +581,7 @@ fn host_target(root: &Path) -> String {
 
 #[test]
 fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap();
+    let root = repository_root();
     let host = host_target(root);
     let metadata = metadata(root, &[]);
     for target in [host.as_str(), "wasm32-unknown-unknown"] {
@@ -473,23 +604,78 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
                 seeds.insert((package.name.clone(), "semantic-observe".into()));
             }
         }
-        let forbidden = forbidden_closure(root, target, &metadata, &seeds, &[]);
+        let requests: Vec<_> = ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"]
+            .into_iter()
+            .flat_map(|package| [false, true].map(|dev| (package, dev)))
+            .collect();
+        let production = map_in_parallel::map_in_parallel(&requests, |&(package, include_dev)| {
+            let before = TREE_RUNS.get();
+            let enabled = closure(root, package, target, None, include_dev, &[], &metadata);
+            (package, include_dev, enabled, TREE_RUNS.get() - before)
+        });
+        let mut enabled_union = BTreeSet::new();
+        let mut defaults = BTreeMap::new();
+        for (package, include_dev, enabled, work) in &production {
+            TREE_RUNS.set(TREE_RUNS.get() + work);
+            enabled_union.extend(enabled.iter().cloned());
+            if !include_dev {
+                defaults.insert(package.to_string(), enabled.clone());
+            }
+        }
+        let forbidden = forbidden_closure(
+            root,
+            target,
+            &metadata,
+            &seeds,
+            &[],
+            &enabled_union,
+            &mut defaults,
+        );
         // Cargo features are profile-independent: this same resolver-2
         // closure applies to default/dev, debug, release and no-debug-assertions.
         // Checking cfg(profile) with metadata would falsely claim build proof;
         // the repository's build lanes independently compile those profiles.
-        for package in ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"] {
-            for include_dev in [false, true] {
-                let enabled = closure(root, package, target, None, include_dev, &[], &metadata);
-                let violations = violations(&metadata, &enabled, &forbidden);
-                assert!(violations.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {violations:?}");
+        // The flight-rendezvous seam is test machinery its own crates' test
+        // edges carry, so only the normal/build closures must stay free of it.
+        let support_seeds: BTreeSet<(String, String)> = metadata
+            .packages
+            .iter()
+            .filter(|package| package.features.contains_key("soak-support"))
+            .map(|package| (package.name.clone(), "soak-support".into()))
+            .collect();
+        assert!(
+            support_seeds.contains(&("verter_type_engine".into(), "soak-support".into())),
+            "the engine declares the soak-support seam"
+        );
+        let shipped_union: BTreeSet<PackageFeature> = production
+            .iter()
+            .filter(|(_, include_dev, _, _)| !include_dev)
+            .flat_map(|(_, _, enabled, _)| enabled.iter().cloned())
+            .collect();
+        let support_forbidden = forbidden_closure(
+            root,
+            target,
+            &metadata,
+            &support_seeds,
+            &[],
+            &shipped_union,
+            &mut defaults,
+        );
+        for (package, include_dev, enabled, _) in production {
+            let observed = violations(&metadata, &enabled, &forbidden);
+            assert!(observed.is_empty(), "{package} target={target} dev={include_dev}: optional observation features enabled: {observed:?}");
+            if !include_dev {
+                let support = violations(&metadata, &enabled, &support_forbidden);
+                assert!(support.is_empty(), "{package} target={target}: soak-support enabled in a shipped closure: {support:?}");
             }
         }
     }
+    eprintln!("feature closure work: {} Cargo tree runs", TREE_RUNS.get());
 }
 
 struct Fixture {
     root: PathBuf,
+    metadata: std::sync::OnceLock<Metadata>,
     // Routes crates.io at an in-fixture registry directory, the one offline
     // source Cargo serves multiple versions of a package from; empty for the
     // fixtures that need no registry.
@@ -559,10 +745,13 @@ edition = "2021"
         )
         .unwrap();
         let fixture = Self {
+            metadata: std::sync::OnceLock::new(),
             root,
             config: Vec::new(),
         };
-        cargo(&fixture.root, &["generate-lockfile", "--offline"]);
+        fixture
+            .metadata
+            .get_or_init(|| resolve_metadata(&fixture.root, &fixture.config, false));
         fixture
     }
 
@@ -595,6 +784,7 @@ edition = "2021"
 [features]
 default = [{}]
 instrument = []
+quiet = []
 "#,
                     default
                         .iter()
@@ -660,50 +850,48 @@ edition = "2021"
             "[workspace]\nmembers = [\"verter_audit\", \"production\"]\nresolver = \"2\"\n",
         )
         .unwrap();
+        let config = vec![
+            "--config".into(),
+            "source.crates-io.replace-with=\"fixture-registry\"".into(),
+            "--config".into(),
+            format!(
+                "source.fixture-registry.directory='{}'",
+                root.join("registry").display()
+            ),
+        ];
         let fixture = Self {
-            config: vec![
-                "--config".into(),
-                "source.crates-io.replace-with=\"fixture-registry\"".into(),
-                "--config".into(),
-                format!(
-                    "source.fixture-registry.directory='{}'",
-                    root.join("registry").display()
-                ),
-            ],
+            metadata: std::sync::OnceLock::new(),
             root,
+            config,
         };
-        let mut lockfile = vec!["generate-lockfile".to_string(), "--offline".into()];
-        lockfile.extend(fixture.config.iter().cloned());
-        cargo(
-            &fixture.root,
-            &lockfile.iter().map(|arg| arg.as_str()).collect::<Vec<_>>(),
-        );
+        fixture
+            .metadata
+            .get_or_init(|| resolve_metadata(&fixture.root, &fixture.config, false));
         fixture
     }
 
     fn violations(&self, include_dev: bool) -> Vec<String> {
         let target = host_target(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let metadata = metadata(&self.root, &self.config);
+        let metadata = self.metadata.get().expect("fixture metadata prepared");
+        let enabled = closure(
+            &self.root,
+            "production",
+            &target,
+            None,
+            include_dev,
+            &self.config,
+            metadata,
+        );
         let forbidden = forbidden_closure(
             &self.root,
             &target,
-            &metadata,
+            metadata,
             &BTreeSet::from([("verter_audit".to_owned(), "semantic-observe".to_owned())]),
             &self.config,
+            &enabled,
+            &mut BTreeMap::new(),
         );
-        violations(
-            &metadata,
-            &closure(
-                &self.root,
-                "production",
-                &target,
-                None,
-                include_dev,
-                &self.config,
-                &metadata,
-            ),
-            &forbidden,
-        )
+        violations(metadata, &enabled, &forbidden)
     }
 }
 
@@ -755,6 +943,32 @@ fn observe_feature_closure_rejects_dev_dependency_unification() {
 // independently is the same measurement activation and must be rejected.
 #[test]
 fn observe_feature_closure_rejects_dependency_edge_activation() {
+    let mandatory = Fixture::with_collector(
+        "collector/quiet",
+        "[dependencies]\ncollector = { version = \"=1.0.0\" }",
+        &[],
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\" }",
+        false,
+    );
+    TREE_RUNS.set(0);
+    assert!(mandatory.violations(false).is_empty());
+    assert_eq!(
+        TREE_RUNS.get(),
+        1,
+        "mandatory defaults are active independently of the observation seed"
+    );
+    let mandatory_instrument = Fixture::with_collector(
+        "collector/quiet",
+        "[dependencies]\ncollector = { version = \"=1.0.0\" }",
+        &["instrument"],
+        "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=1.0.0\" }",
+        false,
+    );
+    assert_eq!(
+        mandatory_instrument.violations(false),
+        ["collector v1.0.0/instrument"],
+        "default implications remain firm even when the default itself needs no activation tree"
+    );
     let requested = Fixture::with_collector(
         "dep:collector",
         "[dependencies]\ncollector = { version = \"=1.0.0\", optional = true, default-features = false, features = [\"instrument\"] }",
@@ -829,9 +1043,15 @@ fn observe_feature_closure_keys_features_by_package_identity() {
         "[dependencies]\nverter_audit = { path = \"../verter_audit\", default-features = false }\ncollector = { version = \"=2.0.0\", default-features = false, features = [\"instrument\"] }",
         false,
     );
+    TREE_RUNS.set(0);
     assert!(
         unrelated.violations(false).is_empty(),
         "production enables collector v2; the observation closure names v1"
+    );
+    assert_eq!(
+        TREE_RUNS.get(),
+        1,
+        "disjoint package identities need only the production tree, never seed activation trees"
     );
     let observed = Fixture::with_collector(
         "dep:collector",

@@ -4,7 +4,7 @@
 //! scan is optimal for the small surfaces that dominate the corpus, but a
 //! wide surface (a TanStack `Table` options object, a theme registry) pays
 //! O(members) string compares per hop, re-paid on every path that crosses
-//! it. This sidecar memoises a name → FIRST-occurrence member ordinal map
+//! it. This sidecar memoises a name → ordered member ordinal group
 //! per interned node so repeated hops into the same wide surface resolve
 //! in O(1).
 //!
@@ -15,8 +15,8 @@
 //! arena is append-only (ids are never reused) and payloads are immutable,
 //! so entries never go stale and no EDIT-time invalidation hook is required
 //! (unlike the hash-cons memos, whose values depend on cross-file walks).
-//! A document CLOSE (`release_canonical`) does drop the entries of the
-//! nodes it tombstones — pure retention once the payload is gone.
+//! A destroyed node's entry is dropped with the arena's destroyed log
+//! (`release.rs`) — pure retention once the payload is gone.
 //!
 //! **Collision-safe hashing.** Member names are authored strings, so the
 //! inner map uses the std `HashMap` default hasher (SipHash `RandomState`),
@@ -35,12 +35,44 @@ use dashmap::mapref::entry::Entry;
 use super::SemanticGraphStore;
 use crate::semantic_query::{PropertyKey, SemanticNodeId, SurfaceView};
 
-/// Name → FIRST-occurrence member ordinal for one interned `Object`
-/// surface. First occurrence matches the walker's linear
-/// `members.iter().find(..)` semantics exactly — a duplicate name maps to
-/// its earliest ordinal, and any post-lookup filtering (e.g. the public-
-/// visibility gate) applies to that same member the scan would have found.
-pub type MemberOrdinalIndex = HashMap<PropertyKey, u32>;
+/// Ordered collision groups for one interned object. Ordinary reads take
+/// the first ordinal; accessor and overload reads keep the whole group.
+pub struct MemberOrdinalIndex {
+    members: HashMap<PropertyKey, smallvec::SmallVec<[u32; 1]>>,
+}
+
+impl MemberOrdinalIndex {
+    pub(crate) fn from_members(members: &[crate::semantic_query::SurfaceMember]) -> Self {
+        let mut index = Self {
+            members: HashMap::with_capacity(members.len()),
+        };
+        for (ordinal, member) in members.iter().enumerate() {
+            crate::semantic_query::note_key_scan_comparison();
+            if let Some(key) = member.key.cloned_known() {
+                index
+                    .members
+                    .entry(crate::semantic_query::property_spelling(key))
+                    .or_default()
+                    .push(ordinal as u32);
+            }
+        }
+        index
+    }
+
+    pub(crate) fn colliding(&self, key: &PropertyKey) -> &[u32] {
+        self.members
+            .get(&crate::semantic_query::property_spelling(key.clone()))
+            .map_or(&[], |members| members.as_slice())
+    }
+
+    /// The first member addressing this property, in authored order.
+    /// Production readers resolve through [`Self::colliding`] inside the
+    /// engine; this single-ordinal view exists for test inspection only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn get(&self, key: &PropertyKey) -> Option<&u32> {
+        self.colliding(key).first()
+    }
+}
 
 /// FIFO retention cap for the member-ordinal sidecar. Sized for the
 /// working set of wide surfaces a session actually path-hops (hundreds
@@ -52,58 +84,56 @@ pub(super) const MEMBER_ORDINAL_INDEX_RETENTION_CAP: usize = 16_384;
 /// name lookups faster by scanning than through the sidecar (hash + lock
 /// overhead dominates below it). Callers consult the sidecar only ABOVE
 /// this count.
-#[allow(dead_code)]
 pub const MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX: usize = 16;
 
 impl SemanticGraphStore {
-    /// Return the lazily-built member-ordinal index for the interned
-    /// `Object` node `id`, whose payload surface the caller already holds
-    /// as `view`. Builds at most once per node id (first-writer-wins;
-    /// concurrent builders produce identical maps because the payload is
-    /// immutable).
-    ///
-    /// The caller is responsible for passing the `SurfaceView` that
-    /// belongs to `id` — the sidecar trusts the pairing, mirroring how
-    /// every walker arm already reads the view through
-    /// [`Self::node_data`].
-    #[must_use]
-    pub fn member_ordinal_index(
-        &self,
-        id: SemanticNodeId,
-        view: &SurfaceView,
-    ) -> Arc<MemberOrdinalIndex> {
-        if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
-            return Arc::clone(existing.value());
-        }
-        let mut index = MemberOrdinalIndex::with_capacity(view.positive_members().len());
-        for (ordinal, member) in view.positive_members().iter().enumerate() {
-            // First occurrence wins — `or_insert` keeps the earliest
-            // ordinal for a duplicated name, matching linear-scan `find`.
-            if let Some(key) = member.key.cloned_known() {
-                index.entry(key).or_insert(ordinal as u32);
+    construction_ordinal_seam! {
+        /// Return the lazily-built member-ordinal index for the interned
+        /// `Object` node `id`, whose payload surface the caller already holds
+        /// as `view`. Builds at most once per node id (first-writer-wins;
+        /// concurrent builders produce identical maps because the payload is
+        /// immutable).
+        ///
+        /// The caller is responsible for passing the `SurfaceView` that
+        /// belongs to `id` — the sidecar trusts the pairing, mirroring how
+        /// every walker arm already reads the view through
+        /// [`Self::node_data`].
+        #[must_use]
+        fn member_ordinal_index(
+            &self,
+            id: SemanticNodeId,
+            view: &SurfaceView,
+        ) -> Arc<MemberOrdinalIndex> {
+            if let Some(existing) = self.member_ordinal_index_memo.get(&id) {
+                return Arc::clone(existing.value());
             }
-        }
-        let built = Arc::new(index);
-        match self.member_ordinal_index_memo.entry(id) {
-            Entry::Occupied(existing) => Arc::clone(existing.get()),
-            Entry::Vacant(slot) => {
-                slot.insert(Arc::clone(&built));
-                let mut fifo = self.member_ordinal_index_fifo.lock();
-                fifo.push_back(id);
-                while fifo.len() > MEMBER_ORDINAL_INDEX_RETENTION_CAP {
-                    if let Some(victim) = fifo.pop_front() {
-                        // Drop the FIFO lock BEFORE touching the DashMap
-                        // (mirrors the hash-cons eviction ordering) so a
-                        // concurrent builder is never blocked behind a
-                        // shard removal; re-acquire to continue evicting.
-                        drop(fifo);
-                        self.member_ordinal_index_memo.remove(&victim);
-                        fifo = self.member_ordinal_index_fifo.lock();
-                    } else {
-                        break;
+            let built = Arc::new(MemberOrdinalIndex::from_members(view.positive_members()));
+            match self.member_ordinal_index_memo.entry(id) {
+                Entry::Occupied(existing) => Arc::clone(existing.get()),
+                Entry::Vacant(slot) => {
+                    slot.insert(Arc::clone(&built));
+                    if !self.track_sidecar(id) {
+                        // A destroyed id is answered, never memoized.
+                        self.member_ordinal_index_memo.remove(&id);
+                        return built;
                     }
+                    let mut fifo = self.member_ordinal_index_fifo.lock();
+                    fifo.push_back(id);
+                    while fifo.len() > MEMBER_ORDINAL_INDEX_RETENTION_CAP {
+                        if let Some(victim) = fifo.pop_front() {
+                            // Drop the FIFO lock BEFORE touching the DashMap
+                            // (mirrors the hash-cons eviction ordering) so a
+                            // concurrent builder is never blocked behind a
+                            // shard removal; re-acquire to continue evicting.
+                            drop(fifo);
+                            self.member_ordinal_index_memo.remove(&victim);
+                            fifo = self.member_ordinal_index_fifo.lock();
+                        } else {
+                            break;
+                        }
+                    }
+                    built
                 }
-                built
             }
         }
     }
@@ -206,6 +236,7 @@ mod tests {
     #[test]
     fn member_ordinal_index_is_built_once_and_shared() {
         let store = SemanticGraphStore::new();
+        let _scope = store.enter_node_root_scope();
         let value = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let view = object_view(vec![member("alpha", value)]);
         let id = store.intern_node(SemanticNodeData::Object(view.clone()));

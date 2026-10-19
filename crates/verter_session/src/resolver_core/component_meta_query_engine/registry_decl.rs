@@ -178,7 +178,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<std::sync::Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    > {
         let key = (canonical_id.to_string(), owner, symbol_name.to_string());
         if let Some(cached) = self.prepared_type_decls.get(&key) {
             return cached.clone();
@@ -320,12 +324,11 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // `ResolvedDeclSlotIdentity` slot (built via `type_slot_for`); the
         // cold build re-sources the live whole_hash from
         // `ensure_indexed_ready_serve`.
-        let root_canonical: std::sync::Arc<str> =
-            std::sync::Arc::clone(&resolved_root.canonical_id);
+        let root_canonical = resolved_root.canonical_id.clone();
         let base = dispatch.type_slot_for(
-            std::sync::Arc::clone(&root_canonical),
+            root_canonical.clone(),
             resolved_root.owner,
-            std::sync::Arc::clone(&resolved_root.symbol_name),
+            resolved_root.symbol_name.clone(),
         );
         let root_inst_ctx = dispatch.instantiate_context_for(
             &root_canonical,
@@ -369,7 +372,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<(
-        verter_type_engine::semantic_query::SurfaceView,
+        verter_type_engine::semantic_query_memo::node_data_lease::SurfaceLease,
         SemanticNodeId,
     )> {
         let root = self.dispatch_root_instantiated(scope_canonical_id, scope_owner, symbol_name)?;
@@ -426,7 +429,6 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         scope_owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Option<verter_type_expr::facts::ProjectedSurfaceFact> {
-        use verter_type_engine::project_semantic_dispatch::node_data_for;
         use verter_type_engine::semantic_query::SemanticNodeData;
         use verter_type_expr::facts::{ProjectedMemberFact, ProjectedSurfaceFact};
 
@@ -460,18 +462,18 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &body_locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot| hot.node())?
         };
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =
-                node_data_for(self.dispatch.graph(), node).as_deref()
+                self.dispatch.graph().read_in_scope(node).as_deref()
             {
                 node = *inner;
             }
@@ -479,8 +481,13 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         };
         // Lone-`extends` heritage shape only: heritage `DeclRef` arms plus
         // exactly ONE own-member `Object` arm.
-        let arms = match node_data_for(self.dispatch.graph(), peel_alias(body_root)).as_deref() {
-            Some(SemanticNodeData::Intersection(arms)) => arms.clone(),
+        let arms = match self
+            .dispatch
+            .graph()
+            .read_in_scope(peel_alias(body_root))
+            .as_deref()
+        {
+            Some(SemanticNodeData::Intersection(arms)) => arms.to_vec(),
             _ => return None,
         };
         let mut heritage: Vec<(
@@ -490,11 +497,16 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         )> = Vec::new();
         let mut own_object_arms = 0usize;
         for arm in arms.iter() {
-            match node_data_for(self.dispatch.graph(), peel_alias(*arm)).as_deref() {
+            match self
+                .dispatch
+                .graph()
+                .read_in_scope(peel_alias(*arm))
+                .as_deref()
+            {
                 Some(SemanticNodeData::DeclRef { identity }) => heritage.push((
-                    std::sync::Arc::clone(&identity.canonical_id),
+                    std::sync::Arc::<str>::from(identity.canonical_id.as_str()),
                     identity.owner,
-                    std::sync::Arc::clone(&identity.decl_name),
+                    std::sync::Arc::<str>::from(identity.decl_name.as_str()),
                 )),
                 Some(SemanticNodeData::Object(_)) => own_object_arms += 1,
                 _ => return None,
@@ -508,9 +520,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         let (view, _surface_node) =
             compound_root_surface_view_via_dispatch(self.dispatch, body_root)?;
         let closed = view.closed();
-        if !view.call_signatures.is_empty()
-            || !view.construct_signatures.is_empty()
-            || !view.index_signatures.is_empty()
+        if !view.call_signatures().is_empty()
+            || !view.construct_signatures().is_empty()
+            || !view.index_signatures().is_empty()
             || view.has_known_index_signature()
         {
             return None;
@@ -558,10 +570,10 @@ impl<'a> ComponentMetaQueryEngine<'a> {
             });
         }
         Some(ProjectedSurfaceFact {
-            members: std::sync::Arc::from(members.into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
+            call_signatures: From::from(Vec::new().into_boxed_slice()),
+            construct_signatures: From::from(Vec::new().into_boxed_slice()),
+            index_signatures: From::from(Vec::new().into_boxed_slice()),
             has_index_signature: false,
         })
     }
@@ -586,15 +598,17 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     ) -> Option<AdmittedRouteProjectionNode> {
         match route {
             RouteDemand::MemberPath(path) if !path.is_empty() => {
+                let _scope = self.semantic_dispatch().enter_construction_scope();
                 let root =
                     self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
-                let query_path: std::sync::Arc<[PathSegment]> = std::sync::Arc::from(
-                    path.iter()
-                        .cloned()
-                        .map(PathSegment::Member)
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
+                let query_path: verter_type_expr::OwnedSlice<PathSegment> =
+                    verter_type_expr::OwnedSlice::from(
+                        path.iter()
+                            .cloned()
+                            .map(PathSegment::Member)
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
                 let dispatch = self.semantic_dispatch();
                 match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
                     base: root,
@@ -612,8 +626,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // `.filter(dispatch_route_expr_is_materialized)`); the
                         // gated mint is `route_admission::admit_materialized`,
                         // which admits the node WITHOUT materialising it.
-                        node_raised_shape_facts_with_dispatch(dispatch, node)
-                            .and_then(|witness| route_admission::admit_materialized(&witness))
+                        node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
+                            route_admission::admit_materialized(dispatch.graph(), &witness)
+                        })
                     }
                     _ => None,
                 }
@@ -666,6 +681,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         // Step A: instantiate the route root to a projectable body. Navigate
         // keeps generic carriers intact (the builtin engine re-projects in the
         // caller's mode), mirroring the materialiser's Step A.
+        let _scope = self.semantic_dispatch().enter_construction_scope();
         let body_id =
             self.dispatch_root_instantiated(scope_canonical_id, scope_owner, root_symbol)?;
         let dispatch = self.semantic_dispatch();
@@ -677,7 +693,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
         match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.builtin_type_slot(builtin_name),
-                std::sync::Arc::from(vec![body_id, keys_node].into_boxed_slice()),
+                std::sync::Arc::from(vec![body_id, keys_node.id()].into_boxed_slice()),
                 dispatch.instantiate_context_for(
                     "__builtin__",
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -692,8 +708,9 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // mint is `route_admission::admit_materialized`, which admits the
                 // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
-                node_raised_shape_facts_with_dispatch(dispatch, node)
-                    .and_then(|witness| route_admission::admit_materialized(&witness))
+                node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
+                    route_admission::admit_materialized(dispatch.graph(), &witness)
+                })
             }
             _ => None,
         }

@@ -403,6 +403,9 @@ pub struct RetentionStatistics {
     pub publication_lanes: usize,
     pub semantic_nodes: usize,
     pub semantic_node_slots: usize,
+    pub semantic_node_roots: usize,
+    pub semantic_node_internal_edges: usize,
+    pub semantic_node_permanent_nodes: usize,
     pub semantic_memo_entries: usize,
     pub unresolved_reach: usize,
     pub union_views: usize,
@@ -411,9 +414,9 @@ pub struct RetentionStatistics {
     /// entries) across the process-wide semantic identity indexes.
     pub identity_index_records: usize,
     pub identity_index_backing_slots: usize,
-    /// Close-time semantic releases still queued behind in-flight
-    /// computations.
-    pub deferred_releases: usize,
+    /// Destroyed semantic nodes whose sidecar entries wait for cleanup:
+    /// the bounded pending log.
+    pub pending_destroyed_nodes: usize,
     pub resolved_import_facts: usize,
     pub component_meta_states: usize,
     pub registered_sources: usize,
@@ -429,14 +432,13 @@ pub struct RetentionStatistics {
     /// Fallthrough nodes the resolver runtime caches, released with their
     /// component.
     pub fallthrough_nodes: usize,
-    /// Queued releases applied so far, the longest one waited for a
-    /// zero-reader instant, and the slowest / summed release wall time.
-    pub releases_applied: u64,
-    pub release_wait_max_micros: u64,
-    pub release_elapsed_max_micros: u64,
-    pub release_elapsed_total_micros: u64,
-    /// The last close-time release applied, or `None` before the first.
-    pub last_release: Option<LastReleaseStatistics>,
+    /// Document closes applied so far and the slowest / summed close wall
+    /// time.
+    pub closes_applied: u64,
+    pub close_elapsed_max_micros: u64,
+    pub close_elapsed_total_micros: u64,
+    /// The last document close applied, or `None` before the first.
+    pub last_close: Option<LastCloseStatistics>,
     pub shape_cache_entries: usize,
     pub flow_graphs: usize,
     pub flow_hash_entries: usize,
@@ -470,13 +472,16 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             publication_lanes: snapshot.publication_lanes,
             semantic_nodes: snapshot.semantic_nodes,
             semantic_node_slots: snapshot.semantic_node_slots,
+            semantic_node_roots: snapshot.semantic_node_ownership.roots,
+            semantic_node_internal_edges: snapshot.semantic_node_ownership.internal_edges,
+            semantic_node_permanent_nodes: snapshot.semantic_node_ownership.permanent_nodes,
             semantic_memo_entries: snapshot.semantic_memo_entries,
             unresolved_reach: snapshot.unresolved_reach,
             union_views: snapshot.union_views,
             stable_key_classes: snapshot.stable_key_classes,
             identity_index_records: snapshot.identity_indexes.records(),
             identity_index_backing_slots: snapshot.identity_indexes.backing_slots(),
-            deferred_releases: snapshot.deferred_releases,
+            pending_destroyed_nodes: snapshot.pending_destroyed_nodes,
             resolved_import_facts: snapshot.resolved_import_facts,
             component_meta_states: snapshot.component_meta_states,
             registered_sources: snapshot.registered_sources,
@@ -485,11 +490,10 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             overlay_resolution_slots: snapshot.overlay_resolution_slots,
             overlay_value_versions: snapshot.overlay_value_versions,
             fallthrough_nodes: snapshot.fallthrough_nodes,
-            releases_applied: snapshot.reclaim.releases_applied,
-            release_wait_max_micros: snapshot.reclaim.wait_max_micros,
-            release_elapsed_max_micros: snapshot.reclaim.elapsed_max_micros,
-            release_elapsed_total_micros: snapshot.reclaim.elapsed_total_micros,
-            last_release: snapshot.reclaim.last.map(LastReleaseStatistics::from),
+            closes_applied: snapshot.closes.closes_applied,
+            close_elapsed_max_micros: snapshot.closes.elapsed_max_micros,
+            close_elapsed_total_micros: snapshot.closes.elapsed_total_micros,
+            last_close: snapshot.closes.last.map(LastCloseStatistics::from),
             shape_cache_entries: snapshot.shape_cache_entries,
             flow_graphs: snapshot.flow_graphs,
             flow_hash_entries: snapshot.flow_hash_entries,
@@ -509,35 +513,30 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
     }
 }
 
-/// One applied close-time semantic release: how long it waited behind
-/// in-flight computations, what its O(live nodes) scan cost, and what it
-/// found (`retention.lastRelease`).
+/// One applied document close: its wall time and the cache owners it
+/// evicted (`retention.lastClose`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LastReleaseStatistics {
-    pub wait_micros: u64,
+pub struct LastCloseStatistics {
     pub elapsed_micros: u64,
-    pub nodes_scanned: usize,
-    pub nodes_released: usize,
-    pub storage_slots_before: usize,
-    pub storage_slots_after: usize,
     pub memo_entries_evicted: usize,
+    pub union_views_released: usize,
+    pub signature_tokens_released: usize,
+    pub signature_epoch_replaced: bool,
+    pub sidecar_entries_dropped: usize,
+    pub shape_entries_released: usize,
 }
 
-impl From<verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt>
-    for LastReleaseStatistics
-{
-    fn from(
-        receipt: verter_session::project_type_store::semantic_activity::SemanticReleaseReceipt,
-    ) -> Self {
+impl From<verter_session::project_type_store::SemanticCloseReport> for LastCloseStatistics {
+    fn from(report: verter_session::project_type_store::SemanticCloseReport) -> Self {
         Self {
-            wait_micros: receipt.wait_micros,
-            elapsed_micros: receipt.elapsed_micros,
-            nodes_scanned: receipt.nodes_scanned,
-            nodes_released: receipt.nodes_released,
-            storage_slots_before: receipt.storage_slots_before,
-            storage_slots_after: receipt.storage_slots_after,
-            memo_entries_evicted: receipt.memo_entries_evicted,
+            elapsed_micros: report.elapsed_micros,
+            memo_entries_evicted: report.memo_entries_evicted,
+            union_views_released: report.union_views_released,
+            signature_tokens_released: report.signature_tokens_released,
+            signature_epoch_replaced: report.signature_epoch_replaced,
+            sidecar_entries_dropped: report.sidecar_entries_dropped,
+            shape_entries_released: report.shape_entries_released,
         }
     }
 }

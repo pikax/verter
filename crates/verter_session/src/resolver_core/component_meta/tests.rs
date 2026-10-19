@@ -18,9 +18,9 @@ fn local_ref_shape(type_ref: &str) -> verter_type_expr::facts::ResolvedLocalShap
     verter_type_expr::facts::ResolvedLocalShape::Ref(
         verter_type_expr::locators::SymbolBodyLocator {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: std::sync::Arc::from(""),
+                canonical_id: verter_type_expr::OwnedStr::from(""),
                 owner: TopLevelOwnerId::instance(0),
-                symbol: std::sync::Arc::from(type_ref),
+                symbol: verter_type_expr::OwnedStr::from(type_ref),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Type,
             },
         },
@@ -532,6 +532,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                             macro_index: 0,
                             result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
                                 verter_session_query::analysis::type_expand::ExpandedObjectShape {
+                                    domain_guarantee: None,
                                     properties: vec![
                                         verter_session_query::analysis::type_expand::ExpandedProperty {
                                             name: "save".to_string(),
@@ -539,7 +540,7 @@ fn resolve_component_meta_parts_fallthrough_skips_imported_define_emits_when_eva
                                                 verter_type_expr::facts::ResolvedLocalShape::Tuple(
                                                     verter_type_expr::facts::TuplePayloadFact {
                                                         readonly: false,
-                                                        elements: std::sync::Arc::from(vec![
+                                                        elements: From::from(vec![
                                                             verter_type_expr::facts::TupleElementFact {
                                                                 label: Some("value".to_string()),
                                                                 optional: false,
@@ -1053,6 +1054,7 @@ type Props = Pick<ImportedBase, 'href'>
                         macro_index: 0,
                         result: verter_session_query::analysis::type_expand::ExpansionResult::exact_symbolic(
                             verter_session_query::analysis::type_expand::ExpandedObjectShape {
+                                domain_guarantee: None,
                                 properties: vec![
                                     verter_session_query::analysis::type_expand::ExpandedProperty {
                                         name: "href".to_string(),
@@ -1184,9 +1186,9 @@ type Props = Pick<ImportedBase, 'href'>
                 type_annotation: Some("string".to_string()),
                 payload: Some(verter_type_expr::locators::MacroPayloadLocator {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: std::sync::Arc::from("/test.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/test.ts"),
                         owner: TopLevelOwnerId::instance(0),
-                        symbol: std::sync::Arc::from("default"),
+                        symbol: verter_type_expr::OwnedStr::from("default"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     macro_index: 0,

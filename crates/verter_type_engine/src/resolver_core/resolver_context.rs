@@ -253,6 +253,7 @@ pub trait ResolverContext<C: ResolverCapabilities>:
     + LiveFactValidation<Clocks = C::Clocks>
     + ExecutionSubmission<MacroMirrors = C::MacroMirrors>
     + HostAttachmentPort<HostAttachment = C::HostAttachment>
+    + Sync
 {
 }
 
@@ -267,12 +268,16 @@ pub trait ResolverCapabilities: 'static {
         + Clone
         + 'static;
     /// The workspace clock source a live aggregate sample reads.
-    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks + Clone + 'static;
+    type Clocks: verter_session_query::facts::clocks::WorkspaceClocks
+        + Clone
+        + Send
+        + Sync
+        + 'static;
     /// The composition-owned attachment the host hands out beside the engine.
     /// Opaque to the engine.
-    type HostAttachment: ?Sized + 'static;
+    type HostAttachment: ?Sized + Sync + 'static;
     /// The request-retained macro hot-mirror selector an engine binding holds.
-    type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + 'static;
+    type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + Send + 'static;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,
@@ -335,6 +340,18 @@ pub fn observe_fan_out(fact: verter_session_query::facts::fact_cache::FactVersio
     tracer_stack::observe_fan_out(fact);
 }
 
+/// Record that the active computation ordered declarations by `order`, so
+/// its result misses once the program lists its files differently. No-op
+/// for a file no program owns.
+#[inline]
+pub fn observe_program_file_order(
+    order: &verter_session_query::inputs::program_order::ProgramFileOrder,
+) {
+    if let Some(fact) = order.fact() {
+        tracer_stack::observe_fan_out(fact);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Request-bound lifecycle adapters — the ONE shared `ResolverContext`
 // implementation behind `HostResolverContext` and `SessionResolverContext`.
@@ -368,6 +385,17 @@ pub struct RecordedFactReads {
     pub facts: std::sync::Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
     /// Whether any non-cacheable read was marked, local-only included.
     pub non_cacheable: bool,
+}
+
+impl RecordedFactReads {
+    /// Fan the recorded facts out again into the live tracers, as reusing
+    /// the computation that read them must. They were recorded in canonical
+    /// order, so each live read set retains them as one run instead of
+    /// copying every fact; a set built by hand in another order is copied.
+    #[inline]
+    pub(crate) fn replay(&self) {
+        tracer_stack::observe_fan_out_canonical(&self.facts);
+    }
 }
 
 /// Where the active scopes stood when a computation began, so its
@@ -440,7 +468,10 @@ pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFact
 //   2. Nesting IS supported: the active tracers form a per-thread STACK
 //      (`ACTIVE_TRACERS`), and every observation / non-cacheability mark
 //      fans out to ALL active levels, so an inner scope's observations are
-//      also seen by every enclosing scope. An inner `with_fact_tracer`
+//      also seen by every enclosing scope. An observation reaches the
+//      levels below a DELIVERING scope through that scope's completed read
+//      set, which its owner hands down when it completes, rather than once
+//      per observation (`tracer_stack::install_delivering`). An inner `with_fact_tracer`
 //      pushes a second cell and pops it on drop (RAII, including on
 //      unwind). This is what lets the evaluator-scoped carrier observer
 //      nest inside a cold build's tracer.
@@ -468,7 +499,9 @@ impl Drop for TracerScope {
 /// A fact tracer whose cell a suspendable compute owns: it is installed on
 /// the thread only while one of the compute's steps runs
 /// ([`Self::install`]), and yields its read set once, when the compute
-/// completes.
+/// completes. Its owner delivers that read set to the scope that consumes
+/// the compute, so it is installed as a delivering scope
+/// ([`tracer_stack::install_delivering`]).
 pub(crate) struct OwnedFactTracer {
     cell: Box<verter_session_query::facts::fact_read_set::FactReadSetCell>,
 }
@@ -484,7 +517,7 @@ impl OwnedFactTracer {
 
     /// Install the cell until the returned scope drops, unwinding included.
     pub(crate) fn install(&self) -> OwnedTracerScope<'_> {
-        tracer_stack::install(&self.cell);
+        tracer_stack::install_delivering(&self.cell);
         OwnedTracerScope {
             _tracer: std::marker::PhantomData,
         }
@@ -515,11 +548,40 @@ pub fn with_fact_tracer_cell<F, R>(
 where
     F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
 {
+    with_fact_tracer_cell_scope(basis, false, f)
+}
+
+/// [`with_fact_tracer_cell`] for a scope whose owner delivers its whole
+/// completed read set to the scopes active when it completes
+/// ([`tracer_stack::install_delivering`]): observations made inside it do
+/// not also fan out to the scopes below it.
+pub(crate) fn with_delivering_fact_tracer_cell<F, R>(
+    basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    f: F,
+) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
+where
+    F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
+{
+    with_fact_tracer_cell_scope(basis, true, f)
+}
+
+fn with_fact_tracer_cell_scope<F, R>(
+    basis: verter_session_query::facts::fact_cache::AggregateGenerations,
+    delivers: bool,
+    f: F,
+) -> (R, verter_session_query::facts::fact_read_set::FactReadSet)
+where
+    F: FnOnce(&verter_session_query::facts::fact_read_set::FactReadSetCell) -> R,
+{
     let cell = verter_session_query::facts::fact_read_set::FactReadSetCell::new();
     cell.set_aggregate_basis(basis);
     // Push onto the tracer stack. The RAII guard pops on drop
     // (including on panic unwind) so no dangling pointer remains.
-    tracer_stack::install(&cell);
+    if delivers {
+        tracer_stack::install_delivering(&cell);
+    } else {
+        tracer_stack::install(&cell);
+    }
     let scope = TracerScope;
     let result = f(&cell);
     // Explicit drop so the stack is popped before we consume

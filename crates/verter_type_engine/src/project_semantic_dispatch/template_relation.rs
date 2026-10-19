@@ -72,7 +72,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => (quasis.clone(), expressions.clone()),
+            }) => (quasis.clone(), expressions.share()),
             _ => return None,
         };
         let is_infer = |node: SemanticNodeId| {
@@ -519,7 +519,10 @@ pub(super) fn string_mapping(
                 )
                 && args.len() == 1 =>
         {
-            Some((Arc::clone(&base.decl_name), args[0]))
+            Some((
+                std::sync::Arc::<str>::from(base.decl_name.as_str()),
+                args[0],
+            ))
         }
         _ => None,
     }
@@ -543,7 +546,7 @@ pub(super) fn string_literal_matches_pattern(
         Some(SemanticNodeData::TemplateLiteral {
             quasis,
             expressions,
-        }) if quasis.len() == expressions.len() + 1 => (quasis.clone(), expressions.clone()),
+        }) if quasis.len() == expressions.len() + 1 => (quasis.clone(), expressions.share()),
         _ => return false,
     };
     let last = quasis.len() - 1;

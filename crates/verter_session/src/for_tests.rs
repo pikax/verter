@@ -231,6 +231,60 @@ pub fn dispatch_inject_parse_fact_for_tests(
     verter_type_engine::project_semantic_dispatch::DispatchInjectParseFactGuard::arm(fact)
 }
 
+/// Hand `nodes` — construction ordinals a helper's own dispatcher produced
+/// under the helper's own `builder` — to the caller's construction scope once
+/// that builder and dispatcher are gone, so the caller reads them for as long
+/// as its scope lives. With no caller scope they are released with the
+/// builder. Every ordinal handed here is one the helper's builder still owns
+/// — a recursion result included, which is an allocated opaque node — so a
+/// failed rooting is a lost handoff and panics rather than leaving the caller
+/// an ordinal nothing owns.
+fn hand_to_caller_scope<'h>(
+    host: &'h crate::VerterHost,
+    dispatch: verter_type_engine::project_semantic_dispatch::ThreadDispatch<
+        'h,
+        crate::resolver_core::HostCapabilities,
+    >,
+    builder: verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
+    nodes: impl IntoIterator<Item = verter_type_engine::semantic_query::SemanticNodeId>,
+) {
+    let roots = host
+        .project_type_store()
+        .semantic_graph()
+        .root_nodes(nodes)
+        .unwrap_or_else(|error| {
+            panic!("a node the live dispatcher produced must root for its caller: {error:?}")
+        });
+    drop(builder);
+    drop(dispatch);
+    roots.retain_for_construction();
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    #[test]
+    fn a_dispatch_handoff_rejects_a_destroyed_result() {
+        use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let graph = host.project_type_store().semantic_graph();
+        let node = {
+            let _scope = graph.enter_node_root_scope();
+            graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+        };
+        assert!(!graph.node_is_live(node));
+        let dispatch = host.semantic_dispatch();
+        let builder = dispatch.enter_construction_scope();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::hand_to_caller_scope(&host, dispatch, builder, [node]);
+        }))
+        .expect_err("a failed handoff must fail visibly");
+        let message = failure
+            .downcast_ref::<String>()
+            .expect("formatted invariant failure");
+        assert!(message.contains("must root for its caller"), "{message}");
+    }
+}
+
 /// Test-visibility shim exposing the canonical
 /// [`execute_type_node`](verter_type_engine::semantic_query::SemanticQueryApi::execute_type_node)
 /// to integration-test crates (dispatch is `pub(crate)`); it returns the typed
@@ -248,8 +302,17 @@ pub fn dispatch_execute_type_node_for_tests(
     >,
 > {
     use verter_type_engine::semantic_query::SemanticQueryApi;
-    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-        .execute_type_node(key)
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
+    let read = dispatch.execute_type_node(key);
+    let node = match &read {
+        verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
+        verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
+        verter_type_engine::semantic_query::QueryResult::Error(_) => None,
+    };
+    hand_to_caller_scope(host, dispatch, builder, node);
+    read
 }
 
 /// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
@@ -319,8 +382,12 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
     expr: &verter_type_expr::TypeExpr,
     context: verter_type_engine::semantic_query::ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
-    verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-        .lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context)
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
+    let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
+    hand_to_caller_scope(host, dispatch, builder, node);
+    node
 }
 
 /// Relate the type named `source` to the type named `target`, both declared
@@ -332,8 +399,8 @@ pub fn relate_named_types_for_tests(
     scope_canonical_id: &str,
     source: &str,
     target: &str,
-    construction_byte_limit: Option<usize>,
-) -> (bool, usize, usize) {
+    construction_byte_limit: Option<u64>,
+) -> (bool, usize, u64) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
@@ -371,8 +438,8 @@ pub fn reduce_named_template_for_tests(
     host: &crate::VerterHost,
     scope_canonical_id: &str,
     name: &str,
-    construction_byte_limit: Option<usize>,
-) -> (bool, usize) {
+    construction_byte_limit: Option<u64>,
+) -> (bool, u64) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
@@ -412,7 +479,10 @@ pub fn dispatch_substitute_for_tests(
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg)
+    let builder = dispatch.enter_construction_scope();
+    let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
+    hand_to_caller_scope(host, dispatch, builder, [node]);
+    node
 }
 
 /// Integration-test shim that drives the
@@ -444,7 +514,10 @@ pub fn dispatch_evaluate_deferred_for_tests(
 ) {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context)
+    let builder = dispatch.enter_construction_scope();
+    let outcome = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(node, context);
+    hand_to_caller_scope(host, dispatch, builder, [outcome.0]);
+    outcome
 }
 
 /// Observe whether a base request's private lifecycle carries a session view.
@@ -984,7 +1057,7 @@ fn flow_graph_fixture(source: &str, body_hash_tag: u8, file_language: verter_lan
     let prepared = build_indexed_function_body_skeleton(&body, source, entry).expect("indexed fixture structure");
     let function = entry.key().clone();
     let key = verter_session_query::flow::bundle::FlowSliceFunctionKey {
-        canonical_id, function, parse_env_hash: [0u8; 16],
+        canonical_id: canonical_id.into(), function, parse_env_hash: [0u8; 16],
         flow_body_stable_hash: [body_hash_tag; 16], flow_body_exact_hash: [body_hash_tag; 16],
         parse_key, file_language,
         build_toolchain_fingerprint: verter_session_query::source::toolchain::current_build_toolchain_fingerprint(),
@@ -1130,8 +1203,6 @@ pub fn dispatch_resolve_type_decl_for_tests(
     canonical: &str,
     name: &str,
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
-    use std::sync::Arc;
-
     use verter_type_engine::semantic_query::{
         BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
         SemanticQueryOutput,
@@ -1139,17 +1210,21 @@ pub fn dispatch_resolve_type_decl_for_tests(
 
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+    let builder = dispatch.enter_construction_scope();
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })) {
-        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
+        QueryResult::Value(SemanticQueryOutput { value, .. }) => {
+            hand_to_caller_scope(host, dispatch, builder, [value]);
+            value
+        }
         other => panic!("ResolveDecl({canonical}#{name}) must anchor, got {other:?}"),
     }
 }
@@ -1258,3 +1333,36 @@ pub(crate) fn resolution_witness_fact_for_tests(
         .expect("an admitted resolution must carry at least one resolution-currency fact")
         .clone()
 }
+
+/// The merged-enum fixture: three global-script files whose enum
+/// declarations merge across files — auto-increment after a constant member
+/// computed from another file's block, string members concatenating another
+/// block's, a `const enum`, an enum merged with a namespace, a non-constant
+/// member, two blocks omitting their first initializer, and auto-increment
+/// after a non-constant member. Shared by the session engine test
+/// (`global_enum_blocks_evaluate_as_the_checker_evaluates_them`) and the
+/// `verter_lsp` real-provider diagnostics lane, so both lanes always prove
+/// the same program instead of divergent copies.
+///
+/// tsc 7.0.2 reports exactly one TS2432 on `Two`'s second initializer-less
+/// block and one TS1061 on `Bad`'s bare member after `Math.random()` — both
+/// in `MERGED_B` — and nothing else in any of the three files.
+pub const MERGED_A: &str = "\
+enum AutoInc { A = 3 }
+enum Str { A = \"a\" }
+const enum CE { A = 1 }
+enum NE { A = 1 }
+enum Rand { A = 1 }
+enum Two { A }
+enum Bad { A = 1 }
+";
+pub const MERGED_B: &str = "\
+enum AutoInc { B = AutoInc.A * 2, C }
+enum Str { B = Str.A + \"b\", C = `${B}c` }
+const enum CE { B = CE.A + 1, C }
+namespace NE { export const x = 2; }
+enum Rand { F = Math.random() }
+enum Two { B, C }
+enum Bad { R = Math.random(), S }
+";
+pub const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";

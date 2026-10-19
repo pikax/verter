@@ -97,7 +97,11 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedTypeDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn raw_prepared_value_decl(
@@ -106,7 +110,11 @@ trait SourceInputProvider {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn source_host(&self) -> &crate::VerterHost;
@@ -131,7 +139,7 @@ trait SourceInputProvider {
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>>;
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>>;
     fn indexed(
         &self,
         input: &verter_session_query::inputs::indexed::IndexedInputRecord,
@@ -149,7 +157,7 @@ where
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
@@ -162,7 +170,7 @@ where
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.0
@@ -215,7 +223,7 @@ where
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>> {
         self.0
             .request_view()
             .overlay()
@@ -242,7 +250,7 @@ impl SourceInputProvider for crate::VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
@@ -262,7 +270,7 @@ impl SourceInputProvider for crate::VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
@@ -315,7 +323,7 @@ impl SourceInputProvider for crate::VerterHost {
     fn prepared(
         &self,
         input: &verter_session_query::inputs::prepared::PreparedInputRecord,
-    ) -> Option<Arc<super::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<crate::resolver_core::CachedValue<super::prepared_decl::PreparedDeclBundle>> {
         self.source_input_leases.prepared(input)
     }
     fn indexed(
@@ -578,7 +586,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 symbol_name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedValueDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_value_decl");
@@ -591,19 +599,20 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 symbol_name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_decl");
                 SourceInputProvider::raw_prepared_type_decl(self, canonical_id, owner, symbol_name)
             }
 
-            fn augmentation_index(
+            fn augmentation_index_with_resolutions(
                 &self,
                 target: crate::file_artifact_store::AugmentationTargetKind,
             ) -> (
                 crate::file_artifact_store::AugmentationTargetKey,
                 Arc<verter_session_query::resolution::AugmenterSet>,
+                verter_type_engine::resolver_core::request_ports::AugmenterResolutions,
             ) {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_index");
                 let host = SourceInputProvider::source_host(self);
@@ -618,61 +627,136 @@ macro_rules! owned_lowering_from_source_inputs {
                     population,
                     target,
                 };
+                let resolutions = std::cell::RefCell::new(
+                    verter_type_engine::resolver_core::request_ports::AugmenterResolutions::default(),
+                );
                 let answer = crate::host_manage::source_augmentation::AugmentationRequestDriver::new(
                     host.project_type_store().indexed(),
                 )
                 .ensure_populated(
                     &key,
                     |canonical, spec| {
-                        verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
-                            .map(Arc::from)
+                        let resolved: Option<Arc<str>> =
+                            verter_type_engine::resolver_core::request_ports::RouteLookup::resolve_type_dependency_canonical(self, canonical, spec)
+                                .map(Arc::from);
+                        resolutions
+                            .borrow_mut()
+                            .entry(Arc::from(canonical))
+                            .or_default()
+                            .push((Arc::from(spec), resolved.clone()));
+                        resolved
                     },
                     discriminator,
                 );
-                (key, answer)
+                (key, answer, resolutions.into_inner())
             }
             fn global_contributor_answer(
                 &self,
+                demand_canonical: &str,
                 name: &str,
                 space: verter_session_query::facts::SymbolSpace,
             ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::global_contributor_answer");
-                SourceInputProvider::source_host(self).ingest_program_ambient_roots();
-                OwnedLowering::contributor_answer(self,
-                    &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
-                    name,
-                    true,
-                    Some(space),
-                )
+                let host = SourceInputProvider::source_host(self);
+                host.ingest_program_ambient_roots();
+                let (_, discriminator) = crate::session_view::augmentation_population_for_view(
+                    SourceInputProvider::source_session_view(self));
+                let index = host.project_type_store().indexed().global_contributor_index();
+                let root = host.workspace().published_root();
+                let project_for = |canonical: &str| root.as_ref().and_then(|root| host.project_for_canonical_in_snapshot(canonical, &root.snapshot));
+                let project = project_for(demand_canonical);
+                let lookup = |population: &crate::global_contributors::GlobalContributorPopulation| population.lookup_in_project(name, space, discriminator, project,
+                    root.as_ref().map(|root| root.snapshot.generation.0),
+                    |entry| {
+                        let owner = project_for(entry.artifact_key.canonical.as_ref());
+                        project.and_then(|project| root.as_ref().and_then(|root| host.program_lists(&root.snapshot, project, entry.artifact_key.canonical.as_ref())))
+                            .unwrap_or(owner.is_none() || owner == project)
+                    },
+                    |entries| host.declaration_order(demand_canonical, entries.iter().map(|entry| entry.artifact_key.canonical.as_ref())));
+                let mut population = index.snapshot();
+                let (mut contributors, mut order) = lookup(&population);
+                // Walking the program indexes the files it reaches; once
+                // they joined the population, read it again, so the first
+                // read answers what every later one does.
+                if order.is_some() {
+                    let grown = index.snapshot();
+                    if !Arc::ptr_eq(&grown, &population) {
+                        population = grown;
+                        (contributors, order) = lookup(&population);
+                    }
+                }
+                if let Some(order) = order {
+                    verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+                }
+                verter_type_engine::resolver_core::request_ports::ContributorAnswer {
+                    population_fingerprint: population.observation_fingerprint(
+                        &crate::file_artifact_store::AugmentationTargetKind::GlobalAugmentation,
+                        name, discriminator),
+                    contributors,
+                }
             }
             fn contributor_answer(
                 &self,
+                anchor: &str,
                 target: &crate::file_artifact_store::AugmentationTargetKind,
                 name: &str,
-                allow_automatic_libs: bool,
                 space: Option<verter_session_query::facts::SymbolSpace>,
             ) -> verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::contributor_answer");
                 let host = SourceInputProvider::source_host(self);
                 let (_, discriminator) =
                     crate::session_view::augmentation_population_for_view(SourceInputProvider::source_session_view(self));
-                let population = host
-                    .project_type_store()
-                    .indexed()
-                    .global_contributor_index()
-                    .snapshot();
+                let index = host.project_type_store().indexed().global_contributor_index();
+                let read = |population: &crate::global_contributors::GlobalContributorPopulation| match space {
+                    Some(space) => population.lookup_in_space(target, name, discriminator, true, space),
+                    None => population.lookup(target, name, discriminator, true),
+                };
+                // The libraries the program loads are indexed — so in the
+                // population — before it is read; an order that walks the
+                // program indexes the files it reaches, and the population
+                // is read again once they joined it.
+                host.settle_program_libraries(anchor);
+                let mut population = index.snapshot();
+                let mut contributors = read(&population);
+                let ordered = host.declaration_order(
+                    anchor,
+                    contributors.entries.iter().map(|entry| entry.artifact_key.canonical.as_ref()),
+                );
+                if ordered.is_some() {
+                    let grown = index.snapshot();
+                    if !Arc::ptr_eq(&grown, &population) {
+                        population = grown;
+                        contributors = read(&population);
+                    }
+                }
                 let population_fingerprint =
                     population.observation_fingerprint(target, name, discriminator);
-                let contributors = match space {
-                    Some(space) => {
-                        population.lookup_in_space(target, name, discriminator, allow_automatic_libs, space)
-                    }
-                    None => population.lookup(target, name, discriminator, allow_automatic_libs),
-                };
                 verter_type_engine::resolver_core::request_ports::ContributorAnswer {
                     population_fingerprint,
                     contributors,
                 }
+            }
+            fn augmentation_contributor_order(
+                &self,
+                anchor: &str,
+                key: &crate::file_artifact_store::AugmentationTargetKey,
+                augmenters: &verter_session_query::resolution::AugmenterSet,
+                name: &str,
+                contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+                selection: verter_session_query::inputs::contributors::FileScopeContribution,
+            ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]> {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::augmentation_contributor_order");
+                let host = SourceInputProvider::source_host(self);
+                let (ordered, order) = host.project_type_store().indexed().global_contributor_index().snapshot()
+                    .augmentation_order(key, augmenters, name, contributors, selection,
+                        |candidates| {
+                            let candidates: Vec<&str> = candidates.collect();
+                            host.declaration_order(anchor, candidates.iter().copied())
+                        });
+                if let Some(order) = order {
+                    verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
+                }
+                ordered
             }
             fn augmenter_artifact_answer(
                 &self,
@@ -820,7 +904,7 @@ macro_rules! owned_lowering_from_source_inputs {
                 owner: verter_type_expr::TopLevelOwnerId,
                 name: &str,
             ) -> Result<
-                Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+                Option<verter_retention::heap_size::OwnedValue<verter_session_query::type_solver::PreparedTypeDecl>>,
                 verter_session_query::inputs::prepared::PreparationFailure,
             > {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::prepared_type_from_input");
@@ -829,6 +913,33 @@ macro_rules! owned_lowering_from_source_inputs {
                     return Ok(None);
                 };
                 bundle.prepared_type_decls.get_in(owner, name)
+            }
+            fn batch_type_bodies(
+                &self,
+                demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
+            ) -> verter_session_query::source::demand::BatchedBodies {
+                verter_type_engine::count_resolver_context_call!("OwnedLowering::batch_type_bodies");
+                let sources: Vec<_> = demands
+                    .iter()
+                    .map(|demand| SourceInputProvider::source(self, demand.source))
+                    .collect();
+                let batch: Vec<_> = demands
+                    .iter()
+                    .zip(&sources)
+                    .filter_map(|(demand, source)| {
+                        source.as_ref().map(|source| {
+                            verter_semantic_source::decl_body_memo::TypeBodyDemand {
+                                memo: source.decl_bodies(),
+                                owner: demand.owner,
+                                name: demand.name,
+                                scope: demand.scope,
+                            }
+                        })
+                    })
+                    .collect();
+                verter_session_query::source::demand::BatchedBodies::new(Box::new(
+                    verter_semantic_source::decl_body_memo::prime_type_bodies(&batch),
+                ))
             }
             fn prepared_type_for_projection(
                 &self,

@@ -238,6 +238,13 @@ impl ComponentMetaHost {
         self.inner.project.host()
     }
 
+    /// Read access to the project host's workspace — the VFS view a project
+    /// configuration (a tsconfig and its `extends` chain) is loaded through,
+    /// so it reads what the host reads.
+    pub fn workspace_read(&self) -> Arc<dyn verter_workspace::WorkspaceRead> {
+        self.inner.project.host().workspace_read()
+    }
+
     /// Current base-state revision.
     pub fn generation(&self) -> u64 {
         self.inner.generation.load(Ordering::Acquire)
@@ -407,10 +414,7 @@ impl ComponentMetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        ComponentMetaHostError,
-    > {
+    ) -> Result<Option<crate::ComponentMetaDelivery>, ComponentMetaHostError> {
         component_meta_trace_custom!("component_meta_session_query", canonical_or_alias);
         let result = self
             .inner
@@ -456,12 +460,7 @@ impl ComponentMetaSession {
         &self,
         canonical_or_aliases: &[String],
     ) -> Result<
-        Vec<
-            Result<
-                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-                ComponentMetaHostError,
-            >,
-        >,
+        Vec<Result<Option<crate::ComponentMetaDelivery>, ComponentMetaHostError>>,
         ComponentMetaHostError,
     > {
         component_meta_trace_custom!(

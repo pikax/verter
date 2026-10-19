@@ -140,6 +140,33 @@ export function subMemberConstAssert() {
   return { a: "s", b };
 }
 
+export function subIndependentLiteral() { return { selected: 1, sibling: notDeclared() }; }
+export function subConstructed() { class C { value = 1; } return new C(); }
+export function subConstructedTuple() { class C { value = 1; } return [new C(), new C()] as const; }
+export function subConstructedNamed(value: number) { class C { field = value; } return new C(); }
+export function subConstructedUnknown() { class C { field = notDeclared(); } return new C(); }
+export function subConstructedComputed(key: string) { class C { [key] = 1; } return new C(); }
+export function subConstructedBase() { class C extends notDeclared() { field = 1; } return new C(); }
+export function subConstructedClause<T>() { class C { field!: T; } return C; }
+export function subConstructedClosedClause<T extends number = 1>() { class C { field!: T; } return C; }
+export function subConstructedClosedSiblingClause<U extends V, V extends number>() { class C { field!: U; } return C; }
+export function subConstructedMethod() { return class { m() { return class { field = 1; }; } }; }
+export function subConstructedMethodNamed(value: number) { return class { m() { return class { field = value; }; } }; }
+export function subConstructedMethodUnknown() { return class { m() { return notDeclared(); } }; }
+export function subConstructedUnknownClause<T extends NotDeclared>() { class C { field!: T; } return C; }
+export function subConstructedForwardUnknownClause<U extends V, V extends NotDeclared>() { class C { field!: U; } return C; }
+export function subNestedConstructed(value: number) { return () => class { constructor(input: number = value) {} field = 1; }; }
+export class StaticDemandSource { static bad = notDeclared(); value = 1; }
+export function subStaticConstruct() { return new StaticDemandSource(); }
+export function subStaticAddressed() { return StaticDemandSource.bad; }
+export function subIndependentParameter(value: number) { return { selected: value }; }
+export function subIndependentCall() { return { selected: notDeclared() }; }
+export function subIndependentOverride() { return { selected: 1, ...{ selected: 2 } }; }
+export function subIndependentControl(flag: boolean) {
+  if (flag) return { selected: 1 };
+  return { selected: 2 };
+}
+
 export function subMixedBareValue(flag: boolean) {
   if (flag) return 1;
   return;
@@ -314,8 +341,509 @@ export function subLoopBodyLet(flag: boolean) {
 
 const CANONICAL: &str = "/ws/flow-exec.ts";
 
+#[test]
+fn flow_superseded_evaluation_cannot_deliver_a_value() {
+    use verter_type_engine::semantic_query::{
+        ExecutionAbort, FactResult, FlowReturnStep, ReturnProjectionDemand,
+    };
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    with_dispatch(&host, |dispatch| {
+        let key = dispatch.flow_return_key_for(&identity);
+        {
+            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            assert!(matches!(
+                dispatch.execute_flow_return(key.clone()),
+                FlowReturnStep::Aborted(ExecutionAbort::Superseded)
+            ));
+        }
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0
+        );
+        {
+            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let public = host
+                .get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+            assert!(matches!(
+                public.as_result(),
+                Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                    ExecutionAbort::Superseded
+                ))
+            ));
+        }
+    });
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_execution_abort_is_delivered_to_singleflight_follower() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{ExecutionAbort, ReturnProjectionDemand};
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    let gate = Arc::new(std::sync::Barrier::new(2));
+    *host
+        .flow_fault_injection
+        .foreign_evaluation_gate
+        .lock()
+        .unwrap() = Some(Arc::clone(&gate));
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        std::thread::scope(|threads| {
+            let producer = threads.spawn(|| {
+                host.get_flow_return_type_with_audit(
+                    &identity,
+                    ReturnProjectionDemand::whole_return(),
+                )
+            });
+            gate.wait();
+            let follower = threads.spawn(|| {
+                host.get_flow_return_type_with_audit(
+                    &identity,
+                    ReturnProjectionDemand::whole_return(),
+                )
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let joined = with_dispatch(&host, |dispatch| {
+                while dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    > 0
+            });
+            // Release before asserting, so a failed rendezvous cannot strand a worker.
+            gate.wait();
+            let producer = producer.join().unwrap();
+            let follower = follower.join().unwrap();
+            assert!(
+                joined,
+                "the follower must subscribe to the real producer flight"
+            );
+            for result in [producer, follower] {
+                assert!(matches!(
+                    result.as_result(),
+                    Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                        ExecutionAbort::Superseded
+                    ))
+                ));
+            }
+        });
+    }
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Complete(_)
+    ));
+}
+
+/// A follower that has exhausted invalidation retries cannot consume a retained
+/// completion, even when that completion still validates for its view.
+#[test]
+fn flow_exhausted_follower_abort_suppresses_retained_completions() {
+    assert_exhausted_follower_abort(
+        verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests::RetainCompletion,
+    );
+}
+
+#[test]
+fn flow_exhausted_follower_abort_preserves_other_sentinel_disposition() {
+    assert_exhausted_follower_abort(
+        verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests::OtherSentinel,
+    );
+}
+
+fn assert_exhausted_follower_abort(
+    completion: verter_type_engine::semantic_query_memo::test_support::ExhaustedJoinAbortForTests,
+) {
+    use verter_type_engine::semantic_query::{
+        ExecutionAbort, FactResult, PartialReasonSet, ReturnProjectionDemand,
+    };
+    enum Follower {
+        Raw,
+        Audited,
+        Enclosing,
+    }
+
+    struct ProduceHookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for ProduceHookGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+
+    for delivery in [Follower::Raw, Follower::Audited, Follower::Enclosing] {
+        let host = make_host_with_config(HostConfig {
+            audit_enabled: true,
+            ..HostConfig::default()
+        });
+        let inner = return_identity("subInner", FunctionPartIdentity::DeclarationBody, 0);
+        let outer = return_identity(
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        with_dispatch(&host, |dispatch| {
+            let inner_key =
+                SemanticQueryKey::FlowReturn(Box::new(dispatch.flow_return_key_for(&inner)));
+            let enclosing_key =
+                SemanticQueryKey::ResolveDecl(verter_type_engine::semantic_query::ResolveDeclKey {
+                    scope: verter_type_engine::semantic_query::ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        local_scope: None,
+                        binder_scope_id:
+                            verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            ),
+                    },
+                    name: verter_type_expr::OwnedStr::from("Enclosing"),
+                });
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let release_rx = std::sync::Mutex::new(release_rx);
+            let hold_once = std::sync::atomic::AtomicBool::new(true);
+            let held_key = inner_key.clone();
+            dispatch
+                .graph()
+                .set_produce_hook_for_tests(Some(Arc::new(move |key, _| {
+                    if key == &held_key
+                        && hold_once.swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = ready_tx.send(());
+                        let _ = release_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(std::time::Duration::from_secs(10));
+                    }
+                })));
+            let hook = ProduceHookGuard(dispatch.graph());
+            let fault = dispatch
+                .graph()
+                .test_exhausted_join_abort(inner_key.clone(), completion);
+            std::thread::scope(|threads| {
+                let producer = threads.spawn(|| {
+                    with_dispatch(&host, |dispatch| {
+                        dispatch.execute_via_cold_build_helper(inner_key.clone())
+                    })
+                });
+                let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(10));
+                if ready.is_err() {
+                    let _ = release_tx.send(());
+                    let _ = producer.join();
+                    panic!("the raw producer must reach the held flight: {ready:?}");
+                }
+                let follower = threads.spawn(|| {
+                    if matches!(delivery, Follower::Audited) {
+                        let public = host.get_flow_return_type_with_audit(
+                            &inner,
+                            ReturnProjectionDemand::whole_return(),
+                        );
+                        assert!(
+                            matches!(
+                                public.as_result(),
+                                Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                                    ExecutionAbort::Superseded
+                                ))
+                            ),
+                            "an audited follower must preserve the abort: {:?}",
+                            public.as_result()
+                        );
+                        assert!(
+                            public.audit().flow_return_inference_payload().is_some(),
+                            "the failed public call still delivers its audit payload"
+                        );
+                    } else {
+                        with_dispatch(&host, |dispatch| {
+                            let _validity = verter_type_engine::request_context::ExecutionValidityScope::enter();
+                            let raw = if matches!(delivery, Follower::Enclosing) {
+                                let node = dispatch.graph().intern_node(SemanticNodeData::Primitive(
+                                    verter_type_engine::semantic_query::PrimitiveKind::String,
+                                ));
+                                dispatch.graph().execute_cooperative_value(
+                                    host.as_ref(), enclosing_key.clone(), || node, || {
+                                        let _ = dispatch.execute_via_cold_build_helper(inner_key.clone());
+                                        // The enclosing computation has its own complete value.
+                                        // The consumed child's validity must still veto admission.
+                                        let output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> = (
+                                            QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                                            verter_type_engine::semantic_query_memo::test_support::empty_signature_for_tests(),
+                                        ).into();
+                                        output
+                                    },
+                                )
+                            } else {
+                                dispatch.execute_via_cold_build_helper(inner_key.clone())
+                            };
+                            assert!(
+                                matches!(
+                                    raw.value().clone(),
+                                    QueryResult::Error(QueryError::ExecutionAborted(
+                                        ExecutionAbort::Superseded
+                                    ))
+                                ),
+                                "an exhausted follower must deliver a typed abort: {:?}",
+                                raw.value().clone()
+                            );
+                            assert!(raw.cache_suppress() && raw.result_is_partial());
+                            assert!(raw
+                                .partial_reasons()
+                                .contains(PartialReasonSet::SUPERSEDED_GENERATION));
+                            if matches!(delivery, Follower::Raw) {
+                                assert!(
+                                    raw.receipt().priced().is_none(),
+                                    "aborted delivery must not charge the retained completion"
+                                );
+                            }
+                        });
+                    }
+                });
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    == 0
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                let joined = dispatch
+                    .graph()
+                    .task_registry_for_tests()
+                    .wait_count_for_tests()
+                    > 0;
+                // Release before asserting or joining, including a failed rendezvous.
+                let _ = release_tx.send(());
+                let produced = producer.join().expect("the producer completes");
+                follower.join().expect("the follower completes");
+                assert!(joined, "the follower must join the held inner flight");
+                assert!(
+                    matches!(
+                        &produced.value(),
+                        QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if matches!(value.fact(), FactResult::Complete(_))
+                    ),
+                    "the unaffected producer still delivers its complete value"
+                );
+            });
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&enclosing_key),
+                0,
+                "no enclosing result may admit around the exhausted follower"
+            );
+            drop((fault, hook));
+            if matches!(delivery, Follower::Enclosing) {
+                let node = dispatch.graph().intern_node(SemanticNodeData::Primitive(
+                    verter_type_engine::semantic_query::PrimitiveKind::String,
+                ));
+                let clean = dispatch.graph().execute_cooperative(
+                    host.as_ref(), enclosing_key.clone(), || node,
+                    || (QueryResult::Value(node), verter_type_engine::semantic_query_memo::test_support::empty_signature_for_tests()),
+                );
+                assert!(
+                    matches!(clean.value().clone(), QueryResult::Value(value) if value == node)
+                );
+                assert_eq!(
+                    dispatch
+                        .graph()
+                        .slot_candidate_count_for_tests(&enclosing_key),
+                    1,
+                    "a clean enclosing computation remains admissible"
+                );
+            }
+        });
+        for identity in [&inner, &outer] {
+            let recovered = host
+                .get_flow_return_type_with_audit(identity, ReturnProjectionDemand::whole_return());
+            assert!(
+                matches!(
+                    recovered.as_result().unwrap().fact(),
+                    FactResult::Complete(_)
+                ),
+                "a clean request must recover after exhausted follower delivery"
+            );
+        }
+    }
+}
+
+#[test]
+fn flow_execution_abort_reaches_raw_direct_and_public_consumers() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{ExecutionAbort, FlowReturnStep};
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
+        with_dispatch(&host, |dispatch| {
+            let key = dispatch.flow_return_key_for(&identity);
+            let raw = dispatch
+                .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
+            assert!(
+                matches!(
+                    raw.value().clone(),
+                    QueryResult::Error(QueryError::ExecutionAborted(ExecutionAbort::Superseded))
+                ),
+                "raw dispatch cannot deliver rejected evidence: {:?}",
+                raw.value().clone()
+            );
+            assert!(raw.cache_suppress());
+            assert!(matches!(
+                dispatch.execute_flow_return(key.clone()),
+                FlowReturnStep::Aborted(ExecutionAbort::Superseded)
+            ));
+            assert!(matches!(
+                dispatch.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                    CANONICAL
+                ),
+                super::flow_return::FunctionReturnNode::Aborted(ExecutionAbort::Superseded)
+            ));
+            assert_eq!(
+                dispatch
+                    .graph()
+                    .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+                0
+            );
+        });
+        let public = host.get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            public.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                ExecutionAbort::Superseded
+            ))
+        ));
+        let enclosing = return_identity(
+            "subOuterCallsInner",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let composed = host.get_flow_return_type_with_audit(
+            &enclosing,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            composed.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Aborted(
+                ExecutionAbort::Superseded
+            ))
+        ));
+    }
+    let recovered = host.get_flow_return_type_with_audit(
+        &identity,
+        verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+    );
+    assert!(matches!(
+        recovered.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_refused_preparation_is_publicly_approximate_without_admission() {
+    use verter_type_engine::semantic_query::{
+        FactResult, PartialReasonSet, ReturnProjectionDemand,
+    };
+    let host = make_host_with_config(HostConfig {
+        audit_enabled: true,
+        ..HostConfig::default()
+    });
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    host.flow_fault_injection
+        .unserved_demand_site
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let public =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    let result = public
+        .as_result()
+        .expect("independently evaluated value remains observable");
+    let FactResult::Approximate { causes, .. } = result.fact() else {
+        panic!("refused preparation must be approximate");
+    };
+    assert!(causes.get().contains(PartialReasonSet::UNSTABLE_STATE));
+    assert_eq!(
+        public
+            .audit()
+            .flow_return_inference_payload()
+            .expect("audited flow payload")
+            .partiality,
+        Some(
+            verter_audit::payloads::flow_return::FlowPartialityTag::Degraded(
+                verter_audit::payloads::flow_return::FlowDegradationTag::PartialInterior
+            )
+        )
+    );
+    with_dispatch(&host, |dispatch| {
+        let key = dispatch.flow_return_key_for(&identity);
+        assert_eq!(
+            dispatch
+                .graph()
+                .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key))),
+            0
+        );
+    });
+    let retry =
+        host.get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
+    assert!(matches!(
+        retry.as_result().unwrap().fact(),
+        FactResult::Complete(_)
+    ));
+}
+
+#[test]
+fn flow_incomplete_evaluation_has_no_public_value() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    let host = make_host();
+    let identity = return_identity("subLiteral", FunctionPartIdentity::DeclarationBody, 0);
+    {
+        let _fault = inject::Guard::arm(&host.flow_fault_injection.short_execution_ledger);
+        let public = host.get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+        );
+        assert!(matches!(
+            public.as_result(),
+            Err(crate::host_flow_return_audit::FlowReturnError::Failure(
+                verter_type_engine::semantic_query::FlowReturnFailure::Unresolved
+            ))
+        ));
+    }
+    assert!(host
+        .get_flow_return_type_with_audit(
+            &identity,
+            verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return()
+        )
+        .as_result()
+        .is_ok());
+}
+
 fn make_host() -> Arc<VerterHost> {
-    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    make_host_with_config(HostConfig::default())
+}
+
+fn make_host_with_config(config: HostConfig) -> Arc<VerterHost> {
+    let host = Arc::new(VerterHost::new_standalone(config));
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some(CANONICAL.to_string()),
         input_id: CANONICAL.to_string(),
@@ -336,6 +864,7 @@ fn with_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -347,13 +876,13 @@ fn flow_result_for_file(
 ) -> (verter_type_expr::TypeExpr, bool) {
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -370,13 +899,13 @@ fn flow_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(CANONICAL),
+            verter_type_expr::OwnedStr::from(CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             overload_ordinal,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CANONICAL),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -558,7 +1087,7 @@ fn flow_return_this_call_reads_the_receiver_member() {
             dispatch,
             "SubThisCall",
             FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![1u32].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![1u32].into_boxed_slice()),
             },
             0,
         );
@@ -713,7 +1242,7 @@ fn flow_return_empty_cycle_is_return_only_and_never_never() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "an empty recursive cycle admits no family value"
         );
@@ -846,7 +1375,7 @@ fn flow_return_key_carries_no_value_environment() {
             let warm = fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.value);
+                .map(|served| served.value().clone());
             assert!(
                 warm.is_some(),
                 "the second demand of the same function identity is a warm family hit"
@@ -857,10 +1386,13 @@ fn flow_return_key_carries_no_value_environment() {
         // the key.
         let mut typed = key.clone();
         typed.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                verter_type_engine::semantic_query::SemanticNodeId(7),
-                verter_type_engine::semantic_query::SemanticNodeId(8),
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                dispatch.graph(),
+                vec![(
+                    verter_type_engine::semantic_query::SemanticNodeId(7),
+                    verter_type_engine::semantic_query::SemanticNodeId(8),
+                )],
+            );
         assert_ne!(typed, key, "a type substitution fork is a distinct key");
     });
 }
@@ -919,7 +1451,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
         );
         assert_ne!(ordinal_fork, base, "the overload ordinal is key identity");
         let mut args_fork = base.clone();
-        args_fork.normalized_type_args = Arc::from(
+        args_fork.normalized_type_args = verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::SemanticNodeId(9)].into_boxed_slice(),
         );
         assert_ne!(args_fork, base, "the normalized type args are key identity");
@@ -933,7 +1465,7 @@ pub(crate) fn flow_return_keys_do_not_warm_hit_across_env_axes() {
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &shifted)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "a shifted-env key must not warm-hit the base entry"
         );
@@ -951,9 +1483,9 @@ fn return_identity(
 ) -> verter_type_expr::facts::FlowFunctionReturnIdentity {
     verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: part,
@@ -964,12 +1496,12 @@ fn return_identity(
 fn declared_return_slot(name: &str) -> verter_type_expr::locators::TypeBodySlot {
     verter_type_expr::locators::TypeBodySlot {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 verter_type_expr::locators::TypeBodyPathStep::ValueSignature { ordinal: 0 },
                 verter_type_expr::locators::TypeBodyPathStep::FunctionReturn,
@@ -1021,7 +1553,7 @@ fn function_return_helper_flow_arm_builds_the_identical_key() {
                 fresh
                     .graph()
                     .get_flow_return_result(fresh.ctx, &key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .is_some(),
                 "the helper's demand admits under the identical key"
             );
@@ -1110,9 +1642,9 @@ fn function_return_declared_rail_keeps_the_literal_union_member() {
             dispatch.graph().node_data(member.value)
         };
         let anchor = |symbol: &str| verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(UNION_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(UNION_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         };
 
@@ -1120,7 +1652,7 @@ fn function_return_declared_rail_keeps_the_literal_union_member() {
             verter_type_expr::locators::FunctionReturnLocator::Authored(
                 verter_type_expr::locators::TypeBodySlot {
                     anchor: anchor("ccAnnotated"),
-                    path: Arc::from(
+                    path: verter_type_expr::OwnedSlice::from(
                         vec![
                             verter_type_expr::locators::TypeBodyPathStep::ValueSignature {
                                 ordinal: 0,
@@ -1238,9 +1770,9 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
         let observed = verter_type_engine::request_context::current_cold_compute_completeness();
         scope.discard();
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the outer's degraded success stays usable, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
             observed
@@ -1266,6 +1798,12 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
 /// members' nodes. Mutation recipe: publishing the member with the root's
 /// relation-only self-root set (the pre-union behavior) drops its own
 /// file from the carrier.
+///
+/// The conditional relates object types holding the classes: a decision
+/// instantiates operands that name declarations before it relates them,
+/// which would evaluate the methods' returns ahead of the relation, outside
+/// its component. Holding them in members leaves their instantiation, and
+/// the flows it reads, to the relation.
 #[test]
 fn mixed_component_member_entry_self_roots_cover_all_component_files() {
     let host = make_host();
@@ -1297,7 +1835,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         canonical_id: Some("/ws/root.ts".to_string()),
         input_id: "/ws/root.ts".to_string(),
         source: Arc::from(
-            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = RootBox extends NextBox ? \"yes\" : \"no\";\n",
+            "import type { RootBox } from \"/ws/mixed_a\";\nimport type { NextBox } from \"/ws/mixed_b\";\nexport type RootAssign = { v: RootBox } extends { v: NextBox } ? \"yes\" : \"no\";\n",
         ),
         file_language: crate::LanguageRegistry::global()
             .classify_static("/ws/root.ts")
@@ -1317,7 +1855,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
         .into_parts();
     let node = expr.ok().flatten().expect("RootAssign resolves");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("RootAssign projects");
     assert_eq!(
         projected,
@@ -1328,15 +1866,15 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/mixed_c.ts"),
+                verter_type_expr::OwnedStr::from("/ws/mixed_c.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Worker"),
+                verter_type_expr::OwnedStr::from("Worker"),
                 FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
                 },
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/mixed_c.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -1380,9 +1918,9 @@ fn flow_return_block_scoped_shadowing_does_not_escape() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("shadow"),
+                symbol: verter_type_expr::OwnedStr::from("shadow"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -1427,13 +1965,13 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/member-recur.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/member-recur.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("obj"),
+                symbol: verter_type_expr::OwnedStr::from("obj"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::Member {
-                member_path: Arc::from(vec![0u32].into_boxed_slice()),
+                member_path: verter_type_expr::OwnedSlice::from(vec![0u32].into_boxed_slice()),
             },
             overload_ordinal: 0,
         };
@@ -1448,7 +1986,7 @@ fn flow_return_member_call_self_recursion_is_return_only_not_complete_miss() {
         assert!(dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &dispatch.flow_return_key_for(&identity))
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none());
     });
 }
@@ -1607,6 +2145,10 @@ fn flow_return_nested_generic_arrow_keeps_its_type_parameters() {
 #[test]
 fn flow_return_direct_call_chain_charges_connected_work() {
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mut source = String::new();
     for index in 0..8 {
         source.push_str(&format!(
@@ -1628,9 +2170,9 @@ fn flow_return_direct_call_chain_charges_connected_work() {
         dispatch.set_connected_limits_for_tests(4, u16::MAX);
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/chain.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/chain.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("chain0"),
+                symbol: verter_type_expr::OwnedStr::from("chain0"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -1724,6 +2266,10 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
     use verter_type_engine::semantic_query::PartialReasonSet;
 
     let host = make_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let mut source = String::new();
     for index in 0..8 {
         source.push_str(&format!(
@@ -1745,9 +2291,9 @@ fn a_budget_truncated_flow_return_folds_a_faulting_class_not_a_contained_one() {
         dispatch.set_connected_limits_for_tests(4, u16::MAX);
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/budget-class.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/budget-class.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("chain0"),
+                symbol: verter_type_expr::OwnedStr::from("chain0"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -1813,9 +2359,9 @@ fn flow_return_direct_call_reads_the_shadowing_nested_function_declaration() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("f"),
+                symbol: verter_type_expr::OwnedStr::from("f"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -1854,9 +2400,9 @@ fn flow_return_self_call_shadowed_by_nested_function_declaration_reads_it() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/self-fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/self-fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("f"),
+                symbol: verter_type_expr::OwnedStr::from("f"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2038,9 +2584,9 @@ fn flow_return_nested_value_hoisted_declaration_shadows_the_outer_callee() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/nested-fn-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/nested-fn-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("outer"),
+                symbol: verter_type_expr::OwnedStr::from("outer"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2080,9 +2626,9 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
     with_dispatch(&host, |dispatch| {
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from("/ws/nested-self-shadow.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/ws/nested-self-shadow.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("outer"),
+                symbol: verter_type_expr::OwnedStr::from("outer"),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -2178,7 +2724,9 @@ pub(crate) fn flow_return_key_covers_input_context_and_projection_demand() {
         );
         let mut with_input = base.clone();
         with_input.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(
+                vec![contextual].into_boxed_slice(),
+            ),
         };
         assert_ne!(
             base, with_input,
@@ -2764,7 +3312,7 @@ fn flow_return_warm_read_consults_no_slice_state() {
         let warm_read = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the published FlowReturn entry warm-validates on a live view");
         assert_eq!(warm_read, cold);
         flow_result_value(dispatch, key)
@@ -2929,6 +3477,351 @@ fn member_flow_key(
         ),
     };
     key
+}
+
+#[test]
+fn constructed_value_evidence_preserves_capture_refusal_and_its_roots() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{FactStatus, FlowReturnStep};
+    for name in [
+        "subConstructed",
+        "subConstructedTuple",
+        "subConstructedClause",
+        "subConstructedClosedClause",
+        "subConstructedClosedSiblingClause",
+        "subConstructedMethod",
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+            let FlowReturnStep::Complete(whole) = dispatch.execute_flow_return(key) else {
+                panic!("the whole return is evaluated");
+            };
+            assert!(
+                matches!(whole.fact().status(), FactStatus::Approximate(_, _)),
+                "{name}: full capture proof remains refused"
+            );
+            let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            );
+            for _ in 0..2 {
+                let quality = ColdComputeCompletenessScope::enter();
+                let frame =
+                    verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+                        &dispatch.build_local_taint,
+                    );
+                let result = dispatch.execute_function_return_source(&source, CANONICAL);
+                let observed = frame.finish();
+                assert!(matches!(
+                    result,
+                    super::flow_return::FunctionReturnNode::Flow(_)
+                ));
+                assert!(
+                    !current_cold_compute_completeness().is_partial(),
+                    "{name}: constructed type owns its exact evidence"
+                );
+                quality.discard();
+                assert!(observed.cache_suppress && !observed.result_is_partial);
+                assert!(observed
+                    .observed_self_roots
+                    .iter()
+                    .any(|(canonical, _)| canonical.as_ref() == CANONICAL));
+            }
+        });
+    }
+}
+
+#[test]
+fn incomplete_nested_products_cannot_retain_constructive_evidence() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::semantic_query::{FlowReturnDegradation, FlowReturnStep};
+    for incomplete in [false, true] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let _missing = incomplete.then(|| {
+                inject::Guard::arm(&host.flow_fault_injection.drop_binding_domain_product)
+            });
+            let key = flow_key(
+                dispatch,
+                "subNestedConstructed",
+                FunctionPartIdentity::DeclarationBody,
+                0,
+            );
+            let FlowReturnStep::Complete(result) = dispatch.execute_flow_return(key) else {
+                panic!("the nested signature preserves its evaluated positions")
+            };
+            assert_eq!(
+                result.degradation(),
+                incomplete.then_some(FlowReturnDegradation::UnresolvedValue),
+                "missing nested products cannot certify an independently constructed return"
+            );
+        });
+    }
+}
+
+#[test]
+fn constructor_source_navigation_preserves_unread_static_value_sources() {
+    use verter_type_engine::semantic_query::FlowReturnStep;
+    let host = make_host();
+    for name in ["subStaticConstruct", "subStaticAddressed"] {
+        with_dispatch(&host, |dispatch| {
+            let key = flow_key(dispatch, name, FunctionPartIdentity::DeclarationBody, 0);
+            for _ in 0..2 {
+                match dispatch.execute_flow_return(key.clone()) {
+                    FlowReturnStep::Complete(result) => {
+                        assert_eq!(result.fact().status().is_complete(), name == "subStaticConstruct",
+                            "constructor structure does not consume an unread static value; its actual value demand retains the gap");
+                    }
+                    FlowReturnStep::NoValue(_) if name == "subStaticAddressed" => {}
+                    _ => panic!("{name}: the constructor completes and an unsupported addressed value stays incomplete"),
+                }
+            }
+        });
+    }
+}
+
+#[test]
+fn constructed_value_evidence_withholds_unsupported_source_operands_and_execution() {
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    for name in [
+        "subConstructedNamed",
+        "subConstructedUnknown",
+        "subConstructedComputed",
+        "subConstructedBase",
+        "subConstructedUnknownClause",
+        "subConstructedForwardUnknownClause",
+        "subConstructedMethodNamed",
+        "subConstructedMethodUnknown",
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+                verter_type_expr::facts::FlowFunctionReturnIdentity {
+                    anchor: verter_type_expr::locators::AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(name),
+                        space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+            );
+            let quality = ColdComputeCompletenessScope::enter();
+            let _result = dispatch.execute_function_return_source(&source, CANONICAL);
+            assert!(
+                current_cold_compute_completeness().is_partial(),
+                "{name}: unsupported operands cannot certify a constructed type"
+            );
+            quality.discard();
+        });
+    }
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _short = super::flow_return::flow_admission_fault_injection::Guard::arm(
+            &host.flow_fault_injection.short_execution_ledger,
+        );
+        let source = verter_type_expr::facts::FunctionReturnSource::Flow(
+            verter_type_expr::facts::FlowFunctionReturnIdentity {
+                anchor: verter_type_expr::locators::AuthoredAnchor {
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    symbol: verter_type_expr::OwnedStr::from("subConstructed"),
+                    space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+                },
+                function_part: FunctionPartIdentity::DeclarationBody,
+                overload_ordinal: 0,
+            },
+        );
+        let quality = ColdComputeCompletenessScope::enter();
+        let _result = dispatch.execute_function_return_source(&source, CANONICAL);
+        assert!(
+            current_cold_compute_completeness().is_partial(),
+            "a short actual walk cannot mint constructed-value evidence"
+        );
+        quality.discard();
+    });
+}
+
+#[test]
+fn an_independent_member_value_keeps_the_whole_return_refusal() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{
+        FactStatus, FlowReturnStep, PathSegment, PropertyKey, ScopeId, ValueRootKey,
+    };
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+        let key = flow_key(
+            dispatch,
+            "subIndependentLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let FlowReturnStep::Complete(whole) = dispatch.execute_flow_return(key) else {
+            panic!("the independently evaluated whole return remains usable")
+        };
+        assert!(matches!(
+            whole.fact().status(),
+            FactStatus::Approximate(_, _)
+        ));
+        let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    Arc::from(CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from("subIndependentLiteral"),
+            },
+            verter_type_expr::OwnedSlice::from([]),
+            Arc::from([]),
+        ));
+        let quality = ColdComputeCompletenessScope::enter();
+        let frame = verter_type_engine::project_semantic_dispatch::BuildLocalTaintGuard::push(
+            &dispatch.build_local_taint,
+        );
+        let node = dispatch
+            .flow_return_member_projection(
+                callee,
+                &PathSegment::Member(PropertyKey::identifier("selected")),
+            )
+            .expect("the completed literal member owns independent evidence");
+        let observed = frame.finish();
+        assert!(!current_cold_compute_completeness().is_partial());
+        quality.discard();
+        assert!(matches!(
+            dispatch.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+        ));
+        assert!(!observed.result_is_partial && observed.cache_suppress);
+        assert!(observed
+            .observed_self_roots
+            .iter()
+            .any(|(canonical, _)| canonical.as_ref() == CANONICAL));
+    });
+}
+
+#[test]
+fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
+    use verter_type_engine::semantic_query::{FactStatus, ScopeId, ValueRootKey};
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let callee = graph.intern_node(SemanticNodeData::new_typeof(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    Arc::from(CANONICAL),
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: verter_type_expr::OwnedStr::from("subIndependentLiteral"),
+            },
+            verter_type_expr::OwnedSlice::from([]),
+            Arc::from([]),
+        ));
+        let key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.builtin_type_slot("ReturnType"),
+                Arc::from([callee]),
+                dispatch.instantiate_context_for(
+                    "__builtin__",
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Shallow,
+                    ),
+                ),
+            ));
+        let read = dispatch.execute_read(key);
+        assert_eq!(
+            read.fact_status().clone(),
+            FactStatus::Complete,
+            "static keys own their source fact: {read:?}"
+        );
+        let QueryResult::Value(node) = read.value().clone() else {
+            panic!("the key source has a value")
+        };
+        let data = graph.node_data(node).unwrap();
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            panic!("the key source is an object: {data:?}")
+        };
+        assert_eq!(
+            surface
+                .positive_members()
+                .iter()
+                .map(|member| member.key.as_string().unwrap())
+                .collect::<Vec<_>>(),
+            ["selected", "sibling"]
+        );
+        let key = flow_key(
+            dispatch,
+            "subIndependentLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let verter_type_engine::semantic_query::FlowReturnStep::Complete(whole) =
+            dispatch.execute_flow_return(key)
+        else {
+            panic!("the unfinished value remains usable")
+        };
+        assert!(matches!(
+            whole.fact(),
+            verter_type_engine::semantic_query::FactResult::Approximate { .. }
+        ));
+    });
+}
+
+#[test]
+fn independent_member_evidence_consumes_parameter_and_control_but_withholds_call_and_override() {
+    use super::flow_return::flow_admission_fault_injection as inject;
+    use verter_type_engine::request_context::{
+        current_cold_compute_completeness, ColdComputeCompletenessScope,
+    };
+    use verter_type_engine::semantic_query::{PathSegment, PropertyKey, ScopeId, ValueRootKey};
+    for (name, consumed) in [
+        ("subIndependentParameter", true),
+        ("subIndependentControl", true),
+        ("subIndependentCall", false),
+        ("subIndependentOverride", false),
+    ] {
+        let host = make_host();
+        with_dispatch(&host, |dispatch| {
+            let _zero = inject::Guard::arm(&host.flow_fault_injection.zero_obligation_budget);
+            let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+                ValueRootKey {
+                    scope: ScopeId::file(
+                        Arc::from(CANONICAL),
+                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    ),
+                    name: verter_type_expr::OwnedStr::from(name),
+                },
+                verter_type_expr::OwnedSlice::from([]),
+                Arc::from([]),
+            ));
+            let quality = ColdComputeCompletenessScope::enter();
+            let node = dispatch.flow_return_member_projection(
+                callee,
+                &PathSegment::Member(PropertyKey::identifier("selected")),
+            );
+            assert_eq!(node.is_some(), consumed, "{name}");
+            assert_eq!(current_cold_compute_completeness().is_partial(), consumed,
+                "{name}: a usable unproven value keeps its quality; a declined probe contributes none");
+            quality.discard();
+        });
+    }
 }
 
 /// Whether any dispatched key under the capture names `needle` (the
@@ -3106,17 +3999,28 @@ fn budget_tripping_content() -> String {
     )
 }
 
+fn arm_content_budget(host: &VerterHost) {
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
+}
+
 /// The budget-tripping content trips when it IS lowered: returned, the
 /// function's evaluation answers the leaf lowering's typed budget failure.
 /// The two tests below read it unlowered, which only this makes a proof.
 #[test]
 fn budget_tripping_content_trips_when_lowered() {
+    let host = super::checker_probe_lane_tests::probe_host(Default::default());
+    arm_content_budget(&host);
     let source = format!(
         "export function pf() {{ return {}; }}\n",
         budget_tripping_content()
     );
     assert_eq!(
-        super::checker_probe_lane_tests::flow_return_outcome_in(Default::default(), &source, "pf"),
+        super::checker_probe_lane_tests::flow_return_outcome_on_host(&host, &source, "pf"),
         Err(crate::host_flow_return_audit::FlowReturnError::Failure(
             verter_type_engine::semantic_query::FlowReturnFailure::Budget(
                 verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,
@@ -3136,6 +4040,7 @@ fn budget_tripping_content_trips_when_lowered() {
 #[test]
 fn flow_return_unread_binding_content_never_lowers() {
     let host = make_host();
+    arm_content_budget(&host);
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/unread-content.ts".to_string()),
         input_id: "/ws/unread-content.ts".to_string(),
@@ -3167,6 +4072,7 @@ fn flow_return_unread_binding_content_never_lowers() {
 #[test]
 fn flow_return_member_demand_never_lowers_elided_sibling_content() {
     let host = make_host();
+    arm_content_budget(&host);
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/ws/member-sibling-content.ts".to_string()),
         input_id: "/ws/member-sibling-content.ts".to_string(),
@@ -3182,13 +4088,13 @@ fn flow_return_member_demand_never_lowers_elided_sibling_content() {
     with_dispatch(&host, |dispatch| {
         let mut key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from("/ws/member-sibling-content.ts"),
+                verter_type_expr::OwnedStr::from("/ws/member-sibling-content.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("memberSliced"),
+                verter_type_expr::OwnedStr::from("memberSliced"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for("/ws/member-sibling-content.ts"),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -3303,7 +4209,7 @@ pub(crate) fn flow_return_routes_through_project_semantic_dispatch() {
         let stored = fresh
             .graph()
             .get_flow_return_result(fresh.ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .expect("the dispatched FlowReturn published to the graph store");
         assert_eq!(
             stored, dispatched,
@@ -3603,13 +4509,15 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
         ] {
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
-                    Arc::from(OWNER_PROBE_CANONICAL),
+                    verter_type_expr::OwnedStr::from(OWNER_PROBE_CANONICAL),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(name),
+                    verter_type_expr::OwnedStr::from(name),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -3651,13 +4559,13 @@ fn flow_return_unanswered_type_space_owner_probe_preserves_unresolved_carrier() 
 
         let collision = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(OWNER_PROBE_CANONICAL),
+                verter_type_expr::OwnedStr::from(OWNER_PROBE_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("ownerCollisionClass"),
+                verter_type_expr::OwnedStr::from("ownerCollisionClass"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(OWNER_PROBE_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -3907,13 +4815,13 @@ fn scc_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(SCC_CANONICAL),
+            verter_type_expr::OwnedStr::from(SCC_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(SCC_CANONICAL),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -3944,11 +4852,21 @@ fn staged_flow_proof(
     let basis = FlowDemandBasis {
         ancestry: Default::default(),
         graph_body: verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&key.function.declaration_slot.defining_canonical),
+            canonical_id: key
+                .function
+                .declaration_slot
+                .defining_canonical
+                .as_str()
+                .into(),
             function: verter_session_query::function_program::FunctionProgramKey {
                 declaration: verter_session_query::function_program::FunctionDeclarationRef {
                     owner: key.function.declaration_slot.owner,
-                    name: Arc::clone(&key.function.declaration_slot.merged_symbol_name),
+                    name: key
+                        .function
+                        .declaration_slot
+                        .merged_symbol_name
+                        .as_str()
+                        .into(),
                     space: verter_session_query::facts::SymbolSpace::Value,
                 },
                 part: key.function.function_part.clone(),
@@ -4058,7 +4976,7 @@ fn reused_flow_result_replays(reuse: verter_session_query::facts::reuse::ReuseCl
             hash: [5; 16],
         };
         let root: verter_type_engine::semantic_query_memo::ObservedGraphSelfRoot =
-            (Arc::from("/ws/replayed.ts"), [6; 16]);
+            (verter_type_expr::OwnedStr::from("/ws/replayed.ts"), [6; 16]);
         dispatch.dispatch_txn.borrow_mut().flow.results.complete(
             key.clone(),
             super::dispatch_txn::TransactionFlowResult {
@@ -4402,7 +5320,7 @@ fn flow_return_resurrected_member_publishes_a_readable_entry() {
                 let warm = dispatch
                     .graph()
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.value);
+                    .map(|served| served.value().clone());
                 (materialized, warm)
             });
             let materialized =
@@ -4470,7 +5388,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let query = SemanticQueryKey::FlowReturn(Box::new(key.clone()));
                 let result = graph
                     .get_flow_return_result(dispatch.ctx, &key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .unwrap_or_else(|| panic!("{name} must be warm before re-staging"));
                 let materialized = graph
                     .entry_satisfied_projection_for_tests(&query)
@@ -4524,7 +5442,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
                 let candidates = graph.slot_candidate_count_for_tests(query);
                 let warm = graph
                     .get_flow_return_result(dispatch.ctx, key)
-                    .map(|served| served.value)
+                    .map(|served| served.value().clone())
                     .is_some();
                 if invalidate_root {
                     assert!(
@@ -4584,13 +5502,13 @@ fn flow_expr_for_script(
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -4962,7 +5880,7 @@ fn flow_source_probe_configured(
         let verter_type_expr::facts::FunctionReturnSource::Flow(identity) = &mut source else {
             panic!("makeProps serves a flow return source")
         };
-        identity.anchor.canonical_id = Arc::from(canonical);
+        identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical);
         identity.anchor.owner = owner;
         let identity = identity.clone();
         let candidate_key =
@@ -5799,15 +6717,15 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             verter_type_engine::semantic_query::SemanticNodeData::new_typeof(
                 verter_type_engine::semantic_query::ValueRootKey {
                     scope: verter_type_engine::semantic_query::ScopeId {
-                        canonical_id: Arc::from(canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner,
                         local_scope: None,
                         binder_scope_id:
                             verter_type_engine::semantic_query::BinderScopeId::file_scope(owner),
                     },
-                    name: Arc::from("makeProps"),
+                    name: verter_type_expr::OwnedStr::from("makeProps"),
                 },
-                Arc::from([]),
+                verter_type_expr::OwnedSlice::from([]),
                 Arc::from([]),
             ),
         );
@@ -5853,9 +6771,9 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
             0,
         );
         key.function = dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
-            Arc::from("makeProps"),
+            verter_type_expr::OwnedStr::from("makeProps"),
             FunctionPartIdentity::DeclarationBody,
             0,
         );
@@ -5872,24 +6790,24 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
         let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 verter_type_engine::semantic_query::QueryResult::Error(
                     verter_type_engine::semantic_query::QueryError::Miss
                 )
             ),
             "the member demand itself fails closed with the typed miss, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "a direct member-demand consumer keeps the no-surface rails"
         );
         assert!(
-            read.partial_reasons.contains(
+            read.partial_reasons().contains(
                 verter_type_engine::semantic_query::PartialReasonSet::FLOW_RETURN_NO_SURFACE
             ),
             "the decline rides the no-surface class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
     });
 }
@@ -5975,7 +6893,7 @@ fn flow_root_publish_requires_complete_flow_proof() {
             fresh
                 .graph()
                 .get_flow_return_result(fresh.ctx, &warm_key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the second request is a warm family hit"
         );
@@ -6077,9 +6995,9 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
             &verter_type_expr::facts::FunctionReturnSource::Flow(
                 verter_type_expr::facts::FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("subNonCallableCall"),
+                        symbol: verter_type_expr::OwnedStr::from("subNonCallableCall"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: FunctionPartIdentity::DeclarationBody,
@@ -6200,7 +7118,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
         let pending_roots = [
             SemanticQueryKey::FlowNarrowingAt {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                     offset: 0,
                 },
                 flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
@@ -6208,7 +7126,7 @@ fn flow_plan_runs_once_per_cold_demand_and_never_for_nonflow() {
             },
             SemanticQueryKey::ContextualTypeAt {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                     offset: 0,
                 },
                 contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
@@ -6264,7 +7182,7 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
             (
                 SemanticQueryKey::FlowNarrowingAt {
                     point: verter_type_engine::semantic_query::ProgramPointId {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         offset: 0,
                     },
                     flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
@@ -6275,7 +7193,7 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
             (
                 SemanticQueryKey::ContextualTypeAt {
                     point: verter_type_engine::semantic_query::ProgramPointId {
-                        canonical_id: Arc::from(CANONICAL),
+                        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                         offset: 0,
                     },
                     contextual: verter_type_engine::semantic_query::ContextualTypingKey::empty(),
@@ -6287,25 +7205,25 @@ fn pending_flow_roots_surface_their_operation_specific_gap() {
         for (key, gap) in pending_roots {
             let read = dispatch.execute_via_cold_build_helper(key);
             assert!(
-                matches!(read.value, QueryResult::Error(QueryError::Miss)),
+                matches!(read.value().clone(), QueryResult::Error(QueryError::Miss)),
                 "a pending typed-gap root is a typed miss, got {:?}",
-                read.value
+                read.value().clone()
             );
             assert!(
-                read.result_is_partial && read.cache_suppress,
+                read.result_is_partial() && read.cache_suppress(),
                 "a pending typed-gap root is a typed partial, ReturnOnly"
             );
             assert!(
-                read.partial_reasons
+                read.partial_reasons()
                     .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE),
                 "the no-surface partial class, got {:?}",
-                read.partial_reasons
+                read.partial_reasons()
             );
             assert!(
-                read.walker_diagnostics
+                read.walker_diagnostics()
                     .contains(&ShallowDiagnostic::PendingFlowRoot { gap }),
                 "the operation-specific typed gap is surfaced on the read, got {:?}",
-                read.walker_diagnostics
+                read.walker_diagnostics()
             );
         }
     });
@@ -6336,19 +7254,19 @@ fn flow_root_proof_gate_veto_marks_the_read_partial() {
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the usable value still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the proof-gate veto marks the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the veto records the unverified class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -6396,28 +7314,28 @@ fn obligation_budget_refusal_takes_the_faulting_request_class() {
         let read = dispatch
             .execute_via_cold_build_helper(SemanticQueryKey::FlowReturn(Box::new(key.clone())));
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the usable value still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the budget refusal marks the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::BUDGET_EXCEEDED),
             "a budget edge is a statement about the request and takes the faulting class, \
              got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert!(
             !read
-                .partial_reasons
+                .partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the refusal must not ride the contained degraded-success class every macro \
              projection lane publishes through, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -6448,8 +7366,7 @@ fn production_flow_proof_has_evaluator_origin() {
     use super::flow_return::flow_admission_fault_injection as inject;
 
     // Negative leg: evidence whose provenance is not this evaluation's
-    // one-shot mint refuses finalization — the usable value still flows,
-    // nothing publishes.
+    // one-shot mint invalidates delivery: no value or candidate survives.
     let host = make_host();
     with_dispatch(&host, |dispatch| {
         let _foreign = inject::Guard::arm(&host.flow_fault_injection.foreign_evaluation_evidence);
@@ -6459,8 +7376,15 @@ fn production_flow_proof_has_evaluator_origin() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6575,7 +7499,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(SUB_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(SUB_CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -6588,17 +7512,17 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let key_of = |name: &str| FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(SUB_CANONICAL),
+                verter_type_expr::OwnedStr::from(SUB_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(SUB_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -6607,9 +7531,10 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         let root_key = key_of("rootFn");
         let mut member_key = key_of("memberFn");
         member_key.context.type_substitution =
-            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                binder, number,
-            )]);
+            verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                graph,
+                vec![(binder, number)],
+            );
 
         // Open both frames and prepare BOTH demands for real.
         let root_idx = dispatch
@@ -6723,9 +7648,8 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
 /// opaque evaluation provenance (semantic-store identity + request
 /// generation + the demand's OWN ledger ordinal — demand-unique). A
 /// demand carrier stamped with a provenance from another store or a
-/// stale generation makes the whole solve a typed partial/ReturnOnly:
-/// the usable value still flows, and NEITHER the root nor any SCC member
-/// produces a candidate; so does evaluation evidence from ANOTHER demand
+/// stale generation aborts the whole solve: no value, and NEITHER the root
+/// nor any SCC member produces a candidate; so does evidence from ANOTHER demand
 /// of the SAME store and generation (the demand-ordinal axis).
 #[test]
 fn foreign_flow_value_provenance_is_rejected() {
@@ -6741,8 +7665,15 @@ fn foreign_flow_value_provenance_is_rejected() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6759,11 +7690,14 @@ fn foreign_flow_value_provenance_is_rejected() {
         let _stale = inject::Guard::arm(&scc_host.flow_fault_injection.stale_demand_carrier);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
-        let result = flow_result_value(dispatch, root.clone());
-        assert_eq!(
-            result.degradation(),
-            None,
-            "the component value stays usable"
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(root.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
         );
         for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
             assert_eq!(
@@ -6789,8 +7723,15 @@ fn foreign_flow_value_provenance_is_rejected() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -6804,11 +7745,14 @@ fn foreign_flow_value_provenance_is_rejected() {
         let _foreign = inject::Guard::arm(&scc_host.flow_fault_injection.foreign_demand_provenance);
         let root = scc_key(dispatch, "scCleanA");
         let peer = scc_key(dispatch, "scCleanB");
-        let result = flow_result_value(dispatch, root.clone());
-        assert_eq!(
-            result.degradation(),
-            None,
-            "the component value stays usable"
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(root.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                )
+            ),
+            "foreign evaluated evidence cannot deliver a value"
         );
         for (name, key) in [("scCleanA", root), ("scCleanB", peer)] {
             assert_eq!(
@@ -6878,13 +7822,13 @@ export function makeProps(x: string | number) {
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(PRED_CANONICAL),
+                verter_type_expr::OwnedStr::from(PRED_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(PRED_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -6945,13 +7889,13 @@ export function makeChecked(x: string | number) {
         );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(CHECK_CANONICAL),
+                verter_type_expr::OwnedStr::from(CHECK_CANONICAL),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeChecked"),
+                verter_type_expr::OwnedStr::from("makeChecked"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(CHECK_CANONICAL),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -6988,13 +7932,13 @@ fn whole_return_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -7296,6 +8240,12 @@ export function pick(x: string | number) {
 /// `viaImport` (importing it) both return `1` on 7.0.2, complete.
 #[test]
 fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
+    use verter_type_engine::semantic_query::{
+        ProjectionMode, ProjectionReductionContext, QueryOutcome, Ready, ScopeId,
+        SemanticContextId, SignatureKind, ValueRootKey,
+    };
+    use verter_type_engine::signature_kernel::{BorrowedSet, SemanticReadView};
+
     const MAIN_CANONICAL: &str = "/ws/call-merge/main.ts";
     const MAIN_FIXTURE: &str = "export function conv(x: string): number { return 1; }\n\
                                 export function viaCall(x: string) { return conv(x); }\n";
@@ -7310,6 +8260,42 @@ fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
     upsert_ts(&host, AUG_CANONICAL, AUG_FIXTURE);
     upsert_ts(&host, USE_CANONICAL, USE_FIXTURE);
     with_dispatch(&host, |dispatch| {
+        let key = dispatch.typeof_key_for(
+            ValueRootKey {
+                scope: ScopeId::file(
+                    MAIN_CANONICAL,
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+                name: "conv".into(),
+            },
+            ProjectionReductionContext::published(ProjectionMode::Navigate),
+        );
+        let read = dispatch.execute_read(key.clone());
+        let QueryResult::Value(node) = read.value() else {
+            panic!("the exported function has a type: {:?}", read.value());
+        };
+        let store = dispatch.graph().signature_store();
+        let QueryOutcome::Ready(Ready { value: set, .. }) = dispatch.signatures_of_type(
+            store,
+            *node,
+            SignatureKind::Call,
+            SemanticContextId::production(),
+        ) else {
+            panic!("the exported function has complete signatures");
+        };
+        let view = SemanticReadView::pin(store);
+        let BorrowedSet::Many(signatures) = view.read_set(set).expect("the signature set is live")
+        else {
+            panic!("the original and augmenting signatures both stay");
+        };
+        assert_eq!(signatures.len(), 2, "each declaration contributes once");
+        let roots = dispatch
+            .graph()
+            .entry_self_root_canonicals_for_tests(&key)
+            .expect("the merged function is published");
+        for file in [MAIN_CANONICAL, AUG_CANONICAL] {
+            assert!(roots.iter().any(|root| root.as_ref() == file), "{roots:?}");
+        }
         for (canonical, name) in [(MAIN_CANONICAL, "viaCall"), (USE_CANONICAL, "viaImport")] {
             let result = flow_result_value(dispatch, whole_return_key(dispatch, canonical, name));
             let expr = host
@@ -8155,7 +9141,7 @@ interface PlainSurface { extra: number }
                     CANONICAL,
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     &verter_type_expr::TypeExpr::Ref {
-                        name: Arc::from(name),
+                        name: name.into(),
                         type_arguments: Arc::from(Vec::new().into_boxed_slice()),
                     },
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -9796,24 +10782,24 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
                     "{label} armed={armed}: the root build ran and drained the injected member"
                 );
                 assert!(
-                    read.result_is_partial && read.cache_suppress,
+                    read.result_is_partial() && read.cache_suppress(),
                     "{label} armed={armed}: the refused batch keeps the root non-admissible"
                 );
                 assert_eq!(
-                    read.partial_reasons
+                    read.partial_reasons()
                         .contains(PartialReasonSet::UNSTABLE_STATE),
                     armed,
                     "{label} armed={armed}: the member's refusal must reach the root's rails \
                      as the faulting class it is — and must not appear when no member \
                      recorded a cause, got {:?}",
-                    read.partial_reasons
+                    read.partial_reasons()
                 );
                 assert!(
-                    read.partial_reasons
+                    read.partial_reasons()
                         .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
                     "{label} armed={armed}: the refused batch always rides the unverified \
                      class too — the member set is incomplete either way, got {:?}",
-                    read.partial_reasons
+                    read.partial_reasons()
                 );
                 assert_eq!(
                     graph.slot_candidate_count_for_tests(&query_key),
@@ -9871,27 +10857,27 @@ fn unserved_demand_site_takes_the_transient_class() {
             "the one-shot slot is consumed by the preparation's derivation"
         );
         assert!(
-            matches!(read.value, QueryResult::Value(_)),
+            matches!(read.value().clone(), QueryResult::Value(_)),
             "the evaluation's own derivation served, so the usable value still flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.result_is_partial && read.cache_suppress,
+            read.result_is_partial() && read.cache_suppress(),
             "the refused preparation keeps the read partial + suppressed"
         );
         assert!(
-            read.partial_reasons
+            read.partial_reasons()
                 .contains(PartialReasonSet::UNSTABLE_STATE),
             "a torn prepare-time read is transient and takes the faulting class, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert!(
             !read
-                .partial_reasons
+                .partial_reasons()
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "the transient read must not ride the contained class every macro projection \
              lane publishes through, got {:?}",
-            read.partial_reasons
+            read.partial_reasons()
         );
         assert_eq!(
             dispatch
@@ -9946,13 +10932,96 @@ fn assert_flow_unverified_rails(
 
 /// SEAM — the RELATION machinery root. An unproven flow member drained
 /// at the root's close turns the decided verdict into
-/// `DecidedReturnOnly`: the payload still reaches the caller, the build
+/// `DecidedReturnOnly`: the unproven scalar payload is withheld, the build
 /// folds the flow-unverified ReturnOnly rails, the relation family slot
 /// admits NOTHING, and the next request runs the build again (the slot
 /// is consumed a second time). The unarmed control admits once. The
 /// member enters through the real provisional pop path beneath the open
 /// root frame, so the close drains it exactly as an organic torn
 /// component would.
+#[test]
+fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, RelationOutcome};
+    let host = make_host();
+    with_dispatch(&host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+        let source = super::tests::simple_object(graph, &[("value", number)]);
+        let target = super::tests::simple_object(graph, &[("value", string)]);
+        let refused_key = dispatch.relate_key_for(source, target).to_query_key();
+        let root_key = dispatch.relate_key_for(number, number).to_query_key();
+        let member = flow_key(
+            dispatch,
+            "subLiteral",
+            FunctionPartIdentity::DeclarationBody,
+            0,
+        );
+        let refusal = with_relation_comparisons_for_tests(0, || {
+            dispatch.execute_via_cold_build_helper(refused_key.clone())
+        });
+        assert!(
+            matches!(refusal.fact_status(), FactStatus::Approximate(_, _)),
+            "{refusal:?}"
+        );
+        assert!(
+            matches!(refusal.value().clone(), QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            if payload.outcome == RelationOutcome::NotAssignable)
+        );
+        assert_eq!(
+            refusal.walker_diagnostics(),
+            &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+        );
+        struct HookGuard<'a>(&'a verter_type_engine::semantic_query_memo::SemanticGraphStore);
+        impl Drop for HookGuard<'_> {
+            fn drop(&mut self) {
+                self.0.set_produce_hook_for_tests(None);
+            }
+        }
+        let root = root_key.clone();
+        graph.set_produce_hook_for_tests(Some(Arc::new(move |key, read| {
+            if key == &root {
+                with_relation_comparisons_for_tests(0, || read(refused_key.clone()));
+            }
+        })));
+        let hook = HookGuard(graph);
+        arm_unproven_member(&host, &member);
+        let read = dispatch.execute_via_cold_build_helper(root_key.clone());
+        drop(hook);
+        assert!(unproven_member_slot_consumed(&host));
+        assert_eq!(
+            read.walker_diagnostics(),
+            &[super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+        );
+        assert!(read
+            .partial_reasons()
+            .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED));
+        assert!(
+            matches!(read.fact_status(), FactStatus::Unavailable(_)),
+            "another pair's recovery cannot authorize this unproven judgment: {read:?}"
+        );
+        assert!(matches!(
+            read.value().clone(),
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ));
+        assert_eq!(graph.slot_candidate_count_for_tests(&root_key), 0);
+    });
+    let control_host = make_host();
+    with_dispatch(&control_host, |dispatch| {
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let key = dispatch.relate_key_for(number, number).to_query_key();
+        let control = dispatch.execute_via_cold_build_helper(key.clone());
+        assert_eq!(control.fact_status().clone(), FactStatus::Complete);
+        assert!(
+            matches!(control.value().clone(), QueryResult::Value(SemanticQueryValue::Relation(ref payload))
+            if payload.outcome == RelationOutcome::Assignable)
+        );
+        assert_eq!(graph.slot_candidate_count_for_tests(&key), 1);
+    });
+}
+
 #[test]
 fn unproven_flow_member_makes_relation_root_decided_return_only() {
     let host = make_host();
@@ -9975,16 +11044,20 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
             );
             assert!(
                 matches!(
-                    read.value,
-                    QueryResult::Value(SemanticQueryValue::Relation(_))
+                    read.value().clone(),
+                    QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
                 ),
-                "request {request}: the decided verdict still flows to the caller, got {:?}",
-                read.value
+                "request {request}: an unproven judgment without a bounded interpretation is withheld, got {:?}",
+                read.value().clone()
             );
+            assert!(matches!(
+                read.fact_status(),
+                verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+            ));
             assert_flow_unverified_rails(
-                read.result_is_partial,
-                read.cache_suppress,
-                read.partial_reasons,
+                read.result_is_partial(),
+                read.cache_suppress(),
+                read.partial_reasons(),
                 &format!("request {request}: relation root"),
             );
             assert_eq!(
@@ -9998,14 +11071,14 @@ fn unproven_flow_member_makes_relation_root_decided_return_only() {
         let read = dispatch.execute_via_cold_build_helper(query_key.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::Relation(_))
             ),
             "control: the decided verdict flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -10064,18 +11137,33 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
         );
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::ResolveCall(_))
             ),
             "the resolved call still flows to the caller, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert_flow_unverified_rails(
-            read.result_is_partial,
-            read.cache_suppress,
-            read.partial_reasons,
+            read.result_is_partial(),
+            read.cache_suppress(),
+            read.partial_reasons(),
             "call root",
         );
+        let fact = read.into_fact().expect("the refused proof is not an abort");
+        assert!(
+            fact.exact().is_none(),
+            "provisional selection supplies no exact proof"
+        );
+        let verter_type_engine::semantic_query::FactResult::Approximate {
+            value: SemanticQueryValue::ResolveCall(call),
+            ..
+        } = fact
+        else {
+            panic!("a completed call retains its evaluated return positions")
+        };
+        assert!(matches!(call.as_ref(),
+            verter_type_engine::semantic_query::ResolvedCallResult::Selected { return_type, .. }
+                if *return_type == number));
         assert_eq!(
             graph.slot_candidate_count_for_tests(&query_key),
             0,
@@ -10096,15 +11184,19 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
         let read = dispatch.execute_via_cold_build_helper(query_key.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::ResolveCall(_))
             ),
             "control: the resolved call flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
+        );
+        assert!(
+            read.fact_status().is_complete(),
+            "control: selection is exact"
         );
         assert_eq!(
             graph.slot_candidate_count_for_tests(&query_key),
@@ -10146,10 +11238,10 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
             unproven_member_slot_consumed(&host),
             "the flow root build ran and drained the injected member"
         );
-        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value else {
+        let QueryResult::Value(SemanticQueryValue::FlowReturn(result)) = &read.value() else {
             panic!(
                 "the root's evaluated value still flows, got {:?}",
-                read.value
+                read.value().clone()
             );
         };
         assert_eq!(
@@ -10158,9 +11250,9 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
             "the root's own value is usable — only its proof is withheld"
         );
         assert_flow_unverified_rails(
-            read.result_is_partial,
-            read.cache_suppress,
-            read.partial_reasons,
+            read.result_is_partial(),
+            read.cache_suppress(),
+            read.partial_reasons(),
             "flow root",
         );
         assert_eq!(
@@ -10177,14 +11269,14 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
         let read = dispatch.execute_via_cold_build_helper(root_query.clone());
         assert!(
             matches!(
-                read.value,
+                read.value().clone(),
                 QueryResult::Value(SemanticQueryValue::FlowReturn(_))
             ),
             "control: the root's value flows, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            !read.result_is_partial && !read.cache_suppress,
+            !read.result_is_partial() && !read.cache_suppress(),
             "control: an unpoisoned root keeps the clean rails"
         );
         assert_eq!(
@@ -10201,7 +11293,7 @@ fn unproven_flow_member_withholds_flow_root_verdict() {
 /// never by copying the plan's selection. An evaluation whose walk
 /// ledger is short/aborted (modelling an early-exit run that did not
 /// complete the structural walk) claims NO structural obligation: the
-/// usable value still flows, zero candidates, and the second demand
+/// value is withheld, zero candidates remain, and the second demand
 /// recomputes. The unarmed control warms. Mutation: assign the witness's
 /// executed selection from the plan unconditionally; the armed leg
 /// admits and fails.
@@ -10218,8 +11310,15 @@ fn short_walk_ledger_never_discharges_structural_claims() {
             FunctionPartIdentity::DeclarationBody,
             0,
         );
-        let result = flow_result_value(dispatch, key.clone());
-        assert_eq!(result.degradation(), None, "the value itself stays usable");
+        assert!(
+            matches!(
+                dispatch.execute_flow_return(key.clone()),
+                verter_type_engine::semantic_query::FlowReturnStep::NoValue(
+                    verter_type_engine::semantic_query::FlowReturnFailure::Unresolved
+                )
+            ),
+            "an incomplete evaluation supplies no value"
+        );
         assert_eq!(
             dispatch
                 .graph()
@@ -10256,12 +11355,11 @@ fn short_walk_ledger_never_discharges_structural_claims() {
 /// across them, and the finalizer's carrier comparison could not tell
 /// one runtime's first-demand evidence from the other's. Both first
 /// tokens must differ, and finalizing one runtime's demand with the
-/// OTHER runtime's first-demand token must be the typed
-/// `ForeignProvenance` partial — never a proof.
+/// OTHER runtime's first-demand token aborts as superseded evidence — no value.
 #[test]
 fn provenance_distinguishes_first_demands_of_two_runtimes() {
     use super::dispatch_txn::flow_obligation_state::ObservedFlowConvergence;
-    use super::flow_solve::{FlowPartialReason, FlowSolveOutcome};
+    use super::flow_solve::FlowSolveOutcome;
 
     let host = make_host();
     let key_of = |dispatch: &ProjectSemanticDispatch<crate::resolver_core::HostCapabilities>| {
@@ -10326,11 +11424,12 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         assert!(
             matches!(
                 verdict,
-                Some(FlowSolveOutcome::Partial(ref partial))
-                    if matches!(partial.reason, FlowPartialReason::ForeignProvenance)
+                Some(FlowSolveOutcome::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Superseded
+                ))
             ),
             "the other runtime's first-demand token must finalize as the \
-             typed ForeignProvenance partial, got {verdict:?}"
+             typed Superseded abort, got {verdict:?}"
         );
     });
 }
@@ -10668,13 +11767,13 @@ fn flow_expr_cold_warm(
     let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
         FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -10687,7 +11786,7 @@ fn flow_expr_cold_warm(
             dispatch
                 .graph()
                 .get_flow_return_result(dispatch.ctx, &key(dispatch))
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
         });
         assert_eq!(
             warm.as_ref(),
@@ -10967,13 +12066,13 @@ fn conv_flow_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(CONV_OWNER),
+            verter_type_expr::OwnedStr::from(CONV_OWNER),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(CONV_OWNER),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -10990,7 +12089,7 @@ fn conv_member_demand(base: SemanticNodeId) -> SemanticQueryKey {
     };
     SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(PropertyKey::identifier(Arc::from("v")))].into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
@@ -11426,8 +12525,10 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
         let narrow = object(string);
         let wide = object(string_or_number);
         let union = dispatch.intern_normalized_union_or_intersection(&[narrow, wide], true);
-        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) =
-            graph.node_data(union).as_deref().cloned()
+        let Some(verter_type_engine::semantic_query::SemanticNodeData::Union(members)) = graph
+            .node_data(union)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the canonical union of the two object arms must stay a union");
         };
@@ -11603,13 +12704,13 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
     let key = |dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>| {
         FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("makeProps"),
+                verter_type_expr::OwnedStr::from("makeProps"),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -11641,7 +12742,7 @@ fn flow_return_reunion_asks_each_arm_pair_once_and_a_warm_replay_asks_nothing() 
         let warm = dispatch
             .graph()
             .get_flow_return_result(dispatch.ctx, &key(dispatch))
-            .map(|served| served.value);
+            .map(|served| served.value().clone());
         assert_eq!(
             warm.as_ref(),
             Some(&cold),
@@ -11672,13 +12773,13 @@ fn flow_return_slot_candidates(script: &str, function: &str) -> usize {
     with_dispatch(&host, |dispatch| {
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(canonical),
+                verter_type_expr::OwnedStr::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(function),
+                verter_type_expr::OwnedStr::from(function),
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -11799,9 +12900,9 @@ fn a_warm_flow_return_query_takes_the_memo_lock_once_at_any_caller_count() {
     let host = make_host();
     let identity = |name: &str| verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -11873,21 +12974,23 @@ pub(super) fn flow_reads_without_proof(source: &str, names: &[&str]) -> Vec<Stri
         with_dispatch(&host, |dispatch| {
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
-                    Arc::from(FILE),
+                    verter_type_expr::OwnedStr::from(FILE),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from(*name),
+                    verter_type_expr::OwnedStr::from(*name),
                     FunctionPartIdentity::DeclarationBody,
                     0,
                 ),
-                normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                normalized_type_args: verter_type_expr::OwnedSlice::from(
+                    Vec::new().into_boxed_slice(),
+                ),
                 context: dispatch.flow_return_context_for(FILE),
                 demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
                 input: verter_type_engine::semantic_query::FlowInputContext::empty(),
                 result_contract: super::flow_solve::flow_return_result_contract_id(),
             };
             let read = dispatch.execute_read(SemanticQueryKey::FlowReturn(Box::new(key)));
-            if read.result_is_partial {
-                unproven.push(format!("{name}: {:?}", read.partial_reasons));
+            if read.result_is_partial() {
+                unproven.push(format!("{name}: {:?}", read.partial_reasons()));
             }
         });
     }

@@ -15,10 +15,11 @@
 //! no proof or key table, so a published relation's residency is its memo
 //! candidate alone.
 //!
-//! **Leases.** Each [`LeasedOperand`] holds its operand's interned payload
-//! `Arc`, so a captured explanation stays readable after the memo evicts the
-//! judgement and after a document close tombstones the operand's arena slot.
-//! The lease ends when the explanation drops.
+//! **Leases.** Each [`LeasedOperand`] roots its operand in the graph, so a
+//! captured explanation stays readable after the memo evicts the judgement
+//! and after a document close evicts the caches that held the operand: the
+//! explanation is then the operand's owner, and the node is destroyed when
+//! its last owner, the explanation included, drops.
 //!
 //! **Cold only.** A warm hit computes nothing and captures nothing: an
 //! uncaptured warm answer is complete on its own, and capture never
@@ -28,20 +29,31 @@ use std::sync::Arc;
 
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    RecursionOrBudgetCap, RelateMemoKey, RelationKind, RelationOutcome, SemanticNodeData,
-    SemanticNodeId,
+    RecursionOrBudgetCap, RelateMemoKey, RelationKind, RelationOutcome, SemanticNodeId,
 };
+use crate::semantic_query_memo::node_data_lease::NodeDataLease;
 
-/// One relation operand, held by its interned payload rather than by a
-/// store-relative id alone.
+/// One relation operand, rooted for the explanation's lifetime rather than
+/// named by a store-relative id alone.
 #[derive(Debug, Clone)]
 pub struct LeasedOperand {
-    /// The operand's id at capture time. After a document close the id may
-    /// read as released in the store; [`Self::payload`] does not.
-    pub id: SemanticNodeId,
-    /// The operand's payload, leased for the explanation's lifetime. `None`
-    /// only for an id the store never handed out.
-    pub payload: Option<Arc<SemanticNodeData>>,
+    id: SemanticNodeId,
+    payload: Option<NodeDataLease>,
+}
+
+impl LeasedOperand {
+    /// The operand's id: an identity label that authorizes no read.
+    #[must_use]
+    pub fn id(&self) -> SemanticNodeId {
+        self.id
+    }
+
+    /// The operand's payload under the explanation's root. `None` only for
+    /// an id that named no live node when the judgement was captured.
+    #[must_use]
+    pub fn payload(&self) -> Option<&NodeDataLease> {
+        self.payload.as_ref()
+    }
 }
 
 /// The two leased operands of one relation and the axis they relate on.
@@ -83,11 +95,11 @@ impl RelationExplanation {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// Lease `id`'s current payload.
+    /// Root `id` and lease its payload.
     fn lease_operand(&self, id: SemanticNodeId) -> LeasedOperand {
         LeasedOperand {
             id,
-            payload: self.graph().node_data(id),
+            payload: self.graph().lease_for_delivery(id),
         }
     }
 

@@ -75,7 +75,7 @@
 //! Memoization discipline: no identity decision outlives one
 //! canonicalization. Wide arm sets narrow pairwise candidates with the
 //! LOCAL canonical bucket hash ([`arm_bucket_keys`]) — a
-//! per-canonicalization, bounded memo aligned with the comparator's own
+//! per-canonicalization memo, linear in the arms' unique nodes, aligned with the comparator's own
 //! identity (`Equal` arms always share a bucket; a bucket match is always
 //! confirmed by the exact cycle-safe comparator, never deduplicated on the
 //! hash alone). `structural_hash_of` is NOT used here: it is the audit
@@ -86,7 +86,9 @@
 //! and no store-level or global fingerprint/representative cache exists
 //! here.
 
+use std::ops::ControlFlow;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -98,6 +100,64 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::{ObservedGraphSelfRoot, SemanticGraphStore};
 use verter_session_query::flow::policy::NullabilityPolicy;
+
+#[cfg(test)]
+mod pairwise_budget_tests {
+    use super::*;
+
+    thread_local! {
+        pub(super) static STRUCTURAL_COMPARISONS: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// `readonly "a"[]` whose element is a `"a"` interned in its own file:
+    /// every such array is structurally equal to every other, but no two
+    /// share a payload, so each pair reaches the pairwise tier and pays one
+    /// descent unit to be proven equal.
+    fn array_of_a_in(graph: &SemanticGraphStore, file: usize) -> SemanticNodeId {
+        let element = graph.intern_node_with_scope(
+            SemanticNodeData::Literal(LiteralValue::String("a".into())),
+            NodeScopeId::File {
+                canonical_id: verter_type_expr::OwnedStr::from(format!("/arm-{file}.ts")),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: [1; 16],
+                local_scope: None,
+            },
+        );
+        graph.intern_node(SemanticNodeData::Array {
+            element,
+            readonly: true,
+        })
+    }
+
+    /// Once the compare budget is spent, the pairwise tier stops: the arms
+    /// it has not examined are kept, the union is unproven, and the work is
+    /// linear in the arms. Continuing would compare every later arm with
+    /// every earlier survivor, all of them coming back `Incomplete`.
+    #[test]
+    fn an_exhausted_compare_budget_ends_the_pairwise_tier() {
+        let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
+        let past_budget = 600;
+        let arms: Vec<SemanticNodeId> = (0..COMPARE_WORK_BUDGET as usize + 1 + past_budget)
+            .map(|file| array_of_a_in(&graph, file))
+            .collect();
+        STRUCTURAL_COMPARISONS.set(0);
+        let union = intern_ordered_union(&graph, &arms, NullabilityPolicy::Strict);
+        let comparisons = STRUCTURAL_COMPARISONS.get();
+
+        assert!(
+            union.evidence.incomplete,
+            "an exhausted budget leaves the union unproven"
+        );
+        assert!(
+            comparisons <= arms.len(),
+            "the pairwise tier is linear once the budget is spent: {comparisons} comparisons \
+             over {} arms",
+            arms.len()
+        );
+    }
+}
 
 #[cfg(test)]
 mod literal_provenance_tests {
@@ -112,6 +172,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_union_subsumption_reads_each_arm_a_bounded_number_of_times() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let members: Vec<_> = (0..1024)
             .map(|n| graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(n as f64))))
             .collect();
@@ -146,7 +207,7 @@ mod literal_provenance_tests {
         graph.intern_node_with_scope(
             SemanticNodeData::Literal(value),
             NodeScopeId::File {
-                canonical_id: Arc::from(file),
+                canonical_id: verter_type_expr::OwnedStr::from(file),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1; 16],
                 local_scope: None,
@@ -172,6 +233,7 @@ mod literal_provenance_tests {
             ),
         ] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             let left = scoped_literal(&graph, left, "/fresh.ts");
             let right = scoped_literal(&graph, right, "/pinned.ts");
             let result = intern_ordered_union(
@@ -197,6 +259,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_provenance_batches_partial_roots_and_normalizes_survivors() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let a = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("a".into())));
         let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
         let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
@@ -274,6 +337,7 @@ mod literal_provenance_tests {
     #[test]
     fn literal_provenance_hashes_shared_payloads_once_per_operation() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let string = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
             "s".repeat(4096),
         )));
@@ -319,15 +383,16 @@ mod literal_provenance_tests {
 
     #[test]
     fn literal_provenance_hash_collision_still_compares_exact_values() {
-        let left = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
-            LiteralValue::String("left".into()),
-        )));
-        let mut right = LiteralValueIdentity::new(Arc::new(SemanticNodeData::Literal(
-            LiteralValue::String("right".into()),
-        )));
+        let left = LiteralValueIdentity::new(crate::semantic_query_memo::NodeData::new(
+            SemanticNodeData::Literal(LiteralValue::String("left".into())),
+        ));
+        let mut right = LiteralValueIdentity::new(crate::semantic_query_memo::NodeData::new(
+            SemanticNodeData::Literal(LiteralValue::String("right".into())),
+        ));
         // A hash is only a candidate filter. Force the rare collision without
         // relying on particular hash output or a source fingerprint.
         right.semantic_hash = left.semantic_hash;
+        #[allow(clippy::mutable_key_type)]
         let distinct: FxHashSet<_> = [left, right].into_iter().collect();
         assert_eq!(distinct.len(), 2);
     }
@@ -345,8 +410,7 @@ pub(crate) struct CanonicalMint {
     /// explicit incompleteness signal. Candidate narrowing cannot dilute
     /// it: the bucketing key ([`arm_bucket_keys`]) is aligned with the
     /// comparator's identity — an `Equal` pair always shares a bucket and
-    /// reaches the pairwise tier (a tripped bucket-hash cap disables the
-    /// narrowing rather than grouping on partial keys). The mint maps a
+    /// reaches the pairwise tier. The mint maps a
     /// `false` value to the at-rest `CanonicalUnproven` category, which the
     /// pre-seal closure's O(1) skip does not accept — a budget-degraded
     /// list resurfacing in a later request pays the full re-close (and its
@@ -418,6 +482,9 @@ pub struct CanonicalEvidence {
     /// Nodes already scope-classified — one sidecar lookup per unique node
     /// per canonicalization, regardless of how many walks revisit it.
     seen_nodes: FxHashSet<SemanticNodeId>,
+    /// The roots [`Self::inspected_file_roots`] holds, so recording one is
+    /// constant time however many files the walk inspects.
+    seen_roots: FxHashSet<ObservedGraphSelfRoot>,
 }
 
 /// Fresh literal values contributed by one input. Partial roots may themselves
@@ -457,12 +524,12 @@ pub enum LiteralProvenanceResult {
 /// operation-local inventory computes its semantic hash only on first read.
 #[derive(Clone)]
 struct LiteralValueIdentity {
-    data: Arc<SemanticNodeData>,
+    data: crate::semantic_query_memo::NodeData,
     semantic_hash: u64,
 }
 
 impl LiteralValueIdentity {
-    fn new(data: Arc<SemanticNodeData>) -> Self {
+    fn new(data: crate::semantic_query_memo::NodeData) -> Self {
         use std::hash::{Hash, Hasher};
         #[cfg(test)]
         literal_provenance_tests::PAYLOAD_HASHES.with(|count| count.set(count.get() + 1));
@@ -504,7 +571,7 @@ impl LiteralValueIdentity {
 
 impl PartialEq for LiteralValueIdentity {
     fn eq(&self, other: &Self) -> bool {
-        if Arc::ptr_eq(&self.data, &other.data) {
+        if crate::semantic_query_memo::NodeData::ptr_eq(&self.data, &other.data) {
             return true;
         }
         if self.semantic_hash != other.semantic_hash {
@@ -558,7 +625,7 @@ fn inspect_literal_provenance_with_budget(
     }
     enum InspectedPayload {
         Literal(LiteralValueIdentity),
-        Nonliteral(Arc<SemanticNodeData>),
+        Nonliteral(crate::semantic_query_memo::NodeData),
     }
     const PRESENT: u8 = 1;
     const FRESH: u8 = 2;
@@ -587,6 +654,8 @@ fn inspect_literal_provenance_with_budget(
     }
     let mut inspected: FxHashMap<SemanticNodeId, InspectedPayload> = FxHashMap::default();
     let mut visited_roles = FxHashSet::default();
+    // Eq/Hash read only the immutable literal payload; the interior-mutable release cell is never part of the key.
+    #[allow(clippy::mutable_key_type)]
     let mut literals: FxHashMap<(LiteralValueIdentity, usize), u8> = FxHashMap::default();
     let mut representatives = Vec::new();
     let mut visits = 0usize;
@@ -650,6 +719,7 @@ fn inspect_literal_provenance_with_budget(
     if evidence.incomplete {
         return (LiteralProvenanceResult::None, evidence);
     }
+    #[allow(clippy::mutable_key_type)]
     let mut states: FxHashMap<LiteralValueIdentity, u8> = FxHashMap::default();
     for ((identity, _), flags) in literals {
         if flags & PRESENT != 0 {
@@ -684,13 +754,7 @@ impl CanonicalEvidence {
         self.incomplete |= other.incomplete;
         self.refusal = self.refusal.or(other.refusal);
         for root in other.inspected_file_roots {
-            if !self
-                .inspected_file_roots
-                .iter()
-                .any(|(c, h)| *c == root.0 && *h == root.1)
-            {
-                self.inspected_file_roots.push(root);
-            }
+            self.note_file_root(root);
         }
         self.seen_nodes.extend(other.seen_nodes);
     }
@@ -705,13 +769,18 @@ impl CanonicalEvidence {
             ..
         }) = graph.node_scope(node)
         {
-            if !self
-                .inspected_file_roots
-                .iter()
-                .any(|(c, h)| *c == canonical_id && *h == whole_hash)
-            {
-                self.inspected_file_roots.push((canonical_id, whole_hash));
-            }
+            self.note_file_root((canonical_id, whole_hash));
+        }
+    }
+
+    /// Record `root` once, in first-inspection order.
+    fn note_file_root(&mut self, root: ObservedGraphSelfRoot) {
+        if self.seen_roots.len() != self.inspected_file_roots.len() {
+            // A caller assigned the list directly; index what it holds.
+            self.seen_roots = self.inspected_file_roots.iter().cloned().collect();
+        }
+        if self.seen_roots.insert(root.clone()) {
+            self.inspected_file_roots.push(root);
         }
     }
 
@@ -774,18 +843,6 @@ pub struct CanonicalComposite {
 /// deep structural work, and it marks the evidence incomplete (ReturnOnly),
 /// never a wrong collapse.
 pub(super) const COMPARE_WORK_BUDGET: u32 = 4096;
-
-/// Arm cap of the UNNARROWED pairwise structural (tier-2) dedup: it runs
-/// only among CHILD-BEARING arms (childless payloads are fully deduplicated
-/// by the linear content-identity tier), and every pair is compared only
-/// when the canonical bucket hash cannot narrow the candidates (its node
-/// cap tripped) and at most this many remain. Beyond it the tier is
-/// skipped and the evidence marked incomplete — a pathological wide
-/// composite of deep arms is served ReturnOnly rather than either paying
-/// O(n²) deep comparisons or warm-publishing an unproven canonical form. A
-/// narrowed set compares within its equal-key groups only, whatever its
-/// width, under the shared [`COMPARE_WORK_BUDGET`].
-const STRUCTURAL_DEDUP_ARM_CAP: usize = 128;
 
 /// Maximum transparent `Alias` hops the lattice peek follows — mirrors the
 /// absorb-table discipline (`absorb.rs::ALIAS_PEEK_HOPS`).
@@ -884,32 +941,49 @@ pub(crate) fn object_arms_conflict_on_a_literal_property(
     false
 }
 
-/// Canonical union construction over `members` under `nullability`.
-pub fn intern_ordered_union(
+construction_ordinal_seam! {
+    /// Canonical union construction over `members` under `nullability`.
+    fn intern_ordered_union(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: NullabilityPolicy,
+    ) -> CanonicalComposite {
+        canonicalize(graph, members, /* is_union */ true, nullability)
+    }
+}
+
+/// [`intern_ordered_union`] inside a construction lane this thread holds of
+/// `graph`. Without such a lane the members' bare ordinals authorize nothing
+/// and there is no union.
+pub fn intern_ordered_union_in_scope(
     graph: &SemanticGraphStore,
     members: &[SemanticNodeId],
     nullability: NullabilityPolicy,
-) -> CanonicalComposite {
-    canonicalize(graph, members, /* is_union */ true, nullability)
+) -> Option<CanonicalComposite> {
+    graph
+        .holds_construction_lane()
+        .then(|| intern_ordered_union(graph, members, nullability))
 }
 
-/// Private ordered-intersection intern. Operand order is preserved. An
-/// intersection runs the strict-null algebra. The intersection is one the
-/// construction derives (an instantiation, a merge), so every redundant
-/// supertype drops: the written `string & {}` the checker keeps is an
-/// authored shell, reduced by [`reduced_authored_intersection`].
-pub fn intern_ordered_intersection(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> CanonicalComposite {
-    canonicalize_with(
-        graph,
-        members,
-        /* is_union */ false,
-        NullabilityPolicy::Strict,
-        SupertypeReduction::Always,
-        DistributionOrigin::KeepWrittenIntersection,
-    )
+construction_ordinal_seam! {
+    /// Private ordered-intersection intern. Operand order is preserved. An
+    /// intersection runs the strict-null algebra. The intersection is one the
+    /// construction derives (an instantiation, a merge), so every redundant
+    /// supertype drops: the written `string & {}` the checker keeps is an
+    /// authored shell, reduced by [`reduced_authored_intersection`].
+    fn intern_ordered_intersection(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> CanonicalComposite {
+        canonicalize_with(
+            graph,
+            members,
+            /* is_union */ false,
+            NullabilityPolicy::Strict,
+            SupertypeReduction::Always,
+            DistributionOrigin::KeepWrittenIntersection,
+        )
+    }
 }
 
 fn canonicalize(
@@ -944,6 +1018,10 @@ enum SupertypeReduction {
     /// & {}` makes `NN<string>` `string`).
     ExceptPrimitiveOverEmptyObject,
 }
+
+/// Up to this many arms, the content-identity tier compares each arm with
+/// the arms already kept instead of hashing every payload.
+const TIER1_DIRECT_SCAN_MAX: usize = 8;
 
 fn canonicalize_with(
     graph: &SemanticGraphStore,
@@ -1282,43 +1360,77 @@ fn canonicalize_with(
     //    First occurrence
     //    survives; a discarded duplicate's TRANSITIVE structure roots stay
     //    in the evidence (the identity decision rests on the shared
-    //    children); an `Incomplete` comparison (or an over-cap arm set)
-    //    keeps every arm and taints the evidence.
-    let hasher = std::collections::hash_map::RandomState::new();
-    let mut seen_payloads: FxHashMap<u64, smallvec::SmallVec<[SemanticNodeId; 1]>> =
-        FxHashMap::default();
+    //    children); an `Incomplete` comparison keeps every arm and taints
+    //    the evidence.
+    //    A few arms compare directly against the arms already kept, in
+    //    order; wider sets narrow the candidates by a payload hash first.
+    //    Either way only an exact payload match deduplicates.
     let mut kept: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
-    let mut child_bearing: Vec<(usize, Arc<SemanticNodeData>)> = Vec::new();
-    'tier1: for &m in &arms {
-        let Some(data) = graph.node_data(m) else {
-            // A dangling arm cannot be compared — preserve it and refuse
-            // canonical warm admission.
-            evidence.incomplete = true;
+    let mut child_bearing: Vec<(usize, crate::semantic_query_memo::NodeData)> = Vec::new();
+    if arms.len() <= TIER1_DIRECT_SCAN_MAX {
+        let mut kept_payloads: smallvec::SmallVec<
+            [(SemanticNodeId, crate::semantic_query_memo::NodeData); TIER1_DIRECT_SCAN_MAX],
+        > = smallvec::SmallVec::new();
+        'direct: for &m in &arms {
+            let Some(data) = graph.node_data(m) else {
+                // A dangling arm cannot be compared — preserve it and refuse
+                // canonical warm admission.
+                evidence.incomplete = true;
+                kept.push(m);
+                continue;
+            };
+            for (candidate, candidate_data) in kept_payloads.iter() {
+                if *candidate == m {
+                    continue 'direct;
+                }
+                if **candidate_data == *data && same_importing_unit(graph, *candidate, m, &data) {
+                    // Content-identical cross-scope duplicate — discarded,
+                    // its transitive structure roots kept as evidence.
+                    evidence.record_subtree_roots(graph, m);
+                    continue 'direct;
+                }
+            }
+            if !payload_is_childless(&data) {
+                child_bearing.push((kept.len(), data.clone()));
+            }
+            kept_payloads.push((m, data));
             kept.push(m);
-            continue;
-        };
-        use std::hash::BuildHasher;
-        let bucket = seen_payloads.entry(hasher.hash_one(&*data)).or_default();
-        for &candidate in bucket.iter() {
-            if candidate == m {
-                continue 'tier1;
-            }
-            if graph.node_data(candidate).is_some_and(|cand| {
-                *cand == *data && same_importing_unit(graph, candidate, m, &data)
-            }) {
-                // Content-identical cross-scope duplicate — discarded. The
-                // payload-equality claim rests on the SHARED CHILD ids, so
-                // the discarded arm's transitive structure roots enter the
-                // evidence even though tier 1 never descends.
-                evidence.record_subtree_roots(graph, m);
-                continue 'tier1;
-            }
         }
-        bucket.push(m);
-        if !payload_is_childless(&data) {
-            child_bearing.push((kept.len(), Arc::clone(&data)));
+    } else {
+        let hasher = std::collections::hash_map::RandomState::new();
+        let mut seen_payloads: FxHashMap<u64, smallvec::SmallVec<[SemanticNodeId; 1]>> =
+            FxHashMap::default();
+        'tier1: for &m in &arms {
+            let Some(data) = graph.node_data(m) else {
+                // A dangling arm cannot be compared — preserve it and refuse
+                // canonical warm admission.
+                evidence.incomplete = true;
+                kept.push(m);
+                continue;
+            };
+            use std::hash::BuildHasher;
+            let bucket = seen_payloads.entry(hasher.hash_one(&*data)).or_default();
+            for &candidate in bucket.iter() {
+                if candidate == m {
+                    continue 'tier1;
+                }
+                if graph.node_data(candidate).is_some_and(|cand| {
+                    *cand == *data && same_importing_unit(graph, candidate, m, &data)
+                }) {
+                    // Content-identical cross-scope duplicate — discarded. The
+                    // payload-equality claim rests on the SHARED CHILD ids, so
+                    // the discarded arm's transitive structure roots enter the
+                    // evidence even though tier 1 never descends.
+                    evidence.record_subtree_roots(graph, m);
+                    continue 'tier1;
+                }
+            }
+            bucket.push(m);
+            if !payload_is_childless(&data) {
+                child_bearing.push((kept.len(), data.clone()));
+            }
+            kept.push(m);
         }
-        kept.push(m);
     }
     if child_bearing.len() > 1 {
         // Candidate narrowing for wide arm sets: bucket by the CANONICAL
@@ -1341,37 +1453,43 @@ fn canonicalize_with(
         // identity fields exactly for acyclic arms, folds every
         // cycle-reaching arm into ONE shared bucket (coinductive equality
         // is not positionally hashable, and Equal never pairs a cyclic arm
-        // with an acyclic one), and on a tripped node cap DISABLES the
-        // narrowing entirely (one all-arms group) instead of grouping on
-        // partial keys — a slower complete pass, never a missed compare
-        // and never tainted evidence.
+        // with an acyclic one). The hash visits each node the arms reach
+        // once, so it is linear in what the arms already hold: a union of
+        // thousands of deep, distinct arms (the elements of a large
+        // `as const` tree) narrows to singleton groups at the cost of
+        // reading them, as the checker's own union construction reads
+        // every constituent.
         let prehash_groups: Option<FxHashMap<ArmBucketKey, Vec<usize>>> =
             if child_bearing.len() > STRUCTURAL_PREHASH_MIN_ARMS {
                 let roots: Vec<SemanticNodeId> = child_bearing
                     .iter()
                     .map(|(index, _)| kept[*index])
                     .collect();
-                arm_bucket_keys(graph, &roots).map(|keys| {
-                    let mut groups: FxHashMap<ArmBucketKey, Vec<usize>> = FxHashMap::default();
-                    for (position, key) in keys.into_iter().enumerate() {
-                        groups.entry(key).or_default().push(position);
-                    }
-                    groups
-                })
+                let mut groups: FxHashMap<ArmBucketKey, Vec<usize>> = FxHashMap::default();
+                for (position, key) in arm_bucket_keys(graph, &roots).into_iter().enumerate() {
+                    groups.entry(key).or_default().push(position);
+                }
+                Some(groups)
             } else {
                 None
             };
-        // Without the narrowing, the comparison is every pair of arms.
-        let over_cap = prehash_groups.is_none() && child_bearing.len() > STRUCTURAL_DEDUP_ARM_CAP;
-        if over_cap {
-            evidence.incomplete = true;
-        }
+        // Without the narrowing (a small set), the comparison is every pair
+        // of arms.
+        //
+        // An exhausted budget ends the tier for the whole canonicalization:
+        // every later descent would come back `Incomplete`, and the
+        // evidence already says so, so the arms not yet examined are kept
+        // unproven rather than compared pair by pair. Without the stop, one
+        // wide group (the shared cycle-reaching bucket) would still pay a
+        // quadratic number of root-pair checks after the budget proved
+        // nothing more could be decided.
         let mut budget = COMPARE_WORK_BUDGET;
         let mut discarded: Vec<usize> = Vec::new();
         let compare_group = |group: &[usize],
                              evidence: &mut CanonicalEvidence,
                              discarded: &mut Vec<usize>,
-                             budget: &mut u32| {
+                             budget: &mut u32|
+         -> ControlFlow<()> {
             for i in 1..group.len() {
                 let (index_m, _) = child_bearing[group[i]];
                 for &earlier in &group[..i] {
@@ -1379,6 +1497,9 @@ fn canonicalize_with(
                     if discarded.contains(&index_k) {
                         continue;
                     }
+                    #[cfg(test)]
+                    pairwise_budget_tests::STRUCTURAL_COMPARISONS
+                        .with(|count| count.set(count.get() + 1));
                     match compare_structural(graph, kept[index_m], kept[index_k], evidence, budget)
                     {
                         StructuralIdentity::Equal => {
@@ -1392,23 +1513,29 @@ fn canonicalize_with(
                         StructuralIdentity::Distinct => {}
                         StructuralIdentity::Incomplete => {
                             evidence.incomplete = true;
+                            if *budget == 0 {
+                                return ControlFlow::Break(());
+                            }
                         }
                     }
                 }
             }
+            ControlFlow::Continue(())
         };
         match &prehash_groups {
-            _ if over_cap => {}
             Some(groups) => {
                 for group in groups.values() {
-                    if group.len() > 1 {
-                        compare_group(group, &mut evidence, &mut discarded, &mut budget);
+                    if group.len() > 1
+                        && compare_group(group, &mut evidence, &mut discarded, &mut budget)
+                            .is_break()
+                    {
+                        break;
                     }
                 }
             }
             None => {
                 let all: Vec<usize> = (0..child_bearing.len()).collect();
-                compare_group(&all, &mut evidence, &mut discarded, &mut budget);
+                let _ = compare_group(&all, &mut evidence, &mut discarded, &mut budget);
             }
         }
         if !discarded.is_empty() {
@@ -1486,8 +1613,8 @@ fn canonicalize_with(
     //    `Global` through the sealed canonical mint. The mint carries the
     //    completeness verdict (see `CanonicalMint::canonical_form_proven`
     //    for exactly what it does and does not witness): only a run with
-    //    no explicit incompleteness signal (over-cap arm set, exhausted
-    //    compare budget, dangling arm, undecided peek) is stamped
+    //    no explicit incompleteness signal (exhausted compare budget,
+    //    dangling arm, undecided peek) is stamped
     //    `Canonical`; anything else is stamped `CanonicalUnproven` at rest
     //    — never skip-eligible.
     let node = mint_composite(graph, kept, is_union, nullability, &evidence);
@@ -1554,7 +1681,7 @@ fn remove_redundant_supertypes(
     arms: &mut Vec<SemanticNodeId>,
     supertype_reduction: SupertypeReduction,
 ) {
-    let data: Vec<Option<Arc<SemanticNodeData>>> =
+    let data: Vec<Option<crate::semantic_query_memo::NodeData>> =
         arms.iter().map(|arm| graph.node_data(*arm)).collect();
     let is_empty_object = |d: &SemanticNodeData| matches!(d, SemanticNodeData::Object(view) if view.closed().is_empty());
     let present = |test: &dyn Fn(&SemanticNodeData) -> bool| data.iter().flatten().any(|d| test(d));
@@ -1693,18 +1820,20 @@ fn reduce_authored_intersection(
     (!kept_as_written).then_some(reduced)
 }
 
-/// The type the checker constructs from an AUTHORED intersection shell
-/// (`getIntersectionType`), when it differs from the shell as written:
-/// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
-/// for any other node and for a shell the canonical intersection keeps as
-/// written (`QA & QB`). The shell itself stays the authored display form;
-/// a consumer that DECIDES on the type reads this.
-pub fn reduced_authored_intersection(
-    graph: &SemanticGraphStore,
-    node: SemanticNodeId,
-    nullability: NullabilityPolicy,
-) -> Option<SemanticNodeId> {
-    reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+construction_ordinal_seam! {
+    /// The type the checker constructs from an AUTHORED intersection shell
+    /// (`getIntersectionType`), when it differs from the shell as written:
+    /// `string & ("a" | 1)` is `"a"` and `number & string` is `never`. `None`
+    /// for any other node and for a shell the canonical intersection keeps as
+    /// written (`QA & QB`). The shell itself stays the authored display form;
+    /// a consumer that DECIDES on the type reads this.
+    fn reduced_authored_intersection(
+        graph: &SemanticGraphStore,
+        node: SemanticNodeId,
+        nullability: NullabilityPolicy,
+    ) -> Option<SemanticNodeId> {
+        reduce_authored_intersection(graph, node, nullability).map(|reduced| reduced.node)
+    }
 }
 
 /// Whether a distributed intersection keeps its written form as the
@@ -2062,7 +2191,10 @@ fn intersect_unions_of_primitive_types(
     // false`.
     let primitive_union_members =
         |arm: SemanticNodeId| -> Option<Vec<SemanticNodeId>> {
-            let Some(SemanticNodeData::Union(members)) = graph.node_data(arm).as_deref().cloned()
+            let Some(SemanticNodeData::Union(members)) = graph
+                .node_data(arm)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
             else {
                 return None;
             };
@@ -2459,15 +2591,6 @@ fn payload_is_childless(data: &SemanticNodeData) -> bool {
     }
 }
 
-/// Node-visit cap of one canonicalization's bucket-hash phase, shared
-/// across every arm (the memo deduplicates shared subtrees). Generous
-/// relative to the pairwise tier's own budget because hashing is linear in
-/// unique nodes; a tripped cap DISABLES candidate narrowing for the run
-/// (every child-bearing arm lands in one group and the budgeted pairwise
-/// tier decides) — it never taints the evidence and never changes a
-/// verdict.
-const BUCKET_HASH_NODE_CAP: usize = 16_384;
-
 /// Bucket key of one child-bearing arm for the pairwise tier's candidate
 /// narrowing. INVARIANT (the reason this is a separate policy from the
 /// audit fingerprint `structural_hash_of`): `compare_structural(a, b) ==
@@ -2498,35 +2621,28 @@ enum BucketSlot {
     Cyclic,
 }
 
-/// Compute one bucket key per arm, sharing a memo across arms (bounded and
-/// per-canonicalization — nothing outlives the run). `None` means the node
-/// cap tripped: the caller must disable candidate narrowing for this
-/// canonicalization rather than group on partial keys — an Equal pair
-/// split across a hashed and an unhashed arm would otherwise never meet.
-fn arm_bucket_keys(
-    graph: &SemanticGraphStore,
-    arms: &[SemanticNodeId],
-) -> Option<Vec<ArmBucketKey>> {
+/// Compute one bucket key per arm, sharing a memo across arms
+/// (per-canonicalization — nothing outlives the run). The memo visits each
+/// node the arms reach once, so the whole phase is linear in the arms'
+/// unique nodes. Every arm is keyed: an arm left unkeyed would have to
+/// share a group with every other one, and an Equal pair split across a
+/// hashed and an unhashed arm would otherwise never meet.
+fn arm_bucket_keys(graph: &SemanticGraphStore, arms: &[SemanticNodeId]) -> Vec<ArmBucketKey> {
     let mut memo: FxHashMap<SemanticNodeId, BucketSlot> = FxHashMap::default();
-    let mut visits: usize = 0;
-    let mut keys = Vec::with_capacity(arms.len());
-    for &arm in arms {
-        keys.push(bucket_hash_of(graph, arm, &mut memo, &mut visits)?);
-    }
-    Some(keys)
+    arms.iter()
+        .map(|&arm| bucket_hash_of(graph, arm, &mut memo))
+        .collect()
 }
 
 /// Iterative post-order canonical-identity hash of one arm. Cycle-safe: a
 /// combine step that still sees an `InProgress` child observed a back edge
 /// (the child is an open ancestor on the current path), and cyclicity
-/// propagates upward through `Cyclic` child slots. `None` = node cap
-/// tripped.
+/// propagates upward through `Cyclic` child slots.
 fn bucket_hash_of(
     graph: &SemanticGraphStore,
     root: SemanticNodeId,
     memo: &mut FxHashMap<SemanticNodeId, BucketSlot>,
-    visits: &mut usize,
-) -> Option<ArmBucketKey> {
+) -> ArmBucketKey {
     use std::hash::{Hash, Hasher};
     let mut stack: Vec<(SemanticNodeId, bool)> = vec![(root, false)];
     let mut children: Vec<SemanticNodeId> = Vec::new();
@@ -2539,10 +2655,6 @@ fn bucket_hash_of(
                 // frame settles it.
                 Some(BucketSlot::InProgress) => continue,
                 None => {}
-            }
-            *visits += 1;
-            if *visits > BUCKET_HASH_NODE_CAP {
-                return None;
             }
             let Some(data) = graph.node_data(node) else {
                 // A dangling node: any deterministic key keeps the
@@ -2613,10 +2725,10 @@ fn bucket_hash_of(
         memo.insert(node, BucketSlot::Done(hasher.finish()));
     }
     match memo.get(&root) {
-        Some(BucketSlot::Done(hash)) => Some(ArmBucketKey::Exact(*hash)),
+        Some(BucketSlot::Done(hash)) => ArmBucketKey::Exact(*hash),
         // `Cyclic`, and the defensively-unreachable open slot, both land in
         // the shared coarse bucket.
-        _ => Some(ArmBucketKey::Cyclic),
+        _ => ArmBucketKey::Cyclic,
     }
 }
 
@@ -2828,6 +2940,14 @@ fn hash_shallow_identity<H: std::hash::Hasher>(data: &SemanticNodeData, hasher: 
                 SignatureReturnCarrier::Declared(_) => 0u8.hash(hasher),
                 SignatureReturnCarrier::Function(source) => {
                     1u8.hash(hasher);
+                    source.hash(hasher);
+                }
+                SignatureReturnCarrier::DeferredFlow(source) => {
+                    2u8.hash(hasher);
+                    source.hash(hasher);
+                }
+                SignatureReturnCarrier::EvaluatedFlow(source) => {
+                    3u8.hash(hasher);
                     source.hash(hasher);
                 }
             }
@@ -3569,6 +3689,14 @@ fn compare_shallow(
                         return false;
                     }
                 }
+                (
+                    SignatureReturnCarrier::DeferredFlow(a),
+                    SignatureReturnCarrier::DeferredFlow(b),
+                ) => {
+                    if a != b {
+                        return false;
+                    }
+                }
                 _ => return false,
             }
             // A parameter written as a literal type makes the signature a
@@ -3870,8 +3998,8 @@ fn classify_node(
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let quasis = quasis.clone();
+            let expressions = Arc::clone(expressions.as_arc());
             classify_template(walk, &quasis, &expressions)
         }
         Some(SemanticNodeData::Union(members)) => {
@@ -3936,7 +4064,7 @@ fn literal_is_truthy(literal: &LiteralValue) -> bool {
 
 fn classify_template(
     walk: &mut TruthinessWalk<'_>,
-    quasis: &[Arc<str>],
+    quasis: &[OwnedStr],
     expressions: &[SemanticNodeId],
 ) -> crate::semantic_query::TruthinessDomain {
     use crate::semantic_query::TruthinessInhabitance as Tri;
@@ -4042,8 +4170,8 @@ fn render_domain(walk: &mut TruthinessWalk<'_>, node: SemanticNodeId) -> RenderD
             quasis,
             expressions,
         }) => {
-            let quasis = Arc::clone(quasis);
-            let expressions = Arc::clone(expressions);
+            let quasis = quasis.clone();
+            let expressions = Arc::clone(expressions.as_arc());
             let nested = classify_template(walk, &quasis, &expressions);
             // A template denotes strings, so its render domain IS its
             // truthiness domain: the one falsy string is `""`.
@@ -4135,12 +4263,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             crate::semantic_query::PartialReasonSet::empty()
         });
         crate::semantic_query::CacheRead {
+            lease: read.lease,
             value,
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress || !value.is_decided() || defensive,
-            result_is_partial: read.result_is_partial || defensive,
-            partial_reasons,
+            fact_status: if defensive {
+                crate::semantic_query::FactStatus::unavailable(partial_reasons)
+            } else {
+                read.fact_status
+            },
             receipt: read.receipt,
         }
     }

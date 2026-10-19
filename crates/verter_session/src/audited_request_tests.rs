@@ -200,9 +200,9 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         // that. `DefineProps` with empty `type_args` lowers to
         // `Opaque(Miss)`, which is still a `Value` node id.
         assert!(
-            matches!(macro_read.value, QueryResult::Value(_)),
+            matches!(macro_read.value().clone(), QueryResult::Value(_)),
             "ResolveMacroPayload(0-arg DefineProps) must return Value(Opaque(Miss)); got {:?}",
-            macro_read.value
+            macro_read.value().clone()
         );
 
         // Second raw dispatch: ProjectPath rooted at a primitive
@@ -216,7 +216,7 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         ));
         let path_key = SemanticQueryKey::ProjectPath {
             base: primitive_base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 vec![PathSegment::Member(
                     verter_type_engine::semantic_query::PropertyKey::identifier("nonexistent"),
                 )]
@@ -232,9 +232,9 @@ fn raw_dispatch_execute_emits_no_audit_records() {
         // non-existent member off a primitive surface yields a
         // `Value(Opaque(Miss))` node id — still a `Value` arm.
         assert!(
-            matches!(path_read.value, QueryResult::Value(_)),
+            matches!(path_read.value().clone(), QueryResult::Value(_)),
             "ProjectPath(primitive, [member]) must return Value; got {:?}",
-            path_read.value
+            path_read.value().clone()
         );
 
         // The guard drops here, restoring the prior TLS slots.

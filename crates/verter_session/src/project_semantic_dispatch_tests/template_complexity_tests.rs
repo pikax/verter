@@ -297,6 +297,7 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
     };
     let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = super::ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let union = |prefix: &str| {
         let members: Vec<verter_type_engine::semantic_query::SemanticNodeId> = (0..40)
@@ -315,15 +316,17 @@ fn a_template_past_its_byte_allowance_is_a_memory_partial() {
         ))
     };
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: std::sync::Arc::from(
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
             vec![
-                std::sync::Arc::<str>::from(""),
-                std::sync::Arc::from("-"),
-                std::sync::Arc::from(""),
+                verter_type_expr::OwnedStr::from(""),
+                verter_type_expr::OwnedStr::from("-"),
+                verter_type_expr::OwnedStr::from(""),
             ]
             .into_boxed_slice(),
         ),
-        expressions: std::sync::Arc::from(vec![union("a"), union("b")].into_boxed_slice()),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(std::sync::Arc::from(
+            vec![union("a"), union("b")].into_boxed_slice(),
+        )),
     });
     dispatch.set_construction_byte_limit_for_tests(4 << 10);
     let (_, completeness) = dispatch.evaluate_deferred_semantic_node_with_context_for_tests(

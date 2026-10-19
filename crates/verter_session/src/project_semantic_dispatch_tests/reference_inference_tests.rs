@@ -20,6 +20,8 @@ interface IPh<T> { k: 1 }
 type CoFn<T> = { f: (x: T) => void };
 type PE<M, L> = { type: "ParsingError"; message: M; lineNumber: L };
 type F<X> = [X] extends [PE<infer M, any>] ? M : "ok";
+type ToIPh<T> = IPh<T>;
+type Sel<T> = T extends 1 ? IPh<T> : never;
 "##;
 
 /// `Box<"a">` against `Box<infer P>` infers `"a"` from the type argument,
@@ -28,7 +30,9 @@ type F<X> = [X] extends [PE<infer M, any>] ? M : "ok";
 /// `Ph<infer P>` infers nothing, `unknown`). A contravariant parameter's
 /// argument infers contravariantly, a repeated `infer` unions its
 /// candidates, and a reference nested in a tuple or another reference is a
-/// site of the same pattern.
+/// site of the same pattern. An alias application is the type it
+/// instantiates to, so an alias whose body selects a reference infers from
+/// that reference's type arguments (`Sel<1>` IS `IPh<1>`).
 #[test]
 fn references_to_one_declaration_infer_from_their_type_arguments() {
     let failures = Matrix::new(SOURCE).settings(&ALL).types(&[
@@ -47,6 +51,8 @@ fn references_to_one_declaration_infer_from_their_type_arguments() {
         ("{ k: 1 } extends Ph<infer P> ? P : 0", "unknown"),
         (r#"CoFn<"a"> extends CoFn<infer P> ? P : 0"#, r#""a""#),
         (r#"F<PE<"m", 1>>"#, r#""m""#),
+        (r#"ToIPh<"a"> extends IPh<infer P> ? P : 0"#, r#""a""#),
+        ("Sel<1> extends IPh<infer P> ? P : 0", "1"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

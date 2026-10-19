@@ -530,6 +530,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`apply_guard_union`) reads the earlier parts' negations as one growing
   prefix whose standing facts are kept one per subject; re-reading the
   whole prefix for every alternative made the count grow with the cube.
+  That prefix is one subject-indexed environment every alternative shares,
+  each alternative's own part is read off the guard ledger as an indexed
+  delta over it, the overlay is marked by a persistent share of the
+  product state and restored only at the roots the ledger window names,
+  and the per-reference union probes each later alternative only for the
+  references the first one narrowed (`flow_return_disjunction.rs`).
+  Copying the prefix and the whole overlay into every alternative wrote
+  facts in the square of the chain, and rescanning each alternative's
+  subject list compared subjects in its cube; both now grow linearly
+  (`an_or_guard_over_independent_subjects_does_linear_environment_work`,
+  over 128 to 1,024 independent parameters).
   The evaluator walks a chain's nested left operands from the innermost
   one outward (`eval_logical`), so a 300-operand chain answers on a 1 MiB
   thread (`flow_return_null_policy_tests.rs` →
@@ -1017,8 +1028,8 @@ Recorded plainly so no reader mistakes absence for a pass:
     locator lowering's stack; each body's binder frames push onto a shared
     chain; a binder's identity folds each nested mapped type by a digest
     its drive computes once; and the openness walk's recursive arms are
-    functions of their own (the walk is bounded by its 256-node budget, and
-    a level now carries only the arm it takes).
+    functions of their own (their re-entry nests at most 256 levels deep,
+    and a level now carries only the arm it takes).
     `mapped_types_nested_10000_deep_return_on_production_stacks` returns
     the connected-demand work budget's typed failure 10,000 deep (5.9 s,
     against 256 s before the digest fix) and

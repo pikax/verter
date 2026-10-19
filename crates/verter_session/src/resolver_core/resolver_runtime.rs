@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use crate::resolver_core::{
     fallthrough_resolver::FallthroughResolverState, imported_root_db::ImportedRootDb,
-    prepared_decl::PreparedDeclBundle, route_db::RouteDb, FallthroughNodeKey, ResolutionNodeKey,
-    ResolverCounters, SingleflightGroup, StableExecutionValue, ValidatedFactAdmission,
-    ValidatedFactCache,
+    prepared_decl::PreparedDeclBundle, route_db::RouteDb, CachedData, CachedValue,
+    FallthroughNodeKey, ResolutionNodeKey, ResolverCounters, SingleflightGroup,
+    StableExecutionValue, ValidatedFactAdmission, ValidatedFactCache,
 };
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::store_view::StoreView;
@@ -21,19 +21,22 @@ use verter_session_query::facts::store_view::StoreView;
 /// runtime keeps: the current one and the one before it.
 const RECENT_COMPONENT_META_VIEWS: usize = 2;
 
-pub struct StableRequestState<K, V>
+/// A stable request cache: fact-validated value cells and the singleflight
+/// its cold computations coalesce on, whose rendezvous carries `F` (by
+/// default the value's cell itself).
+pub struct StableRequestState<K, V, F = CachedValue<V>>
 where
     K: Eq + Hash,
-    V: Clone,
+    V: CachedData,
 {
     cache: ValidatedFactCache<K, V>,
-    singleflight: SingleflightGroup<K, StableExecutionValue<Option<V>>, ()>,
+    singleflight: SingleflightGroup<K, StableExecutionValue<Option<F>>, ()>,
 }
 
-impl<K, V> StableRequestState<K, V>
+impl<K, V, F> StableRequestState<K, V, F>
 where
     K: Eq + Hash + Clone,
-    V: Clone,
+    V: CachedData,
 {
     pub fn new() -> Self {
         Self {
@@ -47,7 +50,7 @@ where
         self.singleflight.clear();
     }
 
-    pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<Arc<V>>
+    pub fn get_if_valid<TView>(&self, key: &K, view: &TView) -> Option<CachedValue<V>>
     where
         TView: StoreView + ?Sized,
     {
@@ -58,7 +61,7 @@ where
         &self,
         key: &K,
         view: &TView,
-    ) -> Option<(Arc<V>, ValidatedFactAdmission<V>)>
+    ) -> Option<(CachedValue<V>, ValidatedFactAdmission<V>)>
     where
         TView: StoreView + ?Sized,
     {
@@ -76,7 +79,7 @@ where
         key: &K,
         view: &TView,
         self_root_canonicals: &[&str],
-    ) -> Option<Arc<V>>
+    ) -> Option<CachedValue<V>>
     where
         TView: StoreView + ?Sized,
     {
@@ -95,7 +98,7 @@ where
         view: &TView,
         self_root_canonicals: &[&str],
     ) -> Result<
-        Arc<V>,
+        CachedValue<V>,
         (
             Option<verter_session_query::facts::fact_cache::FactVersionRef>,
             usize,
@@ -109,41 +112,50 @@ where
     }
 
     /// Strict-admission wrapper: forwards through to
-    /// [`ValidatedFactCache::insert_arc_with_kind`] so producers
+    /// [`ValidatedFactCache::insert_value_with_kind`] so producers
     /// admit through the fact-completeness guard. Empty signatures
     /// refuse + emit `FactSignatureAdmissionRefused`; wide signatures
     /// are paged and admitted.
-    pub fn insert_arc_with_kind(
+    pub fn insert_value_with_kind(
         &self,
         key: K,
-        value: Arc<V>,
+        value: CachedValue<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> Option<ValidatedFactAdmission<V>> {
+    ) -> Option<ValidatedFactAdmission<V>>
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         self.cache
-            .insert_arc_with_kind(key, value, facts, cache_kind)
+            .insert_value_with_kind(key, value, facts, cache_kind)
     }
 
-    pub(crate) fn resign_arc_with_kind(
+    pub(crate) fn resign_value_with_kind(
         &self,
         key: &K,
         admission: &ValidatedFactAdmission<V>,
-        value: Arc<V>,
+        value: CachedValue<V>,
         facts: Vec<FactVersionRef>,
         cache_kind: &'static str,
-    ) -> bool {
+    ) -> bool
+    where
+        K: verter_retention::heap_size::HeapSize,
+    {
         self.cache
-            .resign_arc_with_kind(key, admission, value, facts, cache_kind)
+            .resign_value_with_kind(key, admission, value, facts, cache_kind)
     }
 
-    pub fn cached_values(&self) -> Vec<Arc<V>> {
+    pub fn cached_values(&self) -> Vec<CachedValue<V>> {
         self.cache.values()
     }
 
     /// Test-only pass-through to
     /// [`ValidatedFactCache::candidate_signatures_for_key`].
     #[cfg(test)]
-    pub fn candidate_signatures_for_key(&self, key: &K) -> Vec<Arc<[FactVersionRef]>> {
+    pub fn candidate_signatures_for_key(
+        &self,
+        key: &K,
+    ) -> Vec<crate::resolver_core::OwnedFactSignature> {
         self.cache.candidate_signatures_for_key(key)
     }
 
@@ -169,9 +181,9 @@ where
     }
 
     /// Remove all entries whose key satisfies the predicate.
-    pub fn retain<F>(&self, predicate: F)
+    pub fn retain<P>(&self, predicate: P)
     where
-        F: FnMut(&K) -> bool,
+        P: FnMut(&K) -> bool,
     {
         self.cache.retain(predicate);
     }
@@ -189,15 +201,15 @@ where
 
     pub(crate) fn singleflight(
         &self,
-    ) -> &SingleflightGroup<K, StableExecutionValue<Option<V>>, ()> {
+    ) -> &SingleflightGroup<K, StableExecutionValue<Option<F>>, ()> {
         &self.singleflight
     }
 }
 
-impl<K, V> Default for StableRequestState<K, V>
+impl<K, V, F> Default for StableRequestState<K, V, F>
 where
     K: Eq + Hash + Clone,
-    V: Clone,
+    V: CachedData,
 {
     fn default() -> Self {
         Self::new()
@@ -212,13 +224,13 @@ where
 /// itself.
 pub struct UnifiedResolverRuntime<MetaV = (), FallthroughV = ()>
 where
-    MetaV: Clone,
+    MetaV: Clone + CachedData,
     FallthroughV: Clone,
 {
     /// Fallthrough/inheritance resolution subsystem.
     pub fallthrough: FallthroughResolverState,
     /// Top-level materialized component-meta request state.
-    pub component_meta: StableRequestState<ResolutionNodeKey, MetaV>,
+    pub component_meta: StableRequestState<ResolutionNodeKey, MetaV, MetaV>,
     /// View fingerprints admitted most recently per (document, mode), newest
     /// last, [`RECENT_COMPONENT_META_VIEWS`] deep (see
     /// [`Self::admit_component_meta_view`]).
@@ -262,7 +274,7 @@ where
 
 impl<MetaV, FallthroughV> UnifiedResolverRuntime<MetaV, FallthroughV>
 where
-    MetaV: Clone,
+    MetaV: Clone + CachedData,
     FallthroughV: Clone,
 {
     /// Create a new runtime with fresh caches and counters, sharing the
@@ -396,7 +408,7 @@ where
     pub(crate) fn admit_component_meta_view<R>(
         &self,
         key: ResolutionNodeKey,
-        state: Option<(Arc<MetaV>, Vec<FactVersionRef>)>,
+        state: Option<(CachedValue<MetaV>, Vec<FactVersionRef>)>,
         alongside: impl FnOnce(Option<u64>) -> R,
     ) -> (Option<ValidatedFactAdmission<MetaV>>, R) {
         let mut recent = self.recent_component_meta_views.lock();
@@ -425,7 +437,7 @@ where
         }
         let admission = state.and_then(|(value, facts)| {
             self.component_meta
-                .insert_arc_with_kind(key, value, facts, "component_meta.results")
+                .insert_value_with_kind(key, value, facts, "component_meta.results")
         });
         let alongside = alongside(superseded);
         drop(recent);
@@ -501,7 +513,7 @@ where
 
 impl<MetaV, FallthroughV> Default for UnifiedResolverRuntime<MetaV, FallthroughV>
 where
-    MetaV: Clone,
+    MetaV: Clone + CachedData,
     FallthroughV: Clone,
 {
     fn default() -> Self {
@@ -568,7 +580,7 @@ mod tests {
             hash: [1u8; 16],
         }];
         let (admission, ()) =
-            runtime.admit_component_meta_view(key, Some((Arc::new(1), facts)), |_| ());
+            runtime.admit_component_meta_view(key, Some((CachedValue::new(1), facts)), |_| ());
         assert!(admission.is_some(), "fixture: the state is admitted");
     }
 
@@ -597,9 +609,9 @@ mod tests {
             node_kind: crate::resolver_core::ResolutionNodeKind::DeclarationMetadata,
             ..view_key("/src/A.vue", 1)
         };
-        runtime.component_meta.insert_arc_with_kind(
+        runtime.component_meta.insert_value_with_kind(
             foreign.clone(),
-            Arc::new(2),
+            CachedValue::new(2),
             vec![FactVersionRef::FileWholeHash {
                 canonical_id: "/src/A.vue".to_string(),
                 hash: [1u8; 16],

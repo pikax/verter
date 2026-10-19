@@ -107,7 +107,9 @@ fn program(
     effects: impl IntoIterator<Item = ObjectConstructionEffect>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-        effects: Arc::from(effects.into_iter().collect::<Vec<_>>()),
+        effects: verter_type_engine::semantic_query::PayloadArray::from(
+            effects.into_iter().collect::<Vec<_>>(),
+        ),
     }))
 }
 
@@ -149,9 +151,80 @@ fn key(name: &str) -> PropertyKey {
 }
 
 #[test]
+fn composed_inner_spread_merges_nullable_members_inside_an_outer_union() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
+    let x = object(graph, [surface_member("x", number, false)]);
+    let z = object(graph, [surface_member("z", number, false)]);
+    let empty = object(graph, []);
+    let nullable = graph.intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            x, null,
+        ])),
+    ));
+    for policy in [
+        ExactOptionalPropertyPolicy::Disabled,
+        ExactOptionalPropertyPolicy::Enabled,
+    ] {
+        for general in [true, false] {
+            let mut effects = Vec::new();
+            if general {
+                // An inert leading spread selects the general evaluator.
+                effects.push(ObjectConstructionEffect::Spread(empty));
+            }
+            effects.extend([
+                ObjectConstructionEffect::Spread(nullable),
+                property("y", number, false),
+            ]);
+            let inner = program(graph, effects);
+            let union = graph.intern_node(SemanticNodeData::Union(
+                verter_type_engine::semantic_query::composite::CompositeList::test_fixture(
+                    Arc::from([inner, z]),
+                ),
+            ));
+            let outer = program(graph, [ObjectConstructionEffect::Spread(union)]);
+            let formula = project(&dispatch, outer, ObjectProjectionSelector::Surface, policy);
+            assert_eq!(formula.alternatives().len(), 2, "general={general}");
+            let alternatives = formula.closed().expect("finite closed alternatives");
+            let mut nullable_arms = 0;
+            for alternative in alternatives.alternatives() {
+                if let Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(y)) =
+                    alternative.lookup(&key("y"))
+                {
+                    nullable_arms += 1;
+                    assert_eq!(y.presence(), PositiveKeyPresence::Required);
+                    assert!(matches!(
+                        alternative.lookup(&key("x")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(x))
+                            if x.presence() == PositiveKeyPresence::Optional
+                                && *x.value() == ProjectionEvidence::Proven(number)
+                    ));
+                } else {
+                    assert!(matches!(
+                        alternative.lookup(&key("z")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::Present(z))
+                            if z.presence() == PositiveKeyPresence::Required
+                    ));
+                    assert!(matches!(
+                        alternative.lookup(&key("x")),
+                        Some(verter_type_engine::semantic_query::ClosedKeyLookup::AbsentProven)
+                    ));
+                }
+            }
+            assert_eq!(nullable_arms, 1);
+        }
+    }
+}
+
+#[test]
 fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -163,10 +236,24 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
             left, right,
         ])),
     ));
-    let program = program(
+    let inner = program(
         graph,
         [
             ObjectConstructionEffect::Spread(union),
+            property("x", boolean, false),
+        ],
+    );
+    let copied = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(inner),
+            property("y", number, false),
+        ],
+    );
+    let program = program(
+        graph,
+        [
+            ObjectConstructionEffect::Spread(copied),
             property("x", boolean, false),
         ],
     );
@@ -174,7 +261,11 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
     let formula = project(
         &dispatch,
         program,
-        ObjectProjectionSelector::RelationShape(Arc::from([key("a"), key("b"), key("x")])),
+        ObjectProjectionSelector::RelationShape(verter_type_expr::OwnedSlice::from([
+            key("a"),
+            key("b"),
+            key("x"),
+        ])),
         ExactOptionalPropertyPolicy::Disabled,
     );
     assert_eq!(formula.alternatives().len(), 2);
@@ -208,6 +299,7 @@ fn finite_union_spread_keeps_correlated_alternatives_through_final_overwrite() {
 fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -227,7 +319,7 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let exact = program(
@@ -306,13 +398,14 @@ fn optional_spread_write_fold_distinguishes_policy_and_live_open_state() {
 fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::RecursiveRef {
-            name: Arc::from("Self"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("Self"),
+            args: Default::default(),
         },
     ));
     let late_write = program(
@@ -366,6 +459,7 @@ fn selector_liveness_prunes_only_shadowed_recursive_key_effects() {
 fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -373,17 +467,17 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let call = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -444,6 +538,7 @@ fn whole_program_excess_and_direct_signature_rules_survive_open_spreads() {
 fn copied_index_is_writable_while_authored_direct_index_retains_readonly() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -499,17 +594,18 @@ fn copied_index_is_writable_while_authored_direct_index_retains_readonly() {
 fn accessor_effects_normalize_to_writable_property_values() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let getter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -517,7 +613,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 number,
@@ -530,7 +626,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -584,6 +680,7 @@ fn accessor_effects_normalize_to_writable_property_values() {
 fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let expr = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
         properties: vec![
@@ -610,9 +707,9 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: Arc::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("x"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("x")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Navigate),
     });
     assert!(matches!(
@@ -629,6 +726,7 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
 fn keyof_and_substitution_consume_the_canonical_program() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -669,7 +767,7 @@ fn keyof_and_substitution_consume_the_canonical_program() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(
         graph,
@@ -714,8 +812,10 @@ fn keyof_and_substitution_consume_the_canonical_program() {
         ],
     );
     let substituted = dispatch.substitute_semantic_type_param(substitution_subject, binder, string);
-    let Some(SemanticNodeData::ObjectSpreadProgram(substituted)) =
-        graph.node_data(substituted).as_deref().cloned()
+    let Some(SemanticNodeData::ObjectSpreadProgram(substituted)) = graph
+        .node_data(substituted)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
     else {
         panic!("substitution must preserve the canonical program carrier");
     };
@@ -729,6 +829,7 @@ fn keyof_and_substitution_consume_the_canonical_program() {
 fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -750,7 +851,7 @@ fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let unresolved = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     assert_eq!(
@@ -782,6 +883,7 @@ fn relation_quantifies_correlated_alternatives_and_never_shortcuts_open_identity
 fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // One arm past the alternative-product distribution cap.
     // Each arm carries its own member: arms that spread into an empty object
@@ -844,6 +946,7 @@ fn distribution_cap_is_a_typed_budget_partial_and_never_a_miss() {
 fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppression() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -851,7 +954,7 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let concrete = object(graph, [surface_member("known", number, false)]);
     let intersection = graph.intern_node(SemanticNodeData::Intersection(
@@ -937,7 +1040,7 @@ fn unclassifiable_spread_residual_yields_indeterminate_excess_not_generic_suppre
     assert_eq!(
         excess_of(closed),
         ExcessEligibility::Eligible {
-            direct_candidates: Arc::from([key("extra")]),
+            direct_candidates: verter_type_expr::OwnedSlice::from([key("extra")]),
         }
     );
 }
@@ -977,6 +1080,7 @@ fn relate(
 fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1024,6 +1128,7 @@ fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
 fn spread_index_signature_never_manufactures_required_named_presence() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1061,7 +1166,7 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(
         graph,
@@ -1081,6 +1186,7 @@ fn spread_index_signature_never_manufactures_required_named_presence() {
 fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1142,7 +1248,7 @@ fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_residual = program(
         graph,
@@ -1174,6 +1280,7 @@ fn finite_and_broad_record_targets_consume_named_presence_and_envelopes() {
 fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1182,7 +1289,7 @@ fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let post_open = program(
         graph,
@@ -1229,6 +1336,7 @@ fn open_targets_reject_on_exact_mismatch_and_stay_unknown_on_known_subset() {
 fn optional_spread_write_fold_matrix_under_fixed_policy() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1310,13 +1418,14 @@ fn optional_spread_write_fold_matrix_under_fixed_policy() {
 fn unique_symbol_keys_survive_spreads_without_aliasing_same_spelling() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let identity = |canonical: &str| verter_type_expr::facts::ValueDeclIdentityPart {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("k"),
-        member_path: Arc::from([]),
+        symbol: verter_type_expr::OwnedStr::from("k"),
+        member_path: verter_type_expr::OwnedSlice::from([]),
     };
     let first = PropertyKey::UniqueSymbol(identity("/w/first.ts"));
     let twin = PropertyKey::UniqueSymbol(identity("/w/twin.ts"));
@@ -1388,19 +1497,20 @@ fn unique_symbol_keys_survive_spreads_without_aliasing_same_spelling() {
 fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from([]),
+            params: verter_type_engine::semantic_query::PayloadArray::from([]),
             return_type: value,
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 value,
             ),
-            type_parameters: Arc::from([]),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -1410,7 +1520,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
     let setter = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from([
+            params: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::FunctionParam::synthetic(
                     Some(Arc::from("value")),
                     value,
@@ -1423,7 +1533,7 @@ fn accessor_checker_parity_getter_setter_paired_duplicate_around_spreads() {
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
             ),
-            type_parameters: Arc::from([]),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -1563,6 +1673,7 @@ fn relate_fresh_excess(
 fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1570,7 +1681,7 @@ fn generic_spread_excess_suppression_matrix_with_closed_contrast_and_healing() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let empty_target = object(graph, []);
     let knows_a_target = object(graph, [surface_member("a", number, false)]);
@@ -1701,7 +1812,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let unresolved = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let key = dispatch.relate_key_for(unresolved, unresolved);
@@ -1716,7 +1827,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "an unresolved Unknown must never publish to the relation memo"
     );
@@ -1726,6 +1837,7 @@ fn identical_unresolved_program_relation_is_unknown_and_never_published() {
 fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -1766,8 +1878,8 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
     // A live recursive operand is likewise ReturnOnly.
     let recursive = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::RecursiveRef {
-            name: Arc::from("Self"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("Self"),
+            args: Default::default(),
         },
     ));
     let cyclic = program(
@@ -1822,6 +1934,7 @@ fn cap_and_cycle_partials_are_never_admitted_and_later_queries_heal() {
 fn inference_deposits_only_from_exact_whole_branch_positions() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -1836,10 +1949,10 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let infer_u = graph.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("U"),
+        name: verter_type_expr::OwnedStr::from("U"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -1935,6 +2048,7 @@ fn inference_deposits_only_from_exact_whole_branch_positions() {
 fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1943,14 +2057,14 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let shallow = |node: SemanticNodeId| {
         host.project_shallow_surface_graph_only(
             &host,
             &dispatch,
             node,
-            Arc::from([]),
+            verter_type_expr::OwnedSlice::from([]),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         )
@@ -2054,6 +2168,7 @@ fn joined_shallow_surface_reports_incomplete_unless_single_closed_witness() {
 fn distributed_and_aliased_program_operands_reach_the_program_relation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base = object(graph, [surface_member("a", number, false)]);
@@ -2100,7 +2215,7 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let open_union = graph.intern_node(SemanticNodeData::Union(
@@ -2133,6 +2248,7 @@ fn distributed_and_aliased_program_operands_reach_the_program_relation() {
 fn program_relation_unwraps_transparent_carriers_before_projecting() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2170,7 +2286,7 @@ fn program_relation_unwraps_transparent_carriers_before_projecting() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     assert_eq!(
@@ -2184,6 +2300,7 @@ fn program_relation_unwraps_transparent_carriers_before_projecting() {
 fn nested_open_program_keeps_post_open_exact_keys_proven() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let generic = graph.intern_node(SemanticNodeData::TypeParam {
@@ -2191,7 +2308,7 @@ fn nested_open_program_keeps_post_open_exact_keys_proven() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let inner = program(
         graph,
@@ -2240,6 +2357,10 @@ fn projected_optional_to_required_honors_the_strict_family_config() {
             ),
         ],
     );
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let base = object(graph, [surface_member("a", number, true)]);
@@ -2273,6 +2394,7 @@ fn projected_optional_to_required_honors_the_strict_family_config() {
 fn projected_relation_matches_numeric_and_canonical_string_keys() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let numeric_key_member = |value: SemanticNodeId| SurfaceMember {
@@ -2327,6 +2449,7 @@ fn projected_relation_matches_numeric_and_canonical_string_keys() {
 fn path_projection_joins_closed_absent_alternatives_as_optional() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2341,9 +2464,9 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: correlated,
-        path: Arc::from([verter_type_engine::semantic_query::PathSegment::Member(
-            key("a"),
-        )]),
+        path: verter_type_expr::OwnedSlice::from([
+            verter_type_engine::semantic_query::PathSegment::Member(key("a")),
+        ]),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     });
     let QueryResult::Value(SemanticQueryOutput { value, .. }) = projected else {
@@ -2380,6 +2503,7 @@ fn path_projection_joins_closed_absent_alternatives_as_optional() {
 fn program_relation_applies_top_bottom_rules_before_projecting() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
@@ -2391,7 +2515,7 @@ fn program_relation_applies_top_bottom_rules_before_projecting() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open = program(graph, [ObjectConstructionEffect::Spread(generic)]);
     let closed = program(
@@ -2447,6 +2571,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     host.ensure_indexed_ready("/w/wrap.ts")
         .expect("wrap file indexes");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let reference = verter_type_expr::TypeExpr::Ref {
@@ -2469,7 +2594,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
     assert!(
         graph
             .get_relation_payload(&host, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the unresolved Unknown never publishes: {step:?}"
     );
@@ -2499,6 +2624,7 @@ fn carrier_wrapped_identical_open_program_stays_unpublished_unknown() {
 fn program_index_obligations_cover_cross_domain_contributions() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -2606,6 +2732,7 @@ fn program_index_obligations_cover_cross_domain_contributions() {
 fn spread_operand_carriers_fold_to_their_concrete_surface() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -2681,18 +2808,19 @@ fn spread_operand_carriers_fold_to_their_concrete_surface() {
 fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: number,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2700,7 +2828,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
     });
     let setter = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 string,
@@ -2713,7 +2841,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2724,7 +2852,7 @@ fn key_liveness_keeps_the_getter_of_a_paired_accessor() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let paired = program(
         graph,
@@ -2770,6 +2898,7 @@ fn exact_optional_property_types_threads_into_consumer_projections() {
     let default_request =
         verter_type_engine::request_context::install_test_request_for("/default/main.ts");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -2855,7 +2984,7 @@ fn empty_path_shallow_surface(
 ) -> verter_type_engine::semantic_query::SurfaceView {
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
@@ -2865,7 +2994,7 @@ fn empty_path_shallow_surface(
     };
     let data = graph.node_data(value).expect("surface node has data");
     match &*data {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => {
             panic!("empty-path Shallow terminal must publish an Object surface, got {other:?}")
         }
@@ -2888,6 +3017,7 @@ fn surface_member_names(view: &verter_type_engine::semantic_query::SurfaceView) 
 fn empty_path_shallow_surface_over_program_root_publishes_the_construction() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2917,6 +3047,7 @@ fn empty_path_shallow_surface_over_program_root_publishes_the_construction() {
 fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // Open program `{ a: number, ...T }`: `SurfaceView::closed()` is
@@ -2930,7 +3061,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let root = program(
         graph,
@@ -2942,13 +3073,13 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert!(
         matches!(
@@ -2959,15 +3090,15 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
         graph.node_data(node)
     );
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "the open-root read is genuinely partial"
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "the open-root read must never be cached as a finished surface"
     );
     assert!(
-        read.walker_diagnostics.iter().any(|diag| matches!(
+        read.walker_diagnostics().iter().any(|diag| matches!(
             diag,
             verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::OpenSpreadProgram { .. }
         )),
@@ -2979,6 +3110,7 @@ fn empty_path_shallow_over_open_program_root_returns_open_typed_evidence() {
 fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3006,13 +3138,13 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     let node_data = graph.node_data(node);
     let Some(SemanticNodeData::Object(view)) = node_data.as_deref() else {
@@ -3028,7 +3160,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
         .collect();
     assert_eq!(names, vec!["c"], "the common member of both alternatives");
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "every alternative closed: the merged surface is complete and cacheable"
     );
 }
@@ -3042,6 +3174,7 @@ fn empty_path_shallow_over_correlated_program_merges_closed_alternatives() {
 fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3083,7 +3216,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3099,13 +3232,13 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
     ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: open_union_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert_eq!(
         terminal,
@@ -3115,7 +3248,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
         graph.node_data(terminal)
     );
     assert!(
-        read.result_is_partial && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress(),
         "a union with an open program arm must flag the read partial + uncacheable"
     );
 }
@@ -3127,6 +3260,7 @@ fn empty_path_shallow_over_union_with_program_arm_projects_the_arm() {
 fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3142,7 +3276,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3158,13 +3292,13 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
     ));
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: intersection_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert_eq!(
         terminal,
@@ -3173,7 +3307,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
          observed {:?}",
         graph.node_data(terminal)
     );
-    assert!(read.result_is_partial && read.cache_suppress);
+    assert!(read.result_is_partial() && read.cache_suppress());
 }
 
 /// The shared typeinfo surface reader never hands out a
@@ -3182,6 +3316,7 @@ fn empty_path_shallow_over_intersection_with_open_program_arm_keeps_the_carrier(
 fn typeinfo_surface_view_refuses_partial_terminal_reads() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3197,7 +3332,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3211,12 +3346,13 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
             xa, open_arm,
         ])),
     ));
-    assert_eq!(
-        dispatch.resolve_typeinfo_surface_view(
-            open_union_root,
-            ProjectionReductionContext::published(ProjectionMode::Shallow),
-        ),
-        None,
+    assert!(
+        dispatch
+            .resolve_typeinfo_surface(
+                open_union_root,
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            )
+            .is_none(),
         "a partial (open-spread) terminal read yields no completeness-claiming view"
     );
     // A closed union still hands out its view.
@@ -3234,7 +3370,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
     ));
     assert!(
         dispatch
-            .resolve_typeinfo_surface_view(
+            .resolve_typeinfo_surface(
                 closed_union_root,
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
             )
@@ -3249,6 +3385,7 @@ fn typeinfo_surface_view_refuses_partial_terminal_reads() {
 fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // Chain of nested programs past the spread depth cap (8): the inner
     // projection errors, the root read must surface partiality.
@@ -3257,7 +3394,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let mut node = program(graph, [ObjectConstructionEffect::Spread(type_param)]);
     // bounded-loop: fixed 12-iteration fixture chain past the depth cap
@@ -3267,13 +3404,13 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
 
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: node,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     assert!(
         !matches!(
@@ -3283,7 +3420,7 @@ fn empty_path_shallow_over_program_root_failure_is_typed_partial() {
         "a failed program-root projection must not publish any closed Object"
     );
     assert!(
-        read.result_is_partial && read.cache_suppress,
+        read.result_is_partial() && read.cache_suppress(),
         "the failure path is typed partial + uncacheable"
     );
 }
@@ -3318,6 +3455,7 @@ fn numeric_surface_member(value: i64, node: SemanticNodeId) -> SurfaceMember {
 fn fold_treats_numeric_and_string_spellings_as_one_js_property() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3365,12 +3503,46 @@ fn fold_treats_numeric_and_string_spellings_as_one_js_property() {
         ),
         "a numeric-spelling read must find the colliding string-spelling fact"
     );
+
+    // Copy a required readonly write through several shared prefixes. Its
+    // metadata becomes a writable property, and the latest spelling wins.
+    let mut readonly = property("1", string, false);
+    let ObjectConstructionEffect::DirectProperty(effect) = &mut readonly else {
+        unreachable!()
+    };
+    effect.readonly = true;
+    let copied = program(graph, [ObjectConstructionEffect::Spread(root), readonly]);
+    let outer = program(
+        graph,
+        [
+            property("1", number, false),
+            ObjectConstructionEffect::Spread(copied),
+        ],
+    );
+    let formula = project(
+        &dispatch,
+        outer,
+        ObjectProjectionSelector::Surface,
+        ExactOptionalPropertyPolicy::Disabled,
+    );
+    let alternative = &formula.alternatives()[0];
+    assert_eq!(alternative.closed().unwrap().iter().unwrap().len(), 1);
+    assert!(matches!(
+        alternative.selected_key(&numeric_property_key(1)),
+        verter_type_engine::semantic_query::OpenSafeKeyEvidence::Positive(fact)
+            if fact.value() == &ProjectionEvidence::Proven(string)
+                && matches!(fact.facets(), ProjectionEvidence::Proven(facets) if !facets.readonly() && facets.method_kind().is_none())
+    ));
+    assert!(
+        matches!(alternative.excess(), ExcessEligibility::Eligible { direct_candidates } if direct_candidates.is_empty())
+    );
 }
 
 #[test]
 fn key_projection_over_spelling_overwrite_reads_the_latest_write() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3424,6 +3596,10 @@ fn key_projection_over_spelling_overwrite_reads_the_latest_write() {
 #[test]
 fn macro_member_reader_publishes_open_program_positive_names_without_completeness() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3457,7 +3633,7 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_root = program(
         graph,
@@ -3513,17 +3689,18 @@ fn macro_member_reader_publishes_open_program_positive_names_without_completenes
 fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let getter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3531,7 +3708,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
     });
     let setter_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([
+        params: verter_type_engine::semantic_query::PayloadArray::from([
             verter_type_engine::semantic_query::FunctionParam::synthetic(
                 Some(Arc::from("value")),
                 string,
@@ -3544,7 +3721,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void)),
         ),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3617,6 +3794,7 @@ fn paired_setter_excess_candidate_tracks_the_fact_key_spelling() {
 fn formula_closed_keyof_intersects_dual_spellings_nominally() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3657,6 +3835,7 @@ fn formula_closed_keyof_intersects_dual_spellings_nominally() {
 fn direct_write_excess_candidates_replace_dual_spelling_stale_entries() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3707,6 +3886,10 @@ fn direct_write_excess_candidates_replace_dual_spelling_stale_entries() {
 #[test]
 fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3715,7 +3898,7 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_arm = program(
         graph,
@@ -3735,13 +3918,13 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
     let dispatch = ProjectSemanticDispatch::new(&host);
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: union_root,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
         ),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     });
-    let QueryResult::Value(terminal) = read.value else {
-        panic!("expected a terminal value, got {:?}", read.value)
+    let QueryResult::Value(terminal) = read.value().clone() else {
+        panic!("expected a terminal value, got {:?}", read.value().clone())
     };
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
@@ -3770,7 +3953,7 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
         &host,
         &dispatch,
         union_root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
@@ -3800,6 +3983,10 @@ fn macro_member_reader_recurses_union_carriers_for_positive_members() {
 #[test]
 fn props_reader_applies_intersection_rules_to_intersection_carriers() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3808,7 +3995,7 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let names_of =
         |node: SemanticNodeId| -> Vec<verter_type_engine::semantic_query::SurfaceMember> {
@@ -3927,6 +4114,10 @@ fn props_reader_applies_intersection_rules_to_intersection_carriers() {
 #[test]
 fn macro_union_merge_collapses_dual_spelling_members() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3935,7 +4126,7 @@ fn macro_union_merge_collapses_dual_spelling_members() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let numeric_arm = object(graph, [numeric_surface_member(1, string)]);
     let open_arm = program(
@@ -3985,17 +4176,18 @@ fn macro_union_merge_collapses_dual_spelling_members() {
 fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let void = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let call_sig = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: void,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(void),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -4053,6 +4245,7 @@ fn raise_fold_keeps_index_signature_off_the_single_call_fast_path() {
 fn union_common_member_merge_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4104,6 +4297,7 @@ fn union_common_member_merge_collapses_dual_spelling_members() {
 fn intersection_merge_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4155,6 +4349,7 @@ fn intersection_merge_collapses_dual_spelling_members() {
 fn program_index_obligations_relate_every_overlapping_source_index() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4210,6 +4405,7 @@ fn program_index_obligations_relate_every_overlapping_source_index() {
 fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4230,8 +4426,8 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         ],
     );
     let read = keyof(closed_program);
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a keyspace value, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a keyspace value, got {:?}", read.value().clone())
     };
     let data = graph.node_data(node).expect("keyof node interned");
     let SemanticNodeData::Union(arms) = &*data else {
@@ -4252,7 +4448,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
     names.sort();
     assert_eq!(names, vec!["a".to_string(), "b".to_string()]);
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "the exact closed keyspace is a complete, admissible value"
     );
 
@@ -4264,7 +4460,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_program = program(
         graph,
@@ -4274,8 +4470,8 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
         ],
     );
     let read = keyof(open_program);
-    let QueryResult::Value(node) = read.value else {
-        panic!("expected a keyof carrier, got {:?}", read.value)
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("expected a keyof carrier, got {:?}", read.value().clone())
     };
     let data = graph.node_data(node).expect("keyof node interned");
     assert!(
@@ -4292,6 +4488,7 @@ fn keyof_over_program_base_enumerates_closed_and_defers_open() {
 fn typeinfo_join_collapses_dual_spelling_members() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4318,7 +4515,7 @@ fn typeinfo_join_collapses_dual_spelling_members() {
         &host,
         &dispatch,
         root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );
@@ -4378,6 +4575,7 @@ fn typeinfo_join_collapses_dual_spelling_members() {
 fn selector_local_closed_domain_proves_only_the_declared_keys() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4432,7 +4630,7 @@ fn selector_local_closed_domain_proves_only_the_declared_keys() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let pruned = program(
         graph,
@@ -4484,6 +4682,7 @@ fn selector_local_closed_domain_proves_only_the_declared_keys() {
 fn whole_domain_closed_witness_still_answers_domain_operations() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -4530,6 +4729,7 @@ fn whole_domain_closed_witness_still_answers_domain_operations() {
 fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     // `{a: number, ...T}` — `a` is definitely PRESENT (a later spread
@@ -4542,7 +4742,7 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let root = program(
         graph,
@@ -4555,7 +4755,7 @@ fn typeinfo_join_publishes_indeterminate_value_members_as_open_rows() {
         &host,
         &dispatch,
         root,
-        Arc::from([]),
+        verter_type_expr::OwnedSlice::from([]),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     );

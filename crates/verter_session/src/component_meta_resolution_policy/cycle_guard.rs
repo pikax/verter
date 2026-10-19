@@ -289,9 +289,7 @@ fn hash_node_rec<H: std::hash::Hasher>(
     let ordinal = seen.len() as u64;
     seen.insert(node, ordinal);
 
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(node) else {
         hasher.write_u8(0xFD);
         return;
     };
@@ -383,16 +381,16 @@ fn hash_node_rec<H: std::hash::Hasher>(
                 member.method_kind.hash(hasher);
                 hash_node_rec(dispatch, member.value, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.call_signatures.len() as u64);
-            for signature in surface.call_signatures.iter() {
+            hasher.write_u64(surface.call_signatures().len() as u64);
+            for signature in surface.call_signatures().iter() {
                 hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.construct_signatures.len() as u64);
-            for signature in surface.construct_signatures.iter() {
+            hasher.write_u64(surface.construct_signatures().len() as u64);
+            for signature in surface.construct_signatures().iter() {
                 hash_node_rec(dispatch, *signature, hasher, seen, depth + 1);
             }
-            hasher.write_u64(surface.index_signatures.len() as u64);
-            for signature in surface.index_signatures.iter() {
+            hasher.write_u64(surface.index_signatures().len() as u64);
+            for signature in surface.index_signatures().iter() {
                 hash_node_rec(dispatch, signature.key_type, hasher, seen, depth + 1);
                 hash_node_rec(dispatch, signature.value_type, hasher, seen, depth + 1);
             }
@@ -673,7 +671,7 @@ mod tests {
 
     fn scope() -> NodeScopeId {
         NodeScopeId::File {
-            canonical_id: Arc::from("/fixture/owner.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/fixture/owner.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
             local_scope: None,
@@ -707,6 +705,10 @@ mod tests {
         use verter_type_expr::LiteralValue;
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let lit = |text: &str| {
             graph.intern_node_with_scope(
@@ -735,19 +737,23 @@ mod tests {
         use verter_type_engine::semantic_query::SemanticNodeData;
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let left_binder = graph.alloc_infer_binder_id();
         let right_binder = graph.alloc_infer_binder_id();
         let left = graph.intern_node_with_scope(
             SemanticNodeData::InferRef {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 binder: left_binder,
             },
             scope(),
         );
         let right = graph.intern_node_with_scope(
             SemanticNodeData::InferRef {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 binder: right_binder,
             },
             scope(),
@@ -774,6 +780,10 @@ mod tests {
         use verter_type_engine::semantic_query::{PrimitiveKind, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let string_node = graph
             .intern_node_with_scope(SemanticNodeData::Primitive(PrimitiveKind::String), scope());
@@ -814,6 +824,10 @@ mod tests {
         };
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
         let value = graph.intern_node(SemanticNodeData::Primitive(
             verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -823,7 +837,7 @@ mod tests {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         });
         let member = SurfaceMember {
             key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
@@ -844,12 +858,12 @@ mod tests {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         });
         let object = |operand| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
-                    effects: Arc::from([
+                    effects: verter_type_engine::semantic_query::PayloadArray::from([
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                             verter_type_engine::semantic_query::AuthoredPropertyEffect {
                                 key: member.key.clone(),
@@ -960,16 +974,20 @@ mod tests {
         use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeData};
 
         let host = VerterHost::new_standalone(HostConfig::default());
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let graph = host.project_type_store().semantic_graph();
 
         // Intern `Wrapper<'a'>` and `Wrapper<'b'>` argument nodes — an
         // `InstantiationRef` head named `Wrapper` differing ONLY in the
         // nested literal argument.
         let wrapper_base = DeclIdentity {
-            canonical_id: Arc::from("/wrapper.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/wrapper.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Wrapper"),
+            decl_name: verter_type_expr::OwnedStr::from("Wrapper"),
         };
         let lit = |text: &str| {
             graph.intern_node_with_scope(
@@ -981,7 +999,7 @@ mod tests {
             graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: wrapper_base.clone(),
-                    args: Arc::from([arg]),
+                    args: verter_type_engine::semantic_query::PayloadArray::from([arg]),
                 },
                 scope(),
             )

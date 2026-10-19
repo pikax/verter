@@ -22,19 +22,19 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
     let reachable = [
         QueryError::Miss,
         QueryError::UnsupportedIntrinsic {
-            name: std::sync::Arc::from("FixtureIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("FixtureIntrinsic"),
         },
         QueryError::BudgetExceeded(
             verter_session_query::inputs::budget::BudgetExceededFailure {
                 domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                 limit: 1,
                 actual: 2,
-                context: "opaque-sentinel summary fixture".to_string(),
+                context: "opaque-sentinel summary fixture".into(),
             },
         ),
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: std::sync::Arc::from(
+            chain: verter_type_expr::OwnedSlice::from(
                 vec![std::sync::Arc::from("A"), std::sync::Arc::from("B")].into_boxed_slice(),
             ),
         },
@@ -49,10 +49,10 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
         // Adversarial text-bearing payloads: INERT (never sentinels).
-        QueryError::Other(std::sync::Arc::from("semanticMiss")),
-        QueryError::Other(std::sync::Arc::from("semanticObjectSurface")),
-        QueryError::Other(std::sync::Arc::from("budgetExceeded(x)")),
-        QueryError::Other(std::sync::Arc::from("genuinely free text")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticMiss")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticObjectSurface")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("budgetExceeded(x)")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("genuinely free text")),
     ];
     for variant in &reachable {
         let typed = summary::opaque_sentinel(variant);
@@ -73,9 +73,9 @@ fn opaque_sentinel_summary_is_typed_only_genuine_unknown_is_always_materialized(
     // The tag discriminator, FLIPPED: `Other("semanticObjectSurface")` is
     // INERT — it must NOT tag `ObjectSurfaceSentinel` (only the typed
     // `UnrepresentableSurface` carrier does).
-    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(std::sync::Arc::from(
-        "semanticObjectSurface",
-    )));
+    let object_surface_text = summary::opaque_sentinel(&QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticObjectSurface"),
+    ));
     assert_eq!(
         object_surface_text.tag,
         FactShapeTag::Other,
@@ -149,6 +149,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let empty_surface = || {
         verter_type_engine::surface_view! {
@@ -171,21 +172,21 @@ fn root_only_projection_root_kind_matches_full_fold() {
     let dummy = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: dummy,
-        index: IndexKey::String(StdArc::from("x")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
     });
     let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: StdArc::from("/p.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: StdArc::from("v"),
+            name: verter_type_expr::OwnedStr::from("v"),
         },
-        StdArc::from(Vec::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::default(),
         StdArc::from(Vec::new().into_boxed_slice()),
     ));
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: open_obj });
@@ -194,13 +195,17 @@ fn root_only_projection_root_kind_matches_full_fold() {
     // does not cover and the root-only `Object` arm must reproduce.
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: StdArc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -260,7 +265,7 @@ fn root_only_projection_root_kind_matches_full_fold() {
     for (label, node) in cases {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -346,6 +351,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let empty_surface = || {
         verter_type_engine::surface_view! {
@@ -365,13 +371,17 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     ));
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: StdArc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         return_type: string,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             string,
         ),
-        type_parameters: StdArc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -379,14 +389,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     });
 
     let reference = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-        canonical_id: StdArc::from("/p.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        name: StdArc::from("Foo"),
+        name: verter_type_expr::OwnedStr::from(StdArc::from("Foo")),
         whole_hash: HashValue::default(),
     }));
     let import = graph.intern_node(SemanticNodeData::new_import_type(
         StdArc::from("./m"),
-        StdArc::from(Vec::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::default(),
         StdArc::from(Vec::new().into_boxed_slice()),
         false,
     ));
@@ -409,7 +419,9 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let ctor = graph.intern_construct_twin_for_tests(func);
     let alias = graph.intern_node(SemanticNodeData::Alias(open_obj));
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: StdArc::from(vec![open_obj].into_boxed_slice()),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            vec![open_obj].into_boxed_slice(),
+        )),
     });
 
     // Leaf / carrier arms the earlier collapsed-intersection test does not
@@ -419,32 +431,36 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         verter_type_expr::LiteralValue::String("lit".to_string()),
     ));
     let infer = graph.intern_node(SemanticNodeData::Infer {
-        name: StdArc::from("I"),
+        name: verter_type_expr::OwnedStr::from("I"),
         binder: graph.alloc_infer_binder_id(),
         constraint: None,
     });
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: StdArc::from(vec![StdArc::from("q")].into_boxed_slice()),
-        expressions: StdArc::from(Vec::new().into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("q")].into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            Vec::new().into_boxed_slice(),
+        )),
     });
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Owner"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Owner")),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: StdArc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let synthetic = graph.intern_node(SemanticNodeData::SyntheticBinding {
         id: SyntheticBindingId {
-            scope_canonical_id: StdArc::from("/p.ts"),
+            scope_canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
             slot_name: None,
-            binding_name: StdArc::from("b"),
+            binding_name: verter_type_expr::OwnedStr::from(StdArc::from("b")),
         },
         value_node: 0,
     });
@@ -452,20 +468,22 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     // (`RaisedRootKind::Reference`).
     let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Foo"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Foo")),
         },
     });
     let instantiation_ref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: StdArc::from("/p.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/p.ts")),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: StdArc::from("Gen"),
+            decl_name: verter_type_expr::OwnedStr::from(StdArc::from("Gen")),
         },
-        args: StdArc::from(vec![string].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+            vec![string].into_boxed_slice(),
+        )),
     });
     let bare_ref = graph.intern_node(SemanticNodeData::new_bare_ref(
         StdArc::from("Bare"),
@@ -473,7 +491,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
         StdArc::from(Vec::new().into_boxed_slice()),
     ));
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: StdArc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -481,14 +499,14 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
                 rest: false,
             }]
             .into_boxed_slice(),
-        ),
+        )),
         readonly: false,
     });
     // The `Opaque(RecursiveRef)` sub-arm (distinct from the `_` Opaque conduit) —
     // raises to a materialized/expanded leaf (root `Other`).
     let recursive_ref = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: StdArc::from("Rec"),
-        args: std::sync::Arc::from([]),
+        name: verter_type_expr::OwnedStr::from(StdArc::from("Rec")),
+        args: Default::default(),
     }));
 
     let mapped_with = |value_expr| {
@@ -514,7 +532,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
     let assert_parity = |label: &str, node| {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -653,6 +671,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // A node id with no arena entry — a dangling required child.
     let dangling = SemanticNodeId(u64::MAX);
@@ -685,7 +704,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "indexed.object",
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: dangling,
-                index: IndexKey::String(StdArc::from("x")),
+                index: IndexKey::String(verter_type_expr::OwnedStr::from(StdArc::from("x"))),
             }),
         ),
         (
@@ -779,7 +798,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     for (label, node) in malformed {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -818,11 +837,13 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     let fn_with = |return_type, params: Vec<verter_type_engine::semantic_query::FunctionParam>| {
         SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: StdArc::from(params.into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+                params.into_boxed_slice(),
+            )),
             return_type,
-            type_parameters: StdArc::from(
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
                 Vec::<verter_type_engine::semantic_query::TypeParamDecl>::new().into_boxed_slice(),
-            ),
+            )),
             occurrence: None,
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 return_type,
@@ -853,7 +874,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
         (
             "tuple.element",
             graph.intern_node(SemanticNodeData::Tuple {
-                elements: StdArc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
                     vec![verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: dangling,
@@ -861,15 +882,19 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                         rest: false,
                     }]
                     .into_boxed_slice(),
-                ),
+                )),
                 readonly: false,
             }),
         ),
         (
             "template.expression",
             graph.intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: StdArc::from(vec![StdArc::from("x")].into_boxed_slice()),
-                expressions: StdArc::from(vec![dangling].into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![verter_type_expr::OwnedStr::from("x")].into_boxed_slice(),
+                ),
+                expressions: verter_type_engine::semantic_query::PayloadArray::from(StdArc::from(
+                    vec![dangling].into_boxed_slice(),
+                )),
             }),
         ),
         (
@@ -894,37 +919,37 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
             "typeparam.constraint",
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: verter_type_engine::semantic_query::DeclIdentity {
-                    canonical_id: StdArc::from("/w/tp.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/w/tp.ts")),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
-                    decl_name: StdArc::from("T"),
+                    decl_name: verter_type_expr::OwnedStr::from(StdArc::from("T")),
                 },
                 param_index: 0,
                 constraint: Some(dangling),
                 default: None,
-                display_name: StdArc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             }),
         ),
         (
             "typeparam.default",
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: verter_type_engine::semantic_query::DeclIdentity {
-                    canonical_id: StdArc::from("/w/tp.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from(StdArc::from("/w/tp.ts")),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: [0u8; 16],
-                    decl_name: StdArc::from("T"),
+                    decl_name: verter_type_expr::OwnedStr::from(StdArc::from("T")),
                 },
                 param_index: 0,
                 constraint: None,
                 default: Some(dangling),
-                display_name: StdArc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             }),
         ),
     ];
     for (label, node) in asymmetric {
         let full = {
             let mut alg =
-                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+                verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
             let mut active = FxHashSet::default();
             verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
                 &mut alg,
@@ -984,7 +1009,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
     ));
     let full_obj = {
         let mut alg =
-            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg;
+            verter_type_engine::project_semantic_dispatch::raise::shape_engine::node_domain::RaisedFactsAlg::default();
         let mut active = FxHashSet::default();
         verter_type_engine::project_semantic_dispatch::raise::shape_engine::fold_node(
             &mut alg,

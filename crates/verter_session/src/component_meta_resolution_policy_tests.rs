@@ -132,6 +132,7 @@ fn run_policy_with_macro_participation(
 
 fn empty_meta() -> ComponentMetaAnalysis {
     ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: vec![],
         events: vec![],
         slots: vec![],
@@ -218,18 +219,18 @@ fn ref_source(name: &str) -> SemanticTypeSource {
 fn decl_body_source(canonical: &str, symbol: &str) -> SemanticTypeSource {
     SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     }))
 }
 
 /// A synthesized closed object SOURCE with leaf-fact member values.
 fn synthesized_object(members: &[(&str, LeafTypeFact)]) -> SemanticTypeSource {
-    SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(Arc::from(
+    SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(From::from(
         members
             .iter()
             .map(|(name, leaf)| SynthesizedMemberFact {
@@ -294,7 +295,10 @@ fn raise(host: &VerterHost, source: &SemanticTypeSource) -> Option<SemanticNodeI
     out
 }
 
-fn node_data(host: &VerterHost, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+fn node_data(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> Option<verter_type_engine::semantic_query_memo::NodeData> {
     let mut out = None;
     crate::resolver_core::with_bare_host_ctx_for_test(host, |ctx| {
         out = verter_type_engine::project_semantic_dispatch::node_data_for(
@@ -327,7 +331,7 @@ fn bare_ref_scope_and_resolved_decl(
     host: &VerterHost,
     node: SemanticNodeId,
 ) -> (
-    Arc<str>,
+    verter_type_expr::OwnedStr,
     Option<verter_type_engine::semantic_query::NodeScopeId>,
     verter_type_engine::semantic_query::DeclIdentity,
 ) {
@@ -341,10 +345,10 @@ fn bare_ref_scope_and_resolved_decl(
         .expect("reference node data");
         let (name, scope, identity) = match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
-                (Arc::clone(&identity.decl_name), None, identity.clone())
+                (identity.decl_name.clone(), None, identity.clone())
             }
             SemanticNodeData::InstantiationRef { base, .. } => {
-                (Arc::clone(&base.decl_name), None, base.clone())
+                (base.decl_name.clone(), None, base.clone())
             }
             SemanticNodeData::BareRef(_) => {
                 let (name, scope) = data.bare_ref_head().expect("BareRef identity");
@@ -371,7 +375,11 @@ fn bare_ref_scope_and_resolved_decl(
                     Some(SemanticNodeData::InstantiationRef { base, .. }) => base.clone(),
                     other => panic!("BareRef must resolve to declaration identity; got {other:?}"),
                 };
-                (Arc::clone(name), Some(scope.clone()), identity)
+                (
+                    verter_type_expr::OwnedStr::from(name),
+                    Some(scope.clone()),
+                    identity,
+                )
             }
             other => panic!("expected reference identity; got {other:?}"),
         };
@@ -1097,16 +1105,20 @@ fn pass_does_not_touch_public_instance_when_no_rewrite() {
 #[test]
 fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
     let scope_a = verter_type_engine::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::from("/workspace/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/workspace/a.ts"),
         owner,
         whole_hash: [1; 16],
         local_scope: Some(1),
     };
     let scope_b = verter_type_engine::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::from("/workspace/b.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/workspace/b.ts"),
         owner,
         whole_hash: [2; 16],
         local_scope: Some(2),
@@ -1143,27 +1155,31 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
 
     let decl_a = graph.intern_node(SemanticNodeData::DeclRef {
         identity: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/workspace/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/workspace/a.ts"),
             owner,
             whole_hash: [1; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     let decl_b = graph.intern_node(SemanticNodeData::DeclRef {
         identity: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/workspace/b.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/workspace/b.ts"),
             owner,
             whole_hash: [2; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     let indexed_a = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_a,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("value"),
+        ),
     });
     let indexed_b = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: decl_b,
-        index: verter_type_engine::semantic_query::IndexKey::String(Arc::from("value")),
+        index: verter_type_engine::semantic_query::IndexKey::String(
+            verter_type_expr::OwnedStr::from("value"),
+        ),
     });
     assert_eq!(
         symbolic_projection_eq_for_test(&host, indexed_a, indexed_b),
@@ -1175,6 +1191,10 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
 #[test]
 fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/a.ts",
@@ -1195,10 +1215,10 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
             .whole_hash;
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner,
                 whole_hash,
-                decl_name: Arc::from("Same"),
+                decl_name: verter_type_expr::OwnedStr::from("Same"),
             },
         })
     };
@@ -1206,7 +1226,7 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
     let b = decl_ref("/workspace/b.ts");
     let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 values
                     .iter()
                     .map(|value| verter_type_engine::semantic_query::TupleElement {
@@ -1234,6 +1254,10 @@ fn symbolic_projection_rejects_swapped_repeated_canonical_references() {
 #[test]
 fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/shared.ts",
@@ -1258,7 +1282,7 @@ fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
             .expect("fixture must be indexed")
             .whole_hash;
         let scope = verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             whole_hash,
             local_scope: None,
@@ -1276,7 +1300,7 @@ fn symbolic_projection_rejects_swapped_repeated_lexical_scopes() {
     let b = bare_ref("/workspace/scope-b.ts");
     let tuple = |values: &[verter_type_engine::semantic_query::SemanticNodeId]| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 values
                     .iter()
                     .map(|value| verter_type_engine::semantic_query::TupleElement {
@@ -1724,6 +1748,10 @@ fn same_spelled_distinct_indexed_roots_cannot_mint_symbolic_equivalence() {
 #[test]
 fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
     let host = empty_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     upsert_ts(
         &host,
         "/workspace/a/token.ts",
@@ -1820,13 +1848,15 @@ fn same_spelled_distinct_nominal_identities_cannot_mint_symbolic_equivalence() {
                 Arc::from("/workspace/annos.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from("TOKEN"),
+            name: verter_type_expr::OwnedStr::from("TOKEN"),
         };
         let identity_for = |declaring: &str| verter_type_expr::facts::ValueDeclIdentityPart {
-            canonical_id: Arc::from(declaring),
+            canonical_id: verter_type_expr::OwnedStr::from(declaring),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("TOKEN"),
-            member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+            symbol: verter_type_expr::OwnedStr::from("TOKEN"),
+            member_path: verter_type_expr::OwnedSlice::from(
+                Vec::<String>::new().into_boxed_slice(),
+            ),
         };
         let before_retarget = graph.intern_node(
             verter_type_engine::semantic_query::new_nominal_typeof_for_tests(

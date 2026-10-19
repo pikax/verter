@@ -73,12 +73,16 @@ fn lower_ref_through(
     (*graph
         .node_data(node)
         .expect("the lowered ref node must be interned"))
-    .clone()
+    .copy_for_tests()
 }
 
 #[test]
 fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     // A `<script setup generic="T, U extends T">` SFC: two generics, the second
     // constrained by the first (incremental scoping).
     upsert_vue(
@@ -95,7 +99,7 @@ fn extracted_builder_seeds_typeparam_binders_for_script_setup_generics() {
         .expect("the SFC must materialise an IndexedReady");
     let graph = host.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from("/G.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/G.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: indexed.whole_hash,
         local_scope: None,
@@ -170,7 +174,7 @@ fn extracted_builder_returns_empty_frames_without_script_setup_generics() {
         .expect("the SFC must materialise an IndexedReady");
     let graph = host.project_type_store().semantic_graph();
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from("/Plain.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/Plain.vue"),
         owner: verter_type_expr::TopLevelOwnerId::instance(0),
         whole_hash: indexed.whole_hash,
         local_scope: None,

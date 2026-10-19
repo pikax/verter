@@ -199,9 +199,91 @@ function concurrent() {
   };
 }
 
+// ---------------------------------------------------------------- AUGMENTATION GROWTH
+
+// The two augmentation reproductions (the augment-global and augment-module
+// scenarios), each answered at FIRST contributors and then, in the same
+// engine, at GROWN after edits fill in the remaining contributor files, as
+// a project grows under an editor. Every contributor file exists from the
+// start: a slot not yet contributing holds a declaration-free file of the
+// same kind (a script, or a module), so only edits change the program.
+// Each growth session has a baseline session answering GROWN alone; the
+// retention proof (session-analyze.mjs) compares what the two engines retain
+// after their last answer.
+export const GROWTH_FIRST = 500;
+export const GROWTH_GROWN = 2000;
+
+const REPRODUCTIONS = {
+  global: {
+    probe: 'BenchRegistry[keyof BenchRegistry]["tag"]',
+    prelude: "",
+    fixed: {},
+    file: (i) => `reg-${i}.ts`,
+    contributor: (i) => `interface BenchRegistry { r${i}: { id: ${i}; tag: "t${i}" } }\n`,
+    slot: "// an empty contributor slot\n",
+    answer: (n) => union(range(n).map((i) => `"t${i}"`)),
+    note: "a global interface merged from script contributors",
+  },
+  module: {
+    probe: "Props[keyof Props]",
+    prelude: 'import type { Props } from "./core";\n',
+    fixed: { "core.ts": "export interface Props { base: -1 }\nexport {};\n" },
+    file: (i) => `plugin-${i}.ts`,
+    contributor: (i) => `declare module "./core" { interface Props { p${i}: ${i} } }\nexport {};\n`,
+    slot: "export {};\n",
+    answer: (n) => union(["-1", ...range(n).map(String)]),
+    note: "a module interface augmented by modules the entry never imports",
+  },
+};
+
+function augmentationSession(kind, first) {
+  const r = REPRODUCTIONS[kind];
+  const files = {
+    "scenario.ts": `${r.prelude}type ${INIT_ALIAS} = 0;\ntype __Probe = ${r.probe};\nexport {};\n`,
+    ...r.fixed,
+  };
+  for (const i of range(GROWTH_GROWN)) files[r.file(i)] = i < first ? r.contributor(i) : r.slot;
+  const demand = (n) => ({
+    kind: "demand",
+    requests: [{ file: "scenario.ts", alias: "__Probe", expect: r.answer(n) }],
+  });
+  const baseline = `augment-${kind}-baseline`;
+  if (first === GROWTH_GROWN)
+    return {
+      id: baseline,
+      family: "augmentation",
+      note: `${r.note}: ${GROWTH_GROWN} contributors answered once, the growth session's baseline`,
+      files,
+      initFile: "scenario.ts",
+      steps: [demand(GROWTH_GROWN)],
+    };
+  return {
+    id: `augment-${kind}-growth`,
+    family: "augmentation",
+    note: `${r.note}: answered at ${first} contributors, then at ${GROWTH_GROWN} after edits add the rest, one engine`,
+    files,
+    initFile: "scenario.ts",
+    steps: [
+      demand(first),
+      ...range(GROWTH_GROWN)
+        .slice(first)
+        .map((i) => ({ kind: "edit", file: r.file(i), text: r.contributor(i) })),
+      demand(GROWTH_GROWN),
+    ],
+    retentionProof: { baseline, first },
+  };
+}
+
+function augmentationSessions() {
+  return ["global", "module"].flatMap((kind) => [
+    augmentationSession(kind, GROWTH_FIRST),
+    augmentationSession(kind, GROWTH_GROWN),
+  ]);
+}
+
 /** Every session, in catalog order. */
 export function allSessions() {
-  return [incremental(), editorSession(), concurrent()];
+  return [incremental(), editorSession(), concurrent(), ...augmentationSessions()];
 }
 
 /** Each session's tier (tiers nest as the scenarios' do). */
@@ -209,6 +291,10 @@ export const SESSION_TIERS = {
   "incremental-edits": "quick",
   "editor-session": "quick",
   "concurrent-demands": "quick",
+  "augment-global-growth": "standard",
+  "augment-global-baseline": "standard",
+  "augment-module-growth": "standard",
+  "augment-module-baseline": "standard",
 };
 
 /** The files tsc's program lists: every TypeScript file (a Vue SFC is Verter-only). */
@@ -287,6 +373,15 @@ export function sessionProblems(session) {
     } else problems.push(`${at}: unknown step kind ${step.kind}`);
   });
   if (!SESSION_TIERS[session.id]) problems.push(`${session.id} has no tier`);
+  const proof = session.retentionProof;
+  if (proof) {
+    if (!SESSION_TIERS[proof.baseline])
+      problems.push(`${session.id}: no baseline session ${proof.baseline}`);
+    const first = session.steps.findIndex((step) => step.kind === "demand");
+    const last = session.steps.length - 1;
+    if (first < 0 || first === last || session.steps[last].kind !== "demand")
+      problems.push(`${session.id}: a retention proof needs a first and a last demand`);
+  }
   return problems;
 }
 

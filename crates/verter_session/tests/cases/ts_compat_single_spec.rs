@@ -86,7 +86,7 @@ const TARGET_STRUCTS: &[(&str, &str)] = &[
     ),
     (
         "ComponentMetaResultKey",
-        "crates/verter_session/src/component_meta_result_db.rs",
+        "crates/verter_type_engine/src/component_meta_result_db.rs",
     ),
     (
         "ShapeCacheKey",

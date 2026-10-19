@@ -52,9 +52,9 @@ fn with_probe<R>(
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("__predicate_probe"),
+            symbol: verter_type_expr::OwnedStr::from("__predicate_probe"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -71,6 +71,7 @@ fn with_probe<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let node = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
             result.return_type(),
@@ -131,7 +132,7 @@ fn only_call_signature(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     match dispatch.graph().node_data(node).as_deref() {
-        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures.as_ref() {
+        Some(SemanticNodeData::Object(surface)) => match surface.call_signatures() {
             [signature] => *signature,
             other => panic!("expected one call signature, got {other:?}"),
         },
@@ -275,6 +276,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         crate::HostConfig::default(),
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, number, void) = (
@@ -288,12 +290,12 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let signature = |name: &str, type_parameters: Vec<TypeParamDecl>, ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -303,7 +305,9 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                type_parameters.into_boxed_slice(),
+            ),
             occurrence: Some(occurrence(name, 0)),
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,
@@ -326,7 +330,7 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
     let generic = signature(
         "isT",
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -351,9 +355,10 @@ fn kernel_effects_read_the_declared_predicate_under_the_call_map() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(vec![(
-                    token, number,
-                )]),
+                verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
+                    graph,
+                    vec![(token, number)],
+                ),
             ),
             None,
         )
@@ -535,6 +540,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
         crate::HostConfig::default(),
     ));
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let prim = |kind| graph.intern_node(SemanticNodeData::Primitive(kind));
     let (unknown, boolean, void, string) = (
@@ -546,7 +552,7 @@ fn predicates_participate_in_identity_ordering_and_display() {
     let signature = |ret, predicate| {
         graph.intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![FunctionParam::synthetic(
                     Some(Arc::from("x")),
                     unknown,
@@ -556,7 +562,9 @@ fn predicates_participate_in_identity_ordering_and_display() {
                 .into_boxed_slice(),
             ),
             return_type: ret,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: None,
             return_carrier: SignatureReturnCarrier::Declared(ret),
             signature_span: None,
@@ -906,7 +914,9 @@ export function multi(x: unknown) { if (x) return typeof x === \"string\"; retur
                     effect
                         .ty
                         .and_then(|token| store.type_token_node(token).ok())
-                        .and_then(|target| dispatch.graph().node_data(target).as_deref().cloned()),
+                        .and_then(|target| dispatch.graph().node_data(target).as_deref().map(
+                            verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests
+                        )),
                     Some(SemanticNodeData::Primitive(PrimitiveKind::String))
                 );
             } else {

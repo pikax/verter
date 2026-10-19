@@ -24,6 +24,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSessionRecord } from "./session-record.mjs";
 
 import {
   ARMS,
@@ -51,9 +52,7 @@ import {
   allScenarios,
   cliSource,
   companionFiles,
-  companionInputProblems,
   SCENARIO_TIERS,
-  scenarioSha256,
   SETTINGS,
   TIERS,
   tsconfigText,
@@ -249,30 +248,37 @@ export function validateRun(
     }
     if (cell.inputs?.["scenario.ts"] !== sha256Text(scenario.source))
       fail(`${key}: scenario.ts is not the catalog's source`);
-    for (const p of companionInputProblems(cell.inputs, scenario)) fail(`${key}: ${p}`);
     if (cell.inputs?.["tsconfig.json"] !== sha256Text(tsconfigText(setting, scenario)))
       fail(`${key}: tsconfig.json is not the catalog's`);
     if (cell.inputs?.["cli/scenario.ts"] !== sha256Text(cliSource(scenario)))
       fail(`${key}: cli/scenario.ts is not the catalog's source plus the probe's use`);
+    for (const [file, text] of Object.entries(scenario.files ?? {})) {
+      for (const path of [file, `cli/${file}`]) {
+        if (cell.inputs?.[path] !== sha256Text(text))
+          fail(`${key}: ${path} is not the catalog's source`);
+      }
+    }
     const measured = expected.scenarios?.[cell.id];
     if (!measured) warnings.push(`${key}: no measured reference`);
     else {
-      if (measured.sourceSha256 !== scenarioSha256(scenario))
+      const method = measured.method ?? expected.method;
+      if (measured.sourceSha256 !== sha256Text(scenario.source))
         fail(`${key}: the measured reference is stale (measured on a different source)`);
-      if (expected.method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
+      for (const [file, text] of Object.entries(scenario.files ?? {})) {
+        if (measured.files?.[file] !== sha256Text(text))
+          fail(`${key}: the measured reference has stale ${file}`);
+      }
+      if (method?.libSha256 !== cell.inputs?.["lib.bench.d.ts"])
         fail(`${key}: the measured reference used a different library`);
-      if (expected.method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
+      if (method?.measuringSuffixSha256 !== sha256Text(MEASURING_SUFFIX))
         fail(`${key}: the measured reference used a different measuring method`);
       // Every cell carries its own immutable provenance: measured by the
-      // file's one method, by a verified tsc 7.0.2 executable, on exactly
+      // scenario's method (or the file default), by a verified tsc 7.0.2 executable, on exactly
       // this source (plus the measuring suffix) and this tsconfig.
       const receipt = measured.settings?.[cell.setting]?.receipt;
-      if (receipt?.method !== JSON.stringify(expected.method))
+      if (receipt?.method !== JSON.stringify(method))
         fail(`${key}: the reference cell was measured by another method than the file states`);
-      if (
-        !expected.method?.tscExeSha256 ||
-        expected.method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`
-      )
+      if (!method?.tscExeSha256 || method?.tscVersion !== `Version ${TYPESCRIPT_VERSION}`)
         fail(`${key}: the reference was not measured by a verified tsc ${TYPESCRIPT_VERSION}`);
       if (receipt?.tsconfigSha256 !== sha256Text(tsconfigText(setting, scenario)))
         fail(`${key}: the reference cell was measured with another tsconfig`);
@@ -479,8 +485,9 @@ export function validateRun(
         "/",
       );
       const roots = (r.rootFiles ?? []).map((f) => f.toLowerCase().replace(/\\/g, "/"));
-      const want = ["lib.bench.d.ts", ...companionFiles(byId.get(inv.scenario)), "scenario.ts"].map(
-        (f) => `${dir}/${f}`.toLowerCase(),
+      const scenario = byId.get(inv.scenario);
+      const want = ["lib.bench.d.ts", ...companionFiles(scenario), "scenario.ts"].map((file) =>
+        `${dir}/${file}`.toLowerCase(),
       );
       if (roots.length !== want.length || want.some((w) => !roots.includes(w)))
         fail(`${id}: tsc program roots ${JSON.stringify(r.rootFiles)} are not the scenario's`);
@@ -600,7 +607,13 @@ export function rawFileProblems(run) {
     }
     if (stable(sup) !== stable(embedded))
       problems.push(`${id}: the supervisor record on disk differs from results.json`);
-    if (stable(read(inv.sessionOut)) !== stable(inv.session ?? null))
+    let session = null;
+    try {
+      session = readSessionRecord(inv.sessionOut);
+    } catch {
+      /* compared below */
+    }
+    if (stable(session) !== stable(inv.session ?? null))
       problems.push(`${id}: the session record on disk differs from results.json`);
   }
   for (const inv of run.invocations ?? []) {

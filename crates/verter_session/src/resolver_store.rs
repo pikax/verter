@@ -3250,7 +3250,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
     /// parse_env_hash, resolve_env_hash, resolver_version }` from the fact's
     /// `canonical_id`, the view's root-backed content hash, and the view's
     /// environment hashes. Look up the matching
-    /// `Arc<ResolvedImportFacts>` from the captured
+    /// `crate::resolver_core::CachedValue<ResolvedImportFacts>` from the captured
     /// `ResolvedImportFactsDb` handle and compare the per-binding
     /// `semantic_hash` / `display_hash` (per `fact.lane`) of the
     /// matching `ResolvedImportClauseEntry` or
@@ -3306,10 +3306,10 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
 
     /// Route-surface-domain validator (R26 + R29 + G1).
     ///
-    /// `RouteSurface` is a ONE-ARM domain:
     /// `ModuleAugmentationIndexShape` → consult the snapshot of
     /// augmentation-index fingerprints captured at view-build time
-    /// (R29 / G1 producer state).
+    /// (R29 / G1 producer state). `ProgramFileOrder` → the program's
+    /// published file order, while it still describes the live workspace.
     fn validates_route_surface_domain(
         &self,
         fact: &verter_session_query::facts::fact_cache::RouteSurfaceFactRef,
@@ -3395,12 +3395,17 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                     .augmentation_fingerprint(target, self.augmentation_population())
                 {
                     Some(current) => current == fact.expected_hash,
-                    // No entry visible from this view's artifact root — the
-                    // augmentation index has not been populated under this
-                    // view. Refuse the candidate so the consumer recomputes
-                    // through the cold path (which will populate the index).
+                    // Neither a version visible at this view's artifact
+                    // root nor a live entry — the augmentation index has
+                    // not been populated. Refuse the candidate so the
+                    // consumer recomputes through the cold path (which will
+                    // populate the index).
                     None => false,
                 }
+            }
+            FactKey::ProgramFileOrder { program } => {
+                self.snapshot.roots.program_file_order_fingerprint(program)
+                    == Some(fact.expected_hash)
             }
             // Other parse-domain / resolve-domain keys do not belong
             // to the route-surface domain; the dispatch layer guards
@@ -3439,16 +3444,31 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".
-                let key = verter_session_query::function_program::FunctionProgramKey {
-                    declaration: verter_session_query::function_program::FunctionDeclarationRef {
-                        owner: function.owner,
-                        name: Arc::clone(&function.merged_symbol_name),
-                        space: function.symbol_space,
-                    },
-                    part: function.function_part.clone(),
-                    overload_ordinal: function.overload_ordinal,
-                };
-                index.get(&key).is_some_and(|matched| {
+                // A value-space position is found by its borrowed name; any
+                // other space names its whole key.
+                let matched =
+                    if function.symbol_space == verter_session_query::facts::SymbolSpace::Value {
+                        index.value_function(
+                            function.owner,
+                            &function.merged_symbol_name,
+                            &function.function_part,
+                            function.overload_ordinal,
+                        )
+                    } else {
+                        index.get(
+                            &verter_session_query::function_program::FunctionProgramKey {
+                                declaration:
+                                    verter_session_query::function_program::FunctionDeclarationRef {
+                                        owner: function.owner,
+                                        name: function.merged_symbol_name.as_str().into(),
+                                        space: function.symbol_space,
+                                    },
+                                part: function.function_part.clone(),
+                                overload_ordinal: function.overload_ordinal,
+                            },
+                        )
+                    };
+                matched.is_some_and(|matched| {
                     &matched.entry().flow_body_stable_hash() == flow_body_stable_hash
                 })
             }
@@ -3913,7 +3933,15 @@ impl StoreViewManager {
                         // The cached entry's token equals the live host
                         // token under the lock: proven current, safe for
                         // warm-cache validation.
-                        return StoreViewRead::Current(CurrentHostStoreView(view.clone()));
+                        let view = view.clone();
+                        drop(state);
+                        // A view a caller still held when this one was
+                        // published may have released its root since; the
+                        // versions only that root saw are reclaimable now.
+                        host.project_type_store()
+                            .indexed()
+                            .reclaim_after_root_release();
+                        return StoreViewRead::Current(CurrentHostStoreView(view));
                     }
                 }
                 if state.building.is_claimed() {
@@ -3970,6 +3998,11 @@ impl StoreViewManager {
                     // view.
                     drop(state);
                     drop(claim);
+                    // A published view replaced the previous one: the
+                    // versions only its root still saw are reclaimable.
+                    host.project_type_store()
+                        .indexed()
+                        .reclaim_after_root_release();
                     match outcome {
                         // Published / coalesced onto a live same-token entry:
                         // the view's token equals the live host token, so it
@@ -4116,6 +4149,9 @@ impl StoreViewManager {
                     );
                     drop(state);
                     drop(claim);
+                    host.project_type_store()
+                        .indexed()
+                        .reclaim_after_root_release();
                     match outcome {
                         PublishOutcome::Published { view } => {
                             return StoreViewRead::Current(CurrentHostStoreView(view));
@@ -4525,6 +4561,10 @@ impl VerterHost {
         &self,
         view: &dyn crate::session_view::SessionView,
     ) -> BatchFixedView {
+        // A workspace can publish its configuration after host construction.
+        // Settle shallow membership before freezing project contexts for the
+        // request, including imported files omitted by files/include.
+        self.ingest_configured_programs();
         let (base_view, is_current) = self.resolver_store_view_with_currentness();
         // Base-external fence token: the captured view's token with
         // `overlay_identity` cleared. The base read's token already carries

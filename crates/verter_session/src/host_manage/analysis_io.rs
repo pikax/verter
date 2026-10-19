@@ -207,7 +207,11 @@ impl VerterHost {
         src_blocks: &[crate::SrcBlockInfo],
         external_requests: &[crate::ExternalSourceRequest],
         script_analysis: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
-    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
+    > {
         let imports = &script_analysis.imports;
         let macros = &script_analysis.macros;
         let bindings = &script_analysis.bindings;
@@ -250,12 +254,14 @@ impl VerterHost {
             bindings,
             &script_analysis.style_vbind_roots,
         );
-        Some(Arc::new(crate::template_convert::convert_raw_to_analysis(
-            (&raw).into(),
-            &imports,
-            &class_domains,
-            Some(&unused_ctx),
-        )))
+        Some(verter_session_query::retention::heap_size::OwnedValue::new(
+            crate::template_convert::convert_raw_to_analysis(
+                (&raw).into(),
+                &imports,
+                &class_domains,
+                Some(&unused_ctx),
+            ),
+        ))
     }
 
     /// Lazily compute template analysis for a VueSfc file that hasn't been compiled.
@@ -406,8 +412,8 @@ impl VerterHost {
                 &class_domains,
                 Some(&unused_ctx),
             );
-            let tpl_arc = Arc::new(tpl);
-            snapshot.template = Some(Arc::clone(&tpl_arc));
+            let tpl_arc = verter_session_query::retention::heap_size::OwnedValue::new(tpl);
+            snapshot.template = Some(tpl_arc.clone());
 
             #[cfg(test)]
             self.fire_template_persist_seam();
@@ -447,7 +453,9 @@ impl VerterHost {
     pub(crate) fn persist_raw_template_analysis(
         &self,
         canonical: &str,
-        template: Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
+        template: verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
         admission: crate::types::RawTemplateSlotAdmission,
     ) {
         if admission.admitted_version().is_none() {
@@ -481,7 +489,11 @@ impl VerterHost {
         &self,
         canonical: &str,
         source_version: verter_scheduler::node::SourceVersion,
-    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
+    > {
         // Cheap map short-circuits first; the shard guard ends with this
         // block. `ReadSetSignature` is an `Arc<[FactVersionRef]>` carrier,
         // so cloning it out is a refcount bump, not a fact-set copy.
@@ -492,7 +504,7 @@ impl VerterHost {
                 return None;
             }
             (
-                Arc::clone(&entry.template),
+                entry.template.clone(),
                 entry.template_class_signature.clone(),
             )
         };
@@ -626,8 +638,13 @@ impl VerterHost {
                 // read could observe a newer node mid-window and pair
                 // this source's script analysis with the moved
                 // generation's products.
-                let stored_styles = Arc::new(hd.parse.style_analyses.clone());
-                let stored_markup_tokens = Arc::new(hd.parse.markup_class_tokens.clone());
+                let stored_styles = verter_session_query::analysis::file_analysis::SharedList::new(
+                    hd.parse.style_analyses.clone(),
+                );
+                let stored_markup_tokens =
+                    verter_session_query::analysis::file_analysis::SharedList::new(
+                        hd.parse.markup_class_tokens.clone(),
+                    );
                 // Version rail: accept the persisted template only at
                 // THIS branch's own source version — a late persist
                 // stamped with a superseded version, including one from
@@ -670,7 +687,7 @@ impl VerterHost {
                     if let Some(structure) = structure.as_ref() {
                         crate::parse::attach_style_block_tokens(structure, &mut rebuilt);
                     }
-                    Arc::new(rebuilt)
+                    verter_session_query::analysis::file_analysis::SharedList::new(rebuilt)
                 } else {
                     stored_styles
                 };
@@ -681,26 +698,47 @@ impl VerterHost {
                 }
                 let snapshot = FileAnalysisSnapshot {
                     imports: script_analysis.imports,
-                    module_references: Arc::new(script_analysis.module_references),
+                    module_references:
+                        verter_session_query::analysis::file_analysis::SharedList::new(
+                            script_analysis.module_references,
+                        ),
                     bindings: script_analysis.bindings,
-                    macros: Arc::new(script_analysis.macros),
-                    macro_type_deps: Arc::new(script_analysis.macro_type_deps),
+                    macros: verter_session_query::analysis::file_analysis::SharedList::new(
+                        script_analysis.macros,
+                    ),
+                    macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(
+                        script_analysis.macro_type_deps,
+                    ),
                     script_flags: script_analysis.flags.bits(),
                     styles: style_analyses,
                     template,
-                    vue_api_calls: Arc::new(script_analysis.vue_api_calls),
-                    dom_query_calls: Arc::new(script_analysis.dom_query_calls),
-                    css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
-                    script_binding_occurrences: Arc::new(
-                        script_analysis.script_binding_occurrences,
+                    vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                        script_analysis.vue_api_calls,
                     ),
+                    dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                        script_analysis.dom_query_calls,
+                    ),
+                    css_var_manipulations:
+                        verter_session_query::analysis::file_analysis::SharedList::new(
+                            script_analysis.css_var_manipulations,
+                        ),
+                    script_binding_occurrences:
+                        verter_session_query::analysis::file_analysis::SharedList::new(
+                            script_analysis.script_binding_occurrences,
+                        ),
                     macro_usage: script_analysis.macro_usage,
                     style_vbind_roots: script_analysis.style_vbind_roots,
                     markup_class_tokens: stored_markup_tokens,
-                    export_signatures: Arc::new(export_sigs),
+                    export_signatures:
+                        verter_session_query::analysis::file_analysis::SharedList::new(export_sigs),
                     options_api: script_analysis.options_api,
-                    store_usages: Arc::new(script_analysis.store_usages),
-                    store_definitions: Arc::new(script_analysis.store_definitions),
+                    store_usages: verter_session_query::analysis::file_analysis::SharedList::new(
+                        script_analysis.store_usages,
+                    ),
+                    store_definitions:
+                        verter_session_query::analysis::file_analysis::SharedList::new(
+                            script_analysis.store_definitions,
+                        ),
                     is_typescript: script_analysis.is_typescript,
                     anchor_revision,
                 };
@@ -845,8 +883,10 @@ impl VerterHost {
                 // structure — the artifact its sealed refs were minted from.
                 // This snapshot is built per call, so mutating its own
                 // styles Arc never touches shared/stored state.
-                let overlay_styles: &mut Vec<_> = Arc::make_mut(&mut snapshot.styles);
-                crate::parse::attach_style_block_tokens(&structure, overlay_styles);
+                let mut overlay_styles = (*snapshot.styles).clone();
+                crate::parse::attach_style_block_tokens(&structure, &mut overlay_styles);
+                snapshot.styles =
+                    verter_session_query::analysis::file_analysis::SharedList::new(overlay_styles);
                 return Some(snapshot);
             }
             // Snapshot AND template inputs from the SAME overlay read:
@@ -1005,6 +1045,7 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::source::artifact_key::FileArtifactKey> {
+        use crate::host_executor::HostSourceData;
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         if self
@@ -1014,27 +1055,32 @@ impl VerterHost {
         {
             return None;
         }
-        let state = self.effective_file_state(analysis_canonical, None)?;
+        // The key reads four fields of the source snapshot, so it borrows
+        // them rather than projecting the whole effective file state (whose
+        // carrier meta and analysis handles this hot read never uses).
+        let snap = self.scheduler.try_get_source(analysis_canonical)?;
+        let hd = snap.downcast_data::<HostSourceData>()?;
         // A plain script's parse identity was derived once with its source
         // snapshot: reuse it rather than hashing the source bytes again on
         // every artifact read.
-        if let (None, Some(parse_key)) = (state.framework_parse.as_ref(), state.script_parse_key) {
+        if let (None, Some(parse_key)) = (hd.framework_parse.as_ref(), hd.script_parse_key.as_ref())
+        {
             return Some(
                 verter_session_query::source::artifact_key::FileArtifactKey::for_script_parse_identity(
                     Arc::from(analysis_canonical),
-                    state.whole_hash,
-                    parse_key,
-                    state.file_language,
+                    hd.parse.whole_hash,
+                    parse_key.clone(),
+                    hd.file_language.clone(),
                     verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
                 ),
             );
         }
         verter_session_query::source::artifact_key::FileArtifactKey::for_source_identity(
             Arc::from(analysis_canonical),
-            state.whole_hash,
-            state.source.as_ref(),
-            state.file_language,
-            state.framework_parse.as_deref(),
+            hd.parse.whole_hash,
+            snap.source.as_ref(),
+            hd.file_language.clone(),
+            hd.framework_parse.as_deref(),
             verter_session_query::source::artifact_key::BASE_PARSE_ENV_HASH,
         )
     }
@@ -1513,11 +1559,23 @@ impl VerterHost {
         if !Arc::ptr_eq(&artifacts.indexed, indexed) {
             return None;
         }
+        Self::syntactic_route_interface_fact_of(canonical.to_string(), &artifacts)
+    }
+
+    /// The `SyntacticRouteInterface` parse fact of `artifacts`, the current
+    /// base entry for `canonical`; `None` when its surface is not resolvable.
+    pub(crate) fn syntactic_route_interface_fact_of(
+        canonical: String,
+        artifacts: &crate::file_artifact_store::FileArtifacts,
+    ) -> Option<verter_session_query::facts::fact_cache::ParseFactRef> {
+        if !artifacts.indexed.shallow_state.has_resolvable_surface() {
+            return None;
+        }
         let fact = artifacts
             .facts
             .lookup(&verter_session_query::facts::FactKey::SyntacticRouteInterface)?;
         Some(verter_session_query::facts::fact_cache::ParseFactRef {
-            canonical_id: canonical.to_string(),
+            canonical_id: canonical,
             key: verter_session_query::facts::FactKey::SyntacticRouteInterface,
             lane: verter_session_query::facts::FactLane::Semantic,
             expected_hash: fact.semantic_hash,
@@ -1854,23 +1912,25 @@ impl VerterHost {
         Some(FileAnalysisSnapshot {
             imports: ad.script_analysis.imports.clone(),
             bindings: ad.script_analysis.bindings.clone(),
-            module_references: Arc::clone(&ad.arcs.module_references),
-            macros: Arc::clone(&ad.arcs.macros),
-            macro_type_deps: Arc::clone(&ad.arcs.macro_type_deps),
+            module_references: ad.arcs.module_references.clone(),
+            macros: ad.arcs.macros.clone(),
+            macro_type_deps: ad.arcs.macro_type_deps.clone(),
             script_flags: ad.script_analysis.flags.bits(),
-            styles: Arc::clone(&ad.style_analyses),
+            styles: ad.style_analyses.clone(),
             template,
-            vue_api_calls: Arc::clone(&ad.arcs.vue_api_calls),
-            dom_query_calls: Arc::clone(&ad.arcs.dom_query_calls),
-            css_var_manipulations: Arc::clone(&ad.arcs.css_var_manipulations),
-            script_binding_occurrences: Arc::clone(&ad.arcs.script_binding_occurrences),
+            vue_api_calls: ad.arcs.vue_api_calls.clone(),
+            dom_query_calls: ad.arcs.dom_query_calls.clone(),
+            css_var_manipulations: ad.arcs.css_var_manipulations.clone(),
+            script_binding_occurrences: ad.arcs.script_binding_occurrences.clone(),
             macro_usage: ad.script_analysis.macro_usage.clone(),
             style_vbind_roots: ad.script_analysis.style_vbind_roots.clone(),
-            markup_class_tokens: Arc::clone(&ad.markup_class_tokens),
-            export_signatures: Arc::new(ad.export_signatures.clone()),
+            markup_class_tokens: ad.markup_class_tokens.clone(),
+            export_signatures: verter_session_query::analysis::file_analysis::SharedList::new(
+                ad.export_signatures.clone(),
+            ),
             options_api: ad.script_analysis.options_api.clone(),
-            store_usages: Arc::clone(&ad.arcs.store_usages),
-            store_definitions: Arc::clone(&ad.arcs.store_definitions),
+            store_usages: ad.arcs.store_usages.clone(),
+            store_definitions: ad.arcs.store_definitions.clone(),
             is_typescript: ad.script_analysis.is_typescript,
             anchor_revision,
         })
@@ -2554,7 +2614,11 @@ impl VerterHost {
     pub(crate) fn raw_template_analysis_for_file(
         &self,
         canonical: &str,
-    ) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+    ) -> Option<
+        verter_session_query::retention::heap_size::OwnedValue<
+            verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+        >,
+    > {
         {
             if self.is_canonical_evicted(canonical) {
                 return None;

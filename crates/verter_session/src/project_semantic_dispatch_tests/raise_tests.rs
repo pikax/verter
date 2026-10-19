@@ -10,6 +10,10 @@ use verter_type_expr::TypeExpr;
 #[test]
 fn raise_node_to_type_expr_preserves_number_index_key_values() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
@@ -41,6 +45,10 @@ fn raise_node_to_type_expr_preserves_number_index_key_values() {
 #[test]
 fn raise_all_vacuous_intersection_falls_back_to_empty_object() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let empty_a = graph.intern_node(SemanticNodeData::Object(
         verter_type_engine::project_semantic_dispatch::walk::empty_surface_view(),
@@ -87,6 +95,10 @@ fn node_root_sentinel_is_root_only_not_whole_surface_miss() {
     use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
@@ -161,6 +173,10 @@ fn node_contains_semantic_miss_is_whole_tree_and_equals_type_expr_oracle() {
     use verter_type_engine::semantic_query::QueryError;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let string = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
@@ -247,19 +263,23 @@ fn raise_and_reduce_preserves_open_keyof_over_type_parameter() {
     use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let identity = DeclIdentity {
-        canonical_id: Arc::from("/test.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/test.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("T"),
+        decl_name: verter_type_expr::OwnedStr::from("T"),
     };
     let type_param = graph.intern_node(SemanticNodeData::TypeParam {
         decl: identity,
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: type_param });
 
@@ -287,6 +307,10 @@ fn raise_and_reduce_terminates_on_alias_cycle_via_visited_set() {
     use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let primitive = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
     let alias = graph.intern_node(SemanticNodeData::Alias(primitive));
@@ -315,10 +339,16 @@ fn raise_and_reduce_template_literal_becomes_unknown_hard_stop() {
     use verter_type_engine::semantic_query::ProjectionMode;
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::from("prefix-")].into_boxed_slice()),
-        expressions: Arc::from(
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("prefix-")].into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
             Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
         ),
     });
@@ -352,12 +382,16 @@ fn raise_and_reduce_navigate_mode_decl_ref_raises_to_bare_ref() {
     use verter_type_engine::semantic_query::{DeclIdentity, HashValue, ProjectionMode};
 
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let identity = DeclIdentity {
-        canonical_id: Arc::from("/some-unresolved.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/some-unresolved.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("Unresolved"),
+        decl_name: verter_type_expr::OwnedStr::from("Unresolved"),
     };
     let decl_ref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: identity.clone(),
@@ -406,11 +440,15 @@ fn raise_node_to_type_expr_round_trips_indexed_access_string_key() {
     // `_inner` recursive call (cycle invariant for strings: there is
     // no node to recurse into).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let object = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::Unknown));
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object,
-        index: IndexKey::String(Arc::from("key")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from("key")),
     });
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -444,13 +482,14 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
+        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("Pick"),
+        decl_name: verter_type_expr::OwnedStr::from("Pick"),
     };
     // Keyspace argument — never inspected by the openness walk
     // (only argument 0, the enumeration domain, matters).
@@ -462,16 +501,18 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let props_base_open = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from("PropsBase"),
+            decl_name: verter_type_expr::OwnedStr::from("PropsBase"),
         },
-        args: Arc::from(vec![tparam].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![tparam].into_boxed_slice(),
+        ),
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -500,12 +541,14 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
     // fixtures in `component_meta_pick_omit_tests`.
     let props_base_concrete_unresolved = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from("PropsBase"),
+            decl_name: verter_type_expr::OwnedStr::from("PropsBase"),
         },
-        args: Arc::from(vec![concrete_array].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![concrete_array].into_boxed_slice(),
+        ),
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -523,12 +566,12 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
     // unresolvable (no decl seeded) is undecidable ⇒ OPEN.
     let bare_alias_unresolved = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("/types.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from("SlotProps"),
+            decl_name: verter_type_expr::OwnedStr::from("SlotProps"),
         },
-        args: Arc::from(Vec::new().into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(Vec::new().into_boxed_slice()),
     });
     assert!(
         verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -563,10 +606,10 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
     // A NON-utility instantiation is never subject to this
     // carrier-stop, even with an open source argument.
     let not_a_utility = DeclIdentity {
-        canonical_id: Arc::from("/types.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/types.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("Lookup"),
+        decl_name: verter_type_expr::OwnedStr::from("Lookup"),
     };
     assert!(
         !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -580,7 +623,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
     // Tuple domains are finite surfaces (concrete numeric/length key
     // space) — keep them closed.
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: concrete_elem,
@@ -616,13 +659,14 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
+        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("Pick"),
+        decl_name: verter_type_expr::OwnedStr::from("Pick"),
     };
     let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
@@ -642,7 +686,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
 
     // IndexedAccess { object: concrete, index: TypeNode(open K) }.
@@ -663,7 +707,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
     // A literal-string index key over the same concrete object is CLOSED.
     let indexed_closed_key = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: concrete_object,
-        index: IndexKey::String(Arc::from("a")),
+        index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
     });
     assert!(
         !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(
@@ -683,7 +727,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("MapBinder"),
+        display_name: verter_type_expr::OwnedStr::from("MapBinder"),
     });
     let mapped_open_keyspace = graph.intern_node(SemanticNodeData::Mapped {
         source: concrete_object,
@@ -733,13 +777,14 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {
-        canonical_id: Arc::from("__builtin__"),
+        canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: HashValue::default(),
-        decl_name: Arc::from("Pick"),
+        decl_name: verter_type_expr::OwnedStr::from("Pick"),
     };
     let keys = graph.intern_node(SemanticNodeData::Primitive(SemanticPrimitiveKind::String));
 
@@ -761,14 +806,14 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let outer_t = graph.intern_node(SemanticNodeData::TypeParam {
         decl: DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     let make_mapped = |remap: SemanticNodeId| {
@@ -788,10 +833,16 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
     };
     let template = |interpolant: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: Arc::from(
-                vec![Arc::<str>::from("on"), Arc::<str>::from("")].into_boxed_slice(),
+            quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("on"),
+                    verter_type_expr::OwnedStr::from(""),
+                ]
+                .into_boxed_slice(),
             ),
-            expressions: Arc::from(vec![interpolant].into_boxed_slice()),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![interpolant].into_boxed_slice(),
+            ),
         })
     };
 
@@ -822,8 +873,12 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
 
     // CLOSED control: a CONCRETE name-remap (no interpolant).
     let closed_remap = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("on")].into_boxed_slice()),
-        expressions: Arc::from(Vec::new().into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("on")].into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
     });
     assert!(
         !verter_type_engine::project_semantic_dispatch::raise::utility_enumeration_domain_is_open_or_unknown(

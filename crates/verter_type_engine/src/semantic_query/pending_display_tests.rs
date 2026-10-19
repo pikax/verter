@@ -7,7 +7,7 @@ fn parameter(store: &SemanticGraphStore, name: &str, ordinal: u16) -> SemanticNo
         param_index: ordinal,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -29,7 +29,8 @@ fn conditional(
         true_branch_ref: yes,
         false_branch_ref: no,
         distributive: false,
-        pending: (!pending.is_empty()).then(|| Arc::new(pending)),
+        pending: (!pending.is_empty())
+            .then(|| verter_session_query::retention::owned::Owned::new(pending)),
     })
 }
 
@@ -52,6 +53,7 @@ fn render(store: &SemanticGraphStore, node: SemanticNodeId) -> String {
 #[test]
 fn pending_display_applies_only_the_replacements_suffix_to_arguments() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let u = parameter(&store, "U", 2);
@@ -78,6 +80,7 @@ fn pending_display_applies_only_the_replacements_suffix_to_arguments() {
 #[test]
 fn pending_display_uses_replacement_shape_for_parentheses() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -99,6 +102,7 @@ fn pending_display_uses_replacement_shape_for_parentheses() {
 #[test]
 fn pending_display_composes_inner_frames_before_outer_frames() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let t = parameter(&store, "T", 1);
     let u = parameter(&store, "U", 2);
@@ -115,21 +119,22 @@ fn pending_display_composes_inner_frames_before_outer_frames() {
 #[test]
 fn pending_display_preserves_exact_infer_scope_in_nested_conditionals() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let binder = store.alloc_infer_binder_id();
     let infer = store.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("X"),
+        name: verter_type_expr::OwnedStr::from("X"),
         binder: binder.clone(),
         constraint: None,
     });
     let reference = store.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("X"),
+        name: verter_type_expr::OwnedStr::from("X"),
         binder,
     });
     let foreign = store.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("X"),
+        name: verter_type_expr::OwnedStr::from("X"),
         binder: store.alloc_infer_binder_id(),
         constraint: None,
     });
@@ -156,17 +161,18 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
     // must not reach either the declaration or the true branch. Before the
     // carrier arguments were walked, both collapsed to the outer argument.
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let binder = store.alloc_infer_binder_id();
     let infer = store.intern_node(SemanticNodeData::Infer {
-        name: Arc::from("X"),
+        name: verter_type_expr::OwnedStr::from("X"),
         binder: binder.clone(),
         constraint: None,
     });
     let reference = store.intern_node(SemanticNodeData::InferRef {
-        name: Arc::from("X"),
+        name: verter_type_expr::OwnedStr::from("X"),
         binder,
     });
     for (carrier, expected) in [
@@ -181,7 +187,9 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
         (
             SemanticNodeData::new_import_type(
                 Arc::from("m"),
-                Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+                ),
                 Arc::from(vec![infer].into_boxed_slice()),
                 false,
             ),
@@ -198,6 +206,7 @@ fn pending_display_preserves_infer_scope_declared_inside_a_carrier_argument() {
 #[test]
 fn pending_display_preserves_a_mapped_binder_and_its_value_scope() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let check = parameter(&store, "Q", 0);
     let key = parameter(&store, "K", 1);
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));

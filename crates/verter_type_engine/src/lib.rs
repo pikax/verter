@@ -16,6 +16,22 @@
 #[macro_use]
 extern crate verter_debug_assert;
 
+/// Declares a method that reads or mints graph state from a bare
+/// construction ordinal. A bare ordinal authorizes nothing outside the
+/// engine, so production builds keep the method crate-private; test builds
+/// expose it as a fixture seam.
+macro_rules! construction_ordinal_seam {
+    ($(#[$meta:meta])* fn $($item:tt)*) => {
+        $(#[$meta])*
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn $($item)*
+
+        $(#[$meta])*
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) fn $($item)*
+    };
+}
+
 pub mod bounded_query_retention;
 pub mod cache_runtime;
 pub mod cache_schema;
@@ -25,6 +41,7 @@ pub mod cancel_trace;
 #[cfg(any(test, feature = "test-support"))]
 pub mod capture_token;
 pub mod component_meta_caches;
+pub mod component_meta_result_db;
 pub mod engine_provenance;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]

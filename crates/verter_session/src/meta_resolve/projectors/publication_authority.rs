@@ -78,6 +78,7 @@ use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{DeclIdentity, SemanticNodeId, SurfaceMember};
 
 use super::macro_payload_substrate::PayloadSurfaceScope;
+use verter_type_engine::semantic_query_memo::node_roots::{NodeRoot, NodeRootSet};
 
 /// Private mint seal. A token carries a `_seal: Seal` field; because [`Seal`]
 /// is private to this module and has no public constructor, the only code that
@@ -114,7 +115,7 @@ pub(crate) struct ResolvedMacroPayload {
     owner: DeclIdentity,
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
-    node: SemanticNodeId,
+    node: NodeRoot,
     _seal: Seal,
 }
 
@@ -126,7 +127,7 @@ impl ResolvedMacroPayload {
 
     /// The resolved payload's semantic graph node.
     pub(crate) fn node(&self) -> SemanticNodeId {
-        self.node
+        self.node.id()
     }
 
     /// The macro kind (drives the derived published-surface kind).
@@ -151,7 +152,7 @@ pub(crate) struct ResolvedPayloadSurface {
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
     kind: PublishedSurfaceKind,
-    node: SemanticNodeId,
+    node: NodeRoot,
     _seal: Seal,
 }
 
@@ -163,7 +164,7 @@ impl ResolvedPayloadSurface {
 
     /// The surface's semantic graph node (the enumerable `Object` shell).
     pub(crate) fn node(&self) -> SemanticNodeId {
-        self.node
+        self.node.id()
     }
 
     /// The derived published-surface kind.
@@ -183,7 +184,7 @@ impl ResolvedPayloadSurface {
 
     /// The owner canonical id (the SFC scope file) — equal to the `file`
     /// argument the projectors thread into the sink as `scope_canonical_id`.
-    pub(crate) fn owner_canonical(&self) -> &Arc<str> {
+    pub(crate) fn owner_canonical(&self) -> &verter_type_expr::OwnedStr {
         &self.owner.canonical_id
     }
 }
@@ -200,6 +201,7 @@ pub(crate) struct SurfaceMemberCandidate {
     surface_node: SemanticNodeId,
     member: SurfaceMember,
     kind: PublishedSurfaceKind,
+    _roots: NodeRootSet,
     _seal: Seal,
 }
 
@@ -230,6 +232,7 @@ pub(crate) struct AdmittedPublishedMember<'a> {
     member: SurfaceMember,
     cursor: ProjectionCursor<'a>,
     kind: PublishedSurfaceKind,
+    _roots: NodeRootSet,
     _seal: Seal,
 }
 
@@ -290,6 +293,7 @@ impl<'a> AdmittedPublishedMember<'a> {
             member,
             cursor,
             kind,
+            _roots: Default::default(),
             _seal: Seal,
         }
     }
@@ -354,7 +358,7 @@ pub(crate) fn resolve_payload_surface(
     // side effect a deleted call line could silently drop.
     let node = super::resolve_payload_surface(
         dispatch,
-        payload.node,
+        payload.node.id(),
         payload.macro_index,
         expansion_kind,
         super::macro_payload_surface_provenance(payload.macro_kind),
@@ -390,7 +394,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // usable one-branch subset flows onward.
     let node = super::resolve_payload_surface_with_scope(
         dispatch,
-        payload.node,
+        payload.node.id(),
         payload.macro_index,
         expansion_kind,
         scope,
@@ -423,23 +427,31 @@ pub(crate) fn read_surface_member_candidates(
     >,
     surface: &ResolvedPayloadSurface,
 ) -> Vec<SurfaceMemberCandidate> {
+    let _scope = dispatch.enter_construction_scope();
     // An INCOMPLETE member read records its typed reason and enumerates only
     // the usable subset — never a silently truncated candidate set.
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
             ctx,
             dispatch,
-            surface.node,
+            surface.node.id(),
         )
         .recorded()
         .unwrap_or_default();
+    let roots = dispatch
+        .construction_grant()
+        .root_nodes(
+            std::iter::once(surface.node.id()).chain(members.iter().map(|member| member.value)),
+        )
+        .expect("enumerated surface operands are live");
     members
         .into_iter()
         .map(|member| SurfaceMemberCandidate {
             owner: surface.owner.clone(),
-            surface_node: surface.node,
+            surface_node: surface.node.id(),
             member,
             kind: surface.kind.clone(),
+            _roots: roots.clone(),
             _seal: Seal,
         })
         .collect()
@@ -477,7 +489,7 @@ pub(crate) fn admit_published_member<'a>(
     // publishes verbatim, a numeric literal key publishes under its
     // canonical ECMAScript spelling (`{ 1: x }` IS the property `"1"`),
     // and a symbol / computed key has no published name — not admitted.
-    let member_name: Arc<str> = candidate.member.published_name()?;
+    let member_name: Arc<str> = std::sync::Arc::<str>::from(candidate.member.published_name()?);
     // (2) Derived-kind / cursor match: the descending cursor must address the
     // SAME published surface the candidate was enumerated from. The cursor
     // carries `surface: &PublishedSurfaceKind`; compare it against the
@@ -510,6 +522,7 @@ pub(crate) fn admit_published_member<'a>(
         member: candidate.member,
         cursor: member_cursor,
         kind: candidate.kind,
+        _roots: candidate._roots,
         _seal: Seal,
     })
 }
@@ -529,6 +542,61 @@ mod tests {
     //! whole-surface cursor suffice.
 
     use super::*;
+
+    #[test]
+    fn counted_publication_tokens_keep_members_until_sink_consumption() {
+        use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData, SurfaceView};
+        use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+
+        let host = VerterHost::new_standalone(Default::default());
+        let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, GraphFixture::new());
+        let graph = dispatch.graph();
+        let (surface, value) = {
+            let _scope = graph.enter_node_root_scope();
+            let value = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "member".into(),
+            )));
+            let mut member = member_with_visibility(MemberVisibility::Public);
+            member.value = value;
+            let node = graph.intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+                vec![member],
+                None,
+            )));
+            (
+                ResolvedPayloadSurface {
+                    owner: synthetic_owner(),
+                    macro_index: 0,
+                    macro_kind: AnalyzedMacroKind::DefineEmits,
+                    kind: PublishedSurfaceKind::Emits,
+                    node: graph.root_in_scope(node).unwrap(),
+                    _seal: Seal,
+                },
+                value,
+            )
+        };
+        let candidates = read_surface_member_candidates(&host, &dispatch, &surface);
+        assert_eq!(candidates.len(), 1);
+        drop(surface);
+        graph.invalidate_all();
+        assert!(
+            graph.node_is_live(value),
+            "enumeration owns its member after the surface owner drops"
+        );
+        let projection = SurfaceProjection::whole_surface(PublishedSurfaceKind::Emits);
+        let cursor = projection.cursor();
+        let admitted: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| admit_published_member(candidate, &cursor, &dispatch).unwrap())
+            .collect();
+        graph.invalidate_all();
+        assert!(graph.node_is_live(admitted[0].member().value));
+        drop(admitted);
+        assert!(!graph.node_is_live(value));
+        assert_eq!(
+            graph.node_count(),
+            graph.node_ownership_counts().permanent_nodes
+        );
+    }
     use crate::meta_resolve::projection_demand::SurfaceProjection;
     use crate::VerterHost;
     use verter_type_expr::MemberVisibility;
@@ -557,10 +625,10 @@ mod tests {
     /// A minimal synthetic owner identity for the candidate.
     fn synthetic_owner() -> DeclIdentity {
         DeclIdentity {
-            canonical_id: Arc::from("/Test.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/Test.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Test"),
+            decl_name: verter_type_expr::OwnedStr::from("Test"),
         }
     }
 
@@ -582,6 +650,7 @@ mod tests {
             surface_node: SemanticNodeId(0),
             member: member_with_visibility(MemberVisibility::Private),
             kind: PublishedSurfaceKind::Props,
+            _roots: Default::default(),
             _seal: Seal,
         };
 
@@ -611,6 +680,7 @@ mod tests {
             surface_node: SemanticNodeId(0),
             member: member_with_visibility(MemberVisibility::Public),
             kind: PublishedSurfaceKind::Props,
+            _roots: Default::default(),
             _seal: Seal,
         };
 

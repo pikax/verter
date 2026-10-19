@@ -147,7 +147,7 @@ pub(crate) fn native_feasibility_receipt() -> Value {
     let (resolved, typeinfo_error) = typeinfo::split_resolve_outcome(outcome);
     let type_expr = match resolved {
         Some(node_id) => host
-            .project_node_to_type_expr_json_bytes(node_id)
+            .project_node_to_type_expr_json_bytes(&node_id)
             .map(|bytes| serde_json::from_slice::<Value>(&bytes).expect("typeexpr json")),
         None => None,
     };
@@ -168,7 +168,7 @@ pub(crate) fn native_feasibility_receipt() -> Value {
             Arc::<str>::from(CANONICAL_TS),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
         ),
-        name: Arc::<str>::from(TYPEINFO_SYMBOL),
+        name: verter_type_expr::OwnedStr::from(TYPEINFO_SYMBOL),
     });
     let query_record = host
         .resolve_type_with_audit(key, CANONICAL_TS)

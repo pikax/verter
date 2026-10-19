@@ -216,6 +216,17 @@ fn a_paid_receipt_still_answers_to_the_depth_rail() {
         .connected_demand()
         .replay_admit(&receipts[10], None, Nesting::Entered)
         .expect("depth 10 fits");
+    {
+        let (_nested, trip) = dispatch.enter_connected_demand(true);
+        assert!(trip.is_none(), "the nested consumer itself fits");
+        assert_eq!(
+            dispatch
+                .connected_demand()
+                .replay_admit(&receipts[10], None, Nesting::Entered),
+            Err(ReplayRefusal::Depth),
+            "a fully paid root still needs its footprint at the new entry depth"
+        );
+    }
     assert_eq!(
         dispatch
             .connected_demand()
@@ -387,6 +398,59 @@ fn an_abandoned_computation_is_its_consumers_cost() {
     assert!(
         ledger.seal_cost_scope(None).is_none(),
         "nothing is left recording"
+    );
+}
+
+/// A chain of computations that each fail — every level consuming one
+/// result, then abandoned into the level below — folds what each level
+/// consumed into its consumer as one failed-prefix receipt per level, not
+/// as every prerequisite the levels above already folded: the surviving
+/// consumer's receipt names a bounded list. It still owes everything the
+/// failed levels spent and consumed, and its footprint is what the levels
+/// needed: a result consumed by a frame below any of them keeps its frame.
+#[test]
+fn failed_computations_fold_one_prefix_per_level() {
+    const LEVELS: usize = 64;
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let ledger = &dispatch.connected_demand();
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    ledger.open_cost_scope(identity("root"));
+    for level in 0..LEVELS {
+        ledger.open_cost_scope(identity(&format!("L{level}")));
+    }
+    for level in (0..LEVELS).rev() {
+        let consumed =
+            DemandCostReceipt::new(identity(&format!("R{level}")), usage(1, 0), Vec::new());
+        let nesting = if level == LEVELS / 2 {
+            Nesting::Frame { depth: 1 }
+        } else {
+            Nesting::InPlace
+        };
+        ledger.record_prerequisite(&consumed, nesting);
+        ledger.charge().expect("the level's own unit");
+        ledger.abandon_cost_scope();
+    }
+    let root = ledger.seal_cost_scope(None).expect("the root seals");
+    assert!(
+        root.prerequisites().len() <= 2,
+        "{} prerequisites folded into the surviving consumer",
+        root.prerequisites().len()
+    );
+    assert_eq!(
+        root.exclusive(),
+        usage(LEVELS as u64, 0),
+        "the failed levels' own units"
+    );
+    assert_eq!(
+        root.closure_usage(),
+        usage(2 * LEVELS as u64, 0),
+        "the failed levels' units and every result they consumed"
+    );
+    assert_eq!(
+        root.footprint().instantiation_height,
+        1,
+        "the frame a failed level consumed a result through is the consumer's"
     );
 }
 
@@ -668,7 +732,7 @@ fn probe_answer(host: &VerterHost) -> Result<Vec<u8>, String> {
         .into_parts();
     match outcome {
         Ok(Some(node)) => host
-            .project_node_to_type_expr_json_bytes(node)
+            .project_node_to_type_expr_json_bytes(&node)
             .ok_or_else(|| "the answer did not materialise".to_owned()),
         Ok(None) => Err("miss".to_owned()),
         Err(fault) => Err(format!("{fault:?}")),
@@ -680,6 +744,164 @@ fn semantic_misses(host: &VerterHost) -> u64 {
         .semantic_graph()
         .stats_snapshot()
         .misses
+}
+
+/// The benchmark request envelope reaches the checker comparison limit,
+/// including its resource recovery, rather than stopping at construction bytes.
+fn assert_reversed_checker_answer(count: usize, expected: u8) {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    {
+        let host = bench_host(1_000_000, &reversed_unions(count));
+        let (key, [source, target]) = reversed_conditional_key(&host, count);
+        let read = || {
+            let _request = fresh_request(100);
+            root_read(&host, &key, full)
+        };
+        let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+        let before_visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests();
+        let cold = read();
+        let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before_reductions;
+        let visits = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests() - before_visits;
+        assert!(
+            visits <= 12 * count + 32,
+            "{count} arms: linear union traversal, got {visits}"
+        );
+        assert!(
+            reductions <= 4 * count + 8,
+            "{count} arms: linear structural queries, got {reductions}"
+        );
+        assert_eq!(
+            cold.answer,
+            format!("literal Number({expected}.0)"),
+            "{count} arms: checker answer and charged envelope: {cold:?}"
+        );
+        let recovered = count >= 2100;
+        assert_eq!(
+            cold.partial, recovered,
+            "{count} arms: resource recovery class"
+        );
+        assert_eq!(
+            cold.reasons,
+            if recovered {
+                PartialReasonSet::OPERATION_BUDGET
+            } else {
+                PartialReasonSet::empty()
+            }
+        );
+        assert_eq!(
+            cold.refusals,
+            if recovered {
+                vec![super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+            } else {
+                Vec::new()
+            },
+            "{count} arms: TS2859 subjects"
+        );
+        let before_repeat = semantic_misses(&host);
+        assert_eq!(read(), cold, "{count} arms: exact repeat");
+        assert_eq!(
+            semantic_misses(&host),
+            before_repeat,
+            "{count} arms: no recomputation"
+        );
+        println!(
+            "reversed-{count}: {} partial={} work={} bytes={} reductions={reductions} visits={visits} repeat_misses=0",
+            cold.answer, cold.partial, cold.work, cold.bytes
+        );
+    }
+}
+
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_200() {
+    assert_reversed_checker_answer(200, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_600() {
+    assert_reversed_checker_answer(600, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_1800() {
+    assert_reversed_checker_answer(1800, 1);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_2100() {
+    assert_reversed_checker_answer(2100, 2);
+}
+#[test]
+fn reversed_object_unions_reach_the_checker_answer_3200() {
+    assert_reversed_checker_answer(3200, 2);
+}
+
+#[test]
+fn cold_query_entries_fit_within_the_checker_relation_envelope() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let host = bench_host(1_000_000, &reversed_unions(200));
+    let (key, [source, target]) = reversed_conditional_key(&host, 200);
+    let branch_proofs = || {
+        host.project_type_store()
+            .semantic_graph()
+            .export_all_origin_edges()
+            .iter()
+            .filter(|(_, kind, edge)| {
+                *kind == verter_type_engine::semantic_query::OriginEdgeKind::ConditionalSelect
+                    && edge.sources.as_ref() == [source, target]
+                    && matches!(
+                        edge.meta,
+                        verter_type_engine::semantic_query::OriginMeta::Branch(
+                            verter_type_engine::semantic_query::BranchSelection::True
+                                | verter_type_engine::semantic_query::BranchSelection::False
+                        )
+                    )
+            })
+            .count()
+    };
+    let before_recovery = branch_proofs();
+    let comparisons = 20_000;
+    let reducer_only =
+        comparisons as usize * super::connected_demand::RELATION_UNITS_PER_COMPARISON;
+    // One hundredth of the pinned checker's comparison allowance and
+    // production work envelope keeps this rail discriminator small.
+    let mapped = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK / 100;
+    let read = |work| {
+        let _request = fresh_request(100);
+        with_relation_comparisons_for_tests(comparisons, || root_read(&host, &key, work))
+    };
+    let premature = read(reducer_only);
+    let recovered = read(mapped);
+    println!("reduced checker envelope: reducer={premature:?}; mapped={recovered:?}");
+    assert_eq!(premature.work, reducer_only, "the work rail was spent");
+    assert!(premature.partial);
+    assert_eq!(premature.answer, "refusal carrier TypeNode");
+    // The raw conditional exposes its undecided shell at this operational
+    // stop, without attributing the stop to the checker's comparison budget.
+    assert_eq!(premature.reasons, PartialReasonSet::UNDECIDED_CONDITIONAL);
+    assert!(
+        premature.refusals.is_empty(),
+        "the checker was never reached"
+    );
+    assert_eq!(recovered.answer, "literal Number(2.0)", "{recovered:?}");
+    assert_eq!(recovered.reasons, PartialReasonSet::OPERATION_BUDGET);
+    assert!(recovered.partial);
+    assert_eq!(
+        recovered.refusals,
+        vec![super::walk::ShallowDiagnostic::RelationTooComplex { source, target }]
+    );
+    assert_eq!(
+        branch_proofs(),
+        before_recovery,
+        "a checker recovery must not publish a branch-selection proof"
+    );
+    let before_repeat = semantic_misses(&host);
+    let before_reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
+    assert_eq!(read(mapped), recovered);
+    assert_eq!(semantic_misses(&host), before_repeat);
+    assert_eq!(
+        ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests(),
+        before_reductions,
+        "the sealed operation refusal performs no structural comparisons"
+    );
 }
 
 /// A request repeated warm answers exactly as it answered cold. Its
@@ -720,6 +942,10 @@ fn a_warm_repeat_answers_as_its_cold_request() {
 #[test]
 fn a_sealed_refusal_answers_its_repeat_without_evaluating() {
     let host = bench_host(1, &reversed_unions(4));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let refused = probe_answer(&host).expect("the refusal is a typed partial value");
     assert!(
         host.project_type_store()
@@ -982,14 +1208,16 @@ fn reversed_relation_key(
 }
 
 /// What one root demand answered and what it was charged.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 struct RootAnswer {
     /// The relation's outcome, or the class of the refusal it answered.
     answer: String,
+    status: verter_type_engine::semantic_query::FactStatus,
+    has_value: bool,
     partial: bool,
     reasons: verter_type_engine::semantic_query::PartialReasonSet,
     work: usize,
-    bytes: usize,
+    bytes: u64,
     /// The operation refusals the read reports.
     refusals: Vec<super::walk::ShallowDiagnostic>,
 }
@@ -1001,14 +1229,36 @@ fn root_read(
     key: &verter_type_engine::semantic_query::SemanticQueryKey,
     work: usize,
 ) -> RootAnswer {
+    root_read_with_context(host, key, work, 24, 0)
+}
+
+fn root_read_with_context(
+    host: &Arc<VerterHost>,
+    key: &verter_type_engine::semantic_query::SemanticQueryKey,
+    work: usize,
+    depth: u16,
+    preceding: usize,
+) -> RootAnswer {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&ctx);
-    dispatch.set_connected_limits_for_tests(work, 24);
+    dispatch.set_connected_limits_for_tests(work, depth);
+    let _connected = (preceding != 0).then(|| dispatch.enter_connected_demand(false).0);
+    if preceding != 0 {
+        dispatch.connected_demand().charge_units(preceding).unwrap();
+    }
     let read = dispatch.execute_via_cold_build_helper(key.clone());
-    let answer = match &read.value {
+    let answer = match &read.value() {
+        QueryResult::Value(SemanticQueryValue::TypeNode(node)) => {
+            match dispatch.graph().node_data(*node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Literal(literal)) => {
+                    format!("literal {literal:?}")
+                }
+                _ => "refusal carrier TypeNode".to_owned(),
+            }
+        }
         QueryResult::Value(SemanticQueryValue::Relation(payload)) => {
             format!("{:?}", payload.outcome)
         }
@@ -1018,16 +1268,206 @@ fn root_read(
     };
     RootAnswer {
         answer,
-        partial: read.result_is_partial,
+        status: *read.fact_status(),
+        has_value: matches!(read.value().clone(), QueryResult::Value(_)),
+        partial: read.result_is_partial(),
         reasons: read.partial_reason_classes(),
         work: dispatch.connected_demand().work_used_for_tests(),
         bytes: dispatch.connected_demand().bytes_used_for_tests(),
         refusals: read
-            .walker_diagnostics
+            .walker_diagnostics()
             .iter()
             .filter(|diagnostic| diagnostic.is_operation_refusal())
-            .cloned()
+            .map(super::walk::ShallowDiagnostic::copy_for_tests)
             .collect(),
+    }
+}
+
+#[test]
+fn operation_refusal_isolates_depth_and_preceding_connected_work() {
+    use super::connected_demand::InstantiationBudgetForTests;
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = reversed_relation_key(&host, 40, false);
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    with_relation_comparisons_for_tests(50, || {
+        let solo = root_read(&host, &key, full);
+        assert!(solo.partial);
+        let before = semantic_misses(&host);
+        assert_eq!(root_read(&host, &key, full), solo);
+        assert_eq!(
+            semantic_misses(&host),
+            before,
+            "the exact isolated repeat is sealed"
+        );
+        for (depth, preceding) in [(23, 0), (24, 1)] {
+            let before = semantic_misses(&host);
+            let altered = root_read_with_context(&host, &key, full, depth, preceding);
+            assert_eq!(
+                (altered.answer, altered.partial, altered.reasons),
+                (solo.answer.clone(), solo.partial, solo.reasons)
+            );
+            assert!(
+                semantic_misses(&host) > before,
+                "a different depth or non-isolated ledger must evaluate the check"
+            );
+        }
+        let before = semantic_misses(&host);
+        {
+            let _depth = InstantiationBudgetForTests::install(9999);
+            assert!(root_read(&host, &key, full).partial);
+        }
+        assert!(
+            semantic_misses(&host) > before,
+            "checker depth participates in refusal identity"
+        );
+        let before = semantic_misses(&host);
+        assert_eq!(root_read(&host, &key, full), solo);
+        assert_eq!(
+            semantic_misses(&host),
+            before,
+            "the original isolated profile remains usable"
+        );
+    });
+}
+
+/// An exhausted comparison refuses before its apparent Object query enters,
+/// even when index preparation would exhaust work before the first alternative
+/// or the next alternative fits the last unit of connected work. Preserve the
+/// recovery outcome as well as partiality, named subjects and exact repeats.
+#[test]
+fn object_union_comparison_refusal_precedes_apparent_read() {
+    use super::checker_probe_lane_tests::{
+        probe_host, with_probe_on_host, ProbeProject, PROBE_FILE,
+    };
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    use verter_type_engine::semantic_query::{
+        PartialReasonSet, ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+        SemanticQueryKey,
+    };
+
+    let observe = |aliased, ambient, comparisons, work| {
+        let project = ProbeProject {
+            compiler_options: Some(r#"{"strict": true, "noLib": true}"#),
+            files: if ambient {
+                &[("lib.object.d.ts", "interface Object { z: number; }")]
+            } else {
+                &[]
+            },
+            ..Default::default()
+        };
+        let host = probe_host(project);
+        // Missing keys never read these values. Aliases disable the index
+        // without changing which structured comparisons the relation enters.
+        let source = if aliased {
+            "type V0 = 0; type V1 = 1; type V2 = 2; type V3 = 3; \
+             type S = {p0: V0} | {p1: V1} | {p2: V2} | {p3: V3};"
+        } else {
+            "type S = {p0: 0} | {p1: 1} | {p2: 2} | {p3: 3};"
+        };
+        let source = format!("{source} type T = {{q2: number}} | {{q1: number}} | {{q0: number}};");
+        let key = with_probe_on_host(&host, project, &source, "[S, T]", |dispatch, node| {
+            assert_eq!(
+                matches!(
+                    dispatch.global_wrapper_surface("Object", &[], PROBE_FILE),
+                    super::apparent_type::GlobalWrapper::Surface(_)
+                ),
+                ambient,
+                "the apparent Object interface matches the control"
+            );
+            let data = dispatch.graph().node_data(node).expect("the tuple exists");
+            let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+                panic!("the probe reads [S, T]: {data:?}");
+            };
+            let normalize = |node| {
+                dispatch
+                    .normalize_node_for_structural_fact_demand(
+                        node,
+                        ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    )
+                    .into_complete_node()
+                    .expect("the union is prepared")
+            };
+            dispatch
+                .relate_key_for(normalize(elements[0].value), normalize(elements[1].value))
+                .to_query_key()
+        });
+        let SemanticQueryKey::Relate { source, target, .. } = &key else {
+            unreachable!("a relation key")
+        };
+        with_relation_comparisons_for_tests(comparisons, || {
+            let read = || {
+                let _request = verter_type_engine::request_context::RequestContextGuard::install(
+                    verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+                        1, Arc::from(PROBE_FILE), verter_audit::RequestKind::ComponentMeta, false, false, None, 1_000_000));
+                root_read(&host, &key, work)
+            };
+            let cold = read();
+            assert_eq!(read(), cold, "exact repeat, aliased={aliased}");
+            let expected_refusals = if comparisons == 100 {
+                vec![]
+            } else {
+                vec![super::walk::ShallowDiagnostic::RelationTooComplex {
+                    source: *source,
+                    target: *target,
+                }]
+            };
+            assert_eq!(
+                cold.refusals, expected_refusals,
+                "TS2859 subjects: {cold:?}"
+            );
+            (
+                cold.answer,
+                cold.partial,
+                cold.reasons,
+                cold.status,
+                cold.has_value,
+            )
+        })
+    };
+    for (ambient, comparisons, work) in [
+        (false, 1, 5),
+        (true, 2, 12),
+        (true, 3, 20),
+        (false, 100, 1_000),
+        (true, 100, 1_000),
+    ] {
+        let ordinary = observe(true, ambient, comparisons, work);
+        if comparisons <= 2 {
+            assert!(
+                matches!(
+                    ordinary.3,
+                    verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+                ),
+                "an exhausted comparison has no scalar judgement: {ordinary:?}"
+            );
+            assert!(
+                !ordinary.4,
+                "the refusal must carry no usable payload: {ordinary:?}"
+            );
+        } else {
+            assert_eq!(ordinary.0, "NotAssignable", "the exact ordinary verdict");
+        }
+        if comparisons == 100 {
+            assert_eq!(
+                ordinary,
+                (
+                    "NotAssignable".to_owned(),
+                    false,
+                    PartialReasonSet::empty(),
+                    verter_type_engine::semantic_query::FactStatus::Complete,
+                    true
+                )
+            );
+        } else {
+            assert!(ordinary.1, "the checker refusal is partial");
+            assert_eq!(ordinary.2, PartialReasonSet::OPERATION_BUDGET);
+        }
+        assert_eq!(
+            observe(false, ambient, comparisons, work),
+            ordinary,
+            "indexed and ordinary refusal classes: ambient={ambient}, comparisons={comparisons}, work={work}"
+        );
     }
 }
 
@@ -1099,7 +1539,7 @@ fn path_key(
     use verter_type_engine::semantic_query::{
         PathSegment, ProjectionMode, ProjectionReductionContext, PropertyKey, SemanticQueryKey,
     };
-    let path: Arc<[PathSegment]> = path
+    let path: verter_type_expr::OwnedSlice<PathSegment> = path
         .iter()
         .map(|member| PathSegment::Member(PropertyKey::identifier(Arc::from(*member))))
         .collect();
@@ -1258,10 +1698,16 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
         refused.refusals, named,
         "the refusal names the check's pair"
     );
+    let before_repeat = semantic_misses(&host);
     assert_eq!(
         limited(&relation),
         refused,
         "its sealed repeat reports it too"
+    );
+    assert_eq!(
+        semantic_misses(&host),
+        before_repeat,
+        "no comparisons recomputed"
     );
     assert!(
         root_read(&host, &relation, full).refusals.is_empty(),
@@ -1270,6 +1716,10 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
 
     let (conditional, [check, extends]) = reversed_conditional_key(&host, 40);
     let consumed = limited(&conditional);
+    assert_eq!(
+        consumed.answer, "literal Number(2.0)",
+        "the conditional recovers the checker refusal as false: {consumed:?}"
+    );
     assert_eq!(
         (consumed.partial, consumed.reasons),
         (true, PartialReasonSet::OPERATION_BUDGET),
@@ -1283,7 +1733,13 @@ fn a_relation_refusal_names_its_subjects_through_its_consumer() {
         }],
         "the conditional reports the refusal of its check"
     );
+    let before_repeat = semantic_misses(&host);
     assert_eq!(limited(&conditional), consumed, "cold and repeat agree");
+    assert_eq!(
+        semantic_misses(&host),
+        before_repeat,
+        "the consumer refusal is replayed"
+    );
     let decided = root_read(&host, &conditional, full);
     assert!(
         !decided.partial && decided.refusals.is_empty(),
@@ -1752,26 +2208,29 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     let key = |name: usize| {
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/refusals.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(format!("R{name}")),
+            name: verter_type_expr::OwnedStr::from(format!("R{name}")),
         })
     };
-    let refusal = || CacheRead {
-        value: QueryResult::<SemanticQueryValue>::Error(
-            verter_type_engine::semantic_query::QueryError::Miss,
-        ),
-        dep_signature: verter_type_engine::semantic_query_memo::empty_signature(),
-        walker_diagnostics: Arc::from([]),
-        cache_suppress: true,
-        result_is_partial: true,
-        partial_reasons: PartialReasonSet::PROJECTION_WORK_LIMIT,
-        receipt: verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+    let refusal = || {
+        CacheRead::unleased_for_tests(
+            QueryResult::<SemanticQueryValue>::Error(
+                verter_type_engine::semantic_query::QueryError::Miss,
+            ),
+            verter_type_engine::semantic_query_memo::empty_signature(),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
+            true,
+            verter_type_engine::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ),
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        )
     };
     let carrier =
         || verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(Vec::new()));

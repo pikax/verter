@@ -8,12 +8,11 @@ use crate::semantic_query::{
     QueryResult, SemanticNodeData,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
-use std::sync::Arc;
 
 fn read(
     value: QueryResult<crate::semantic_query::SemanticNodeId>,
 ) -> CacheRead<QueryResult<crate::semantic_query::SemanticNodeId>> {
-    CacheRead::from_value_and_signature(value, Arc::from([]))
+    CacheRead::from_value_and_signature(value, crate::semantic_query::DepSignature::default())
 }
 
 fn partial(
@@ -21,8 +20,7 @@ fn partial(
     reasons: PartialReasonSet,
 ) -> CacheRead<QueryResult<crate::semantic_query::SemanticNodeId>> {
     let mut read = read(value);
-    read.result_is_partial = true;
-    read.partial_reasons = reasons;
+    read.fact_status = crate::semantic_query::FactStatus::approximate(reasons);
     read
 }
 
@@ -73,20 +71,12 @@ fn a_failed_or_recursive_read_is_unavailable() {
 
 #[test]
 fn a_cancelled_or_torn_read_aborts() {
-    let graph = SemanticGraphStore::new();
-    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    assert_eq!(
-        conditional_read_fact(partial(
-            QueryResult::Value(number),
-            PartialReasonSet::CANCELLED
-        )),
-        Err(ExecutionAbort::Cancelled)
-    );
-    assert_eq!(
-        conditional_read_fact(partial(
-            QueryResult::Value(number),
-            PartialReasonSet::SUPERSEDED_GENERATION
-        )),
-        Err(ExecutionAbort::Superseded)
-    );
+    for abort in [ExecutionAbort::Cancelled, ExecutionAbort::Superseded] {
+        assert_eq!(
+            conditional_read_fact(read(QueryResult::Error(QueryError::ExecutionAborted(
+                abort
+            )))),
+            Err(abort)
+        );
+    }
 }

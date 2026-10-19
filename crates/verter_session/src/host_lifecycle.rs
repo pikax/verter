@@ -225,19 +225,17 @@ impl VerterHost {
         parent_canonical_id: &str,
         import_source: &str,
     ) -> Option<String> {
-        let outcome = self.ws().resolve_import_outcome(
+        self.resolve_import_outcome_in(
+            None,
             parent_canonical_id,
             import_source,
             verter_session_query::resolution::ResolutionContext {
                 phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
                 kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
             },
-        );
-        #[cfg(test)]
-        self.observe_owner_edge_outcome(parent_canonical_id, import_source, &outcome);
-        outcome
-            .into_transient_result()
-            .map(|result| result.source_id)
+        )
+        .into_transient_result()
+        .map(|result| result.source_id)
     }
 
     /// Record one owner-edge resolution's semantic trace onto the host's
@@ -322,6 +320,20 @@ impl VerterHost {
         import_source: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> verter_workspace::ResolutionPublication {
+        let publication = self
+            .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
+            .into_publication();
+        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        publication
+    }
+
+    fn resolve_import_outcome_in(
+        &self,
+        overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
+        parent_canonical_id: &str,
+        import_source: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> verter_workspace::ResolutionOutcome {
         // Typeinfo scratch files inline the active request scope and therefore
         // resolve their synthetic imports in that real scope's project
         // context. The request context supplies the actual published-project
@@ -335,11 +347,45 @@ impl VerterHost {
             } else {
                 Arc::from(parent_canonical_id)
             };
-        let outcome = match overlay {
-            None => self
+        let workspace = self.workspace();
+        let root = workspace.published_root();
+        if root.as_ref().is_some_and(|root| {
+            !root.snapshot.owners_for_file(&importer).iter().any(|id| {
+                matches!(
+                    root.snapshot.project(*id).payload,
+                    verter_workspace::ProjectPayload::Configured { .. }
+                )
+            })
+        }) {
+            self.ingest_configured_programs();
+        }
+        let root = workspace.published_root();
+        let reachable_owner = root.as_ref().and_then(|root| {
+            let project = root
+                .snapshot
+                .project(self.project_for_canonical_in_snapshot(&importer, &root.snapshot)?);
+            match &project.payload {
+                verter_workspace::ProjectPayload::Configured { tsconfig_path, .. } => {
+                    Some(verter_session_query::resolution::ProjectOwnership {
+                        project_root: project.root.as_str().to_owned(),
+                        tsconfig_path: Some(tsconfig_path.as_str().to_owned()),
+                    })
+                }
+                _ => None,
+            }
+        });
+        let outcome = match (reachable_owner, overlay) {
+            (Some(owner), overlay) => workspace.resolve_import_from_project_outcome(
+                &owner,
+                overlay,
+                importer.as_ref(),
+                import_source,
+                ctx,
+            ),
+            (None, None) => self
                 .ws()
                 .resolve_import_outcome(importer.as_ref(), import_source, ctx),
-            Some(overlay) => self.ws().resolve_import_outcome_with_overlay(
+            (None, Some(overlay)) => self.ws().resolve_import_outcome_with_overlay(
                 overlay,
                 importer.as_ref(),
                 import_source,
@@ -348,9 +394,7 @@ impl VerterHost {
         };
         #[cfg(test)]
         self.observe_owner_edge_outcome(importer.as_ref(), import_source, &outcome);
-        let publication = outcome.into_publication();
-        crate::host_manage::import_route_witness::record_resolution_witness(&publication);
-        publication
+        outcome
     }
 
     /// The session view's resolution-visible overlay: its upserted
@@ -676,6 +720,7 @@ impl VerterHost {
         // above so its per-file maps release now rather than lingering
         // until the next store-view request.
         self.store_view_manager().clear();
+        self.ingest_configured_programs();
         self.bump_store_view_epoch();
     }
 
@@ -813,15 +858,6 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
-    /// Register a computation that may read semantic nodes, for the whole
-    /// host call. Close-time payload releases wait until no guard is alive
-    /// (see [`crate::project_type_store::semantic_activity`]); a caller that reaches the host
-    /// from several threads concurrently (the language server) must hold one
-    /// per call.
-    pub fn semantic_activity(&self) -> crate::project_type_store::SemanticActivityGuard {
-        self.project_type_store.semantic_activity()
-    }
-
     /// What the host retains right now, as object counts and aggregate
     /// bytes ([`HostRetentionSnapshot`]).
     ///
@@ -859,12 +895,28 @@ impl VerterHost {
                 .carrier_publication
                 .publication_store
                 .retained_lane_count(),
+            semantic_graph_storage_bytes: self
+                .project_type_store
+                .semantic_graph()
+                .graph_storage_charge_bytes(),
+            semantic_bookkeeping_storage_bytes: self
+                .project_type_store
+                .semantic_graph()
+                .bookkeeping_storage_charge_bytes(),
             semantic_nodes: self.project_type_store.semantic_graph().node_count(),
+            semantic_node_ownership: self
+                .project_type_store
+                .semantic_graph()
+                .node_ownership_counts(),
             semantic_node_slots: self
                 .project_type_store
                 .semantic_graph()
                 .node_storage_slots(),
             semantic_memo_entries: self.project_type_store.semantic_graph().memo_entry_count(),
+            semantic_memo_candidates: self
+                .project_type_store
+                .semantic_graph()
+                .memo_candidate_count(),
             unresolved_reach: self
                 .project_type_store
                 .semantic_graph()
@@ -876,7 +928,10 @@ impl VerterHost {
                 .stable_key_class_count(),
             identity_indexes:
                 verter_type_engine::semantic_query_memo::IdentityIndexSnapshot::capture(),
-            deferred_releases: self.project_type_store.deferred_release_count(),
+            pending_destroyed_nodes: self
+                .project_type_store
+                .semantic_graph()
+                .pending_destroyed_nodes(),
             resolved_import_facts: self
                 .project_type_store
                 .resolved_import_facts()
@@ -893,7 +948,7 @@ impl VerterHost {
                 .semantic_graph()
                 .signature_store()
                 .record_cap(),
-            reclaim: self.project_type_store.deferred_release_stats(),
+            closes: self.project_type_store.close_stats(),
             shape_cache_entries: self.project_type_store.shape_cache_db().live_count(),
             flow_graphs: self.project_type_store.flow_slice().graphs_entry_count(),
             flow_hash_entries: self
@@ -1016,36 +1071,34 @@ impl VerterHost {
     /// `ensure_loaded()` re-integrates.
     pub fn evict(&self, canonical_id: &str) {
         self.ws().notify_close(canonical_id);
+        self.evict_loaded_content(canonical_id);
+    }
+
+    /// Discard host content for a workspace-only replacement while preserving
+    /// the workspace's active overlay and snapshot authority.
+    pub(crate) fn evict_loaded_content(&self, canonical_id: &str) {
         self.semantic_db().invalidate(canonical_id);
-        // Release what the semantic substrate retained for this document:
-        // its memo entries, node payloads, per-node sidecars, relation
-        // proofs and shape-cache entries. The editor buffer is gone and the
-        // next reader re-lowers the file from disk, so nothing interned for
-        // the closed content is reachable again except through a stale
-        // handle (which now reads as unresolved). This is NOT
-        // `evict_canonical`: the file's artifacts stay for the reload.
+        // Evict what the semantic substrate cached for this document: its
+        // memo entries, union views, hash-cons memos, signature-token roots
+        // and shape-cache entries. The editor buffer is gone and the next
+        // reader re-lowers the file from disk, so no lookup reaches the
+        // closed content again; its nodes are destroyed as soon as no caller
+        // holds them, and a caller still holding one keeps reading it. This
+        // is NOT `evict_canonical`: the file's artifacts stay for the reload.
         //
         // NOT for a synthesised typeinfo scratch (`verter://typeinfo/…`):
         // `evaluate_type_expression` evicts its scratch at the end of every
         // non-cacheable evaluation under the documented contract that the
         // eviction reclaims compile / derived state but PRESERVES the
-        // scratch's semantic-graph memo — the node id it just returned to
-        // the caller, and the cross-mode materialized-point satisfaction a
-        // repeat request relies on. Releasing it would hand the caller a
-        // tombstoned id.
+        // scratch's semantic-graph memo — the cross-mode materialized-point
+        // satisfaction a repeat request relies on.
         const TYPEINFO_SCRATCH_URI_PREFIX: &str = "verter://typeinfo/";
         if !canonical_id.starts_with(TYPEINFO_SCRATCH_URI_PREFIX) {
-            // Deferred: the payload switch runs only while no computation is
-            // in flight (see `crate::project_type_store::semantic_activity`) — a computation that
-            // read one of these nodes before the close must never see it turn
-            // into the released placeholder between two of its reads.
-            let applied = self
-                .project_type_store
-                .defer_release_canonical(canonical_id);
+            let report = self.project_type_store.close_canonical(canonical_id);
             tracing::debug!(
                 canonical_id,
-                applied,
-                "evict queued the document's semantic substrate release"
+                memo_entries_evicted = report.memo_entries_evicted,
+                "evict released the document's semantic caches"
             );
         }
         // What the document's own content keyed: its resolved-import facts

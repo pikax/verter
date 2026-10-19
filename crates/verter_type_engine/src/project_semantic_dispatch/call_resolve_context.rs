@@ -7,6 +7,37 @@ use super::super::ProjectSemanticDispatch;
 use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// An unfixed binder retains its constraint as a contextual literal type.
+    pub(super) fn contextual_uninferred_parameter(
+        &self,
+        param: SemanticNodeId,
+        constraint: Option<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let Some(constraint) = constraint else {
+            return param;
+        };
+        let graph = self.graph();
+        let Some(SemanticNodeData::TypeParam {
+            decl,
+            param_index,
+            default,
+            display_name,
+            constraint: None,
+        }) = graph
+            .node_data(param)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
+        else {
+            return param;
+        };
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl,
+            param_index,
+            default,
+            display_name,
+            constraint: Some(constraint),
+        })
+    }
     /// The object literal argument `argument` with each member whose
     /// position in the parameter type `target` is one of the `const` type
     /// parameters `const_params` read as that member of the argument's const
@@ -29,9 +60,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::Object(view)),
             Some(SemanticNodeData::Object(target_view)),
         ) = (
-            graph.node_data(argument).as_deref().cloned(),
-            graph.node_data(const_view).as_deref().cloned(),
-            graph.node_data(target).as_deref().cloned(),
+            graph
+                .node_data(argument)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
+            graph
+                .node_data(const_view)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
+            graph
+                .node_data(target)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone),
         )
         else {
             return argument;

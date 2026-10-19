@@ -163,7 +163,7 @@ fn imported_registry_seed_refresh_does_not_engage_skip_under_graph_only_authorit
         text: Some("export interface Props { label?: string }".to_string()),
     };
     let object = verter_type_expr::facts::SemanticTypeSource::Synthesized(
-        verter_type_expr::facts::ResolvedLocalShape::Object(Arc::from(vec![
+        verter_type_expr::facts::ResolvedLocalShape::Object(From::from(vec![
             verter_type_expr::facts::SynthesizedMemberFact {
                 name: "label".to_string(),
                 optional: true,
@@ -205,14 +205,14 @@ fn imported_registry_seed_refresh_keeps_symbolic_imported_surfaces_refreshable()
             verter_type_expr::facts::IndexedAccessFact {
                 object: verter_type_expr::locators::TypeBodySlot {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from("/src/types.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/src/types.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("Button"),
+                        symbol: verter_type_expr::OwnedStr::from("Button"),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(Vec::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::default(),
                 },
-                index_path: Arc::from(vec!["variants".to_string()]),
+                index_path: From::from(vec!["variants".to_string()]),
             },
         ),
     );
@@ -5302,7 +5302,10 @@ defineProps<Props>()
         "repeated DB-backed resolutions should preserve tracked dependencies"
     );
     assert!(
-        result1.canonical_dependencies.contains("/src/types.ts"),
+        result1
+            .canonical_dependencies
+            .iter()
+            .any(|dependency| dependency == "/src/types.ts"),
         "registry resolution should track the defining file as a dependency"
     );
     assert_eq!(
@@ -6551,6 +6554,7 @@ defineProps<Props<T>>()
     let _ = session.evaluate_types("/Generic.vue").unwrap().unwrap();
 
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Construct the macro's parent shell `Props<T>` as a TypeExpr —
     // this is the *macro field's parent*, not the field itself. Step
@@ -6573,7 +6577,7 @@ defineProps<Props<T>>()
 
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
-        path: StdArc::from(vec![PathSegment::Member(
+        path: verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
             verter_type_engine::semantic_query::PropertyKey::identifier("items"),
         )]),
         context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -6665,6 +6669,7 @@ defineProps<Wrapper<Inner>>()
     let _ = session.evaluate_types("/Owner.vue").unwrap().unwrap();
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let wrapper_inner = TypeExpr::Ref {
         name: StdArc::from("Wrapper"),
@@ -6949,6 +6954,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     // The macro shell: `PricingPlansSlots<{ id: string; tier: 'pro' }>`.
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
@@ -6988,9 +6994,10 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     // Project ["badge"] off the lowered shell. After Step 1.5 dispatch
     // can navigate the Mapped+Conditional pair to extract the badge slot.
-    let badge_path: StdArc<[PathSegment]> = StdArc::from(vec![PathSegment::Member(
-        verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
-    )]);
+    let badge_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(vec![PathSegment::Member(
+            verter_type_engine::semantic_query::PropertyKey::identifier("badge"),
+        )]);
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: lowered,
         path: badge_path,
@@ -7160,6 +7167,7 @@ defineSlots<PricingPlansSlots<{ id: string; tier: 'pro' }>>()
 
     let host = project.host();
     let dispatch = ProjectSemanticDispatch::new(host);
+    let _builder = dispatch.enter_construction_scope();
 
     let plan_arg = TypeExpr::Object(StdArc::new(verter_type_expr::ObjectExpr {
         properties: vec![
@@ -7504,7 +7512,7 @@ defineEmits<Emits>()
         assert_eq!(tuple.elements[0].label.as_deref(), Some("payload"));
         assert_eq!(
             tuple.elements[0].ty,
-            FactOrLocator::LeafUnion(std::sync::Arc::from(
+            FactOrLocator::LeafUnion(From::from(
                 vec![
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::String),
                     LeafTypeFact::Primitive(verter_type_expr::PrimitiveName::Number),
@@ -8029,9 +8037,15 @@ defineEmits<ConditionalEmits>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8056,7 +8070,7 @@ defineEmits<ConditionalEmits>()
     );
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            host, &dispatch, surface,
+            host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");
@@ -8132,7 +8146,7 @@ fn emit_branch_merge_merges_colliding_js_property_spellings() {
         ),
     ];
 
-    let merged = merge_emit_branch_members(&true_members, &false_members);
+    let merged = merge_emit_branch_members(true_members, false_members);
     assert_eq!(
         merged.len(),
         2,
@@ -8209,7 +8223,7 @@ fn emit_branch_merge_with_one_unresolvable_branch_records_partiality() {
         // side effect.
         let names = surface.recorded().map(|surface| {
             verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-                host, &dispatch, surface,
+                host, &dispatch, surface.id(),
             )
             .resolved_for_tests()
             .unwrap_or_default()
@@ -8280,6 +8294,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
 
     let host = VerterHost::new_standalone(crate::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(
         verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -8318,11 +8333,11 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let open_branch = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from(
+            effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -8370,11 +8385,11 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     .resolved_for_tests()
     .expect("the open-branch merge still returns a surface");
     assert_eq!(
-        surface,
+        surface.id(),
         conditional,
         "an open branch keeps the conditional carrier — no closed Object is interned from \
          presence-only evidence; observed {:?}",
-        graph.node_data(surface)
+        graph.node_data(surface.id())
     );
 
     // The emit READ is presence-complete over the carrier: both branches'
@@ -8383,7 +8398,7 @@ fn emit_branch_merge_with_open_program_branch_keeps_the_conditional_carrier() {
     // the diagnostic envelope.
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            &host, &dispatch, surface,
+            &host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");
@@ -8506,9 +8521,15 @@ defineEmits<EmitChain0>()
     );
 
     let mut carrier_visited = rustc_hash::FxHashSet::default();
-    let conditional_root =
-        resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut carrier_visited)
-            .expect("the >8-hop named emit alias carrier must reach its conditional root");
+    let builder = dispatch.enter_construction_scope();
+    let conditional_root = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    )
+    .expect("the >8-hop named emit alias carrier must reach its conditional root");
     assert!(matches!(
         verter_type_engine::project_semantic_dispatch::node_data_for(
             host.project_type_store().semantic_graph(),
@@ -8534,7 +8555,7 @@ defineEmits<EmitChain0>()
     );
     let members =
         verter_type_engine::project_semantic_dispatch::one_level_surface::read_positive_surface_members(
-            host, &dispatch, surface,
+            host, &dispatch, surface.id(),
         )
         .resolved_for_tests()
         .expect("a resolvable branch-merge surface reads its members");
@@ -8604,6 +8625,7 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
 
     let scope = "/src/cyclic.ts";
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let builder = dispatch.enter_construction_scope();
 
     // Navigate-lower the cyclic alias head to its DeclRef carrier — the
     // shape the macro projector hands the carrier walk. Navigate produces
@@ -8634,7 +8656,13 @@ fn dispatch_mutual_alias_cycle_emits_terminates_by_identity() {
     // Drive the carrier walk DIRECTLY so the termination mechanism is
     // observable. A mutual alias cycle has no Conditional root → `None`.
     let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-    let result = resolve_emit_payload_to_conditional_root(&dispatch, payload_node, 0, &mut visited);
+    let result = resolve_emit_payload_to_conditional_root(
+        &dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut visited,
+    );
 
     assert!(
         result.is_none(),
@@ -8698,17 +8726,17 @@ export type C = { back: A }
             "Pick",
             vec![TypeExpr::named("A"), TypeExpr::string_literal("next")],
         );
-        let node =
-            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host)
-                .lower_type_expr_in_scope_with_mode(
-                    "/cycle.ts",
-                    &pick_over_cycle,
-                    verter_type_engine::semantic_query::ProjectionMode::Navigate,
-                )
-                .expect("Pick<A,'next'> must lower");
-
+        // One dispatcher lowers and detects: it owns the lowered node.
         let fixture_dispatch_16 =
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
+        let _builder = fixture_dispatch_16.enter_construction_scope();
+        let node = fixture_dispatch_16
+            .lower_type_expr_in_scope_with_mode(
+                "/cycle.ts",
+                &pick_over_cycle,
+                verter_type_engine::semantic_query::ProjectionMode::Navigate,
+            )
+            .expect("Pick<A,'next'> must lower");
         let detected = crate::meta_resolve::node_root_reaches_transitive_cycle_with_fence(
             &fixture_dispatch_16,
             "/cycle.ts",

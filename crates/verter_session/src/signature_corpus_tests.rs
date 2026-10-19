@@ -379,7 +379,7 @@ struct LiveProbeOutcome {
     /// instantiation carrier (`InstantiationRef(<operator>)` — the
     /// substrate has not reduced the probe's outer operator), else
     /// `None`.
-    deferred_operator: Option<std::sync::Arc<str>>,
+    deferred_operator: Option<verter_type_expr::OwnedStr>,
     /// The rail answered the structural-fact demand with a SEMANTIC
     /// non-answer: a `Partial` demand (truncated/faulted, no node at all),
     /// or an `Opaque` carrier whose disposition is `OptionalAbsence` ("no
@@ -425,9 +425,9 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: std::sync::Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("__sig_probe_lane"),
+            symbol: verter_type_expr::OwnedStr::from("__sig_probe_lane"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -458,6 +458,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     // Publication KEEPS an alias/builtin instantiation carrier: the
     // checker keeps the alias label too, and the carrier is resolved when
     // a consumer DEMANDS the structural fact behind it. The recorded
@@ -514,7 +515,7 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
         Some(data) => match data.as_ref() {
             verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
                 base, ..
-            } => (Some(std::sync::Arc::clone(&base.decl_name)), false),
+            } => (Some(base.decl_name.clone()), false),
             // Only a SEMANTIC non-answer counts as a refusal — see the
             // `refused` field. An identity carrier that still denotes a
             // type, or a resource/control sentinel, does not.

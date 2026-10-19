@@ -14,6 +14,7 @@
 //! `fn raise_node_to_type_expr` exists in `crates/`.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use crate::semantic_query::SurfaceView;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -56,6 +57,7 @@ pub use shape_engine::{DegradedLeaf, MaterializedTypeExpr};
 /// Graph-native result of reducing one output demand before the terminal sink
 /// performs its single display materialization.
 pub struct ReducedOutputNode {
+    _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     node_id: SemanticNodeId,
     dep_signature: DepSignature,
     result_is_partial: bool,
@@ -70,6 +72,16 @@ impl ReducedOutputNode {
     #[must_use]
     pub fn result_is_partial(&self) -> bool {
         self.result_is_partial
+    }
+
+    /// Borrow the reduced node this output owns.
+    pub fn node(
+        &self,
+    ) -> Result<
+        crate::semantic_query_memo::node_roots::NodeRef<'_>,
+        crate::semantic_query::QueryError,
+    > {
+        self._roots.0.node_ref(self.node_id)
     }
 }
 
@@ -157,7 +169,7 @@ impl SemanticQueryKeyDigest {
         let mut hasher = rustc_hash::FxHasher::default();
         canonical.hash(&mut hasher);
         Self {
-            variant: std::mem::discriminant(&canonical),
+            variant: std::mem::discriminant(canonical.as_ref()),
             hash: hasher.finish(),
         }
     }
@@ -166,43 +178,33 @@ impl SemanticQueryKeyDigest {
 #[cfg(any(test, feature = "test-support"))]
 fn canonicalise_for_digest(
     key: &crate::semantic_query::SemanticQueryKey,
-) -> crate::semantic_query::SemanticQueryKey {
-    use std::sync::Arc;
+) -> std::borrow::Cow<'_, crate::semantic_query::SemanticQueryKey> {
+    use std::borrow::Cow;
 
     use crate::semantic_query::{PathSegment, SemanticQueryKey};
     match key {
-        SemanticQueryKey::ProjectMember { base, member, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(
-                vec![PathSegment::Member(
-                    crate::semantic_query::PropertyKey::identifier(Arc::clone(member)),
-                )]
-                .into_boxed_slice(),
-            ),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::IndexedAccess { base, index, mode } => SemanticQueryKey::ProjectPath {
-            base: *base,
-            path: Arc::from(vec![PathSegment::Index(index.clone())].into_boxed_slice()),
-            context: crate::semantic_query::ProjectionReductionContext::published(*mode),
-        },
-        SemanticQueryKey::ReduceUnion {
-            members,
-            nullability,
-        } => SemanticQueryKey::ReduceUnion {
-            members: Arc::clone(members),
-            nullability: *nullability,
-        },
-        SemanticQueryKey::ReduceIntersection {
-            input,
-            purpose,
-            context,
-        } => SemanticQueryKey::ReduceIntersection {
-            input: input.clone(),
-            purpose: *purpose,
-            context: context.clone(),
-        },
-        other => other.clone(),
+        SemanticQueryKey::ProjectMember { base, member, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: verter_type_expr::OwnedSlice::from(
+                    vec![PathSegment::Member(
+                        crate::semantic_query::PropertyKey::identifier(member.clone()),
+                    )]
+                    .into_boxed_slice(),
+                ),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        SemanticQueryKey::IndexedAccess { base, index, mode } => {
+            Cow::Owned(SemanticQueryKey::ProjectPath {
+                base: *base,
+                path: verter_type_expr::OwnedSlice::from(
+                    vec![PathSegment::Index(index.clone())].into_boxed_slice(),
+                ),
+                context: crate::semantic_query::ProjectionReductionContext::published(*mode),
+            })
+        }
+        other => Cow::Borrowed(other),
     }
 }
 
@@ -268,6 +270,13 @@ pub fn dispatch_cold_for(key: &crate::semantic_query::SemanticQueryKey) -> usize
 pub fn dispatch_warm_for(key: &crate::semantic_query::SemanticQueryKey) -> usize {
     let digest = SemanticQueryKeyDigest::from_key(key);
     DISPATCH_KEY_WARM_COUNTS.with(|c| c.borrow().get(&digest).copied().unwrap_or(0) as usize)
+}
+
+/// The number of keys this thread has built cold more than once since
+/// thread start: each is a read a stored entry should have served.
+#[cfg(any(test, feature = "test-support"))]
+pub fn keys_built_cold_more_than_once() -> usize {
+    DISPATCH_KEY_COLD_COUNTS.with(|c| c.borrow().values().filter(|count| **count > 1).count())
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -460,6 +469,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
+        let _scope = self.graph().enter_node_root_scope();
         let reduced = self.reduce_output_node_with_context(node, context);
         // A raise failure after a successful reduction is PRESENT-BUT-
         // UNRAISABLE, never a genuine absence: degrade as the TYPED
@@ -486,10 +496,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> ReducedOutputNode {
+        let _scope = self.graph().enter_node_root_scope();
         let mut state = ReduceState::default();
         let node_id = self.reduce_graph_node_iterative(node, context, &mut state);
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
+            _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                self.graph(),
+                [node_id],
+            ),
             node_id,
             dep_signature: state.into_dep_signature(),
             result_is_partial,
@@ -541,16 +556,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn observation_interior_carrier_stop(
         &self,
         node: SemanticNodeId,
-        decl_canonical: &Arc<str>,
+        decl_canonical: &str,
         state: &ReduceState,
     ) -> bool {
         let Some((owner_canonical, root)) = state.observation.as_ref() else {
             return false;
         };
-        if node == *root || decl_canonical.as_ref() == "__builtin__" {
+        if node == *root || decl_canonical == "__builtin__" {
             return false;
         }
-        decl_canonical.as_ref() == owner_canonical.as_ref()
+        decl_canonical == owner_canonical.as_ref()
             || self
                 .ctx
                 .workspace_is_package_backed(decl_canonical.as_ref())
@@ -1063,7 +1078,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `ensure_indexed_ready_serve`.
                 let _ = whole_hash;
                 let base =
-                    self.type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                    self.type_slot_for(canonical_id.clone(), *owner, name.clone());
                 let inst_ctx = self.instantiate_context_for(&base.defining_canonical, context);
                 let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     base,
@@ -1085,7 +1100,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // Raw-fallback / synthetic-binding carriers pass through this
             // reducer unchanged — the dispatch resolves them as a whole.
             | SemanticNodeData::RawFallback { .. }
-            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::SyntheticBinding { .. } => node,
 
             // Unresolved bare-name / dynamic-import reference carriers: a
@@ -1236,7 +1250,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         false_branch_ref: d_false,
                         distributive: d_dist,
                         pending: d_pending,
-                    }) = self.graph().node_data(reduced).as_deref().cloned()
+                    }) = self.graph().node_data(reduced).as_deref().map(crate::semantic_query::SemanticNodeData::clone)
                     {
                         let demanded_true = self.apply_conditional_branch_pending(
                             d_true,
@@ -1310,13 +1324,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // reduced node is driven through the demand reducer below.
                 let (value_root, path) = data.typeof_head().expect("TypeOf carrier head");
                 let value_root = value_root.clone();
-                let path = Arc::clone(path);
+                let path = path.clone();
                 let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
 
                 let typeof_key = self.typeof_key_with_path(value_root, path, context);
                 let root_read = self.execute_read(typeof_key);
                 state.merge_dep_signature(&root_read.dep_signature);
-                if root_read.result_is_partial {
+                if root_read.result_is_partial() {
                     state.result_is_partial = true;
                     crate::request_context::mark_request_result_partial();
                 }
@@ -1380,14 +1394,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // semantically transparent. Dispatch and recurse — same
                 // as Expanded for DeclRef.
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
                 let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                     scope,
-                    name: Arc::clone(&identity.decl_name),
+                    name: identity.decl_name.clone(),
                 });
                 self.dispatch_operator_with_recurse(node, key, context, state)
             }
@@ -1464,9 +1478,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return node;
                 }
                 let base_key = self.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 );
                 // Observation passes run the Instantiate query itself
                 // CARRIER-PRESERVING (`Published(Shallow)`): the outer
@@ -1560,8 +1574,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Tuple { elements, readonly } => {
-                rebuild_tuple(self, node, elements, *readonly, &state.mapping, context)
+                rebuild_tuple(self, node, elements.as_arc(), *readonly, &state.mapping, context)
                     .unwrap_or(node)
+            }
+            SemanticNodeData::DeferredCallable(_) => {
+                if is_whole_surface_published(context) {
+                    self.materialize_returned_callable(node)
+                } else {
+                    node
+                }
             }
             SemanticNodeData::Signature {
                 kind,
@@ -1573,8 +1594,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 signature_span,
                 return_type_span,
                 predicate,
-                is_abstract: _,
-            } => rebuild_function(
+                is_abstract,
+            } => {
+                if is_whole_surface_published(context) {
+                    if let crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) = return_carrier {
+                        let (returned, inferred) = match self.execute_function_return_source(
+                            source.source(), source.identity().anchor.canonical_id.as_ref(),
+                        ) {
+                            super::flow_return::FunctionReturnNode::Flow(result) =>
+                                (source.apply_result(self, result.return_type()), result.inferred_predicate()),
+                            super::flow_return::FunctionReturnNode::Aborted(abort) =>
+                                (self.opaque(QueryError::ExecutionAborted(abort)), None),
+                            _ => (self.opaque(QueryError::Miss), None),
+                        };
+                        let names: Vec<_> = type_parameters.iter().map(|p| Arc::<str>::from(&p.name)).collect();
+                        let arguments: Vec<_> = type_parameters.iter().map(|p| p.param).collect();
+                        let returned = self.bind_flow_return_own_clause(returned,
+                            source.identity().anchor.canonical_id.as_ref(), source.identity().anchor.owner,
+                            &names, &arguments).unwrap_or(returned);
+                        let demanded = self.graph().intern_preserving_scope(node, SemanticNodeData::Signature {
+                            kind: *kind, params: params.share(), return_type: returned,
+                            type_parameters: type_parameters.share(), occurrence: occurrence.clone(),
+                            return_carrier: crate::semantic_query::SignatureReturnCarrier::Function(source.source().clone()),
+                            signature_span: *signature_span, return_type_span: *return_type_span,
+                            predicate: predicate.or(inferred), is_abstract: *is_abstract,
+                        });
+                        return self.reduce_subtree(demanded, context, state);
+                    }
+                }
+                rebuild_function(
                 self,
                 node,
                 *kind,
@@ -1589,7 +1637,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &state.mapping,
                 context,
             )
-            .unwrap_or(node),
+            .unwrap_or(node)
+            },
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then drive it through the
                 // reducer so its demanded children reduce under `context`.
@@ -1652,7 +1701,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // fenced serve / unrootable self-root) is NOT folded here: it refuses
         // only its own inner-memo admission and MUST NOT suppress a
         // complete component-meta result.
-        if read.result_is_partial {
+        if read.result_is_partial() {
             state.result_is_partial = true;
             crate::request_context::mark_request_result_partial();
         }
@@ -1673,6 +1722,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             QueryResult::Recursive(_id) => node,
+            QueryResult::Error(error @ QueryError::IncompleteSemanticOperand { .. }) => {
+                // This demanded reduction completed without a usable value.
+                // Preserve its typed failure instead of republishing the
+                // authored subject as if it were a deliberate carrier stop.
+                self.graph()
+                    .intern_preserving_scope(node, SemanticNodeData::Opaque(error))
+            }
             QueryResult::Error(_) => node,
         };
 
@@ -1690,7 +1746,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn opaque_unknown_with(&self, origin: SemanticNodeId, reason: &str) -> SemanticNodeId {
         self.graph().intern_preserving_scope(
             origin,
-            SemanticNodeData::Opaque(QueryError::Other(Arc::from(reason))),
+            SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(reason))),
         )
     }
 }
@@ -1864,7 +1920,9 @@ fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
     if !changed {
         return Some(node);
     }
-    let mut members = new_members.iter().cloned();
+    let mut members = new_members
+        .iter()
+        .map(crate::semantic_query::SurfaceMember::clone);
     let mut calls = new_calls.iter().copied();
     let mut constructs = new_constructs.iter().copied();
     let entries = view
@@ -1961,7 +2019,7 @@ fn rebuild_tuple<C: crate::resolver_core::ResolverCapabilities>(
             }
             TupleElement {
                 value: new_value,
-                ..el.clone()
+                ..el.copy()
             }
         })
         .collect();
@@ -1971,7 +2029,7 @@ fn rebuild_tuple<C: crate::resolver_core::ResolverCapabilities>(
     Some(dispatch.graph().intern_preserving_scope(
         node,
         SemanticNodeData::Tuple {
-            elements: Arc::from(new_elements.into_boxed_slice()),
+            elements: crate::semantic_query::PayloadArray::from(new_elements.into_boxed_slice()),
             readonly,
         },
     ))
@@ -1982,9 +2040,9 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     kind: crate::semantic_query::SignatureKind,
-    params: &Arc<[crate::semantic_query::FunctionParam]>,
+    params: &crate::semantic_query::PayloadArray<crate::semantic_query::FunctionParam>,
     return_type: SemanticNodeId,
-    type_parameters: &Arc<[crate::semantic_query::TypeParamDecl]>,
+    type_parameters: &crate::semantic_query::PayloadArray<crate::semantic_query::TypeParamDecl>,
     occurrence: Option<crate::semantic_query::SignatureNodeOccurrence>,
     return_carrier: crate::semantic_query::SignatureReturnCarrier,
     signature_span: Option<verter_span::Span>,
@@ -2010,7 +2068,7 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
             }
             crate::semantic_query::FunctionParam {
                 ty: new_ty,
-                ..p.clone()
+                ..p.copy()
             }
         })
         .collect();
@@ -2036,7 +2094,7 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
             crate::semantic_query::TypeParamDecl {
                 constraint: new_constraint,
                 default: new_default,
-                ..tp.clone()
+                ..tp.copy()
             }
         })
         .collect();
@@ -2048,9 +2106,11 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
         SemanticNodeData::Signature {
             kind,
             is_abstract: dispatch.signature_is_abstract(node),
-            params: Arc::from(new_params.into_boxed_slice()),
+            params: crate::semantic_query::PayloadArray::from(new_params.into_boxed_slice()),
             return_type: new_return,
-            type_parameters: Arc::from(new_type_params.into_boxed_slice()),
+            type_parameters: crate::semantic_query::PayloadArray::from(
+                new_type_params.into_boxed_slice(),
+            ),
             // Node remapping preserves source provenance — the occurrence
             // verbatim, the declared carrier retargeted at the remapped
             // return.
@@ -2062,6 +2122,8 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
                 crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                     crate::semantic_query::SignatureReturnCarrier::Function(source)
                 }
+                other @ (crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)) => other,
             },
             signature_span,
             return_type_span,
@@ -2086,10 +2148,10 @@ fn rebuild_function<C: crate::resolver_core::ResolverCapabilities>(
 struct ReduceState {
     visited: FxHashSet<(SemanticNodeId, ProjectionReductionContext)>,
     mapping: MappingMap,
-    dep_facts: Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    /// OR-fold of every `read.result_is_partial` observed by `reduce_one`
+    dep_facts: Vec<crate::semantic_query::DepEntry>,
+    /// OR-fold of every `read.result_is_partial()` observed by `reduce_one`
     /// during this reduce pass. Propagated into the returned
-    /// `MaterializedTypeExpr.result_is_partial` so direct consumers
+    /// `MaterializedTypeExpr.result_is_partial()` so direct consumers
     /// (e.g. `field_types::materialize_component_meta_type_expr_until_stable_full`)
     /// can refuse to publish a PARTIAL result into shared caches without
     /// needing to inspect the request-scoped TLS flag. NOT set by a
@@ -2123,27 +2185,19 @@ struct ReduceState {
 // per-member projectors.
 impl ReduceState {
     fn merge_dep_signature(&mut self, sig: &DepSignature) {
-        for (canonical, version) in sig.iter() {
+        for entry in sig.iter() {
             // Light dedup on (canonical, version) — keeps the
             // accumulated list O(unique_facts) rather than
             // O(num_dispatches × facts_per_dispatch).
-            if !self
-                .dep_facts
-                .iter()
-                .any(|(c, v)| Arc::ptr_eq(c, canonical) && v == version)
-                && !self
-                    .dep_facts
-                    .iter()
-                    .any(|(c, v)| c.as_ref() == canonical.as_ref() && v == version)
-            {
-                self.dep_facts
-                    .push((Arc::clone(canonical), version.clone()));
+            if !self.dep_facts.contains(entry) {
+                // The clone shares the entry's owned canonical.
+                self.dep_facts.push(entry.clone());
             }
         }
     }
 
     fn into_dep_signature(self) -> DepSignature {
-        Arc::from(self.dep_facts.into_boxed_slice())
+        DepSignature::new(self.dep_facts)
     }
 }
 
@@ -2362,9 +2416,9 @@ pub fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilitie
     budget: &mut u32,
 ) -> ClosednessVerdict {
     let key = (
-        Arc::<str>::from(canonical_id),
+        verter_type_expr::OwnedStr::from(canonical_id),
         owner,
-        Arc::<str>::from(decl_name),
+        verter_type_expr::OwnedStr::from(decl_name),
     );
     // DISPATCH-WIDE in-flight cycle guard, NOT a permanent visited set:
     // the key pops on exit, so two SIBLING references to the same decl (a
@@ -2373,6 +2427,9 @@ pub fn prepared_decl_body_is_closed<C: crate::resolver_core::ResolverCapabilitie
     // chain (true recursion — including one that round-trips through a
     // recipe escape's lowering and a key-domain gate's fresh walk) refuses
     // — UNAVAILABLE, not a proof of openness.
+    let Some(_nesting) = OpennessNesting::enter() else {
+        return ClosednessVerdict::Unavailable;
+    };
     if !dispatch.push_closedness_active(key) {
         return ClosednessVerdict::Unavailable;
     }
@@ -2527,6 +2584,34 @@ fn recipe_key_domain_closedness<C: crate::resolver_core::ResolverCapabilities>(
                 };
             }
             match prepared.name_resolution.get(name.as_str()) {
+                // A class's base names no type when it is a value — a class
+                // expression a variable holds, or the value an `extends`
+                // expression (`extends Mixin(Base)`) registers beside the
+                // class. The base is that value's instance, whose keys are
+                // fixed where the class is declared: a class with no type
+                // parameters of its own reaches no generic through it.
+                Some(target)
+                    if prepared.kind == verter_session_query::declarations::TypeDeclKind::Class
+                        && prepared.type_parameters.is_empty()
+                        && dispatch
+                            .ctx
+                            .prepared_type_decl_return_only(
+                                &target.canonical_id,
+                                target.owner,
+                                &target.symbol_name,
+                            )
+                            .is_none()
+                        && dispatch
+                            .ctx
+                            .prepared_value_decl_return_only(
+                                &target.canonical_id,
+                                target.owner,
+                                &target.symbol_name,
+                            )
+                            .is_some() =>
+                {
+                    ClosednessVerdict::ProvenClosed
+                }
                 Some(target) => prepared_decl_body_is_closed(
                     dispatch,
                     &target.canonical_id,
@@ -2712,15 +2797,15 @@ fn type_param_shell_node<C: crate::resolver_core::ResolverCapabilities>(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::TypeParam {
         decl: crate::semantic_query::DeclIdentity {
-            canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+            canonical_id: prepared.root_identity.canonical_id.clone(),
             owner: prepared.root_identity.owner,
             whole_hash: crate::semantic_query::HashValue::default(),
-            decl_name: Arc::clone(&prepared.root_identity.symbol_name),
+            decl_name: prepared.root_identity.symbol_name.clone(),
         },
         param_index: u16::try_from(param.ordinal).unwrap_or(u16::MAX),
         constraint: None,
         default: None,
-        display_name: Arc::from(param.name.as_str()),
+        display_name: OwnedStr::from(param.name.as_str()),
     })
 }
 
@@ -2735,7 +2820,7 @@ fn lower_body_under_env<C: crate::resolver_core::ResolverCapabilities>(
     env: &FxHashMap<String, SemanticNodeId>,
 ) -> SemanticNodeId {
     let scope = crate::semantic_query::NodeScopeId::File {
-        canonical_id: Arc::clone(&prepared.root_identity.canonical_id),
+        canonical_id: prepared.root_identity.canonical_id.clone(),
         owner: prepared.root_identity.owner,
         whole_hash: crate::semantic_query::HashValue::default(),
         local_scope: None,
@@ -2836,9 +2921,9 @@ pub fn prepared_instantiation_key_domain_is_closed<
     // KEY-reachable self-instantiation — including one round-tripping
     // through a recipe escape's lowering — is a genuine recursion; refuse.
     let key = (
-        Arc::clone(&base.canonical_id),
+        base.canonical_id.clone(),
         base.owner,
-        Arc::clone(&base.decl_name),
+        base.decl_name.clone(),
     );
     if !dispatch.push_closedness_active(key) {
         return ClosednessVerdict::Unavailable;
@@ -2898,10 +2983,10 @@ fn prepared_instantiation_key_domain_is_closed_unguarded<
                         || resolved.symbol_name.as_ref() != base.decl_name.as_ref()
                 }) {
                     let resolved = crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(&resolved.canonical_id),
+                        canonical_id: resolved.canonical_id.clone(),
                         owner: resolved.owner,
                         whole_hash: crate::semantic_query::HashValue::default(),
-                        decl_name: Arc::clone(&resolved.symbol_name),
+                        decl_name: resolved.symbol_name.clone(),
                     };
                     return prepared_instantiation_key_domain_is_closed(
                         dispatch, &resolved, args, budget,
@@ -3053,20 +3138,56 @@ fn builtin_utility_key_domain_is_closed(decl_name: &str, args: &[KeyDomainBindin
 /// Node budget for the enumeration-domain openness walk
 /// ([`enumeration_domain_node_is_open`]). The walk is a bounded, shallow
 /// typed-IR inspection — it never reduces, substitutes, or loads new
-/// files — so this cap only guards a pathological already-interned
-/// graph; legitimate utility sources resolve in a handful of hops.
+/// files — and visits each node once per position, so this cap only guards
+/// a pathological already-interned graph: an intersection of thousands of
+/// mapped arms, an object of thousands of members, or a heritage chain
+/// hundreds of declarations deep all decide well inside it.
 ///
-/// The budget is ALSO the walk's de-facto stack-depth ceiling (the
-/// openness recursion and the prepared-decl key-domain proofs it
-/// delegates to consume at least one budget unit per nesting level), so
-/// raising it requires a separate recursion-depth bound first: a
-/// 10_000-deep finite `KeyOf` chain overflows a 2 MiB test-thread stack
-/// near ~2048 nested walk frames. A deep-but-provably-closed real-world
-/// chain that exhausts this budget (`Unavailable` ⇒ L1 carrier-stop) is
-/// NOT silently dropped at surface demands: the shallow walker's
-/// `Pick`-carrier surface enumeration (`Frame::FlushObjectFilter`)
-/// still publishes the picked keys from the source's enumerable arms.
-const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 256;
+/// The budget is no bound on the native stack: the walk's own children run
+/// on its explicit worklist, and the arms that re-enter it — a nested mapped
+/// type's scoped walk, a conditional or instantiation read, a declaration's
+/// closedness proof — nest at most [`OPENNESS_NESTING_LIMIT`] deep.
+/// A deep-but-provably-closed real-world chain that exhausts either bound
+/// (`Unavailable` ⇒ L1 carrier-stop) is NOT silently dropped at surface
+/// demands: the shallow walker's `Pick`-carrier surface enumeration
+/// (`Frame::FlushObjectFilter`) still publishes the picked keys from the
+/// source's enumerable arms.
+pub const ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET: u32 = 1 << 16;
+
+/// How deep openness walks may re-enter one another on one thread's native
+/// stack: a nested mapped type's scoped walk, a conditional or
+/// instantiation the walk reads, a declaration's closedness proof. Past it
+/// the question is undecidable — open for a key domain — exactly as when
+/// the node budget runs out.
+const OPENNESS_NESTING_LIMIT: u32 = 256;
+
+thread_local! {
+    /// The openness walks and closedness proofs open on this thread's
+    /// native stack.
+    static OPENNESS_NESTING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// One level of openness re-entry on this thread's native stack, held
+/// for its extent; `None` past [`OPENNESS_NESTING_LIMIT`].
+struct OpennessNesting;
+
+impl OpennessNesting {
+    fn enter() -> Option<Self> {
+        OPENNESS_NESTING.with(|nesting| {
+            let depth = nesting.get();
+            (depth < OPENNESS_NESTING_LIMIT).then(|| {
+                nesting.set(depth + 1);
+                OpennessNesting
+            })
+        })
+    }
+}
+
+impl Drop for OpennessNesting {
+    fn drop(&mut self) {
+        OPENNESS_NESTING.with(|nesting| nesting.set(nesting.get() - 1));
+    }
+}
 
 /// Enumeration-domain argument index for an OBJECT-FILTER builtin utility
 /// (`Pick` / `Omit`), if `base` names one.
@@ -3492,6 +3613,11 @@ struct OpenMemoKey {
     role: OpenRole,
 }
 
+enum OpenNodeStep {
+    Verdict(bool),
+    Children(Vec<(SemanticNodeId, OperandPosition)>),
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Construct an [`OpenWalk`] for `role` with the given bound binder
     /// (`None` for roles that bind no mapper binder), starting at
@@ -3644,36 +3770,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
     ) -> bool {
-        let memo_key = OpenMemoKey {
-            node,
-            position: self.position,
-            role: self.role,
-        };
-        if let Some(&verdict) = self.memo.get(&memo_key) {
-            // Completed verdict: return it VERBATIM. The hash-consed graph
-            // shares one `SemanticNodeId` per structure, and the
-            // `InstantiationRef` per-argument collect does not
-            // short-circuit — a revisited OPEN node must stay `true`
-            // (`Pick<Foo<T, T>, K>`: arg1 revisits arg0's `T`), or the
-            // per-argument vector would prove a key-positioned open param
-            // CLOSED and re-open the storm class behind the fuse. The
-            // position + role key keeps verdicts for the same node under
-            // different operand positions / policy roles independent.
-            return verdict;
+        struct Pending {
+            key: OpenMemoKey,
+            children: std::vec::IntoIter<(SemanticNodeId, OperandPosition)>,
         }
-        if !self.in_flight.insert(memo_key) {
-            // IN-FLIGHT back-edge — a genuine cycle on the current walk
-            // frontier. Closed for THIS revisit only (the cycle
-            // contributes no new openness signal); never memoized, so a
-            // later completed verdict for the node wins. Defensive: the
-            // intern-only hash-consed semantic graph is a DAG today, so
-            // this back-edge cannot fire at this layer.
-            return false;
+        let surrounding = self.position;
+        let mut next = (node, surrounding);
+        let mut pending: Vec<Pending> = Vec::new();
+        'walk: loop {
+            self.position = next.1;
+            let key = OpenMemoKey {
+                node: next.0,
+                position: next.1,
+                role: self.role,
+            };
+            let verdict = if let Some(&verdict) = self.memo.get(&key) {
+                verdict
+            } else if !self.in_flight.insert(key) {
+                // A back edge contributes no new openness signal and is never
+                // memoized before the active node obtains its real verdict.
+                false
+            } else {
+                match self.node_openness_step(ctx, next.0) {
+                    OpenNodeStep::Verdict(verdict) => {
+                        self.in_flight.remove(&key);
+                        self.memo.insert(key, verdict);
+                        verdict
+                    }
+                    OpenNodeStep::Children(children) => {
+                        let mut children = children.into_iter();
+                        if let Some(child) = children.next() {
+                            pending.push(Pending { key, children });
+                            next = child;
+                            continue;
+                        }
+                        self.in_flight.remove(&key);
+                        self.memo.insert(key, false);
+                        false
+                    }
+                }
+            };
+            // Finish the OR in source order, stopping at its first open child.
+            // Every parent retains its own role/position-qualified memo key.
+            loop {
+                let Some(mut parent) = pending.pop() else {
+                    self.position = surrounding;
+                    return verdict;
+                };
+                if !verdict {
+                    if let Some(child) = parent.children.next() {
+                        pending.push(parent);
+                        next = child;
+                        continue 'walk;
+                    }
+                }
+                self.in_flight.remove(&parent.key);
+                self.memo.insert(parent.key, verdict);
+            }
         }
-        let verdict = self.node_openness_uncached(ctx, node);
-        self.in_flight.remove(&memo_key);
-        self.memo.insert(memo_key, verdict);
-        verdict
     }
 
     /// Recurse into `node` AT the given operand position, restoring the
@@ -3696,11 +3850,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Single-node verdict compute behind [`Self::node_is_open`]'s
     /// memoization. Never call directly — the memo/in-flight discipline
     /// lives in the wrapper.
-    fn node_openness_uncached(
+    fn node_openness_step(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-    ) -> bool {
+    ) -> OpenNodeStep {
         if self.budget == 0 {
             // Walk budget exhausted. The KEY-DOMAIN question is
             // conservatively undecidable ⇒ open; the
@@ -3709,7 +3863,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // question NO (closed), and the armed runaway fuse remains the
             // depth backstop. Over-firing the carrier-stop on a deep
             // CLOSED value would be the worse failure.
-            return self.role.question().undecidable_is_open();
+            return OpenNodeStep::Verdict(self.role.question().undecidable_is_open());
         }
         self.budget -= 1;
 
@@ -3718,6 +3872,112 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // it as open (not provably finite); the
             // outer-generic-reachability question treats it as closed (a
             // missing node carries no outer generic).
+            return OpenNodeStep::Verdict(self.role.question().undecidable_is_open());
+        };
+        let position = self.position;
+        let descend =
+            self.role.descend_value_surfaces() || position == OperandPosition::ValueSensitive;
+        let mut children = Vec::new();
+        match data.as_ref() {
+            SemanticNodeData::Alias(target) => children.push((*target, position)),
+            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                children.push((*surface, position))
+            }
+            SemanticNodeData::KeyOf { base } => children.push((*base, OperandPosition::KeyDomain)),
+            SemanticNodeData::IndexedAccess { object, index } => {
+                children.push((*object, OperandPosition::ValueSensitive));
+                if let crate::semantic_query::IndexKey::Computed(node) = index {
+                    children.push((*node, OperandPosition::KeyDomain));
+                }
+            }
+            SemanticNodeData::TemplateLiteral { expressions, .. } => {
+                children.extend(expressions.iter().map(|node| (*node, position)))
+            }
+            SemanticNodeData::Object(view) => {
+                children.extend(
+                    view.index_signatures
+                        .iter()
+                        .map(|signature| (signature.key_type, position)),
+                );
+                if descend {
+                    children.extend(
+                        view.positive_members()
+                            .iter()
+                            .map(|member| (member.value, position)),
+                    );
+                    children.extend(view.call_signatures.iter().map(|node| (*node, position)));
+                    children.extend(
+                        view.construct_signatures
+                            .iter()
+                            .map(|node| (*node, position)),
+                    );
+                    children.extend(
+                        view.index_signatures
+                            .iter()
+                            .map(|signature| (signature.value_type, position)),
+                    );
+                }
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                predicate,
+                ..
+            } => {
+                if descend {
+                    children.extend(params.iter().map(|param| (param.ty, position)));
+                    children.push((*return_type, position));
+                    children.extend(
+                        predicate
+                            .as_ref()
+                            .and_then(|predicate| predicate.ty)
+                            .map(|node| (node, position)),
+                    );
+                }
+            }
+            SemanticNodeData::Array { element, .. } => {
+                if descend {
+                    children.push((*element, position));
+                }
+            }
+            SemanticNodeData::Tuple { elements, .. } => {
+                children.extend(
+                    elements
+                        .iter()
+                        .filter(|element| element.rest)
+                        .map(|element| (element.value, OperandPosition::KeyDomain)),
+                );
+                if descend {
+                    children.extend(elements.iter().map(|element| (element.value, position)));
+                }
+            }
+            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                children.extend(
+                    composite
+                        .composite_members()
+                        .expect("composite arm")
+                        .iter()
+                        .map(|node| (*node, position)),
+                )
+            }
+            SemanticNodeData::MergedDecl { contributors } => {
+                children.extend(contributors.iter().map(|node| (*node, position)))
+            }
+            _ => {
+                return OpenNodeStep::Verdict(self.node_openness_leaf(ctx, node, data));
+            }
+        }
+        OpenNodeStep::Children(children)
+    }
+
+    /// Declaration and scoped-binder leaves of the ordered openness walk.
+    fn node_openness_leaf(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        node: SemanticNodeId,
+        data: crate::semantic_query_memo::NodeData,
+    ) -> bool {
+        let Some(_nesting) = OpennessNesting::enter() else {
             return self.role.question().undecidable_is_open();
         };
         match data.as_ref() {
@@ -3787,23 +4047,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // instantiation argument opens them) plus BOTH branches under
             // the surrounding position.
             SemanticNodeData::Conditional { .. } => self.conditional_is_open(ctx, node, &data),
-            // `keyof`'s value IS its base's KEY SET — the base re-enters
-            // the `KeyDomain` position even under a value-sensitive
-            // operand, matching the TypeExpr arm.
-            SemanticNodeData::KeyOf { base } => {
-                self.node_is_open_at(ctx, *base, OperandPosition::KeyDomain)
-            }
-            // An indexed access is open when EITHER the object OR the index
-            // key space is open. The OBJECT operand is VALUE-sensitive:
-            // `Wrap<T>['a']` IS the member VALUE `a` (e.g. `BigOpen<T>` —
-            // an open surface), so a per-argument-closed-but-any-arg-open
-            // object must OPEN the access. The INDEX stays a key/keyspace
-            // question; a `TypeParam`-keyed access (`T[K]` with open `K`)
-            // is just as undecidable as an open object.
-            SemanticNodeData::IndexedAccess { object, index } => {
-                self.node_is_open_at(ctx, *object, OperandPosition::ValueSensitive)
-                    || self.index_key_is_open(ctx, index)
-            }
             // A nested mapped type splits BY ROLE per operand. Its `source`
             // / mapper `key_space` are KEY-PRODUCTION proof operands
             // ([`OpenRole::KeyDomainProof`]); its `as`-clause `name_remap` is
@@ -3825,9 +4068,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // binder + role scope is local to each operand, hence a scoped
             // child walk per role (shared budget threaded, fresh memo).
             SemanticNodeData::Mapped { .. } => self.mapped_is_open(ctx, &data),
-            SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                expressions.iter().any(|e| self.node_is_open(ctx, *e))
-            }
+
             // An instantiation's openness depends on the walk's question.
             // The KEY-DOMAIN walks (`Pick`/`Omit` enumeration domain AND
             // the mapped source / key space) judge per-argument: an open
@@ -3851,13 +4092,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
                 self.instantiation_is_open(ctx, node, &data)
             }
 
-            // --- carriers we can follow one transparent hop ---
-            SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target),
-            // A class expression's instance surface may reach the outer
-            // type parameters of the declaration it is authored under.
-            SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                self.node_is_open(ctx, *surface)
-            }
             SemanticNodeData::DeclRef { identity } => {
                 // For the outer-generic-reachability question a declaration
                 // reference cannot carry the mapper's outer generic
@@ -3888,97 +4122,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
                 .is_closed()
             }
 
-            // --- finite value surfaces ---
-            // Under the key-domain policies these are closed leaves
-            // (their NAMED members' presence makes the KEY space
-            // enumerable) — EXCEPT an index signature's KEY type, which is
-            // key-domain reachable in every policy: a key over an unbound
-            // generic / undecidable structure leaves the produced key set
-            // open even though the named-member set is fixed, while a
-            // concrete key (`[k: string]`) is the bounded Record-class
-            // signature surface and stays closed. The mapped value-body
-            // policy — and ANY walk standing at a `ValueSensitive`
-            // operand (the enclosing operator consumes these surfaces'
-            // VALUES) — DESCENDS the value surfaces to find an unbound
-            // generic nested in a member value / function parameter /
-            // element type.
-            SemanticNodeData::Object(view) => {
-                if view
-                    .index_signatures
-                    .iter()
-                    .any(|s| self.node_is_open(ctx, s.key_type))
-                {
-                    return true;
-                }
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && (view
-                        .positive_members()
-                        .iter()
-                        .any(|m| self.node_is_open(ctx, m.value))
-                        || view
-                            .call_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, *s))
-                        || view
-                            .construct_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, *s))
-                        || view
-                            .index_signatures
-                            .iter()
-                            .any(|s| self.node_is_open(ctx, s.value_type)))
-            }
-            SemanticNodeData::Signature {
-                params,
-                return_type,
-                predicate,
-                ..
-            } => {
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && (params.iter().any(|p| self.node_is_open(ctx, p.ty))
-                        || self.node_is_open(ctx, *return_type)
-                        || predicate
-                            .and_then(|predicate| predicate.ty)
-                            .is_some_and(|target| self.node_is_open(ctx, target)))
-            }
-            SemanticNodeData::Array { element, .. } => {
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && self.node_is_open(ctx, *element)
-            }
-            // A tuple's index KEY domain is fixed by its arity — EXCEPT
-            // a `rest` element (`[string, ...T]`), whose arity
-            // contribution depends on the rest TYPE: rest elements are
-            // judged at `KeyDomain` in every position (an open rest
-            // element leaves the index set undecidable ⇒ open), while
-            // non-rest elements stay undescended closed leaves at
-            // `KeyDomain`. No tuple-arity algebra: a rest element whose
-            // type closes at `KeyDomain` conservatively keeps the
-            // domain closed. Matches the TypeExpr `Tuple` arm.
-            SemanticNodeData::Tuple { elements, .. } => {
-                if elements.iter().any(|e| {
-                    e.rest && self.node_is_open_at(ctx, e.value, OperandPosition::KeyDomain)
-                }) {
-                    return true;
-                }
-                (self.role.descend_value_surfaces()
-                    || self.position == OperandPosition::ValueSensitive)
-                    && elements.iter().any(|e| self.node_is_open(ctx, e.value))
-            }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_) => false,
-
-            // --- composites: open iff any arm is open ---
-            composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
-                let arms = composite.composite_members().expect("composite arm");
-                arms.iter().any(|a| self.node_is_open(ctx, *a))
-            }
-            SemanticNodeData::MergedDecl { contributors } => {
-                contributors.iter().any(|a| self.node_is_open(ctx, *a))
-            }
 
             // --- unresolved / fidelity carriers ---
             // A `typeof X` value-rooted lookup is NOT a resolvable
@@ -4054,10 +4200,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             // The sealed callable carrier is a concrete indexed callable
             // position — closed for both open-ness questions.
             SemanticNodeData::DeferredCallable(_) => false,
+            SemanticNodeData::Alias(_)
+            | SemanticNodeData::ClassExpressionInstance { .. }
+            | SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::IndexedAccess { .. }
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::Object(_)
+            | SemanticNodeData::Signature { .. }
+            | SemanticNodeData::Array { .. }
+            | SemanticNodeData::Tuple { .. }
+            | SemanticNodeData::Union(_)
+            | SemanticNodeData::Intersection(_)
+            | SemanticNodeData::MergedDecl { .. } => {
+                unreachable!("structural openness is driven by the worklist")
+            }
         }
     }
 
-    /// [`Self::node_openness_uncached`]'s conditional arm (a function of its
+    /// [`Self::node_openness_step`]'s conditional arm (a function of its
     /// own, so a level of the walk carries only the arm it takes).
     #[inline(never)]
     fn conditional_is_open(
@@ -4083,8 +4243,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         // the check/extends operands terminates bounded instead of
         // diverging.
         let dispatch = self.dispatch;
-        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) =
-            super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+        if let Some(super::conditional_decision::ConditionalReading::Reduced(selected)) = dispatch
+            .probe_optional(|| {
+                super::conditional_decision::exact_reading(dispatch.conditional_outcome(node))
+            })
         {
             return self.node_is_open(ctx, selected);
         }
@@ -4101,7 +4263,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             )
     }
 
-    /// [`Self::node_openness_uncached`]'s mapped arm.
+    /// [`Self::node_openness_step`]'s mapped arm.
     #[inline(never)]
     fn mapped_is_open(
         &mut self,
@@ -4135,7 +4297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         open
     }
 
-    /// [`Self::node_openness_uncached`]'s instantiation arm.
+    /// [`Self::node_openness_step`]'s instantiation arm.
     #[inline(never)]
     fn instantiation_is_open(
         &mut self,
@@ -4255,13 +4417,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
         .is_closed()
     }
 
-    /// [`Self::node_openness_uncached`]'s unresolved-carrier arm.
+    /// [`Self::node_openness_step`]'s unresolved-carrier arm.
     #[inline(never)]
     fn carrier_ref_is_open(
         &mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         node: SemanticNodeId,
-        data: Arc<SemanticNodeData>,
+        data: crate::semantic_query_memo::NodeData,
     ) -> bool {
         // Own the carrier args so the `data` borrow can be released
         // before the `&mut self` recursion / the dispatch re-entry.
@@ -4290,9 +4452,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
     /// Bounded ONE-HOP reduction fallback behind the builtin registry rule.
     ///
     /// Resolves a `__builtin__` instantiation the per-utility output-key
-    /// rule could not prove closed through the ONE shared structural-fact
-    /// demand ([`ProjectSemanticDispatch::normalize_node_for_structural_fact_demand`]
-    /// — the residual-`InstantiationRef` `Instantiate` hop: bounded,
+    /// rule could not prove closed through a structural source-domain demand
+    /// (the residual-`InstantiationRef` `Instantiate` hop: bounded,
     /// fail-closed, dep-signature facts recorded into the active tracer),
     /// then classifies the REDUCED node with this same walk at the
     /// key-domain position. Returns `false` (not provably closed) on a
@@ -4310,40 +4471,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> OpenWalk<'a, C> {
             return false;
         }
         self.budget -= 1;
-        let Some(reduced) = self
-            .dispatch
-            .normalize_node_for_structural_fact_demand(
-                node,
-                ProjectionReductionContext::structural_transit(),
-            )
-            .into_complete_node()
-        else {
+        // Demand the utility's shallow structural result, not a projected
+        // positive-member surface. A flow-backed signature utility can supply
+        // its independently certified exact key domain here, retaining each
+        // unfinished value as a deferred member demand. Structural transit
+        // instead consumes its whole return, whose value limitations cannot
+        // establish whether the keys themselves are complete.
+        // A partial presence subset alone cannot prove a closed domain.
+        let Some(reduced) = self.dispatch.probe_optional(|| {
+            self.dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
+                )
+                .into_complete_node()
+        }) else {
             return false;
         };
         if reduced == node {
             return false;
         }
         !self.node_is_open_at(ctx, reduced, OperandPosition::KeyDomain)
-    }
-
-    /// Whether an [`IndexKey`](crate::semantic_query::IndexKey) index
-    /// operand is OPEN. Literal string / number keys are concrete
-    /// (closed); a `TypeNode` key is open iff its referenced node is open
-    /// under the same bounded walk — always AT the `KeyDomain` position
-    /// (the index is a key/keyspace question even when the enclosing
-    /// access sits in a value-sensitive operand).
-    fn index_key_is_open(
-        &mut self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        index: &crate::semantic_query::IndexKey,
-    ) -> bool {
-        use crate::semantic_query::IndexKey;
-        match index {
-            IndexKey::String(_) | IndexKey::Number(_) | IndexKey::UniqueSymbol(_) => false,
-            IndexKey::Computed(node) => {
-                self.node_is_open_at(ctx, *node, OperandPosition::KeyDomain)
-            }
-        }
     }
 }
 

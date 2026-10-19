@@ -263,6 +263,10 @@ fn assert_eq_nodes_parity(host: &VerterHost, a: SemanticNodeId, b: SemanticNodeI
 #[test]
 fn parity_opaque_errors_and_raw_fallback() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // `Opaque(Miss)` raises to the `SEMANTIC_MISS` sentinel ⇒ NOT materialized.
@@ -276,9 +280,9 @@ fn parity_opaque_errors_and_raw_fallback() {
     // `Opaque(Other("custom"))` raises to `Unknown { raw: "custom" }` which is
     // NOT in the sentinel set ⇒ MATERIALIZED (proves the sentinel set is exact,
     // not "any Unknown is a miss").
-    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
-        "custom",
-    ))));
+    let other = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("custom"),
+    )));
     assert_classifier_parity(&host, other, "opaque-other-nonsentinel");
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, other),
@@ -292,7 +296,7 @@ fn parity_opaque_errors_and_raw_fallback() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 2000,
             actual: 2001,
-            context: "parity fixture".to_string(),
+            context: "parity fixture".into(),
         },
     )));
     assert_classifier_parity(&host, budget, "opaque-budget-exceeded");
@@ -304,8 +308,8 @@ fn parity_opaque_errors_and_raw_fallback() {
     // `Opaque(RecursiveRef)` raises to `TypeExpr::RecursiveRef` ⇒ MATERIALIZED
     // (a materialized leaf, not a sentinel).
     let recursive = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Tree"),
-        args: std::sync::Arc::from([]),
+        name: verter_type_expr::OwnedStr::from("Tree"),
+        args: Default::default(),
     }));
     assert_classifier_parity(&host, recursive, "opaque-recursive-ref");
     assert!(
@@ -315,8 +319,8 @@ fn parity_opaque_errors_and_raw_fallback() {
 
     // `Opaque(DeclPlaceholder)` raises to a `Ref` shell ⇒ MATERIALIZED.
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-        name: Arc::from("Pending"),
-        canonical_id: Arc::from("/w/p.ts"),
+        name: verter_type_expr::OwnedStr::from("Pending"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/p.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
     }));
@@ -359,6 +363,10 @@ fn typed_control_sentinel_producers_raise_byte_identical_and_keep_miss_decision(
     use verter_type_engine::semantic_query::compat_spelling::SEMANTIC_SURFACE_MEMBER;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Surface-member fallback (the CONVERTED `fold_member` miss arm): an object
@@ -426,6 +434,10 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     use verter_type_engine::semantic_query::compat_spelling::semantic_query_error_raw;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // The `_ => opaque_sentinel`-reachable set the converted `Opaque(err)` arm
@@ -447,17 +459,23 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     let variants = [
         QueryError::Miss,
         QueryError::UnsupportedIntrinsic {
-            name: Arc::from("FixtureIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("FixtureIntrinsic"),
         },
         QueryError::BudgetExceeded(BudgetExceededFailure {
             domain: BudgetDomain::ProjectionOperation,
             limit: 2000,
             actual: 2001,
-            context: "opaque-arm fixture".to_string(),
+            context: "opaque-arm fixture".into(),
         }),
         QueryError::UnstableState { attempts: 3 },
         QueryError::AliasCycle {
-            chain: Arc::from(vec![Arc::from("A"), Arc::from("B")].into_boxed_slice()),
+            chain: verter_type_expr::OwnedSlice::from(
+                vec![
+                    verter_type_expr::OwnedStr::from("A"),
+                    verter_type_expr::OwnedStr::from("B"),
+                ]
+                .into_boxed_slice(),
+            ),
         },
         QueryError::ValueDomainMismatch {
             expected: SemanticQueryValueTag::TypeNode,
@@ -468,10 +486,10 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         QueryError::RaiseMiss,
         QueryError::UnrepresentableSurface,
         QueryError::UnrepresentableSurfaceMember,
-        QueryError::Other(Arc::from("semanticMiss")),
-        QueryError::Other(Arc::from("semanticObjectSurface")),
-        QueryError::Other(Arc::from("budgetExceeded(x)")),
-        QueryError::Other(Arc::from("free text")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticMiss")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("semanticObjectSurface")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("budgetExceeded(x)")),
+        QueryError::Other(verter_type_expr::OwnedStr::from("free text")),
     ];
 
     for variant in variants {
@@ -498,9 +516,9 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
     // The FLIPPED `materialized` equation: an `Other("semanticMiss")` payload
     // is INERT — MATERIALIZED, never a miss (only the typed `Miss` variant is
     // the miss sentinel).
-    let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
-        "semanticMiss",
-    ))));
+    let adversarial = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticMiss"),
+    )));
     assert!(
         !node_contains_semantic_miss_or_unraisable(&host, adversarial),
         "Opaque(Other(\"semanticMiss\")) is INERT — MATERIALIZED (typed-only classification)"
@@ -520,7 +538,7 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
         real_member,
     )])));
     let object_surface_other_arm = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
-        Arc::from("semanticObjectSurface"),
+        verter_type_expr::OwnedStr::from("semanticObjectSurface"),
     )));
     // Sanity: the lone arm is MATERIALIZED (inert Other payload).
     assert!(
@@ -556,6 +574,10 @@ fn opaque_arm_routes_through_typed_sentinel_byte_identical_and_keeps_node_domain
 #[test]
 fn parity_alias_chain_transparent() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -579,6 +601,10 @@ fn parity_alias_chain_transparent() {
 #[test]
 fn parity_alias_cycle_sentinel_string_classification() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // A TRUE `Alias` self-cycle (or 2-node mutual `Alias` cycle) — which fires
@@ -635,6 +661,10 @@ fn parity_alias_cycle_sentinel_string_classification() {
 #[test]
 fn parity_merged_decl_peer_merges_to_object() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Two same-name interface contributors (bare objects) peer-merge into one
@@ -649,7 +679,9 @@ fn parity_merged_decl_peer_merges_to_object() {
         "b", number_id,
     )])));
     let merged = graph.intern_node(SemanticNodeData::MergedDecl {
-        contributors: Arc::from(vec![obj_a, obj_b].into_boxed_slice()),
+        contributors: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![obj_a, obj_b].into_boxed_slice(),
+        ),
     });
     assert_classifier_parity(&host, merged, "merged-decl-two-objects");
     assert!(
@@ -670,14 +702,18 @@ fn parity_merged_decl_peer_merges_to_object() {
 #[test]
 fn parity_lazy_carriers() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let declref = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/d.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/d.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
-            decl_name: Arc::from("Foo"),
+            decl_name: verter_type_expr::OwnedStr::from("Foo"),
         },
     });
     assert_classifier_parity(&host, declref, "declref");
@@ -689,12 +725,12 @@ fn parity_lazy_carriers() {
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let instref = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("/w/d.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/d.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
-            decl_name: Arc::from("Box"),
+            decl_name: verter_type_expr::OwnedStr::from("Box"),
         },
-        args: Arc::from(vec![arg].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![arg].into_boxed_slice()),
     });
     assert_classifier_parity(&host, instref, "instantiation-ref");
 
@@ -707,12 +743,14 @@ fn parity_lazy_carriers() {
     // the materialize sidecar (partial), pinned separately.
     let instref_miss_arg = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: DeclIdentity {
-            canonical_id: Arc::from("/w/d.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/d.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
-            decl_name: Arc::from("Box"),
+            decl_name: verter_type_expr::OwnedStr::from("Box"),
         },
-        args: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        ),
     });
     assert_classifier_parity(&host, instref_miss_arg, "instantiation-ref-raise-miss-arg");
     assert!(
@@ -734,7 +772,9 @@ fn parity_lazy_carriers() {
 
     let import = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(Vec::new().into_boxed_slice()),
         false,
     ));
@@ -743,16 +783,16 @@ fn parity_lazy_carriers() {
     let typeof_node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/m.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("factory"),
+            name: verter_type_expr::OwnedStr::from("factory"),
         },
-        Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         Arc::from(Vec::new().into_boxed_slice()),
     ));
     // `TypeOf` raises to `TypeExpr::TypeOf` ⇒ a materialized leaf, but it IS an
@@ -770,10 +810,10 @@ fn parity_lazy_carriers() {
 
     let synthetic = graph.intern_node(SemanticNodeData::SyntheticBinding {
         id: verter_type_engine::semantic_query::SyntheticBindingId {
-            scope_canonical_id: Arc::from("/Comp.vue"),
+            scope_canonical_id: verter_type_expr::OwnedStr::from("/Comp.vue"),
             surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("row"),
+            slot_name: Some(verter_type_expr::OwnedStr::from("default")),
+            binding_name: verter_type_expr::OwnedStr::from("row"),
         },
         value_node: 7,
     });
@@ -788,6 +828,10 @@ fn parity_lazy_carriers() {
 #[test]
 fn parity_object_edge_cases() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Empty surface ⇒ representable empty `Object{}` ⇒ materialized + expanded.
@@ -854,6 +898,10 @@ fn parity_object_edge_cases() {
 #[test]
 fn parity_intersection_arm_drop_and_collapse() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -916,9 +964,9 @@ fn parity_intersection_arm_drop_and_collapse() {
     // SENTINEL-arm DROP path (distinct from the empty-`Object{}`-arm drop above):
     // `Intersection` filters out `Unknown { raw == SEMANTIC_OBJECT_SURFACE }`
     // arms, so `SurfaceSentinel & RealObject` collapses to RealObject.
-    let non_fn_ctor = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
-        "not-a-fn",
-    ))));
+    let non_fn_ctor = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("not-a-fn"),
+    )));
     let surface_sentinel = graph.intern_node(SemanticNodeData::Object(
         verter_type_engine::test_surface_view! {
             members: Arc::from(Vec::<SurfaceMember>::new().into_boxed_slice()),
@@ -985,6 +1033,10 @@ fn parity_intersection_arm_drop_and_collapse() {
 #[test]
 fn intersection_drops_only_typed_root_unrepresentable_surface() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1041,9 +1093,9 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
 
     // (3) A `QueryError::Other("semanticObjectSurface")` arm is RETAINED —
     // `Other` never acts as the surface sentinel.
-    let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(Arc::from(
-        "semanticObjectSurface",
-    ))));
+    let other_surface = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other(
+        verter_type_expr::OwnedStr::from("semanticObjectSurface"),
+    )));
     let inter_other_real = graph.intern_node(SemanticNodeData::Intersection(
         verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
             vec![other_surface, real_obj].into_boxed_slice(),
@@ -1068,6 +1120,10 @@ fn intersection_drops_only_typed_root_unrepresentable_surface() {
 #[test]
 fn parity_deferred_operator_shells() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let tp = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1075,7 +1131,7 @@ fn parity_deferred_operator_shells() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
 
     // `keyof T` ⇒ raised-root KeyOf ⇒ expanded_surface == false, materialized
@@ -1094,7 +1150,7 @@ fn parity_deferred_operator_shells() {
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("K"),
+        display_name: verter_type_expr::OwnedStr::from("K"),
     });
     let indexed = graph.intern_node(SemanticNodeData::IndexedAccess {
         object: tp,
@@ -1144,7 +1200,7 @@ fn parity_deferred_operator_shells() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let keyspace = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     let mapped = graph.intern_node(SemanticNodeData::Mapped {
@@ -1246,18 +1302,22 @@ fn parity_union_and_terminals_and_none() {
 #[test]
 fn parity_equality_pairs_different_nodes_raise_equal() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // Different-scope `BareRef("T")`: two distinct nodes (distinct scope) that
     // raise to the SAME `Ref { name: "T" }` (BareRef drops scope on raise).
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::from("/w/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: Some(1),
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/b.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: Some(2),
@@ -1291,18 +1351,18 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     // `Ref { name: "Same" }` (DeclRef drops canonical identity on raise).
     let declref_a = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     let declref_b = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/b.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [2u8; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     assert_ne!(
@@ -1319,8 +1379,8 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     // `DeclPlaceholder` vs `DeclRef` with the same name: both raise to `Ref {
     // name }` ⇒ EQUAL even though the node KINDS differ.
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-        name: Arc::from("Same"),
-        canonical_id: Arc::from("/w/c.ts"),
+        name: verter_type_expr::OwnedStr::from("Same"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/c.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [3u8; 16],
     }));
@@ -1334,10 +1394,10 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
     // Negative: two DIFFERENT names must raise UNEQUAL (the key discriminates).
     let declref_other = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
-            decl_name: Arc::from("Different"),
+            decl_name: verter_type_expr::OwnedStr::from("Different"),
         },
     });
     assert_eq!(
@@ -1357,6 +1417,10 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
 #[test]
 fn discrimination_oracle_separates_the_facts() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // contains_semantic_miss is BOTH true (Miss) and false (String) across the
@@ -1376,7 +1440,7 @@ fn discrimination_oracle_separates_the_facts() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keyof = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     assert!(node_is_expanded_surface_legacy_equivalent(&host, obj));
@@ -1402,18 +1466,18 @@ fn discrimination_equality_is_not_node_id_equality() {
 
     let declref_a = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [1u8; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     let declref_b = graph.intern_node(SemanticNodeData::DeclRef {
         identity: DeclIdentity {
-            canonical_id: Arc::from("/w/b.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: [9u8; 16],
-            decl_name: Arc::from("Same"),
+            decl_name: verter_type_expr::OwnedStr::from("Same"),
         },
     });
     assert_ne!(declref_a, declref_b);
@@ -1458,6 +1522,10 @@ fn shared_core_raiser_output_matches_oracle_for_primitive() {
 #[test]
 fn parity_function_and_constructor_type() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1468,7 +1536,7 @@ fn parity_function_and_constructor_type() {
     // NOT a miss, AND a Function is an expanded surface.
     let func = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string_id,
@@ -1482,7 +1550,9 @@ fn parity_function_and_constructor_type() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -1505,7 +1575,7 @@ fn parity_function_and_constructor_type() {
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let func_miss_param = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("bad")),
                 miss,
@@ -1519,7 +1589,9 @@ fn parity_function_and_constructor_type() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -1556,6 +1628,10 @@ fn parity_function_and_constructor_type() {
 #[test]
 fn parity_template_literal_leaf_vs_recurse_boundary() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1565,8 +1641,16 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     // treats a raised `TypeExpr::TemplateLiteral` as a LEAF (always materialized)
     // — the exact leaf-vs-recurse boundary. ⇒ NOT a miss.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![string_id].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("a"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string_id].into_boxed_slice(),
+        ),
     });
     assert_classifier_parity(&host, template, "template-literal-materialized-expr");
     assert!(
@@ -1582,8 +1666,16 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
     // assert it matches LEGACY (the oracle), not intuition.
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let template_miss_expr = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![miss].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("x"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![miss].into_boxed_slice(),
+        ),
     });
     assert_classifier_parity(&host, template_miss_expr, "template-literal-miss-expr-leaf");
     assert!(
@@ -1601,6 +1693,10 @@ fn parity_template_literal_leaf_vs_recurse_boundary() {
 #[test]
 fn parity_type_param_with_constraint_and_default() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1616,7 +1712,7 @@ fn parity_type_param_with_constraint_and_default() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert_classifier_parity(&host, tp, "typeparam-constraint-and-default");
     assert!(
@@ -1639,7 +1735,7 @@ fn parity_type_param_with_constraint_and_default() {
         param_index: 1,
         constraint: Some(miss),
         default: Some(miss),
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     assert_classifier_parity(&host, tp_miss_constraint, "typeparam-miss-constraint-leaf");
     assert!(
@@ -1652,6 +1748,10 @@ fn parity_type_param_with_constraint_and_default() {
 #[test]
 fn parity_real_index_signature_member() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1673,7 +1773,7 @@ fn parity_real_index_signature_member() {
                     value_type: number_id,
                     readonly: false,
                     spans: Default::default(),
-                    declaration_origin: Some(Arc::from("/w/idx.ts")),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from("/w/idx.ts")),
                 }]
                 .into_boxed_slice(),
             ),
@@ -1713,7 +1813,7 @@ fn parity_real_index_signature_member() {
                     value_type: miss,
                     readonly: false,
                     spans: Default::default(),
-                    declaration_origin: Some(Arc::from("/w/idx.ts")),
+                    declaration_origin: Some(verter_type_expr::OwnedStr::from("/w/idx.ts")),
                 }]
                 .into_boxed_slice(),
             ),
@@ -1731,6 +1831,10 @@ fn parity_real_index_signature_member() {
 #[test]
 fn parity_carriers_with_type_args_and_raise_miss() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let number_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1779,7 +1883,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     // NOT a miss.
     let import_arg = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(vec![number_id].into_boxed_slice()),
         false,
     ));
@@ -1793,7 +1899,9 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     // outer ImportType still constructs and reads MATERIALIZED.
     let import_miss_arg = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./m"),
-        Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+        ),
         Arc::from(vec![absent].into_boxed_slice()),
         false,
     ));
@@ -1813,16 +1921,16 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     let typeof_arg = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/m.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("factory"),
+            name: verter_type_expr::OwnedStr::from("factory"),
         },
-        Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         Arc::from(vec![number_id].into_boxed_slice()),
     ));
     assert_classifier_parity(&host, typeof_arg, "typeof-with-arg");
@@ -1841,16 +1949,16 @@ fn parity_carriers_with_type_args_and_raise_miss() {
     let typeof_miss_arg = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/m.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("factory"),
+            name: verter_type_expr::OwnedStr::from("factory"),
         },
-        Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new().into_boxed_slice()),
         Arc::from(vec![absent].into_boxed_slice()),
     ));
     assert_classifier_parity(&host, typeof_miss_arg, "typeof-raise-miss-arg");
@@ -1870,6 +1978,10 @@ fn raised_shape_eq_node_type_expr_negative_some_false_discriminates() {
     // the parity suite (which only checks node-vs-its-own-raise = `Some(true)` and
     // unraisable = `None`).
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // A `Literal("idle")` node raises to `TypeExpr::Literal("idle")`, which does
@@ -1999,6 +2111,10 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     };
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2009,7 +2125,7 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
     // both hardcode false).
     let func_node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string_id,
@@ -2023,7 +2139,9 @@ fn raised_shape_eq_node_type_expr_ignores_has_ts_annotation_like_typeexpr_partia
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2105,6 +2223,10 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // not notice. These DIRECT `raise_oracle(...)` shape assertions pin the
     // recursed child payloads so a regression in child-raising is caught.
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2115,8 +2237,16 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // `TypeExpr::TemplateLiteral` must PRESERVE the recursed expression
     // (`Primitive(String)`) in its `expressions`, not drop it.
     let template = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![string_id].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("a"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![string_id].into_boxed_slice(),
+        ),
     });
     let template_oracle = raise_oracle(&host, template).expect("template raises");
     match &template_oracle {
@@ -2136,8 +2266,16 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
     // `Unknown`), proving the child is recursed-and-preserved even though the leaf
     // predicate reads materialized.
     let template_miss = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::<str>::from("x"), Arc::<str>::from("")].into_boxed_slice()),
-        expressions: Arc::from(vec![miss].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![
+                verter_type_expr::OwnedStr::from("x"),
+                verter_type_expr::OwnedStr::from(""),
+            ]
+            .into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![miss].into_boxed_slice(),
+        ),
     });
     let template_miss_oracle = raise_oracle(&host, template_miss).expect("template raises");
     match &template_miss_oracle {
@@ -2166,7 +2304,7 @@ fn raise_oracle_payload_shape_preserves_recursed_children() {
         param_index: 0,
         constraint: Some(string_id),
         default: Some(number_id),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let tp_oracle = raise_oracle(&host, tp).expect("typeparam raises");
     match &tp_oracle {
@@ -2253,10 +2391,10 @@ fn object_surface(props: &[(&str, SemanticNodeId)]) -> SurfaceView {
 /// fixture decl refs — tests carry no real content hash.
 fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
     DeclIdentity {
-        canonical_id: Arc::from(canonical_id),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
-        decl_name: Arc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -2275,6 +2413,10 @@ fn decl_identity_unscoped(canonical_id: &str, name: &str) -> DeclIdentity {
 #[test]
 fn parity_union_no_collapse_single_and_empty() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     // `Union([A])` — a single-member union — stays a `Union`, NOT collapsed to A.
@@ -2442,7 +2584,7 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     // `Foo<Bar>` — a generic instantiation, symbolic-carrier penalty 2, no divergence.
     let foo_of_bar = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_unscoped("/w/m.ts", "Foo"),
-        args: Arc::from(vec![bar].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![bar].into_boxed_slice()),
     });
 
     // Mapped whose `source == key_space == Foo` — the former double-count fixture
@@ -2456,14 +2598,14 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "V"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
     let mapped_tp = mapped_fixture(&graph, tp, keyof_tp, v_tp);
@@ -2482,8 +2624,8 @@ fn node_improvement_verdict_matches_type_expr_improvement_over_raise() {
     // NON-unknown carrier (the former node scorer mis-read it as unknown-root and
     // non-structural).
     let rr = graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-        name: Arc::from("Loop"),
-        args: std::sync::Arc::from([]),
+        name: verter_type_expr::OwnedStr::from("Loop"),
+        args: Default::default(),
     }));
 
     // (candidate, current) pairs. Each verdict is asserted equal to the verdict
@@ -2557,27 +2699,27 @@ fn publication_score_corpus(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let v_tp = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "V"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("V"),
+        display_name: verter_type_expr::OwnedStr::from("V"),
     });
     let tp_bounded = graph.intern_node(SemanticNodeData::TypeParam {
         decl: decl_identity_unscoped("/w/m.ts", "B"),
         param_index: 2,
         constraint: Some(foo),
         default: Some(bar),
-        display_name: Arc::from("B"),
+        display_name: verter_type_expr::OwnedStr::from("B"),
     });
     let keyof_tp = graph.intern_node(SemanticNodeData::KeyOf { base: tp });
 
     let function = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 string,
@@ -2591,7 +2733,9 @@ fn publication_score_corpus(
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             number,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -2614,7 +2758,7 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::EnumLiteral(
                 verter_type_engine::semantic_query::EnumLiteralType {
                     enum_decl: decl_identity_unscoped("/w/m.ts", "Status"),
-                    member: Arc::from("Idle"),
+                    member: verter_type_expr::OwnedStr::from("Idle"),
                     base: zero,
                     member_count: 2,
                 },
@@ -2629,14 +2773,16 @@ fn publication_score_corpus(
                             Arc::from("/w/m.ts"),
                             verter_type_expr::TopLevelOwnerId::module(0),
                         ),
-                        name: Arc::from("TOKEN"),
+                        name: verter_type_expr::OwnedStr::from("TOKEN"),
                     },
                     Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
                     verter_type_expr::facts::ValueDeclIdentityPart {
-                        canonical_id: Arc::from("/w/m.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/w/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::module(0),
-                        symbol: Arc::from("TOKEN"),
-                        member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                        symbol: verter_type_expr::OwnedStr::from("TOKEN"),
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            Vec::<String>::new().into_boxed_slice(),
+                        ),
                     },
                 ),
             ),
@@ -2668,7 +2814,7 @@ fn publication_score_corpus(
         (
             "tuple",
             graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![verter_type_engine::semantic_query::TupleElement {
                         label: None,
                         value: foo,
@@ -2684,7 +2830,9 @@ fn publication_score_corpus(
         (
             "merged_decl",
             graph.intern_node(SemanticNodeData::MergedDecl {
-                contributors: Arc::from(vec![obj_a, obj_b].into_boxed_slice()),
+                contributors: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![obj_a, obj_b].into_boxed_slice(),
+                ),
             }),
         ),
         (
@@ -2701,10 +2849,16 @@ fn publication_score_corpus(
         (
             "template_literal",
             graph.intern_node(SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(
-                    vec![Arc::<str>::from("a"), Arc::<str>::from("")].into_boxed_slice(),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![
+                        verter_type_expr::OwnedStr::from("a"),
+                        verter_type_expr::OwnedStr::from(""),
+                    ]
+                    .into_boxed_slice(),
                 ),
-                expressions: Arc::from(vec![foo].into_boxed_slice()),
+                expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![foo].into_boxed_slice(),
+                ),
             }),
         ),
         ("key_of", keyof_tp),
@@ -2712,7 +2866,7 @@ fn publication_score_corpus(
             "indexed_access",
             graph.intern_node(SemanticNodeData::IndexedAccess {
                 object: foo,
-                index: IndexKey::String(Arc::from("a")),
+                index: IndexKey::String(verter_type_expr::OwnedStr::from("a")),
             }),
         ),
         // Mapped, `source == key_space == Foo` — the former double-count fixture.
@@ -2727,7 +2881,7 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::new_typeof(
                 ValueRootKey {
                     scope: ScopeId {
-                        canonical_id: Arc::from("/m.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         local_scope: None,
                         binder_scope_id:
@@ -2735,9 +2889,9 @@ fn publication_score_corpus(
                                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
                             ),
                     },
-                    name: Arc::from("factory"),
+                    name: verter_type_expr::OwnedStr::from("factory"),
                 },
-                Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new().into_boxed_slice()),
                 Arc::from(Vec::new().into_boxed_slice()),
             )),
         ),
@@ -2746,7 +2900,7 @@ fn publication_score_corpus(
         (
             "infer",
             graph.intern_node(SemanticNodeData::Infer {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 binder: graph.alloc_infer_binder_id(),
                 constraint: None,
             }),
@@ -2754,8 +2908,8 @@ fn publication_score_corpus(
         (
             "opaque_recursive_ref",
             graph.intern_node(SemanticNodeData::Opaque(QueryError::RecursiveRef {
-                name: Arc::from("Loop"),
-                args: std::sync::Arc::from([]),
+                name: verter_type_expr::OwnedStr::from("Loop"),
+                args: Default::default(),
             })),
         ),
         (
@@ -2775,7 +2929,9 @@ fn publication_score_corpus(
             "instantiation_ref",
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: decl_identity_unscoped("/w/m.ts", "Foo"),
-                args: Arc::from(vec![bar].into_boxed_slice()),
+                args: verter_type_engine::semantic_query::PayloadArray::from(
+                    vec![bar].into_boxed_slice(),
+                ),
             }),
         ),
         (
@@ -2798,7 +2954,9 @@ fn publication_score_corpus(
             "import_type",
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 false,
             )),
@@ -2807,7 +2965,9 @@ fn publication_score_corpus(
             "import_type_with_args",
             graph.intern_node(SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from("A")].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
                 Arc::from(vec![foo].into_boxed_slice()),
                 false,
             )),
@@ -2828,10 +2988,10 @@ fn publication_score_corpus(
             "synthetic_binding",
             graph.intern_node(SemanticNodeData::SyntheticBinding {
                 id: verter_type_engine::semantic_query::SyntheticBindingId {
-                    scope_canonical_id: Arc::from("/Comp.vue"),
+                    scope_canonical_id: verter_type_expr::OwnedStr::from("/Comp.vue"),
                     surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                    slot_name: Some(Arc::from("default")),
-                    binding_name: Arc::from("row"),
+                    slot_name: Some(verter_type_expr::OwnedStr::from("default")),
+                    binding_name: verter_type_expr::OwnedStr::from("row"),
                 },
                 value_node: foo.0,
             }),
@@ -2841,14 +3001,16 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::ClassExpressionInstance {
                 identity: Arc::new(
                     verter_type_engine::semantic_query::ClassExpressionIdentity {
-                        canonical_id: Arc::from("/w/m.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/w/m.ts"),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         offset: 42,
-                        name: Arc::from("(Anonymous class)"),
-                        outer_clauses: Arc::from([
+                        name: verter_type_expr::OwnedStr::from("(Anonymous class)"),
+                        outer_clauses: verter_type_expr::OwnedSlice::from([
                             verter_session_query::flow::policy::ClassExpressionClause {
-                                container: Arc::from("Mixin"),
-                                parameters: Arc::from([Arc::from("S")]),
+                                container: verter_type_expr::OwnedStr::from("Mixin"),
+                                parameters: verter_type_expr::OwnedSlice::from([
+                                    verter_type_expr::OwnedStr::from("S"),
+                                ]),
                             },
                         ]),
                         own_arity: 0,
@@ -2857,7 +3019,7 @@ fn publication_score_corpus(
                         object_literal: false,
                     },
                 ),
-                type_arguments: Arc::from([foo]),
+                type_arguments: verter_type_engine::semantic_query::PayloadArray::from([foo]),
                 surface: obj_a,
             }),
         ),
@@ -2878,6 +3040,7 @@ fn node_publication_score_matches_type_expr_score_per_fact() {
     let host = host();
     let graph = graph_of(&host);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     for (label, node) in publication_score_corpus(&graph) {
         let node_score = project_node_publication_score_with_dispatch(&dispatch, node);
@@ -2981,6 +3144,10 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
     ];
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let mut covered: FxHashSet<&'static str> = FxHashSet::default();
@@ -3016,6 +3183,10 @@ fn publication_score_corpus_covers_every_semantic_node_data_variant() {
 #[test]
 fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3060,12 +3231,16 @@ fn intersection_arm_drop_keeps_typed_degradation_in_sidecar() {
 #[test]
 fn invalid_call_signature_drop_keeps_typed_degradation_in_sidecar() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
 
     let string_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let miss = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
-    let mut surface = object_surface(&[("a", string_id)]);
-    surface.call_signatures = Arc::from(vec![miss].into_boxed_slice());
+    let surface = object_surface(&[("a", string_id)]);
+    let surface = surface.with_call_signatures(Arc::from(vec![miss].into_boxed_slice()));
     let obj = graph.intern_node(SemanticNodeData::Object(surface));
 
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -3095,6 +3270,10 @@ fn fold_raises(host: &VerterHost, node: SemanticNodeId) -> bool {
 #[test]
 fn union_with_unraisable_member_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Union(
@@ -3111,6 +3290,10 @@ fn union_with_unraisable_member_fails_whole() {
 #[test]
 fn intersection_with_unraisable_arm_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Intersection(
@@ -3127,10 +3310,14 @@ fn intersection_with_unraisable_arm_fails_whole() {
 #[test]
 fn tuple_with_unraisable_element_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 verter_type_engine::semantic_query::TupleElement {
                     label: None,
@@ -3158,10 +3345,18 @@ fn tuple_with_unraisable_element_fails_whole() {
 #[test]
 fn template_literal_with_unraisable_expression_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::TemplateLiteral {
-        quasis: Arc::from(vec![Arc::from("x")].into_boxed_slice()),
-        expressions: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+            vec![verter_type_expr::OwnedStr::from("x")].into_boxed_slice(),
+        ),
+        expressions: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        ),
     });
     assert!(
         !fold_raises(&host, node),
@@ -3172,16 +3367,24 @@ fn template_literal_with_unraisable_expression_fails_whole() {
 #[test]
 fn function_with_unraisable_return_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<FunctionParam>::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<FunctionParam>::new().into_boxed_slice(),
+        ),
         return_type: SemanticNodeId(u64::MAX),
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             SemanticNodeId(u64::MAX),
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3196,11 +3399,15 @@ fn function_with_unraisable_return_fails_whole() {
 #[test]
 fn function_with_unraisable_parameter_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(
                 Some(Arc::from("a")),
                 SemanticNodeId(u64::MAX),
@@ -3214,7 +3421,9 @@ fn function_with_unraisable_parameter_fails_whole() {
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             str_id,
         ),
-        type_parameters: Arc::from(Vec::<TypeParamDecl>::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::<TypeParamDecl>::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -3229,6 +3438,10 @@ fn function_with_unraisable_parameter_fails_whole() {
 #[test]
 fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let decl = decl_identity_unscoped("/w/tp.ts", "T");
     let with_constraint = graph.intern_node(SemanticNodeData::TypeParam {
@@ -3236,7 +3449,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: Some(SemanticNodeId(u64::MAX)),
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(
         !fold_raises(&host, with_constraint),
@@ -3247,7 +3460,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: None,
         default: Some(SemanticNodeId(u64::MAX)),
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(
         !fold_raises(&host, with_default),
@@ -3259,7 +3472,7 @@ fn type_parameter_with_unraisable_constraint_or_default_fails_whole() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     assert!(fold_raises(&host, plain), "absent slots stay absent");
 }
@@ -3272,10 +3485,16 @@ fn carrier_arg_fallback_is_typed_surface_member_and_marks_partial() {
     use verter_type_engine::semantic_query::DepSignature;
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let node = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: decl_identity_unscoped("/w/r.ts", "Box"),
-        args: Arc::from(vec![SemanticNodeId(u64::MAX)].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![SemanticNodeId(u64::MAX)].into_boxed_slice(),
+        ),
     });
     let dispatch = ProjectSemanticDispatch::new(&host);
     let mut active = rustc_hash::FxHashSet::default();
@@ -3324,6 +3543,10 @@ fn terminal_marks_unraisable_composite_partial_and_genuine_absence_exact() {
     };
 
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = graph_of(&host);
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 

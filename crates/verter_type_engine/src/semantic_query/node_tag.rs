@@ -314,6 +314,12 @@ impl SemanticNodeData {
                 if let SignatureReturnCarrier::Declared(node) = return_carrier {
                     visit(*node);
                 }
+                if let Some(source) = return_carrier.owned_flow_source() {
+                    for (_, image) in source.bindings() {
+                        visit(*image);
+                    }
+                    source.receiver().into_iter().for_each(&mut visit);
+                }
                 for decl in type_parameters.iter() {
                     visit(decl.param);
                     decl.constraint.into_iter().for_each(&mut visit);
@@ -345,13 +351,7 @@ impl SemanticNodeData {
             }
         }
         match self {
-            Self::Opaque(super::QueryError::RecursiveRef { args, .. }) => {
-                args.iter().copied().for_each(visit);
-            }
-            Self::Opaque(super::QueryError::CheckerRecovery {
-                origin: Some(origin),
-                ..
-            }) => visit(*origin),
+            Self::Opaque(error) => error.for_each_retained_node(visit),
             Self::ClassExpressionInstance { identity, .. } => {
                 identity.prototype.into_iter().for_each(visit);
             }
@@ -366,6 +366,7 @@ impl SemanticNodeData {
                         .map(|&(parameter, _)| parameter)
                         .for_each(&mut visit);
                 }
+                pending.distribution.into_iter().for_each(visit);
             }
             _ => {}
         }

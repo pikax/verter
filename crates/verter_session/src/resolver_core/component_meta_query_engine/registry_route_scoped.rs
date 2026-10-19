@@ -142,12 +142,12 @@ impl ComponentMetaQueryEngine<'_> {
         let body_root = {
             let dispatch = self.semantic_dispatch();
             dispatch
-                .raise_authored_locator_to_hot(
+                .owning().raise_authored_locator_to_hot(
                     &body_locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).into_value_in(self.builder())
                 .at_optional_boundary()
                 .map(|hot: verter_type_engine::semantic_query::HotTypeRef| hot.node())?
         };
@@ -156,9 +156,9 @@ impl ComponentMetaQueryEngine<'_> {
         let (view, _surface_node) =
             compound_root_surface_view_via_dispatch(self.dispatch, body_root)?;
         let closed = view.closed();
-        if !view.call_signatures.is_empty()
-            || !view.construct_signatures.is_empty()
-            || !view.index_signatures.is_empty()
+        if !view.call_signatures().is_empty()
+            || !view.construct_signatures().is_empty()
+            || !view.index_signatures().is_empty()
             || view.has_known_index_signature()
         {
             return None;
@@ -207,10 +207,10 @@ impl ComponentMetaQueryEngine<'_> {
             });
         }
         Some(ProjectedSurfaceFact {
-            members: std::sync::Arc::from(members.into_boxed_slice()),
-            call_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            construct_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-            index_signatures: std::sync::Arc::from(Vec::new().into_boxed_slice()),
+            members: From::from(members.into_boxed_slice()),
+            call_signatures: From::from(Vec::new().into_boxed_slice()),
+            construct_signatures: From::from(Vec::new().into_boxed_slice()),
+            index_signatures: From::from(Vec::new().into_boxed_slice()),
             has_index_signature: false,
         })
     }
@@ -231,12 +231,11 @@ impl ComponentMetaQueryEngine<'_> {
         symbol: &str,
         member_key: &verter_type_expr::facts::FactPropertyKey,
     ) -> Option<(verter_type_expr::facts::PreparedMemberFact, bool)> {
-        use verter_type_engine::project_semantic_dispatch::node_data_for;
         use verter_type_engine::semantic_query::SemanticNodeData;
 
         let peel_alias = |mut node: SemanticNodeId| {
             while let Some(SemanticNodeData::Alias(inner)) =
-                node_data_for(self.dispatch.graph(), node).as_deref()
+                self.dispatch.graph().read_in_scope(node).as_deref()
             {
                 node = *inner;
             }
@@ -258,15 +257,19 @@ impl ComponentMetaQueryEngine<'_> {
                 if let Some(fact) = prepared.member_index.get(member_key) {
                     return Some((fact.clone(), crossed));
                 }
-                let Some(root) =
-                    crate::resolver_core::component_meta_registry::prepared_body_root_node(
-                        self.dispatch,
-                        prepared.as_ref(),
-                    )
-                else {
+                let raised = crate::resolver_core::component_meta_registry::prepared_body_root_node(
+                    self.dispatch,
+                    prepared.as_ref(),
+                );
+                let Some(root) = *raised.value() else {
                     continue;
                 };
-                match node_data_for(self.dispatch.graph(), peel_alias(root)).as_deref() {
+                match self
+                    .dispatch
+                    .graph()
+                    .read_in_scope(peel_alias(root))
+                    .as_deref()
+                {
                     Some(SemanticNodeData::DeclRef { identity }) => {
                         next.push((
                             identity.canonical_id.as_ref().to_string(),
@@ -285,7 +288,7 @@ impl ComponentMetaQueryEngine<'_> {
                             if let Some(SemanticNodeData::DeclRef { identity }) = args
                                 .first()
                                 .and_then(|arg| {
-                                    node_data_for(self.dispatch.graph(), peel_alias(*arg))
+                                    self.dispatch.graph().read_in_scope(peel_alias(*arg))
                                 })
                                 .as_deref()
                             {
@@ -307,8 +310,11 @@ impl ComponentMetaQueryEngine<'_> {
                     }
                     Some(SemanticNodeData::Intersection(arms)) => {
                         for arm in arms.iter() {
-                            if let Some(SemanticNodeData::DeclRef { identity }) =
-                                node_data_for(self.dispatch.graph(), peel_alias(*arm)).as_deref()
+                            if let Some(SemanticNodeData::DeclRef { identity }) = self
+                                .dispatch
+                                .graph()
+                                .read_in_scope(peel_alias(*arm))
+                                .as_deref()
                             {
                                 next.push((
                                     identity.canonical_id.as_ref().to_string(),

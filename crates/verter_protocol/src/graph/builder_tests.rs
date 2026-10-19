@@ -4,6 +4,29 @@ use verter_type_expr::{
     LiteralValue, PrimitiveName, RecursiveConditionalBranch, RecursiveConditionalFrame, TypeExpr,
 };
 
+#[test]
+fn constrained_infer_keeps_a_structured_binder() {
+    let mut builder = GraphBuilder::new();
+    let expression = TypeExpr::Infer {
+        name: "Item".into(),
+        constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+    };
+    let id = builder.node_id(&expression);
+    assert!(matches!(
+        builder.nodes()[id as usize - 1],
+        GraphNode::Infer { .. }
+    ));
+    let GraphNode::Infer { constraint, .. } = builder.nodes()[id as usize - 1] else {
+        unreachable!()
+    };
+    assert_ne!(constraint, 0);
+    assert!(matches!(
+        builder.nodes()[constraint as usize - 1],
+        GraphNode::Primitive { primitive: 1 }
+    ));
+    assert_eq!(builder.node_id(&expression), id);
+}
+
 /// Own-once + first-encounter-order invariant for the string / node
 /// interners (the encode-path de-duplication): each interned string is
 /// stored EXACTLY once in `strings`, each structurally-distinct wire node
@@ -736,18 +759,18 @@ fn synthetic_slot_binding_is_live_wire_only_and_capture_fails_closed() {
     use verter_type_expr::{SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
 
     let non_zero = TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Foo.vue"),
+        scope_canonical_id: From::from("/abs/Foo.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("controls"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("controls"),
         // A large SESSION id proving no u32 truncation / no wire-arena remap.
         value_node: 424242,
     });
     let zero = TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/abs/Bar.vue"),
+        scope_canonical_id: From::from("/abs/Bar.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::Binding,
         slot_name: None,
-        binding_name: Arc::from("model"),
+        binding_name: From::from("model"),
         // The legitimate absent sentinel.
         value_node: 0,
     });
@@ -812,5 +835,56 @@ fn synthetic_slot_binding_is_live_wire_only_and_capture_fails_closed() {
     assert!(
         zero_carrier.1 > 0 && zero_carrier.3 > 0,
         "the present scope / binding fields of the sentinel carrier still intern"
+    );
+}
+
+/// A snapshot's footprint follows what its tables keep alive: a long
+/// literal in the string table and a wide union's member list each add at
+/// least their backing, and a clone of one snapshot shares both tables.
+#[test]
+fn snapshot_heap_counts_its_strings_and_node_lists_once_per_shared_table() {
+    use verter_session_query::retention::allocation::{heap_block_bytes, AliasSet};
+    const LONG: usize = 40_000;
+    const ARMS: u32 = 2_000;
+    let capture = |ty: &TypeExpr| {
+        let mut producer = GraphBuilder::new();
+        let root = producer.node_id(ty);
+        crate::graph::snapshot::ResolvedTypeGraphSnapshot::from_builder(producer, root)
+            .expect("valid non-synthetic snapshot")
+    };
+    let literal = |text: String| TypeExpr::Literal(LiteralValue::String(text));
+    let heap = |snapshot: &crate::graph::snapshot::ResolvedTypeGraphSnapshot| {
+        snapshot.owned_heap_bytes(&mut AliasSet::new())
+    };
+
+    let short = heap(&capture(&literal("s".to_string())));
+    let long = heap(&capture(&literal("s".repeat(LONG))));
+    assert!(
+        long >= short + heap_block_bytes(LONG) - heap_block_bytes(1),
+        "a {LONG}-byte literal must add its string backing ({short} -> {long})"
+    );
+
+    let union = |arms: u32| {
+        TypeExpr::Union(Arc::from(
+            (0..arms)
+                .map(|arm| TypeExpr::Literal(LiteralValue::Number(f64::from(arm))))
+                .collect::<Vec<_>>(),
+        ))
+    };
+    let narrow = heap(&capture(&union(2)));
+    let wide = heap(&capture(&union(ARMS)));
+    assert!(
+        wide >= narrow + heap_block_bytes(ARMS as usize * std::mem::size_of::<u32>()),
+        "a {ARMS}-arm union must add its member list backing ({narrow} -> {wide})"
+    );
+
+    let snapshot = capture(&literal("s".repeat(LONG)));
+    let clone = snapshot.clone();
+    let mut aliases = AliasSet::new();
+    assert_eq!(snapshot.owned_heap_bytes(&mut aliases), long);
+    assert_eq!(
+        clone.owned_heap_bytes(&mut aliases),
+        0,
+        "a clone shares both tables"
     );
 }

@@ -49,6 +49,7 @@ use verter_type_engine::semantic_query::{
     DeclIdentity, PathSegment, ProjectionMode, QueryResult, SemanticNodeData, SemanticNodeId,
     SemanticQueryKey,
 };
+use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 
 use super::diagnostic_convert::shallow_diagnostics_to_macro_expansion;
 use verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts;
@@ -373,18 +374,18 @@ pub(crate) fn build_owner_decl_identity(
         .map(|s| s.whole_hash)
         .unwrap_or_default();
     DeclIdentity {
-        canonical_id: Arc::from(owner_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
         owner,
         whole_hash,
-        decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
+        decl_name: verter_type_expr::OwnedStr::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
 }
 
-/// Convert an `Arc<[PathSegment]>` empty path constant. Cached locally
+/// Convert an `verter_type_expr::OwnedSlice<PathSegment>` empty path constant. Cached locally
 /// so each projector call reuses a shared-ref-counted empty path.
 #[inline]
-pub(crate) fn empty_path() -> Arc<[PathSegment]> {
-    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+pub(crate) fn empty_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::default()
 }
 
 // =============================================================================
@@ -515,7 +516,8 @@ pub(crate) fn resolve_macro_payload(
     macro_kind: AnalyzedMacroKind,
     expansion_kind: MacroExpansionKind,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> Option<SemanticNodeId> {
+) -> Option<NodeRoot> {
+    let _scope = dispatch.enter_construction_scope();
     let _ = mac.parsed_type_argument.as_ref()?;
     // The macro type-argument graph node is the ONE mode-neutral mirror
     // handle (its macro-T own-body provenance is baked at production time —
@@ -539,9 +541,9 @@ pub(crate) fn resolve_macro_payload(
 
     let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
         owner: dispatch.type_slot_for(
-            Arc::clone(&owner.canonical_id),
+            owner.canonical_id.clone(),
             owner.owner,
-            Arc::clone(&owner.decl_name),
+            owner.decl_name.clone(),
         ),
         macro_index,
         macro_kind,
@@ -549,18 +551,18 @@ pub(crate) fn resolve_macro_payload(
         context: dispatch.macro_payload_context_for(&owner.canonical_id, ProjectionMode::Navigate),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&payload_read);
-    emit_dispatch_dep_signature_facts(dispatch, &payload_read.dep_signature);
-    if !payload_read.walker_diagnostics.is_empty() {
+    emit_dispatch_dep_signature_facts(dispatch, payload_read.dep_signature());
+    if !payload_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &payload_read.walker_diagnostics,
+            payload_read.walker_diagnostics(),
             macro_index,
             expansion_kind.clone(),
-            payload_read.cache_suppress,
+            payload_read.cache_suppress(),
         ));
     }
 
-    let payload_node = match payload_read.value {
-        QueryResult::Value(id) => id,
+    let payload_node = match payload_read.value() {
+        QueryResult::Value(id) => *id,
         QueryResult::Recursive(_) => {
             diag_sink.push(macro_expansion_for_cycle(
                 macro_index,
@@ -586,8 +588,7 @@ pub(crate) fn resolve_macro_payload(
     // empty surface that's indistinguishable from a successful
     // empty payload.
     if let Some(SemanticNodeData::Opaque(err)) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload_node)
-            .as_deref()
+        dispatch.graph().read_in_scope(payload_node).as_deref()
     {
         diag_sink.push(macro_expansion_for_query_error(
             macro_index,
@@ -616,10 +617,7 @@ pub(crate) fn resolve_macro_payload(
     // non-`Opaque` Object; carrier-stopped payloads (an open mapped
     // surface) are neither empty-Object nor root-`DeclRef` shapes and
     // never reach the probe.
-    let payload_data = verter_type_engine::project_semantic_dispatch::node_data_for(
-        dispatch.graph(),
-        payload_node,
-    );
+    let payload_data = dispatch.graph().read_in_scope(payload_node);
     let payload_is_empty_surface = matches!(
         payload_data.as_deref(),
         Some(SemanticNodeData::Object(view))
@@ -666,27 +664,33 @@ pub(crate) fn resolve_macro_payload(
                             ProjectionMode::Navigate,
                         ),
                 });
-                emit_dispatch_dep_signature_facts(dispatch,  &probe_read.dep_signature);
-                match probe_read.value {
+                emit_dispatch_dep_signature_facts(dispatch,  probe_read.dep_signature());
+                if !probe_read.walker_diagnostics().is_empty() {
+                    diag_sink.push(shallow_diagnostics_to_macro_expansion(
+                        probe_read.walker_diagnostics(),
+                        macro_index,
+                        expansion_kind.clone(),
+                        probe_read.cache_suppress(),
+                    ));
+                }
+                match *probe_read.value() {
                     QueryResult::Value(id) => id,
                     QueryResult::Recursive(id) => id,
                     QueryResult::Error(_) => product.hot.node(),
                 }
             });
             if let Some(probe_node) = probe_node {
-                let unresolved: Option<String> =
-                    match verter_type_engine::project_semantic_dispatch::node_data_for(
-                        dispatch.graph(),
-                        probe_node,
-                    )
+                let unresolved: Option<String> = match dispatch
+                    .graph()
+                    .read_in_scope(probe_node)
                     .as_deref()
-                    {
-                        Some(SemanticNodeData::Opaque(err)) => Some(format!("{err:?}")),
-                        Some(SemanticNodeData::DeclRef { identity }) => {
-                            let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(
+                {
+                    Some(SemanticNodeData::Opaque(err)) => Some(format!("{err:?}")),
+                    Some(SemanticNodeData::DeclRef { identity }) => {
+                        let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(
                                 verter_type_engine::semantic_query::ResolveDeclKey {
                                     scope: verter_type_engine::semantic_query::ScopeId {
-                                        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+                                        canonical_id: identity.canonical_id.clone(),
                                         owner: identity.owner,
                                         local_scope: None,
                                         binder_scope_id:
@@ -694,46 +698,49 @@ pub(crate) fn resolve_macro_payload(
                                                 identity.owner,
                                             ),
                                     },
-                                    name: std::sync::Arc::clone(&identity.decl_name),
+                                    name: identity.decl_name.clone(),
                                 },
                             ));
-                            emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
-                            match read.value {
-                                QueryResult::Value(anchor) => {
-                                    match verter_type_engine::project_semantic_dispatch::node_data_for(
-                                        dispatch.graph(),
-                                        anchor,
-                                    )
-                                    .as_deref()
-                                    {
-                                        Some(SemanticNodeData::Opaque(
-                                            err @ verter_type_engine::semantic_query::QueryError::Miss,
-                                        )) => Some(format!("{err:?}")),
-                                        _ => None,
-                                    }
+                        emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());
+                        if !read.walker_diagnostics().is_empty() {
+                            diag_sink.push(shallow_diagnostics_to_macro_expansion(
+                                read.walker_diagnostics(),
+                                macro_index,
+                                expansion_kind.clone(),
+                                read.cache_suppress(),
+                            ));
+                        }
+                        match *read.value() {
+                            QueryResult::Value(anchor) => {
+                                match dispatch.graph().read_in_scope(anchor).as_deref() {
+                                    Some(SemanticNodeData::Opaque(
+                                        err @ verter_type_engine::semantic_query::QueryError::Miss,
+                                    )) => Some(format!("{err:?}")),
+                                    _ => None,
                                 }
-                                QueryResult::Error(err) => Some(format!("{err:?}")),
-                                QueryResult::Recursive(_) => None,
                             }
+                            QueryResult::Error(ref err) => Some(format!("{err:?}")),
+                            QueryResult::Recursive(_) => None,
                         }
-                        // An unresolved-reference carrier SURVIVING the
-                        // Navigate identity retry is a genuine unresolved
-                        // route/declaration: a resolvable head would have
-                        // become its `DeclRef` / `InstantiationRef` identity
-                        // carrier under the Navigate probe. The preserved
-                        // `BareRef` / `ImportType` / `TypeOf` shape is the
-                        // carrier-preserving counterpart of the pre-carrier
-                        // `Opaque(Miss)` terminal — same silent-miss
-                        // contract, one diagnostic.
-                        Some(data)
-                            if data.bare_ref_head().is_some()
-                                || data.import_type_head().is_some()
-                                || data.typeof_head().is_some() =>
-                        {
-                            Some("unresolved reference carrier".to_string())
-                        }
-                        _ => None,
-                    };
+                    }
+                    // An unresolved-reference carrier SURVIVING the
+                    // Navigate identity retry is a genuine unresolved
+                    // route/declaration: a resolvable head would have
+                    // become its `DeclRef` / `InstantiationRef` identity
+                    // carrier under the Navigate probe. The preserved
+                    // `BareRef` / `ImportType` / `TypeOf` shape is the
+                    // carrier-preserving counterpart of the pre-carrier
+                    // `Opaque(Miss)` terminal — same silent-miss
+                    // contract, one diagnostic.
+                    Some(data)
+                        if data.bare_ref_head().is_some()
+                            || data.import_type_head().is_some()
+                            || data.typeof_head().is_some() =>
+                    {
+                        Some("unresolved reference carrier".to_string())
+                    }
+                    _ => None,
+                };
                 if let Some(err) = unresolved {
                     diag_sink.push(macro_expansion_for_query_error(
                         macro_index,
@@ -746,7 +753,7 @@ pub(crate) fn resolve_macro_payload(
         }
     }
 
-    Some(payload_node)
+    dispatch.graph().root_in_scope(payload_node).ok()
 }
 
 pub(crate) fn resolve_payload_surface(
@@ -756,7 +763,8 @@ pub(crate) fn resolve_payload_surface(
     expansion_kind: MacroExpansionKind,
     provenance: verter_type_engine::semantic_query::SurfaceProvenanceContext,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<NodeRoot> {
+    let _scope = dispatch.enter_construction_scope();
     let claims = dispatch.host_attachment().surface_claims();
     // The empty-path `ProjectPath` carries the macro's surface
     // provenance (by design): for a props payload that
@@ -787,17 +795,17 @@ pub(crate) fn resolve_payload_surface(
             ),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&surface_read);
-    emit_dispatch_dep_signature_facts(dispatch, &surface_read.dep_signature);
-    if !surface_read.walker_diagnostics.is_empty() {
+    emit_dispatch_dep_signature_facts(dispatch, surface_read.dep_signature());
+    if !surface_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &surface_read.walker_diagnostics,
+            surface_read.walker_diagnostics(),
             macro_index,
             expansion_kind.clone(),
-            surface_read.cache_suppress,
+            surface_read.cache_suppress(),
         ));
     }
-    match surface_read.value {
-        QueryResult::Value(id) => claims.resolved(id),
+    let resolution = match surface_read.value() {
+        QueryResult::Value(id) => claims.resolved(*id),
         QueryResult::Recursive(_) => {
             // Cycles are NON-FATAL by rule: they bound the publish surface
             // to the non-recursive arms — the degraded COMPLETE answer, not
@@ -819,14 +827,20 @@ pub(crate) fn resolve_payload_surface(
             // complete no-surface answer; an OPERATIONAL fault (budget /
             // cancellation / torn state) is an INCOMPLETE resolution with
             // its typed reason on the returned claim.
-            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(&e) {
+            match verter_type_engine::semantic_query::surface_resolution::stable_query_error_partiality(e) {
                 Some(reasons) => {
                     claims.incomplete(reasons)
                 }
                 None => claims.no_surface(),
             }
         }
-    }
+    };
+    resolution.map(|node| {
+        dispatch
+            .graph()
+            .root_in_scope(node)
+            .expect("produced surface is live")
+    })
 }
 
 // Macro-payload boundary substrate primitives — diagnostic probe,

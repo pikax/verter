@@ -57,7 +57,7 @@ pub(super) fn enrich_hover_with_provenance(
     // no blocking-pool slots are burned on a capture-disabled
     // host.
     let host = server.documents.host_arc();
-    if !host.host().config().audit_enabled || !host.host().config().footprint_capture {
+    if !host.as_ref().config().audit_enabled || !host.as_ref().config().footprint_capture {
         return hover;
     }
 
@@ -68,13 +68,13 @@ pub(super) fn enrich_hover_with_provenance(
     let canonical_for_task = canonical_id;
     tokio::task::spawn_blocking(move || {
         let Some((_analysis, resolution)) = host
-            .host()
+            .as_ref()
             .get_component_meta_with_resolution(&canonical_for_task)
         else {
             return;
         };
         let Some(record) = host
-            .host()
+            .as_ref()
             .host_audit_runtime()
             .take_record(resolution.request_id)
         else {

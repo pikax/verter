@@ -162,11 +162,13 @@ fn rootless_signature(
     ));
     graph.intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(
+        params: verter_type_engine::semantic_query::PayloadArray::from(
             vec![FunctionParam::synthetic(None, string, false, false)].into_boxed_slice(),
         ),
         return_type,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
@@ -212,7 +214,7 @@ fn rootless_key(
         context: dispatch.apparent_type_context_scoped(
             demand_canonical,
             ApparentDemandScope::Rootless {
-                canonical: Arc::from(demand_canonical),
+                canonical: verter_type_expr::OwnedStr::from(demand_canonical),
             },
         ),
     }
@@ -251,6 +253,7 @@ fn rootless_apparent_surface_is_project_scoped_and_never_cached() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     let apparent_a = apparent_under_demand_scope(&dispatch, base, "/a/main.ts")
@@ -306,18 +309,19 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     // The rootless ApparentType read itself: value + suppress.
     let key = rootless_key(&dispatch, base, "/a/main.ts");
     let read = dispatch.execute_read(key.clone());
     assert!(
-        matches!(read.value, QueryResult::Value(_)),
+        matches!(read.value().clone(), QueryResult::Value(_)),
         "the rootless apparent surface resolves, got {:?}",
-        read.value
+        read.value().clone()
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "a rootless apparent value must be cache-suppressed"
     );
 
@@ -325,7 +329,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     // walker's apparent hop) resolves and inherits the suppress taint.
     let member_key = SemanticQueryKey::ProjectMember {
         base,
-        member: Arc::from("call"),
+        member: verter_type_expr::OwnedStr::from("call"),
         mode: ProjectionMode::Navigate,
     };
     let member_read = {
@@ -336,12 +340,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
         dispatch.execute_read(member_key.clone())
     };
     assert!(
-        matches!(member_read.value, QueryResult::Value(_)),
+        matches!(member_read.value().clone(), QueryResult::Value(_)),
         "`.call` on a rootless callable resolves through the apparent hop, got {:?}",
-        member_read.value
+        member_read.value().clone()
     );
     assert!(
-        member_read.cache_suppress,
+        member_read.cache_suppress(),
         "the enclosing member projection must inherit the rootless suppress taint"
     );
 
@@ -353,7 +357,7 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     assert_eq!(graph.slot_candidate_count_for_tests(&member_key), 0);
     let path_key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("call"),
             )]
@@ -379,6 +383,7 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
 
     assert_eq!(
@@ -388,9 +393,9 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     );
     let read = dispatch.execute_read(rootless_key(&dispatch, base, "/ws/main.ts"));
     assert!(
-        matches!(read.value, QueryResult::Error(QueryError::Miss)),
+        matches!(read.value().clone(), QueryResult::Error(QueryError::Miss)),
         "the producer misses honestly, got {:?}",
-        read.value
+        read.value().clone()
     );
 }
 
@@ -439,7 +444,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path_key = |base: SemanticNodeId, member: &str| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier(member),
             )]
@@ -484,23 +489,23 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
 
     let a = read("/a/main.ts", "onlyA");
     assert_eq!(
-        value(&a.value),
+        value(a.value()),
         Some("a".to_string()),
         "project A reads its own String member"
     );
-    assert!(!a.cache_suppress, "a scoped wrapper read is admissible");
+    assert!(!a.cache_suppress(), "a scoped wrapper read is admissible");
 
     let b = read("/b/main.ts", "onlyA");
     assert!(
-        matches!(b.value, QueryResult::Value(node) if matches!(
+        matches!(b.value().clone(), QueryResult::Value(node) if matches!(
             graph.node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(_))
         )),
         "project B's String declares no `onlyA`: never A's answer, got {:?}",
-        b.value
+        b.value().clone()
     );
     assert_eq!(
-        value(&read("/b/main.ts", "onlyB").value),
+        value(&read("/b/main.ts", "onlyB").value().clone()),
         Some("b".to_string()),
         "project B reads its own String member"
     );
@@ -528,7 +533,7 @@ fn a_primitive_member_read_is_scoped_to_its_project_and_reused_warm() {
     let before = graph.stats_snapshot();
     let warm = read("/a/main.ts", "onlyA");
     let after = graph.stats_snapshot();
-    assert_eq!(value(&warm.value), Some("a".to_string()));
+    assert_eq!(value(warm.value()), Some("a".to_string()));
     assert_eq!(
         after.misses, before.misses,
         "a warm repeat is served from the memo"
@@ -547,7 +552,7 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let path_key = |base: SemanticNodeId| SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("length"),
             )]
@@ -568,14 +573,14 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
         )
     });
     assert!(
-        matches!(read.value, QueryResult::Value(node) if matches!(
+        matches!(read.value().clone(), QueryResult::Value(node) if matches!(
             graph.node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::Miss))
         )),
         "no String declares `length`, got {:?}",
-        read.value
+        read.value().clone()
     );
-    assert!(!read.cache_suppress, "the miss is admissible");
+    assert!(!read.cache_suppress(), "the miss is admissible");
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(miss)), 1);
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(string)), 0);
 }
@@ -617,13 +622,13 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
         >| {
             verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
-                Arc::from(FLOW),
+                verter_type_expr::OwnedStr::from(FLOW),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(FLOW),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),

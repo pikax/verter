@@ -76,6 +76,14 @@
     "reason": "Runs on its own trigger; no ci.yml job reads the file."
   },
   {
+    "glob": "tests/component-workbench/CWB0/contract.md",
+    "reason": "Component-workbench contract prose; no ci.yml job reads its contents."
+  },
+  {
+    "glob": "tests/component-workbench/evidence/CWB0/cases.md",
+    "reason": "Component-workbench review case table; no ci.yml job reads its contents."
+  },
+  {
     "glob": "tests/documentation/**",
     "reason": "Documentation products the local DOC verifiers and the docs deploy read."
   },

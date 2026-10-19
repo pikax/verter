@@ -45,7 +45,14 @@ pub(super) const UNION_VIEW_CAP: usize = crate::bounded_query_retention::DEFAULT
 /// admission order.
 #[derive(Default)]
 pub(super) struct UnionViews {
-    views: FxHashMap<SemanticUnionMembersKey, (Arc<[SemanticNodeId]>, RetentionCharge)>,
+    views: FxHashMap<
+        SemanticUnionMembersKey,
+        (
+            Arc<[SemanticNodeId]>,
+            RetentionCharge,
+            super::node_roots::NodeRootSet,
+        ),
+    >,
     admitted: VecDeque<SemanticUnionMembersKey>,
 }
 
@@ -62,11 +69,15 @@ impl UnionViews {
     pub(super) fn take_where(
         &mut self,
         mut retired: impl FnMut(&SemanticUnionMembersKey, &[SemanticNodeId]) -> bool,
-    ) -> Vec<(Arc<[SemanticNodeId]>, RetentionCharge)> {
+    ) -> Vec<(
+        Arc<[SemanticNodeId]>,
+        RetentionCharge,
+        super::node_roots::NodeRootSet,
+    )> {
         let keys: Vec<SemanticUnionMembersKey> = self
             .views
             .iter()
-            .filter(|(key, (view, _))| retired(key, view))
+            .filter(|(key, (view, _, _))| retired(key, view))
             .map(|(key, _)| key.clone())
             .collect();
         if keys.is_empty() {
@@ -94,7 +105,11 @@ impl std::fmt::Debug for UnionViews {
 fn retained_view_bytes(view: &[SemanticNodeId]) -> usize {
     std::mem::size_of_val(view)
         + std::mem::size_of::<SemanticUnionMembersKey>()
-        + std::mem::size_of::<(Arc<[SemanticNodeId]>, RetentionCharge)>()
+        + std::mem::size_of::<(
+            Arc<[SemanticNodeId]>,
+            RetentionCharge,
+            super::node_roots::NodeRootSet,
+        )>()
 }
 
 impl SemanticGraphStore {
@@ -103,11 +118,14 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticUnionMembersKey,
     ) -> Option<Arc<[SemanticNodeId]>> {
-        self.union_views
+        let (view, roots) = self
+            .union_views
             .lock()
             .views
             .get(key)
-            .map(|(view, _)| Arc::clone(view))
+            .map(|(view, _, roots)| (Arc::clone(view), roots.clone()))?;
+        roots.capture_in_scope();
+        Some(view)
     }
 
     /// Keep `view` as `key`'s union view; the first view built wins. The
@@ -137,12 +155,24 @@ impl SemanticGraphStore {
             RetentionAdmission::Admitted(charge) => charge,
             RetentionAdmission::Refused(_) => return Arc::clone(view),
         };
+        // Acquire arena ownership before taking the table lock, matching
+        // charge reservation and avoiding a table-to-arena lock order.
+        let Ok(roots) = self.root_nodes(std::iter::once(key.union()).chain(view.iter().copied()))
+        else {
+            return Arc::clone(view);
+        };
         let mut table = self.union_views.lock();
-        if let Some((kept, _)) = table.views.get(&key) {
-            // Another reader kept the same view first; this charge drops.
-            return Arc::clone(kept);
+        if let Some((kept, _, _)) = table.views.get(&key) {
+            let kept = Arc::clone(kept);
+            drop(table);
+            // The losing roots and charge release outside the table lock.
+            drop(roots);
+            drop(charge);
+            return kept;
         }
-        table.views.insert(key.clone(), (Arc::clone(view), charge));
+        table
+            .views
+            .insert(key.clone(), (Arc::clone(view), charge, roots));
         table.admitted.push_back(key);
         let evicted = if table.admitted.len() > UNION_VIEW_CAP {
             table
@@ -214,6 +244,7 @@ mod tests {
         let store = SemanticGraphStore::with_account(
             verter_session_query::retention::StoreAccount::new(Arc::clone(&account)),
         );
+        let _scope = store.enter_node_root_scope();
         let ctx = SemanticContext::production();
         let literal =
             |text: String| store.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));

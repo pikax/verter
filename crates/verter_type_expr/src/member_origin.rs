@@ -41,6 +41,8 @@ use crate::TypeExpr;
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ExcessPropertyOrigin {
@@ -59,7 +61,17 @@ pub enum ExcessPropertyOrigin {
 /// member surface. The shared spread materializer folds the ordered entry
 /// list; the pre-fold IR never fabricates an exact member surface for the
 /// operand.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
+)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct SpreadMember {

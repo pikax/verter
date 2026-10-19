@@ -18,7 +18,72 @@
 
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
-use std::sync::Arc;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    use verter_type_expr::PropertyKey;
+
+    #[test]
+    fn counted_key_builder_owns_literals_without_an_enclosing_scope() {
+        for keys in [
+            vec![PropertyKey::string_literal("first")],
+            vec![
+                PropertyKey::string_literal("first"),
+                PropertyKey::string_literal("second"),
+            ],
+        ] {
+            let harness = GraphFixture::new();
+            let host = crate::VerterHost::new_standalone(Default::default());
+            let dispatch = ProjectSemanticDispatch::with_graph_fixture(&host, harness);
+            let graph = Arc::clone(dispatch.graph());
+            let owner = build_keys_union_node(&graph, &keys).unwrap();
+            let node = owner.id();
+            let data = graph.node_data(node).unwrap();
+            match data.as_ref() {
+                SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                    assert_eq!(value, "first")
+                }
+                SemanticNodeData::Union(children) => {
+                    assert_eq!(children.len(), 2);
+                    assert!(children.iter().all(|child| graph.node_is_live(*child)));
+                }
+                other => {
+                    panic!("key builder returned a reclaimed or invalid key domain: {other:?}")
+                }
+            }
+            let read = dispatch.execute_read(
+                verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: node,
+                    path: verter_type_expr::OwnedSlice::from([]),
+                    context:
+                        verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                            verter_type_engine::semantic_query::ProjectionMode::Navigate,
+                        ),
+                },
+            );
+            assert!(matches!(
+                read.value().clone(),
+                verter_type_engine::semantic_query::QueryResult::Value(_)
+            ));
+            drop(owner);
+            graph.invalidate_all();
+            assert!(
+                graph.node_is_live(node),
+                "the consuming dispatch delivery owns the key domain"
+            );
+            drop(read);
+            drop(dispatch);
+            assert_eq!(
+                graph.node_count(),
+                graph.node_ownership_counts().permanent_nodes,
+                "key owner releases the literal topology"
+            );
+        }
+    }
+}
 
 /// Build a string-literal-union node from a list of keys
 /// for the 2-step Pick/Omit dispatch orchestration. Used by the
@@ -29,10 +94,13 @@ use std::sync::Arc;
 /// Single-key fast path produces a bare `Literal` node; multi-key
 /// produces a `Union` of literals. Both are interned at global scope
 /// (no file scope) since the keys are workspace-shared sentinels.
+/// The returned root owns the key topology across the consuming dispatch.
 pub(crate) fn build_keys_union_node(
     graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     keys: &[verter_type_expr::facts::FactPropertyKey],
-) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::NodeRoot> {
+    // Construction lane: the caller's dispatcher holds it.
+    let _scope = graph.enter_nested_scope()?;
     use verter_type_engine::semantic_query::SemanticNodeData;
     use verter_type_expr::LiteralValue;
     use verter_type_expr::PropertyKey;
@@ -58,16 +126,16 @@ pub(crate) fn build_keys_union_node(
     // walk records no file roots and can never be incomplete — asserted
     // below rather than threaded to a disposition boundary.
     let composite =
-        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+        verter_type_engine::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
             graph,
             &key_ids,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
-        );
+        )?;
     verter_debug_assert::verter_debug_assert!(
         composite.evidence.inspected_file_roots.is_empty() && !composite.evidence.incomplete,
         "key-domain union over freshly interned Global literals must carry no evidence"
     );
-    Some(composite.node)
+    graph.root_in_scope(composite.node).ok()
 }
 
 /// Extract the package-backed gate's ROOT declaration IDENTITY from a graph
@@ -110,7 +178,7 @@ fn node_root_identity(
     }
     let action = {
         let graph = dispatch.graph();
-        let data = graph.node_data(node)?;
+        let data = graph.read_in_scope(node)?;
         match data.as_ref() {
             SemanticNodeData::Alias(inner) => Action::Recurse(*inner),
             SemanticNodeData::IndexedAccess { object, .. } => Action::Recurse(*object),
@@ -131,12 +199,12 @@ fn node_root_identity(
         Action::Recurse(next) => node_root_identity(dispatch, next, depth + 1),
         Action::Identity(identity) => Some(identity),
         Action::ResolveBare => {
-            let resolved = dispatch.resolve_carrier_subject_node(
+            let resolved = dispatch.owning().resolve_carrier_subject_node(
                 node,
                 ProjectionReductionContext::published(ProjectionMode::Navigate),
             );
-            if resolved != node {
-                node_root_identity(dispatch, resolved, depth + 1)
+            if *resolved.value() != node {
+                node_root_identity(dispatch, *resolved.value(), depth + 1)
             } else {
                 None
             }
@@ -167,7 +235,10 @@ pub(crate) fn node_package_backed_object_like_root_with_fence(
         node_root_identity(dispatch, node, 0)
     };
     let Some(root_identity) = root_identity else {
-        return (false, Some(Arc::from(Vec::new())));
+        return (
+            false,
+            Some(verter_type_engine::semantic_query::DepSignature::default()),
+        );
     };
     crate::meta_resolve::materialize::package_backed_object_like_root_identity_with_fence(
         query_engine,
@@ -204,7 +275,7 @@ fn collect_node_root_identities(
         // A cap fired with the node unexamined: any shape that could
         // have contributed (or descended to) a root marks the
         // collection truncated.
-        let could_contribute = match dispatch.graph().node_data(node).as_deref() {
+        let could_contribute = match dispatch.graph().read_in_scope(node).as_deref() {
             Some(
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::IndexedAccess { .. }
@@ -231,7 +302,7 @@ fn collect_node_root_identities(
     }
     let step = {
         let graph = dispatch.graph();
-        let Some(data) = graph.node_data(node) else {
+        let Some(data) = graph.read_in_scope(node) else {
             return;
         };
         match data.as_ref() {
@@ -263,12 +334,18 @@ fn collect_node_root_identities(
             }
         }
         Step::ResolveBare => {
-            let resolved = dispatch.resolve_carrier_subject_node(
+            let resolved = dispatch.owning().resolve_carrier_subject_node(
                 node,
                 ProjectionReductionContext::published(ProjectionMode::Navigate),
             );
-            if resolved != node {
-                collect_node_root_identities(dispatch, resolved, depth + 1, out, truncated);
+            if *resolved.value() != node {
+                collect_node_root_identities(
+                    dispatch,
+                    *resolved.value(),
+                    depth + 1,
+                    out,
+                    truncated,
+                );
             }
         }
         Step::Stop => {}
@@ -311,9 +388,12 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
             // fail-open Continue, and the request goes partial.
             verter_type_engine::request_context::mark_request_result_partial();
         }
-        return (false, Arc::from(Vec::new()));
+        return (
+            false,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
-    let mut fence: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> = Vec::new();
+    let mut fence: Vec<verter_type_engine::semantic_query::DepEntry> = Vec::new();
     let mut outcomes: Vec<MaterializationCycleGateOutcome> = Vec::with_capacity(roots.len() + 1);
     if truncated {
         verter_type_engine::request_context::mark_request_result_partial();
@@ -330,8 +410,8 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
             && identity.canonical_id.as_ref() != "__builtin__"
             && identity.canonical_id.as_ref() != scope_canonical_id
         {
-            fence.push((
-                Arc::clone(&identity.canonical_id),
+            fence.push(verter_type_engine::semantic_query::DepEntry::new(
+                &identity.canonical_id,
                 verter_type_engine::semantic_query::DepVersion::WholeHash(identity.whole_hash),
             ));
         }
@@ -339,13 +419,13 @@ pub(crate) fn node_root_reaches_transitive_cycle_with_fence(
         verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
         verter_type_engine::fact_signature_helpers::merge_dep_signature_into_local_fence(
             &mut fence,
-            &read.dep_signature,
+            read.dep_signature(),
         );
-        outcomes.push(read.value);
+        outcomes.push(read.value().clone());
     }
     let aggregate = MaterializationCycleGateOutcome::aggregate(outcomes);
     let fence_signature: verter_type_engine::semantic_query::DepSignature =
-        Arc::from(fence.into_boxed_slice());
+        verter_type_engine::semantic_query::DepSignature::new(fence.into_boxed_slice());
     verter_type_engine::meta_resolve::dep_signature::emit_dispatch_dep_signature_facts(
         dispatch,
         &fence_signature,

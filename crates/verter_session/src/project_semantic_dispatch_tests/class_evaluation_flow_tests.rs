@@ -128,6 +128,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             Arc::from(FILE),
@@ -136,7 +137,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(FILE),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -149,7 +150,7 @@ fn observe(host: &Arc<VerterHost>, name: &str) -> (verter_type_expr::TypeExpr, b
     else {
         panic!("{name} must produce a value");
     };
-    let result: Arc<FlowReturnResult> = result;
+    let result: verter_session_query::retention::owned::Owned<FlowReturnResult> = result;
     let projected = host
         .project_node_to_type_expr_for_test(result.return_type())
         .unwrap_or_else(|| panic!("{name} must project"));
@@ -206,4 +207,54 @@ fn class_evaluation_effects_warm_and_edited_equal_fresh() {
         (&fresh_after.0, fresh_after.1),
         "the edited read equals a fresh computation"
     );
+}
+
+/// A sequence in `extends` retains the supported enclosing write beside an
+/// unsupported nested-class write. Neither that answer nor a sibling
+/// can certify the enclosing evaluation or enter the warm store.
+/// TypeScript 7.0.2, in all four strictNullChecks × noImplicitAny settings:
+/// `f` returns string before the edit and number after; `sibling` returns
+/// number. The unsupported sibling write remains conservative here.
+#[test]
+fn partial_heritage_retains_writes_without_certifying_siblings() {
+    const BEFORE: &str = r#"
+class B {}
+export function f(x: string | number, y: boolean | number) {
+    class C extends (x = "s", class { static { y = 1; } }, B) {}
+    return x;
+}
+export function sibling(x: string | number, y: boolean | number) {
+    class C extends (x = "s", class { static { y = 1; } }, B) {}
+    return y;
+}
+"#;
+    let after = BEFORE.replace("x = \"s\"", "x = 1");
+    let fresh = |source: &str, name: &str| {
+        let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+        upsert(&host, source);
+        observe(&host, name)
+    };
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    for (source, expected) in [
+        (BEFORE, verter_type_expr::PrimitiveName::String),
+        (after.as_str(), verter_type_expr::PrimitiveName::Number),
+    ] {
+        upsert(&host, source);
+        for name in ["f", "sibling"] {
+            let cold = observe(&host, name);
+            if name == "f" {
+                assert_eq!(cold.0, verter_type_expr::TypeExpr::Primitive(expected));
+            } else {
+                assert!(
+                    matches!(cold.0, verter_type_expr::TypeExpr::Union(_)),
+                    "an unmodelled sibling write must retain its conservative union: {:?}",
+                    cold.0
+                );
+            }
+            assert!(!cold.1, "{name}: unsupported heritage stays degraded");
+            assert_eq!(cold.2, 0, "{name}: no warm candidate");
+            assert_eq!(observe(&host, name), cold, "{name}: repeat");
+            assert_eq!(fresh(source, name), cold, "{name}: fresh equivalence");
+        }
+    }
 }

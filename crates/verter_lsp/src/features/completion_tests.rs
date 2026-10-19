@@ -22,9 +22,9 @@ use verter_session_query::analysis::types::VueApiClassification;
 fn svelte_snippet_role() -> verter_type_expr::PropCallableRole {
     verter_type_expr::PropCallableRole::SvelteSnippet {
         symbol: verter_type_expr::ResolvedSymbolIdentity {
-            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            canonical_id: "/node_modules/svelte/index.d.ts".into(),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("Snippet"),
+            symbol: "Snippet".into(),
         },
         exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
         provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,
@@ -2721,7 +2721,7 @@ fn test_component_prop_completions_from_macros() {
     // Child analysis: has defineProps with prop_fields and defineEmits with emit_fields
     // but empty template.prop_definitions / emit_definitions (the normal state)
     let child_analysis = FileAnalysisSnapshot {
-        macros: std::sync::Arc::new(vec![
+        macros: verter_session_query::analysis::file_analysis::SharedList::new(vec![
             AnalyzedMacro {
                 edit_anchors: Default::default(),
                 kind: AnalyzedMacroKind::DefineProps,

@@ -45,6 +45,46 @@ fn classify(
     }
 }
 
+#[test]
+fn runtime_fact_preserves_operation_refusal_and_certified_recovery() {
+    use verter_type_engine::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, FactResult,
+        RecoveryBasis,
+    };
+    let host = VerterHost::new_standalone(Default::default());
+    let graph = host.project_type_store().semantic_graph();
+    let diagnostic = CheckerDiagnostic {
+        code: CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
+        operation: CheckerDiagnosticOperation::InstantiationBudget,
+    };
+    crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+        let dispatch = ProjectSemanticDispatch::new(ctx);
+        let _builder = dispatch.enter_construction_scope();
+        let refused = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            basis: RecoveryBasis::Budget,
+            origin: None,
+        }));
+        assert!(
+            matches!(
+                classify(&dispatch, refused).into_fact(),
+                FactResult::Unavailable { .. }
+            ),
+            "an operation allowance is a refusal, never a successful runtime fact"
+        );
+        let certified = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+            diagnostic,
+            basis: RecoveryBasis::Certified,
+            origin: None,
+        }));
+        let FactResult::Complete(classification) = classify(&dispatch, certified).into_fact()
+        else {
+            panic!("a certified checker recovery remains a complete classification");
+        };
+        assert_eq!(classification.kinds(), &[BroadRuntimeKind::Unknown]);
+    });
+}
+
 fn macro_classifier_key(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical: &str,
@@ -93,7 +133,7 @@ fn file_scope(
         .shallow_file_state(canonical)
         .expect("fixture file must be indexed");
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -103,6 +143,10 @@ fn file_scope(
 #[test]
 fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Literal(LiteralValue::Number(42.0)));
@@ -137,6 +181,10 @@ fn broad_runtime_preserves_union_order_and_first_occurrence_dedup() {
 #[test]
 fn broad_runtime_classifies_container_callable_and_object_without_member_descent() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -145,11 +193,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     });
     let callable = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -179,11 +227,11 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
     // dangling, because classification must never descend into them.
     let constructor = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Construct,
-        params: Arc::from([]),
+        params: verter_type_engine::semantic_query::PayloadArray::from([]),
         return_type: leaf,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(leaf),
-        type_parameters: Arc::from([]),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from([]),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -225,6 +273,10 @@ fn broad_runtime_classifies_container_callable_and_object_without_member_descent
 #[test]
 fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let null = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Null));
     let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
@@ -243,14 +295,15 @@ fn broad_runtime_keeps_null_and_unsupported_undefined_distinct() {
 #[test]
 fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
     let host = VerterHost::new_standalone(Default::default());
+    let _builder = host.project_type_store().construction_grant().enter_scope();
     let graph = host.project_type_store().semantic_graph();
     let builtin = |name: &'static str| {
         graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
         })
     };
@@ -272,10 +325,10 @@ fn broad_runtime_recognizes_only_shadow_safe_builtin_nominal_identities() {
     for name in ["Date", "WeakMap", "WeakSet"] {
         let user_nominal = graph.intern_node(SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from(format!("/src/{name}.ts")),
+                canonical_id: verter_type_expr::OwnedStr::from(format!("/src/{name}.ts")),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
         });
         assert_eq!(
@@ -326,6 +379,7 @@ fn rootless_classifier_subject_stays_return_only_with_a_rooted_descendant() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/rooted-child.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let rooted = graph.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::String),
@@ -588,6 +642,7 @@ fn missing_semantic_node_data_is_partial_unknown_and_return_only() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/missing-node.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Alias(SemanticNodeId(u64::MAX)),
@@ -626,6 +681,7 @@ fn classifier_work_exhaustion_is_partial_unknown_and_never_warms() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/work-limit.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let arms: Vec<_> = (0..64)
         .map(|value| {
@@ -671,10 +727,13 @@ fn opaque_query_fault_is_partial_but_honest_miss_is_complete_unknown() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/query-fault.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let scope = file_scope(&dispatch, "/query-fault.ts");
     let fault_subject = graph.intern_node_with_scope(
-        SemanticNodeData::Opaque(QueryError::Other(Arc::from("fixture fault"))),
+        SemanticNodeData::Opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
+            "fixture fault",
+        ))),
         scope.clone(),
     );
     let miss_subject =
@@ -743,6 +802,7 @@ fn the_positional_marker_classifies_with_the_flow_class_through_the_classifier()
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/positional-marker.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::UnmodeledPosition),
@@ -793,11 +853,12 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
     let host = VerterHost::new_standalone(Default::default());
     upsert_ts(&host, "/recursive-runtime.ts", "export type Seed = string");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let subject = graph.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::from("RuntimeRecursive"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("RuntimeRecursive"),
+            args: Default::default(),
         }),
         file_scope(&dispatch, "/recursive-runtime.ts"),
     );
@@ -826,6 +887,10 @@ fn recursive_runtime_carrier_is_typed_partial_and_return_only() {
 #[test]
 fn finite_deep_alias_chain_is_iterative_and_complete() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
     let mut subject = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Builds the finite alias chain the classifier must resolve iteratively.

@@ -151,12 +151,21 @@ fn component_meta_resolution_budget_error(
     analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> Option<MetaError> {
+    component_meta_evaluated_budget_error(
+        canonical_or_alias,
+        analysis,
+        resolved.evaluated_types.as_ref(),
+    )
+}
+
+fn component_meta_evaluated_budget_error(
+    canonical_or_alias: &str,
+    analysis: Option<&verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
+    evaluated_types: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
+) -> Option<MetaError> {
     // Walker overflow is no longer meaningful — the solver path replaced
     // the legacy imported-eval walker. Only check symbolic expansion budget.
-    if resolved
-        .evaluated_types
-        .as_ref()
-        .is_some_and(component_meta_expansion_budget_exceeded)
+    if evaluated_types.is_some_and(component_meta_expansion_budget_exceeded)
         && component_meta_symbolic_budget_is_fatal(analysis)
     {
         return Some(MetaError::Host(format!(
@@ -694,10 +703,7 @@ impl MetaSession {
     pub fn get_component_meta(
         &self,
         canonical_or_alias: &str,
-    ) -> Result<
-        Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-        MetaError,
-    > {
+    ) -> Result<Option<crate::ComponentMetaDelivery>, MetaError> {
         self.check_alive()?;
         let host = self.project.host();
         // Share the fixed-view fast path with the batch analysis surface
@@ -745,15 +751,7 @@ impl MetaSession {
     pub fn get_component_meta_batch(
         &self,
         canonical_or_aliases: &[String],
-    ) -> Result<
-        Vec<
-            Result<
-                Option<verter_session_query::analysis::component_meta::ComponentMetaAnalysis>,
-                MetaError,
-            >,
-        >,
-        MetaError,
-    > {
+    ) -> Result<Vec<Result<Option<crate::ComponentMetaDelivery>, MetaError>>, MetaError> {
         use std::sync::Arc;
         self.check_alive()?;
         let scheduler = self.project.host().scheduler();

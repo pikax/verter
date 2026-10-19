@@ -123,6 +123,13 @@ pub struct SamplingStats {
     pub max_sweep_ms: f64,
 }
 
+/// CPU attribution bounds in milliseconds; these are not exact totals.
+#[derive(Debug, Serialize)]
+pub struct CpuBounds {
+    pub lower: f64,
+    pub upper: f64,
+}
+
 /// The result document.
 #[derive(Debug, Serialize)]
 pub struct Report {
@@ -177,10 +184,17 @@ pub struct Report {
     /// Descendants still alive when the child exited, killed by teardown.
     #[serde(rename = "descendantsKilled")]
     pub descendants_killed: Option<u64>,
+    /// Process-tree CPU; unavailable when counters cannot be attributed.
     #[serde(rename = "cpuUserMs")]
     pub cpu_user_ms: Option<f64>,
+    /// Kernel CPU has the same availability as user CPU.
     #[serde(rename = "cpuKernelMs")]
     pub cpu_kernel_ms: Option<f64>,
+    /// Bounds from observed counters when macOS reaping is ambiguous.
+    #[serde(rename = "cpuUserMsBounds", skip_serializing_if = "Option::is_none")]
+    pub cpu_user_ms_bounds: Option<CpuBounds>,
+    #[serde(rename = "cpuKernelMsBounds", skip_serializing_if = "Option::is_none")]
+    pub cpu_kernel_ms_bounds: Option<CpuBounds>,
     #[serde(rename = "stdoutPath")]
     pub stdout_path: String,
     #[serde(rename = "stderrPath")]
@@ -225,6 +239,8 @@ impl Report {
             descendants_killed: None,
             cpu_user_ms: None,
             cpu_kernel_ms: None,
+            cpu_user_ms_bounds: None,
+            cpu_kernel_ms_bounds: None,
             stdout_path: spec.stdout_path().to_string_lossy().into_owned(),
             stderr_path: spec.stderr_path().to_string_lossy().into_owned(),
             errors: Vec::new(),

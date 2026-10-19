@@ -17,7 +17,7 @@ use crate::typeinfo::surface::{CanonicalSpan, TypeInfoSurfaceMember};
 use verter_type_engine::project_semantic_dispatch::callable_view::{
     ArmCombineNode, CallableNodeView,
 };
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
     PathSegment, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
@@ -75,12 +75,12 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // request's materialization-cache suppress so the result is
             // never admitted warm as complete metadata.
             if dispatch
-                .demand_validated_structural_node(
+                .owning().demand_validated_structural_node(
                     member.value,
                     ProjectionReductionContext::structural_transit_with_mode(
                         ProjectionMode::Navigate,
                     ),
-                )
+                ).value()
                 .is_none()
             {
                 verter_type_engine::request_context::mark_request_result_partial();
@@ -104,26 +104,27 @@ pub(crate) fn slots_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // member value records its typed reason before the drop, so the
             // missing slot is a PARTIAL surface, never byte-identical to a
             // surface that legitimately has no such slot.
-            let realized_root = match view.realized_callable_root(context) {
+            // Each carrier below owns the nodes this slot is published from.
+            let realized = view.owning().realized_callable_root(context).map(|resolution| match resolution {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
-                    id.into_inner()
+                    Some(id.into_inner())
                 }
-                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
-                    return None
-                }
+                verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => None,
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(incomplete) => {
                     let _ = incomplete.into_recorded_partial();
-                    return None;
+                    None
                 }
-            };
-            let combine = match node_data_for(dispatch.graph(), realized_root).as_deref() {
+            });
+            let realized_root = (*realized.value())?;
+            let combine = match dispatch.graph().read_in_scope(realized_root).as_deref() {
                 Some(SemanticNodeData::Union(_)) => ArmCombineNode::Union,
                 _ => ArmCombineNode::Intersection,
             };
             // The across-arms first-param + return NODES (fails closed to drop
             // the slot when any arm is non-callable).
-            let parts = view.slot_param_and_return_by_arm(combine, context)?;
+            let parts_carrier = view.owning().slot_param_and_return_by_arm(combine, context);
+            let parts = parts_carrier.value().clone()?;
             let scope = macro_surface.member_expr_scope(dispatch, member);
             // Bindings from the (across-arms-intersected) first-param NODE.
             let bindings = parts
@@ -195,13 +196,15 @@ pub(crate) fn slot_member_types_from_typeinfo_surface<
                     && member.published_name().as_deref() == Some(slot.name.as_str())
             })?;
             let view = CallableNodeView::new(dispatch, member.value);
-            let node = match view.realized_callable_root(context) {
+            // The realized carrier owns the node its output is raised from.
+            let realized = view.owning().realized_callable_root(context).map(|resolution| match resolution {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
-                    id.into_inner()
+                    Some(id.into_inner())
                 }
-                _ => member.value,
-            };
+                _ => None,
+            });
+            let node = realized.value().unwrap_or(member.value);
             Some(
                 crate::typeinfo::framework_surface::results::NamedTypeMember {
                     name: slot.name.clone(),
@@ -263,7 +266,7 @@ pub(crate) fn slot_return_publications_from_typeinfo_surface<
                             base: AuthoredBodyLocator::MacroPayload(base.clone()),
                             occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                                 member.value.0,
-                                Arc::from([slot.name.clone()]),
+                                From::from([slot.name.clone()]),
                             ),
                             projection:
                                 verter_type_expr::facts::CallableOccurrenceProjection::Return,
@@ -347,11 +350,7 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
     if let Some(reasons) =
         verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
             ctx,
-            verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                first_param,
-            )
-            .as_deref(),
+            dispatch.graph().read_in_scope(first_param).as_deref(),
         )
     {
         verter_type_engine::request_context::fold_result_completeness(
@@ -377,7 +376,7 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
         ctx,
         dispatch,
         first_param,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     ) {
@@ -403,7 +402,8 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
     // indexed access `NamedRoot['member']`. The Pick source-root is read
     // NODE-DOMAIN from the first-param node (a thin structural `InstantiationRef`
     // read under the Vue Pick DTO policy — never a `"Pick<"` text sniff).
-    let pick_root = pick_source_root_node(dispatch, first_param);
+    let pick_root_carrier = pick_source_root_node(dispatch, first_param);
+    let pick_root = *pick_root_carrier.value();
     surface
         .members
         .iter()
@@ -453,19 +453,31 @@ fn binding_fields_from_param_node<C: crate::session_attachment::SessionCapabilit
 fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     first_param: SemanticNodeId,
-) -> Option<SemanticNodeId> {
+) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<Option<SemanticNodeId>> {
     // A PARTIAL peel yields `None` — the existing safe concrete-materialization
     // fallback (each member mints its own concrete value). The builtin-Pick
     // identity checks below apply ONLY to a Complete peel: a truncated peel
     // must never publish a symbolic `NamedRoot['member']` access off an
     // operationally-incomplete carrier read.
-    let peeled = dispatch
+    // The peel's carrier owns the returned root.
+    let peel = dispatch
+        .owning()
         .peel_node_for_uninstantiated_carrier_fact_demand(
             first_param,
             ProjectionReductionContext::published(ProjectionMode::Navigate),
-        )
-        .into_complete_node()?;
-    match node_data_for(dispatch.graph(), peeled).as_deref() {
+        );
+    let root = peel
+        .value()
+        .into_complete_node()
+        .and_then(|peeled| pick_source_root_of_peeled(dispatch, peeled));
+    peel.map(|_| root)
+}
+
+fn pick_source_root_of_peeled<C: verter_type_engine::resolver_core::ResolverCapabilities>(
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    peeled: SemanticNodeId,
+) -> Option<SemanticNodeId> {
+    match dispatch.graph().read_in_scope(peeled).as_deref() {
         Some(SemanticNodeData::InstantiationRef { base, args })
             if base.canonical_id.as_ref() == "__builtin__"
                 && base.decl_name.as_ref() == "Pick"
@@ -479,7 +491,7 @@ fn pick_source_root_node<C: verter_type_engine::resolver_core::ResolverCapabilit
             // sink instead — here `None` means CONCRETE materialization, not a
             // preserved carrier.
             let root = args[0];
-            match node_data_for(dispatch.graph(), root).as_deref() {
+            match dispatch.graph().read_in_scope(root).as_deref() {
                 Some(
                     SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
@@ -695,13 +707,14 @@ mod raise_miss_normalization_tests {
             })
             .unwrap();
         let dispatch = ProjectSemanticDispatch::new(&*host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = host.project_type_store().semantic_graph();
         let shallow = dispatch
             .ctx
             .shallow_file_state("/dep.ts")
             .expect("/dep.ts must index");
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from("/dep.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/dep.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: shallow.whole_hash,
             local_scope: None,
@@ -730,7 +743,7 @@ mod raise_miss_normalization_tests {
             root
         };
         assert!(
-            armed_root.is_none(),
+            armed_root.value().is_none(),
             "a Partial (operationally-truncated) peel MUST yield None (concrete-materialization \
              fallback), never a symbolic source root off an incomplete carrier read — the \
              pre-change bare-node peel returned the reached Pick node even on truncation and would \
@@ -743,7 +756,7 @@ mod raise_miss_normalization_tests {
         // never warmed, so this re-runs cold ⇒ Complete).
         let complete_root = super::pick_source_root_node(&dispatch, first_param);
         assert!(
-            complete_root.is_some(),
+            complete_root.value().is_some(),
             "FIXTURE INVALID: a Complete peel of Pick<Source, \"foo\"> must reach the builtin Pick \
              and select the nominal source root (the symbolic access) — else the armed None above \
              is a fixture always-miss, not the node-hiding"

@@ -16,17 +16,19 @@
 //! [`SemanticGraphStore::compact_signature_store_if_over_cap`] once per
 //! content change, so the kernel tables stay bounded by
 //! [`EPOCH_RECORD_CAP`](crate::signature_kernel::EPOCH_RECORD_CAP) however
-//! long an edited project stays open. A holder that releases graph nodes
-//! hands them to [`SemanticGraphStore::release_signature_records_naming`],
-//! which replaces the epoch once most of its type tokens name released
-//! nodes, so the tables track the live set rather than the cap.
+//! long an edited project stays open. A document close hands the type-token
+//! nodes of its closed content to
+//! [`SemanticGraphStore::release_signature_records_naming`], which releases
+//! the epoch's roots on them and replaces the epoch once most of its type
+//! tokens are stranded, so the tables track the live set rather than the
+//! cap.
 
 use super::*;
 use crate::signature_kernel::GraphEpoch;
 
 /// The kernel epoch whose handles a memo value carries; `None` for a value
 /// with no kernel handle (every other value tag, and the empty set).
-fn value_kernel_epoch(result: &QueryResult<SemanticQueryValue>) -> Option<GraphEpoch> {
+pub(super) fn value_kernel_epoch(result: &QueryResult<SemanticQueryValue>) -> Option<GraphEpoch> {
     match result {
         QueryResult::Value(SemanticQueryValue::SignatureSet(value)) => value.set.epoch(),
         QueryResult::Value(SemanticQueryValue::SignatureResult(value)) => {
@@ -85,9 +87,6 @@ impl SemanticGraphStore {
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
     ) -> bool {
         cached_satisfies(&entry.satisfied_projection, requested)
-            // A value naming a released node (a close's tombstone) is a miss
-            // too: the warm path must never serve the released placeholder.
-            && self.result_is_live(&entry.result)
             && !self.names_retired_kernel_epoch(&entry.result)
             && entry.validate(ctx)
     }
@@ -108,23 +107,25 @@ impl SemanticGraphStore {
         self.compact_signature_store_over(self.signatures.record_cap())
     }
 
-    /// Release the signature-kernel records that name `released` graph
-    /// nodes. A releasing holder calls this with every node it released;
-    /// once the kernel's tables hold more tokens naming released nodes than
-    /// live ones the epoch is replaced
-    /// ([`SignatureStore::replace_epoch_if_mostly_stranded`](crate::signature_kernel::SignatureStore::replace_epoch_if_mostly_stranded))
-    /// and the memo families and candidates the retired epoch leaves
-    /// unreachable go with it. Returns the new epoch, or `None` while live
-    /// tokens still dominate. Safe wherever
-    /// [`Self::compact_signature_store_if_over_cap`] is.
-    pub fn release_signature_records_naming(
-        &self,
-        released: impl IntoIterator<Item = SemanticNodeId>,
-    ) -> Option<GraphEpoch> {
-        self.signatures.note_released_nodes(released);
-        let epoch = self.signatures.replace_epoch_if_mostly_stranded()?;
-        self.evict_retired_kernel_candidates(epoch);
-        Some(epoch)
+    construction_ordinal_seam! {
+        /// Release the signature kernel's roots on the type tokens naming
+        /// `released` graph nodes — closed content no request reaches again.
+        /// Once the kernel's tables hold more such stranded tokens than live
+        /// ones the epoch is replaced
+        /// ([`SignatureStore::replace_epoch_if_mostly_stranded`](crate::signature_kernel::SignatureStore::replace_epoch_if_mostly_stranded))
+        /// and the memo families and candidates the retired epoch leaves
+        /// unreachable go with it. Returns the new epoch, or `None` while live
+        /// tokens still dominate. Safe wherever
+        /// [`Self::compact_signature_store_if_over_cap`] is.
+        fn release_signature_records_naming(
+            &self,
+            released: impl IntoIterator<Item = SemanticNodeId>,
+        ) -> Option<GraphEpoch> {
+            self.signatures.note_released_nodes(released);
+            let epoch = self.signatures.replace_epoch_if_mostly_stranded()?;
+            self.evict_retired_kernel_candidates(epoch);
+            Some(epoch)
+        }
     }
 
     /// [`Self::compact_signature_store_if_over_cap`] against an explicit
@@ -161,7 +162,6 @@ impl SemanticGraphStore {
             for entry in &evicted {
                 reverse_index::drain_candidate_reverse_index_registrations(
                     &self.canonical_to_entries,
-                    family,
                     ModeSlot::Single,
                     entry,
                 );

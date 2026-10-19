@@ -29,7 +29,7 @@ use verter_type_expr::locators::{
 use verter_type_expr::SyntheticCarrierSurfaceKind;
 
 use super::semantic_context::{
-    project_order_domain, project_union_order, OrderDomainId, SemanticContext, SemanticContextId,
+    project_order_domain, project_union_order, OrderDomainId, SemanticContext,
     SemanticOrderPolicyId, SemanticUnionMembersKey,
 };
 
@@ -324,29 +324,31 @@ fn encode_scope_id(enc: &mut Recipe, scope: &ScopeId) {
     enc.bytes(&scope.binder_scope_id.structural_hash);
 }
 
-/// Encode a node.
-///
-/// The key is the node's exact structure written out. The arena is acyclic
-/// by contract (every child id is below its parent's), so the structure is
-/// a DAG and the key is finite; the walk descends only to children below
-/// their parent and treats any other child as absent, so it terminates on
-/// any arena. A subtree whose written-out form is longer than
-/// [`SHARED_SUBTREE_MIN_BYTES`] and equal to one already written earlier in
-/// the key encodes as a reference to that earlier subtree, so a key is
-/// linear in the graph it describes however often a subtree is shared.
-///
-/// Sharing is a function of the structure alone, so equal structures get
-/// equal keys and distinct structures distinct ones. A key with no repeated
-/// subtree over that length writes every subtree in full. The encoder works
-/// in two passes over heap stacks and never recurses natively: it first
-/// reduces the reachable structure to a table of distinct subtrees
-/// (classes), classifying each node once, then writes the root's class.
-pub fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
-    graph.with_key_classes(|classes| {
-        let mut table = ClassTable::new(graph, classes);
-        let root = table.classify(id);
-        StableKey::from_exact(table.write(root))
-    })
+construction_ordinal_seam! {
+    /// Encode a node.
+    ///
+    /// The key is the node's exact structure written out. The arena is acyclic
+    /// by contract (every child id is below its parent's), so the structure is
+    /// a DAG and the key is finite; the walk descends only to children below
+    /// their parent and treats any other child as absent, so it terminates on
+    /// any arena. A subtree whose written-out form is longer than
+    /// [`SHARED_SUBTREE_MIN_BYTES`] and equal to one already written earlier in
+    /// the key encodes as a reference to that earlier subtree, so a key is
+    /// linear in the graph it describes however often a subtree is shared.
+    ///
+    /// Sharing is a function of the structure alone, so equal structures get
+    /// equal keys and distinct structures distinct ones. A key with no repeated
+    /// subtree over that length writes every subtree in full. The encoder works
+    /// in two passes over heap stacks and never recurses natively: it first
+    /// reduces the reachable structure to a table of distinct subtrees
+    /// (classes), classifying each node once, then writes the root's class.
+    fn stable_key_for_node(graph: &SemanticGraphStore, id: SemanticNodeId) -> StableKey {
+        graph.with_key_classes(|classes| {
+            let mut table = ClassTable::new(graph, classes);
+            let root = table.classify(id);
+            StableKey::from_exact(table.write(root))
+        })
+    }
 }
 
 // Test-only: classification frames opened, and key bytes written to hash a
@@ -444,7 +446,7 @@ struct OpenFrame {
 /// class of an absent child), a class memoizes at most 256 fold offsets
 /// and only when it stands for at least [`FOLD_MEMO_MIN_BYTES`] key bytes
 /// of its own, and the memoized orders are the comparisons of the
-/// classified nodes' sets. When the store releases nodes (a document close), their
+/// classified nodes' sets. When the store's nodes are destroyed, their
 /// entries are forgotten ([`Self::release_nodes`]) and the table is
 /// emptied once released entries outnumber live ones, so it stays
 /// proportional to the live nodes it classified.
@@ -462,6 +464,9 @@ pub(crate) struct KeyClasses {
     folds: FxHashMap<(ClassId, u8), u64>,
     /// Classified nodes released since the table was last emptied.
     released: usize,
+    /// Nodes classified since the owning store last marked them as
+    /// described by this sidecar.
+    pub(crate) fresh: Vec<SemanticNodeId>,
 }
 
 impl KeyClasses {
@@ -616,6 +621,7 @@ impl<'t> ClassTable<'t> {
         let frame = self.frames.pop()?;
         let class = self.build(&frame.recipe, frame.filled);
         self.table.classified.insert(frame.node, class);
+        self.table.fresh.push(frame.node);
         if self.frames.is_empty() {
             return Some(class);
         }
@@ -1184,7 +1190,7 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             match err {
                 QueryError::RecursiveRef { args, .. } => {
                     enc.u16(args.len() as u16);
-                    for arg in args.iter() {
+                    for arg in args.operands().iter() {
                         enc.child(*arg);
                     }
                 }
@@ -1507,7 +1513,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                 SignatureReturnCarrier::Declared(node) => {
                     enc.child_unless_same(*node, return_hole, &[3, 1]);
                 }
-                SignatureReturnCarrier::Function(_) => {
+                SignatureReturnCarrier::Function(_)
+                | SignatureReturnCarrier::DeferredFlow(_)
+                | SignatureReturnCarrier::EvaluatedFlow(_) => {
                     enc.u8(3);
                     encode_return_carrier(&mut enc, return_carrier);
                 }
@@ -1659,8 +1667,34 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             });
             encode_params(&mut enc, parts.params);
             encode_type_parameters(&mut enc, parts.type_parameters);
-            encode_signature_occurrence(&mut enc, parts.occurrence);
+            enc.bool(parts.occurrence.is_some());
+            if let Some(occurrence) = parts.occurrence {
+                encode_signature_occurrence(&mut enc, occurrence);
+            }
             encode_return_carrier(&mut enc, parts.return_carrier);
+            if parts.is_abstract || parts.predicate.is_some() {
+                enc.u8(4);
+                enc.bool(parts.is_abstract);
+                if let Some(predicate) = parts.predicate {
+                    match predicate.subject {
+                        PredicateSubject::This => enc.u8(1),
+                        PredicateSubject::Parameter(index) => {
+                            enc.u8(2);
+                            enc.u32(index);
+                        }
+                    }
+                    enc.bool(predicate.asserts);
+                    match predicate.ty {
+                        Some(ty) => {
+                            enc.u8(1);
+                            enc.child(ty);
+                        }
+                        None => enc.u8(0),
+                    }
+                } else {
+                    enc.u8(0);
+                }
+            }
         }
     }
     enc
@@ -1819,6 +1853,29 @@ fn encode_body_step(enc: &mut Recipe, step: TypeBodyPathStep) {
 /// declared annotation's locator, a body-derived position, or nothing.
 fn encode_return_carrier(enc: &mut Recipe, carrier: &SignatureReturnCarrier) {
     match carrier {
+        SignatureReturnCarrier::DeferredFlow(source)
+        | SignatureReturnCarrier::EvaluatedFlow(source) => {
+            enc.u8(
+                if matches!(carrier, SignatureReturnCarrier::EvaluatedFlow(_)) {
+                    4
+                } else {
+                    3
+                },
+            );
+            enc.u32(source.bindings().len() as u32);
+            for (name, image) in source.bindings() {
+                enc.str(name);
+                enc.child(*image);
+            }
+            enc.bool(source.receiver().is_some());
+            if let Some(receiver) = source.receiver() {
+                enc.child(receiver);
+            }
+            encode_return_carrier(
+                enc,
+                &SignatureReturnCarrier::Function(source.source().clone()),
+            );
+        }
         SignatureReturnCarrier::Declared(node) => {
             enc.u8(1);
             enc.child(*node);
@@ -1942,6 +1999,7 @@ fn encode_property_key(enc: &mut Recipe, key: &AuthoredPropertyKey) {
 
 fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
     let tag: u8 = match err {
+        QueryError::ExecutionAborted(_) => 24,
         QueryError::Miss => 1,
         QueryError::UnsupportedIntrinsic { .. } => 2,
         QueryError::BudgetExceeded(_) => 3,
@@ -1991,6 +2049,11 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::RecoveryBasis::Budget => 2,
             });
         }
+        QueryError::ExecutionAborted(abort) => enc.u8(match abort {
+            super::ExecutionAbort::Cancelled => 1,
+            super::ExecutionAbort::Superseded => 2,
+            super::ExecutionAbort::Shutdown => 3,
+        }),
         QueryError::UnsupportedIntrinsic { name } => enc.str(name),
         QueryError::RecursiveRef { name, .. } => enc.str(name),
         QueryError::Other(s) => enc.str(s),
@@ -2033,76 +2096,88 @@ pub(crate) fn class_fingerprint_for_tests(graph: &SemanticGraphStore, id: Semant
     })
 }
 
-/// Sort `members` by `VerterStableV1`. Equal keys stay in input order
-/// only when they are indistinguishable; distinguishable members never
-/// compare equal.
-pub fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNodeId]) {
-    let ordered = key_ordered(graph, members);
-    for (slot, (_, id)) in members.iter_mut().zip(ordered) {
-        *slot = id;
+construction_ordinal_seam! {
+    /// Sort `members` by `VerterStableV1`. Equal keys stay in input order
+    /// only when they are indistinguishable; distinguishable members never
+    /// compare equal.
+    fn sort_by_stable_key(graph: &SemanticGraphStore, members: &mut [SemanticNodeId]) {
+        let ordered = key_ordered(graph, members);
+        for (slot, (_, id)) in members.iter_mut().zip(ordered) {
+            *slot = id;
+        }
     }
 }
 
-/// Stable-key equality, which may license a collapse: every key encodes
-/// its whole structure, so equal keys name one encoded structure, one
-/// class of the store's table.
-pub fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
-    graph.with_key_classes(|classes| {
-        let mut table = ClassTable::new(graph, classes);
-        table.classify(a) == table.classify(b)
-    })
-}
-
-/// Union-set canonicalization: sort by stable key and drop repeated node ids.
-pub fn canonicalize_union_members(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> Arc<[SemanticNodeId]> {
-    let mut keyed = key_ordered(graph, members);
-    if graph.union_order_reversed() {
-        keyed.reverse();
-    }
-    // Admission-time convergence is ORDER only: structurally equal but
-    // arena-distinct members stay — the build's budgeted comparator owns
-    // the collapse and its discard-evidence discipline.
-    keyed.dedup_by(|a, b| a.1 == b.1);
-    keyed.into_iter().map(|(_, id)| id).collect()
-}
-
-/// Order a union's members by the `VerterStableV1` stable key — THE union
-/// order. Every union construction sorts through here, so the one order has
-/// one site (and one test-only counterfactual, a store that reverses it).
-pub fn sort_union_members_by_stable_key(
-    graph: &SemanticGraphStore,
-    members: &mut [SemanticNodeId],
-) {
-    sort_by_stable_key(graph, members);
-    if graph.union_order_reversed() {
-        members.reverse();
+construction_ordinal_seam! {
+    /// Stable-key equality, which may license a collapse: every key encodes
+    /// its whole structure, so equal keys name one encoded structure, one
+    /// class of the store's table.
+    fn provably_equal(graph: &SemanticGraphStore, a: SemanticNodeId, b: SemanticNodeId) -> bool {
+        graph.with_key_classes(|classes| {
+            let mut table = ClassTable::new(graph, classes);
+            table.classify(a) == table.classify(b)
+        })
     }
 }
 
-/// The positions of `members` in union order: the stable permutation that
-/// visits each entry at its member's rank under
-/// [`sort_union_members_by_stable_key`]. A node id listed more than once
-/// takes the rank of its first occurrence in that order, so repeated
-/// entries stay together in input order. Ranks are recovered once, through
-/// one map built after the sort, never by searching the sorted list per
-/// entry.
-pub fn union_rank_order(graph: &SemanticGraphStore, members: &[SemanticNodeId]) -> Vec<usize> {
-    union_rank_order_probed(graph, members, || {})
+construction_ordinal_seam! {
+    /// Union-set canonicalization: sort by stable key and drop repeated node ids.
+    fn canonicalize_union_members(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> Arc<[SemanticNodeId]> {
+        let mut keyed = key_ordered(graph, members);
+        if graph.union_order_reversed() {
+            keyed.reverse();
+        }
+        // Admission-time convergence is ORDER only: structurally equal but
+        // arena-distinct members stay — the build's budgeted comparator owns
+        // the collapse and its discard-evidence discipline.
+        keyed.dedup_by(|a, b| a.1 == b.1);
+        keyed.into_iter().map(|(_, id)| id).collect()
+    }
 }
 
-/// [`union_rank_order`], also reporting how many rank-map probes the
-/// recovery made.
-#[cfg(any(test, feature = "semantic-observe"))]
-pub fn union_rank_order_observed(
-    graph: &SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> (Vec<usize>, usize) {
-    let mut probes = 0usize;
-    let order = union_rank_order_probed(graph, members, || probes += 1);
-    (order, probes)
+construction_ordinal_seam! {
+    /// Order a union's members by the `VerterStableV1` stable key — THE union
+    /// order. Every union construction sorts through here, so the one order has
+    /// one site (and one test-only counterfactual, a store that reverses it).
+    fn sort_union_members_by_stable_key(
+        graph: &SemanticGraphStore,
+        members: &mut [SemanticNodeId],
+    ) {
+        sort_by_stable_key(graph, members);
+        if graph.union_order_reversed() {
+            members.reverse();
+        }
+    }
+}
+
+construction_ordinal_seam! {
+    /// The positions of `members` in union order: the stable permutation that
+    /// visits each entry at its member's rank under
+    /// [`sort_union_members_by_stable_key`]. A node id listed more than once
+    /// takes the rank of its first occurrence in that order, so repeated
+    /// entries stay together in input order. Ranks are recovered once, through
+    /// one map built after the sort, never by searching the sorted list per
+    /// entry.
+    fn union_rank_order(graph: &SemanticGraphStore, members: &[SemanticNodeId]) -> Vec<usize> {
+        union_rank_order_probed(graph, members, || {})
+    }
+}
+
+construction_ordinal_seam! {
+    /// [`union_rank_order`], also reporting how many rank-map probes the
+    /// recovery made.
+    #[cfg(any(test, feature = "semantic-observe"))]
+    fn union_rank_order_observed(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> (Vec<usize>, usize) {
+        let mut probes = 0usize;
+        let order = union_rank_order_probed(graph, members, || probes += 1);
+        (order, probes)
+    }
 }
 
 fn union_rank_order_probed(
@@ -2130,35 +2205,39 @@ fn union_rank_order_probed(
     order
 }
 
-/// Order a union's members as [`sort_union_members_by_stable_key`] does and
-/// drop each member whose key equals its neighbour's (the key-equality
-/// collapse [`provably_equal`] licenses), classifying every member once.
-pub fn sort_and_collapse_union_members(
-    graph: &SemanticGraphStore,
-    members: &mut Vec<SemanticNodeId>,
-) {
-    let mut keyed = key_ordered(graph, members);
-    if graph.union_order_reversed() {
-        keyed.reverse();
+construction_ordinal_seam! {
+    /// Order a union's members as [`sort_union_members_by_stable_key`] does and
+    /// drop each member whose key equals its neighbour's (the key-equality
+    /// collapse [`provably_equal`] licenses), classifying every member once.
+    fn sort_and_collapse_union_members(
+        graph: &SemanticGraphStore,
+        members: &mut Vec<SemanticNodeId>,
+    ) {
+        let mut keyed = key_ordered(graph, members);
+        if graph.union_order_reversed() {
+            keyed.reverse();
+        }
+        keyed.dedup_by(|a, b| a.0 == b.0);
+        members.clear();
+        members.extend(keyed.into_iter().map(|(_, id)| id));
     }
-    keyed.dedup_by(|a, b| a.0 == b.0);
-    members.clear();
-    members.extend(keyed.into_iter().map(|(_, id)| id));
 }
 
-/// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
-/// Views live in the store whose arena the union's id indexes.
-pub fn semantic_union_members(
-    graph: &SemanticGraphStore,
-    union: SemanticNodeId,
-    ctx: &SemanticContext,
-) -> Arc<[SemanticNodeId]> {
-    let key = SemanticUnionMembersKey::from_context(union, ctx);
-    if let Some(view) = graph.union_view(&key) {
-        return view;
+construction_ordinal_seam! {
+    /// Lazy `SemanticUnionMembers` view. A resident valid view is not re-sorted.
+    /// Views live in the store whose arena the union's id indexes.
+    fn semantic_union_members(
+        graph: &SemanticGraphStore,
+        union: SemanticNodeId,
+        ctx: &SemanticContext,
+    ) -> Arc<[SemanticNodeId]> {
+        let key = SemanticUnionMembersKey::from_context(union, ctx);
+        if let Some(view) = graph.union_view(&key) {
+            return view;
+        }
+        let view = build_union_view(graph, union);
+        graph.keep_union_view(key, &view)
     }
-    let view = build_union_view(graph, union);
-    graph.keep_union_view(key, &view)
 }
 
 fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[SemanticNodeId]> {
@@ -2168,15 +2247,6 @@ fn build_union_view(graph: &SemanticGraphStore, union: SemanticNodeId) -> Arc<[S
         }
         _ => Arc::from([union]),
     }
-}
-
-/// Project a view from a context id.
-pub fn semantic_union_members_for_id(
-    graph: &SemanticGraphStore,
-    union: SemanticNodeId,
-    ctx: &SemanticContextId,
-) -> Arc<[SemanticNodeId]> {
-    semantic_union_members(graph, union, ctx.context())
 }
 
 pub fn order_policy_of(ctx: &SemanticContext) -> SemanticOrderPolicyId {

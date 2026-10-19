@@ -26,7 +26,7 @@ pub use discovery::{
     ParamInput, RestInput, ResultInput, SignatureInput,
 };
 #[allow(unused_imports)]
-pub use lifetime::{SignatureStore, StoreError, EPOCH_RECORD_CAP};
+pub use lifetime::{SignatureEpochLease, SignatureStore, StoreError, EPOCH_RECORD_CAP};
 #[allow(unused_imports)]
 pub use positional::{
     MinArityFlags, PositionalMode, PositionalShape, ProjectedElement, ProjectedKind,
@@ -54,7 +54,7 @@ pub use records::{
 #[allow(unused_imports)]
 pub use result::{
     ReadSignatureResultKey, ResultDemand, SignatureCandidateNodes, SignatureResultValue,
-    SignatureSetValue,
+    SignatureSetValue, SignatureVersion,
 };
 #[allow(unused_imports)]
 pub use substitution::{

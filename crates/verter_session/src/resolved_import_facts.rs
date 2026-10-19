@@ -94,7 +94,7 @@ pub const RESOLVED_IMPORT_FACTS_RESOLVER_VERSION: u32 = 1;
 /// `lib_env_hash` is NOT a key dimension by design (R21 scoping
 /// rule). Tests pin this absence in
 /// `crates/verter_session/tests/cases/g_resolved/resolved_import_facts_key_shape.rs`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedImportFactsKey {
     pub canonical: Arc<str>,
     pub content_hash: Hash16,
@@ -113,7 +113,7 @@ pub struct ResolvedImportFactsKey {
 /// [`ResolvedImportClauseEntry`] / [`ResolvedReexportBindingEntry`].
 ///
 /// `Send + Sync` because every payload field is `Arc`-owned.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedSpecifier {
     /// The literal specifier as written in source (`"./util"`,
     /// `"vue"`, etc.). Interned via [`InternedSpecifier`] so two
@@ -139,7 +139,7 @@ pub struct ResolvedSpecifier {
 /// resolves to a specific source-name in a specific canonical file.
 ///
 /// Owned `Send + Sync` (every field is `Arc`-owned).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedImportClauseEntry {
     /// Imported specifier (`"vue"`, `"./util"`, etc.).
     pub specifier: InternedSpecifier,
@@ -168,7 +168,7 @@ pub struct ResolvedImportClauseEntry {
 /// specific source-name in a specific canonical file.
 ///
 /// Owned `Send + Sync` (every field is `Arc`-owned).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedReexportBindingEntry {
     /// Re-exported specifier.
     pub specifier: InternedSpecifier,
@@ -199,7 +199,7 @@ pub struct ResolvedReexportBindingEntry {
 /// Every field is owned (`Arc<...>` or `Vec<owned>`). No borrows, no
 /// parser arenas, no back-references — safe for long-lived
 /// host-owned caches.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedImportFacts {
     /// Resolved import-clause entries for this file.
     pub import_clauses: Vec<ResolvedImportClauseEntry>,
@@ -308,7 +308,7 @@ impl ResolvedImportFactsDb {
         &self,
         key: &ResolvedImportFactsKey,
         view: &TView,
-    ) -> Option<Arc<ResolvedImportFacts>>
+    ) -> Option<crate::resolver_core::CachedValue<ResolvedImportFacts>>
     where
         TView: StoreView + ?Sized,
     {
@@ -347,7 +347,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn retained_bundle_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
-    ) -> Option<Arc<ResolvedImportFacts>> {
+    ) -> Option<crate::resolver_core::CachedValue<ResolvedImportFacts>> {
         self.entries.lookup_any_candidate(key)
     }
 
@@ -358,7 +358,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn candidate_signatures_for_tests(
         &self,
         key: &ResolvedImportFactsKey,
-    ) -> Vec<Arc<[FactVersionRef]>> {
+    ) -> Vec<crate::resolver_core::OwnedFactSignature> {
         self.entries.candidate_signatures_for_key(key)
     }
 
@@ -373,7 +373,7 @@ impl ResolvedImportFactsDb {
     pub fn insert_if_absent(
         &self,
         key: ResolvedImportFactsKey,
-        value: Arc<ResolvedImportFacts>,
+        value: crate::resolver_core::CachedValue<ResolvedImportFacts>,
         facts: Vec<FactVersionRef>,
     ) -> bool {
         if self.entries.holds_candidate_with_signature(&key, &facts) {
@@ -404,7 +404,7 @@ impl ResolvedImportFactsDb {
     pub(crate) fn admit(
         &self,
         key: ResolvedImportFactsKey,
-        value: Arc<ResolvedImportFacts>,
+        value: crate::resolver_core::CachedValue<ResolvedImportFacts>,
         facts: Vec<FactVersionRef>,
     ) -> bool {
         self.generation.mutate(|| {
@@ -433,7 +433,7 @@ impl ResolvedImportFactsDb {
             }
             let admitted = self
                 .entries
-                .insert_arc_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
+                .insert_value_with_kind(key, value, facts, RESOLVED_IMPORT_FACTS_CACHE_KIND)
                 .is_some();
             (admitted, admitted)
         })

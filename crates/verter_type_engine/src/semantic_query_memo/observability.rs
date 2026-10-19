@@ -1,21 +1,37 @@
 //! Retention observability of the semantic graph store: the live and
-//! physical sizes of every structure a document close is expected to keep
-//! flat, as `$/verter/getStatistics` reports them and the churn endurance
-//! lane bounds them.
+//! physical sizes of every structure counted ownership and document closes
+//! are expected to keep flat, as `$/verter/getStatistics` reports them and
+//! the churn endurance lane bounds them.
 
 use super::*;
 
+/// Current graph ownership, independent of optional observation histories.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeOwnershipCounts {
+    /// Slots currently holding payloads.
+    pub live_nodes: usize,
+    /// Retained child occurrences, including repeated operands.
+    pub internal_edges: usize,
+    /// Independently acquired roots (shared clones count once).
+    pub roots: usize,
+    /// Global primitive vocabulary slots.
+    pub permanent_nodes: usize,
+}
+
 impl SemanticGraphStore {
+    /// Snapshot required current counts under the arena lock.
+    pub fn node_ownership_counts(&self) -> NodeOwnershipCounts {
+        self.arena.ownership_counts()
+    }
     /// Number of LIVE interned semantic nodes — the slots that still hold
-    /// a payload. A slot [`Self::release_canonical`] tombstoned is not
-    /// counted; [`Self::node_slot_count`] is the append-only id space.
-    /// Useful for tests and counters.
+    /// a payload. A destroyed slot is not counted;
+    /// [`Self::node_slot_count`] is the append-only id space.
     #[must_use]
     pub fn node_count(&self) -> usize {
         self.arena.live_len()
     }
 
-    /// Number of node ids ever allocated — live PLUS released. Grows
+    /// Number of node ids ever allocated — live PLUS destroyed. Grows
     /// monotonically (ids are never reused); the retained payload set is
     /// [`Self::node_count`] and the storage held is
     /// [`Self::node_storage_slots`].
@@ -26,23 +42,23 @@ impl SemanticGraphStore {
 
     /// Node slots the arena physically holds right now (live chunks times
     /// the chunk size). Unlike [`Self::node_slot_count`] this is bounded by
-    /// the live set: a chunk whose nodes were all released is dropped.
+    /// the live set: a chunk whose nodes were all destroyed is dropped.
     #[must_use]
     pub fn node_storage_slots(&self) -> usize {
         self.arena.storage_slots()
     }
 
     /// Whether `id` still resolves to its interned payload. `false` for an
-    /// id this store never handed out and for a slot
-    /// [`Self::release_canonical`] tombstoned (such an id reads the shared
-    /// `Opaque(Miss)` placeholder through [`Self::node_data`]).
+    /// id this store never handed out and for a destroyed slot (such an id
+    /// reads the shared `Opaque(Miss)` placeholder through
+    /// [`Self::node_data`]). Reports liveness only; it authorizes no read.
     #[must_use]
     pub fn node_is_live(&self, id: SemanticNodeId) -> bool {
         self.arena.is_live(id)
     }
 
-    /// Number of resident union member views (V8's `union_views`); each is
-    /// released with the union it belongs to.
+    /// Number of resident union member views (V8's `union_views`); a close
+    /// evicts the views over its closed content.
     #[must_use]
     pub fn union_view_count(&self) -> usize {
         self.union_views.lock().len()
@@ -66,6 +82,13 @@ impl SemanticGraphStore {
     #[must_use]
     pub fn stable_key_memo_count(&self) -> usize {
         self.key_classes.lock().memo_count()
+    }
+
+    /// Destroyed nodes whose per-node sidecar entries wait for cleanup:
+    /// the bounded pending log (`release.rs`).
+    #[must_use]
+    pub fn pending_destroyed_nodes(&self) -> usize {
+        self.arena.pending_destroyed()
     }
 
     /// Number of `unresolved_reach` entries (retention observability).
@@ -126,6 +149,19 @@ impl SemanticGraphStore {
         drop(entries);
         out.sort();
         out
+    }
+
+    /// Number of retained memo candidates across every family and slot.
+    /// A slot holding variants for several store versions counts each, so
+    /// unlike [`Self::memo_entry_count`] this sees superseded candidates a
+    /// slot keeps beside its current one.
+    #[must_use]
+    pub fn memo_candidate_count(&self) -> usize {
+        self.entries
+            .lock()
+            .values()
+            .map(FamilySlots::candidate_count)
+            .sum()
     }
 
     /// Number of warm memo entries — sums populated slots across every

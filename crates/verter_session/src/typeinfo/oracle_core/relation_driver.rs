@@ -135,7 +135,7 @@ pub(crate) fn observe_engine(spec: &RelationQuerySpec) -> EngineObservation {
         let (outcome, _record) = host
             .resolve_named_symbol_with_audit(&canonical, name, Some(ProjectionMode::Expanded))
             .into_parts();
-        outcome.ok().flatten()
+        outcome.ok().flatten().map(|root| root.id())
     };
     let Some(source) = resolve("__OracleSource") else {
         return EngineObservation::Unknown("source operand did not resolve".to_string());

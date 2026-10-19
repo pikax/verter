@@ -170,7 +170,7 @@ fn eval(
                 FunctionPartIdentity::DeclarationBody,
                 0,
             ),
-            normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+            normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
             context: dispatch.flow_return_context_for(canonical),
             demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -323,9 +323,9 @@ fn a_primitive_call_reads_the_wrapper_the_project_declares() {
 fn request_return(host: &Arc<VerterHost>, canonical: &str, name: &str) -> TypeExpr {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -497,12 +497,12 @@ fn a_primitive_wrapper_read_is_the_demanding_projects() {
             let _scope =
                 LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(canonical));
             let read = dispatch.execute_via_cold_build_helper(key(string));
-            let signatures: Vec<String> = match &read.value {
+            let signatures: Vec<String> = match &read.value() {
                 QueryResult::Value(SemanticQueryValue::SignatureSet(set)) => set
-                    .nodes
+                    .candidate_nodes()
                     .iter()
                     .map(|nodes| {
-                        let authored = nodes.authored.expect("an authored signature");
+                        let authored = nodes.authored().expect("an authored signature");
                         crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
                             dispatch, authored, 0,
                         )

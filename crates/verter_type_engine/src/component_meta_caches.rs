@@ -74,6 +74,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use verter_session_query::retention::heap_size::OwnedTree;
 
 use dashmap::DashMap;
 #[cfg(any(test, feature = "test-support"))]
@@ -160,7 +161,7 @@ impl<V> From<Option<(V, Arc<[FactVersionRef]>)>> for ComputedEntry<V> {
 
 #[derive(Clone)]
 pub struct ImportedRegistryEntry {
-    pub value: Option<Arc<ResolvedImportedRegistrySymbol>>,
+    pub value: ImportedRegistryValue,
     /// R3/R26/R28 fact-precise dependency signature recorded during the
     /// cold-compute pass that produced this entry. Validated on every
     /// warm-hit read — and on post-compute revalidation — against the
@@ -185,10 +186,25 @@ pub struct ImportedRegistryEntry {
     pub validated_at_generation: u64,
 }
 
-pub type ImportedRegistryKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type ImportedRegistryKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
-/// The value the imported-registry store holds per candidate.
-pub type ImportedRegistryValue = Option<Arc<ResolvedImportedRegistrySymbol>>;
+/// The value the imported-registry store holds per candidate: a
+/// self-charged cell every reader of the candidate shares.
+pub type ImportedRegistryValue =
+    Option<verter_session_query::retention::heap_size::OwnedValue<ResolvedImportedRegistrySymbol>>;
+
+/// What an imported-registry candidate keeps beyond its inline bytes: its
+/// key's owned names and its value's cell, each charged by its own cell.
+fn imported_registry_footprint(
+    key: &ImportedRegistryKey,
+    value: &ImportedRegistryValue,
+) -> verter_session_query::retention::Footprint {
+    verter_session_query::retention::heap_size::footprint(&(key, value))
+}
 
 pub struct ImportedRegistryDb {
     /// The shared reverse-indexed multi-candidate store. No retention
@@ -206,9 +222,20 @@ pub struct ImportedRegistryDb {
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
+    /// The account a published candidate is charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ImportedRegistryDb {
+    /// This cache, its candidates charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+
     pub(crate) fn attach_output(
         &self,
     ) -> crate::project_semantic_dispatch::memo::CandidateAttachment<
@@ -219,6 +246,8 @@ impl ImportedRegistryDb {
         crate::project_semantic_dispatch::memo::CandidateAttachment::new(
             &self.store,
             &self.inflight,
+            self.retention.get(),
+            imported_registry_footprint,
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -256,6 +285,7 @@ impl ImportedRegistryDb {
             store: crate::cache_runtime::ReverseIndexedCandidateStore::with_counter(live_counter),
             inflight: InflightTable::new(),
             schema_version,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -301,16 +331,19 @@ impl ImportedRegistryDb {
     /// publish path. NOT for use from production code.
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_for_test(&self, key: ImportedRegistryKey, entry: Arc<ImportedRegistryEntry>) {
-        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::clone(&key.0)]);
+        let self_roots: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from(key.0.as_str())]);
         let signature = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::clone(
             &entry.fact_dep_signature,
         ));
+        let footprint = imported_registry_footprint(&key, &entry.value);
         self.store.insert_for_test(
             key,
             entry.value.clone(),
             signature,
             self_roots,
             entry.validated_at_generation,
+            footprint,
+            self.retention.get(),
         );
     }
 
@@ -322,9 +355,9 @@ impl ImportedRegistryDb {
     #[cfg(any(test, feature = "test-support"))]
     pub fn insert_synthetic_for_schema_test(&self, marker: &str) {
         let key: ImportedRegistryKey = (
-            Arc::from(marker),
+            verter_type_expr::OwnedStr::from(marker),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("synthetic"),
+            verter_type_expr::OwnedStr::from("synthetic"),
         );
         let entry = Arc::new(ImportedRegistryEntry {
             value: None,
@@ -388,12 +421,18 @@ impl crate::cache_schema::CacheSchemaVersioned for ImportedRegistryDb {
 // 2. DeclarationLookupDb — `(canonical, owner, name) → ResolvedTypeDeclaration`
 // ===========================================================================
 
-pub type DeclarationLookupKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type DeclarationLookupKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct DeclarationLookupDb {
-    entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<Arc<ResolvedTypeDeclaration>>>>,
+    entries: DashMap<DeclarationLookupKey, Arc<CacheEntry<OwnedTree<ResolvedTypeDeclaration>>>>,
     inflight: InflightTable<QueryFlightKey<DeclarationLookupKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl DeclarationLookupDb {
@@ -402,13 +441,14 @@ impl DeclarationLookupDb {
     ) -> crate::project_semantic_dispatch::memo::SingleEntryAttachment<
         '_,
         DeclarationLookupKey,
-        Arc<ResolvedTypeDeclaration>,
+        OwnedTree<ResolvedTypeDeclaration>,
     > {
         crate::project_semantic_dispatch::memo::SingleEntryAttachment::new(
             &self.entries,
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -432,6 +472,7 @@ impl DeclarationLookupDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -475,16 +516,33 @@ impl Default for DeclarationLookupDb {
     }
 }
 
+impl DeclarationLookupDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+}
+
 // ===========================================================================
 // 3. ResolvabilityDb — `(canonical, owner, name) → bool`
 // ===========================================================================
 
-pub type ResolvabilityKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type ResolvabilityKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct ResolvabilityDb {
     entries: DashMap<ResolvabilityKey, Arc<CacheEntry<bool>>>,
     inflight: InflightTable<QueryFlightKey<ResolvabilityKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ResolvabilityDb {
@@ -497,6 +555,7 @@ impl ResolvabilityDb {
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -520,6 +579,7 @@ impl ResolvabilityDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -563,6 +623,17 @@ impl Default for ResolvabilityDb {
     }
 }
 
+impl ResolvabilityDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+}
+
 // ===========================================================================
 // 4. OwnerCollectionDb — `(canonical, owner, name) → Option<AuthoredBodyLocator>`
 //
@@ -580,7 +651,11 @@ impl Default for ResolvabilityDb {
 // only, not a key or validity-oracle change.
 // ===========================================================================
 
-pub type OwnerCollectionKey = (Arc<str>, verter_type_expr::TopLevelOwnerId, Arc<str>);
+pub type OwnerCollectionKey = (
+    verter_type_expr::OwnedStr,
+    verter_type_expr::TopLevelOwnerId,
+    verter_type_expr::OwnedStr,
+);
 
 pub struct OwnerCollectionDb {
     entries: DashMap<
@@ -589,6 +664,8 @@ pub struct OwnerCollectionDb {
     >,
     inflight: InflightTable<QueryFlightKey<OwnerCollectionKey>>,
     live_counter: Arc<AtomicU64>,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl OwnerCollectionDb {
@@ -604,6 +681,7 @@ impl OwnerCollectionDb {
             &self.inflight,
             &self.live_counter,
             crate::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -627,6 +705,7 @@ impl OwnerCollectionDb {
             entries: DashMap::new(),
             inflight: InflightTable::new(),
             live_counter,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -670,6 +749,17 @@ impl Default for OwnerCollectionDb {
     }
 }
 
+impl OwnerCollectionDb {
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
+    }
+}
+
 // ===========================================================================
 // 6. ShapeCacheDb — `ShapeCacheKey → MaterializedOutputTypeExpr`
 //
@@ -686,7 +776,7 @@ impl Default for OwnerCollectionDb {
 //                               // (scope + sealed MemberShapeNodeSubject) |
 //                               // SyntheticBinding (content-free id)
 //       demand: ShapeDemand {
-//           path: Arc<[PathSegment]>,
+//           path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment>,
 //           terminal_context: ProjectionReductionContext,  // mode + demand
 //           key_filter: KeyFilter,
 //           surface: PublishedSurfaceKind,
@@ -731,7 +821,7 @@ impl Default for OwnerCollectionDb {
 /// The `MemberValueNode` variant does not need this marker: its
 /// `node: MemberShapeNodeSubject` field is itself module-private to
 /// construct, which already seals that arm.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 struct ConstructionSeal;
 
 /// Sealed graph-node identity for the regular member-shape subject: the
@@ -745,7 +835,7 @@ struct ConstructionSeal;
 /// [`crate::semantic_query::SemanticNodeId`] — so the key's hash bytes are
 /// unchanged versus a bare ordinal field. This is a representation/naming
 /// seal, not a stale-entry compatibility change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 struct MemberShapeNodeSubject(crate::semantic_query::SemanticNodeId);
 
 impl MemberShapeNodeSubject {
@@ -786,7 +876,7 @@ impl MemberShapeNodeSubject {
 /// registry-side walker enqueues differently than a per-macro
 /// shape solver) and by the cache key to keep slot identity
 /// disjoint across surfaces.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum PublishedSurfaceKind {
     Props,
     Emits,
@@ -828,7 +918,7 @@ pub enum PublishedSurfaceKind {
 /// code must NEVER reach this variant at a hop it intends to walk.
 // The narrowing variants are built by the path-precise projection substrate.
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum KeyFilter {
     All,
     Include(Arc<[crate::semantic_query::PropertyKey]>),
@@ -892,7 +982,7 @@ impl KeyFilter {
 /// yet its type cannot be named outside this module, so the variant
 /// cannot be struct-constructed externally. That "more private than the
 /// item" shape IS the sealing idiom, not a leak.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 #[allow(private_interfaces)]
 pub enum ShapeSubject {
     /// Member-value graph-node subject. Sibling members whose
@@ -926,7 +1016,7 @@ impl ShapeSubject {
     /// Canonical scope id this subject is rooted in. Used for
     /// strict self-root warm-read validation and per-canonical
     /// invalidation.
-    pub(crate) fn scope_canonical(&self) -> &Arc<str> {
+    pub(crate) fn scope_canonical(&self) -> &str {
         match self {
             ShapeSubject::MemberValueNode { scope, .. } => scope,
             ShapeSubject::SyntheticBinding { id, .. } => &id.scope_canonical_id,
@@ -948,12 +1038,12 @@ impl ShapeSubject {
 /// work and distinct results. Without the demand axis a transit lower
 /// would poison the publication slot (or vice versa) the first time
 /// both routes touched the same subject.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ShapeDemand {
     /// Path segments narrowing the requested shape. Empty path =
     /// whole subject. Non-empty path = path-precise demand: projectors
     /// narrow this at the publication boundary.
-    pub(crate) path: Arc<[crate::semantic_query::PathSegment]>,
+    pub(crate) path: verter_type_expr::OwnedSlice<crate::semantic_query::PathSegment>,
     /// Terminal-hop projection / reduction context. `(mode, demand)`
     /// keyed disjointly so cache slots split per the disjoint-slot
     /// rule ("ShapeCacheKey must carry the complete demand/context,
@@ -986,7 +1076,9 @@ impl ShapeDemand {
         terminal_context: crate::semantic_query::ProjectionReductionContext,
     ) -> Self {
         Self {
-            path: Arc::from(Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                Vec::<crate::semantic_query::PathSegment>::new().into_boxed_slice(),
+            ),
             terminal_context,
             key_filter: KeyFilter::All,
             surface: PublishedSurfaceKind::Internal {
@@ -1006,8 +1098,9 @@ impl ShapeDemand {
 /// hash/equality identity byte-identical and therefore needs NO
 /// `CACHE_CLUSTER_SCHEMA_VERSION` bump (the schema version guards
 /// PERSISTED artifact layouts, not in-memory DashMap key identity).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ShapeCacheKey {
+    roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     /// Module-private so no other module (in-crate or downstream) can
     /// build a `ShapeCacheKey { subject, demand }` struct-literal that
     /// bypasses the classifying `*_whole*` constructors. Sibling modules
@@ -1030,7 +1123,7 @@ impl ShapeCacheKey {
     /// Canonical scope id this key is rooted in — the public accessor
     /// sibling modules use now that `subject` is module-private. Delegates
     /// to [`ShapeSubject::scope_canonical`].
-    pub fn scope_canonical(&self) -> &Arc<str> {
+    pub fn scope_canonical(&self) -> &str {
         self.subject.scope_canonical()
     }
 
@@ -1049,6 +1142,7 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_semantic_node_for_test(node),
             },
+            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped([node]),
             demand: ShapeDemand::whole_subject_with_context(
                 crate::semantic_query::ProjectionReductionContext::published(mode),
             ),
@@ -1073,6 +1167,7 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member(authority, member),
             },
+            roots: authority.root_nodes([member.value]),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
@@ -1103,6 +1198,9 @@ impl ShapeCacheKey {
                 scope,
                 node: MemberShapeNodeSubject::from_surface_member_raw(member),
             },
+            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+                [member.value],
+            ),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
@@ -1145,6 +1243,7 @@ impl ShapeCacheKey {
                 id,
                 _seal: ConstructionSeal,
             },
+            roots: Default::default(),
             demand: ShapeDemand::whole_subject_with_context(terminal_context),
         }
     }
@@ -1157,6 +1256,8 @@ pub struct ShapeCacheDb {
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
+    /// The account this cache's entries are charged to.
+    retention: verter_session_query::retention::StoreAccount,
 }
 
 impl ShapeCacheDb {
@@ -1172,6 +1273,7 @@ impl ShapeCacheDb {
             &self.inflight,
             &self.live_counter,
             self.schema_version,
+            std::sync::Arc::clone(self.retention.get()),
         )
     }
     #[cfg(any(test, feature = "test-support"))]
@@ -1210,6 +1312,7 @@ impl ShapeCacheDb {
             inflight: InflightTable::new(),
             live_counter,
             schema_version,
+            retention: verter_session_query::retention::StoreAccount::default(),
         }
     }
 
@@ -1218,7 +1321,7 @@ impl ShapeCacheDb {
             .entries
             .iter()
             .filter_map(|entry| {
-                if entry.key().subject.scope_canonical().as_ref() == canonical_id {
+                if entry.key().subject.scope_canonical() == canonical_id {
                     Some(entry.key().clone())
                 } else {
                     None
@@ -1264,24 +1367,20 @@ impl ShapeCacheDb {
         // subject requires a lowered node).
         let key = ShapeCacheKey::synthetic_binding_whole(
             crate::semantic_query::SyntheticBindingId {
-                scope_canonical_id: Arc::from(marker),
+                scope_canonical_id: verter_type_expr::OwnedStr::from(marker),
                 surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
                 slot_name: None,
-                binding_name: Arc::from("__schema_probe__"),
+                binding_name: verter_type_expr::OwnedStr::from("__schema_probe__"),
             },
             ProjectionMode::Shallow,
         );
-        let entry = Arc::new(CacheEntry {
-            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
-                None,
-                TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
-                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                false,
-            ),
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
-            validated_at_generation: 0,
-        });
+        let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
+            None,
+            TypeExpr::Unknown(verter_type_expr::UnknownValue::missing_output()),
+            crate::semantic_query::DepSignature::default(),
+            false,
+        );
+        let entry = Arc::new(self.charged_entry(&key, value));
         self.entries.insert(key, entry);
         self.live_counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -1336,17 +1435,13 @@ impl ShapeCacheDb {
             crate::semantic_query::SyntheticBindingId::from_carrier_key(carrier),
             mode,
         );
-        let entry = Arc::new(CacheEntry {
-            value: MaterializedOutputTypeExpr::from_type_expr_for_test(
-                None,
-                deep_type,
-                Arc::from([] as [(Arc<str>, crate::semantic_query::DepVersion); 0]),
-                false,
-            ),
-            signature: ReadSetSignature::empty(),
-            self_root_canonicals: Arc::from(vec![Arc::clone(key.subject.scope_canonical())]),
-            validated_at_generation: 0,
-        });
+        let value = MaterializedOutputTypeExpr::from_type_expr_for_test(
+            None,
+            deep_type,
+            crate::semantic_query::DepSignature::default(),
+            false,
+        );
+        let entry = Arc::new(self.charged_entry(&key, value));
         // Bump `live_counter` ONLY on a genuine new key. `DashMap::insert`
         // returns `Some(old)` on overwrite, `None` on a fresh insert — an
         // unconditional `fetch_add` over-counts when two same-identity
@@ -1383,6 +1478,36 @@ impl ShapeCacheDb {
 impl Default for ShapeCacheDb {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl ShapeCacheDb {
+    /// A fixture entry for `key`, charged like a published one.
+    #[cfg(any(test, feature = "test-support"))]
+    fn charged_entry(
+        &self,
+        key: &ShapeCacheKey,
+        value: MaterializedOutputTypeExpr,
+    ) -> CacheEntry<MaterializedOutputTypeExpr> {
+        let footprint = verter_session_query::retention::heap_size::footprint(&(key, &value));
+        CacheEntry::admit::<ShapeCacheKey>(
+            value,
+            ReadSetSignature::empty(),
+            Arc::from(vec![Arc::<str>::from(key.subject.scope_canonical())]),
+            0,
+            footprint,
+            self.retention.get(),
+        )
+        .unwrap_or_else(|_| panic!("a fixture entry is admitted"))
+    }
+
+    /// This cache, its entries charged to `account`.
+    pub(crate) fn charged_to(
+        mut self,
+        account: verter_session_query::retention::StoreAccount,
+    ) -> Self {
+        self.retention = account;
+        self
     }
 }
 
@@ -1501,5 +1626,174 @@ impl crate::invalidation_domain::InvalidationByCanonical for ShapeCacheDb {
         self.invalidate_canonical(canonical_id);
         let after = self.live_count();
         before.saturating_sub(after)
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use std::sync::Arc;
+
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_expr::{
+        LiteralValue, SyntheticCarrierKey, SyntheticCarrierSurfaceKind, TypeExpr,
+    };
+
+    use super::ShapeCacheDb;
+    use crate::semantic_query::ProjectionMode;
+
+    /// A shape entry charges the whole materialized type tree it keeps — a
+    /// long literal costs its text, not a per-entry figure — and gives it
+    /// back when the entry goes.
+    #[test]
+    fn a_shape_entry_charges_its_type_tree_and_releases_it_with_the_entry() {
+        const TEXT: usize = 120_000;
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db = ShapeCacheDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
+        let carrier = SyntheticCarrierKey {
+            scope_canonical_id: From::from("/c.vue"),
+            surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("item"),
+            value_node: 1,
+        };
+        let deep = TypeExpr::Union(Arc::from(vec![
+            TypeExpr::Literal(LiteralValue::String("l".repeat(TEXT))),
+            TypeExpr::Literal(LiteralValue::String("small".into())),
+        ]));
+        db.insert_synthetic_carrier_deep_for_test(&carrier, ProjectionMode::Shallow, deep);
+        let retained = account.snapshot().retained_bytes;
+        assert!(
+            retained > TEXT,
+            "the entry and its type tree are charged: {retained}"
+        );
+        db.invalidate_all();
+        let kept = account.snapshot().total_bytes();
+        assert!(
+            kept < TEXT,
+            "the entry's type tree is released with it; only the carrier \
+             names this caller still holds stay charged: {kept}"
+        );
+        drop(carrier);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+
+    /// An imported-registry candidate charges its own allocations and holds
+    /// its value's cell: a long resolved name costs its text while the
+    /// candidate lives; a reader keeping the value past the candidate keeps
+    /// exactly that cell charged, pinned, until its own drop; at zero
+    /// headroom nothing is admitted and nothing is retained.
+    #[test]
+    fn an_imported_registry_candidate_charges_itself_and_its_value_through_its_last_holder() {
+        use verter_session_query::retention::heap_size::OwnedValue;
+        use verter_session_query::retention::ChargeClass;
+        const NAME: usize = 8192;
+        let symbol =
+            || verter_session_query::declarations::metadata::ResolvedImportedRegistrySymbol {
+                canonical_id: "/imports/source.ts".into(),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                exported_name: "n".repeat(NAME),
+                body: verter_type_expr::facts::PreparedTypeBodyFacts {
+                    classification: verter_type_expr::facts::TypeBodyClass::Alias,
+                    body_slot: verter_type_expr::locators::TypeBodySlot {
+                        anchor: verter_type_expr::locators::AuthoredAnchor {
+                            canonical_id: verter_type_expr::OwnedStr::from("/imports/source.ts"),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            symbol: verter_type_expr::OwnedStr::from("Probe"),
+                            space: verter_type_expr::locators::LocatorSymbolSpace::Type,
+                        },
+                        path: verter_type_expr::OwnedSlice::default(),
+                    },
+                    merged_contributor_slots: Arc::from(Vec::new().into_boxed_slice()),
+                },
+                canonical_dependencies: Box::from(["/imports/source.ts".to_owned()]),
+            };
+        let key = || {
+            (
+                verter_type_expr::OwnedStr::from("/imports/source.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from("Probe"),
+            )
+        };
+
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let db =
+            super::ImportedRegistryDb::new().charged_to(StoreAccount::new(Arc::clone(&account)));
+        let value = OwnedValue::new(symbol());
+        db.insert_for_test(
+            key(),
+            Arc::new(super::ImportedRegistryEntry {
+                value: Some(value.clone()),
+                fact_dep_signature: crate::fact_signature_helpers::empty_fact_signature(),
+                validated_at_generation: 0,
+            }),
+        );
+        let held = account.snapshot();
+        assert_eq!(value.charge_class(), Some(ChargeClass::Retained));
+        let cell = value.charge_bytes().expect("the value cell is charged");
+        assert!(
+            cell > NAME,
+            "the value is charged its resolved name: {cell}"
+        );
+        assert!(
+            held.retained_bytes > cell,
+            "the candidate charges its own allocations beside its value: {} of {cell}",
+            held.retained_bytes
+        );
+
+        // What the value and its nested owned names cost on their own.
+        let alone = {
+            let solo = SemanticRetentionAccount::new(RetentionLimits::defaults());
+            let value = OwnedValue::new(symbol());
+            value.pin(verter_session_query::retention::owned::ChargeCtx::new(
+                &solo,
+            ));
+            solo.snapshot().total_bytes()
+        };
+        assert!(alone >= cell);
+
+        db.invalidate_all();
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "the candidate's part is gone"
+        );
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            alone,
+            "the reader keeps exactly the value and its own names charged"
+        );
+        drop(value);
+        assert_eq!(account.snapshot().total_bytes(), 0);
+
+        let tight = SemanticRetentionAccount::new(RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            active_ceiling_bytes: 0,
+            max_entry_bytes: 0,
+            pin_threshold_bytes: 0,
+        });
+        let refused =
+            super::ImportedRegistryDb::new().charged_to(StoreAccount::new(Arc::clone(&tight)));
+        let footprint =
+            super::imported_registry_footprint(&key(), &Some(OwnedValue::new(symbol())));
+        let admitted = crate::cache_runtime::Candidate::admit::<super::ImportedRegistryKey>(
+            crate::cache_runtime::FactCandidateDiscriminant {
+                validated_at_generation: 0,
+                facts: crate::fact_signature_helpers::empty_fact_signature(),
+            },
+            (),
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(
+                crate::fact_signature_helpers::empty_fact_signature(),
+            ),
+            Arc::from(Vec::<Arc<str>>::new()),
+            0,
+            1,
+            footprint,
+            &tight,
+        );
+        assert!(admitted.is_err(), "zero headroom admits no candidate");
+        assert_eq!(tight.snapshot().retained_bytes, 0, "and retains nothing");
+        assert_eq!(refused.live_count(), 0);
     }
 }

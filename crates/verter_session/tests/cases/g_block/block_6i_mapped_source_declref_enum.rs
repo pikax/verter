@@ -55,6 +55,10 @@ export type MapDeclRefSource = {
 #[test]
 fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/source.ts".to_string()),
         input_id: "/source.ts".to_string(),
@@ -90,7 +94,7 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
     // empty-path Shallow projection.
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {
@@ -107,7 +111,7 @@ fn shallow_walker_enumerates_declref_source_via_source_surface_helper() {
         .expect("surface node must have semantic data");
 
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!(
             "Transit-Shallow Publication contract — synthesise_mapped_surface MUST \
              produce a `SemanticNodeData::Object` for a Mapped with a DeclRef source under \

@@ -1,6 +1,6 @@
 {
   "name": "@verter/component-meta",
-  "version": "0.0.1-beta.6",
+  "version": "0.0.1-beta.7",
   "description": "Extract Vue component metadata (props, events, slots, models, expose) with a generic Type IR",
   "keywords": [
     "component",
@@ -85,7 +85,8 @@
     "@verter/native": "workspace:*",
     "@verter/proto": "workspace:*",
     "@verter/type-ir": "workspace:*",
-    "@verter/types": "workspace:^"
+    "@verter/types": "workspace:^",
+    "jsonc-parser": "3.3.1"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",

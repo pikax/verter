@@ -17,6 +17,7 @@
 //! | [`ExpandableDecl`] | `DeclPlaceholder` | Raises as the expandable `Instantiate` carrier — never "not found". |
 //! | [`ControlCarrier`] | `AliasCycle`, `RaiseAliasCycle`, `TypeParamCycle` | Stays a typed control sentinel; its payload (the `AliasCycle` participant chain) is preserved. |
 //! | [`UnsupportedSurface`] | `UnrepresentableSurface`, `UnrepresentableSurfaceMember` | Typed unsupported-surface / unsupported-member result, retaining its existing sentinel output semantics. |
+//! | [`UnsupportedPosition`] | `UnmodeledPosition` | No value at this position; an enclosing completed structural producer may retain it as a typed gap. Never proves absence. |
 //! | [`Partial`] | `BudgetExceeded`, `Cancelled`, `UnstableState` | Typed partial — `ReturnOnly`, never shared, never warmed. |
 //! | [`Failure`] | `Other`, `UnsupportedIntrinsic`, `ValueDomainMismatch` | Genuine typed failure (the §22 error type). |
 //! | [`CheckerRecovery`] | `CheckerRecovery` with a `Certified` basis | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. A complete answer. |
@@ -34,6 +35,7 @@
 //! [`ExpandableDecl`]: QueryErrorDisposition::ExpandableDecl
 //! [`ControlCarrier`]: QueryErrorDisposition::ControlCarrier
 //! [`UnsupportedSurface`]: QueryErrorDisposition::UnsupportedSurface
+//! [`UnsupportedPosition`]: QueryErrorDisposition::UnsupportedPosition
 //! [`Partial`]: QueryErrorDisposition::Partial
 //! [`Failure`]: QueryErrorDisposition::Failure
 //! [`CheckerRecovery`]: QueryErrorDisposition::CheckerRecovery
@@ -62,6 +64,9 @@ pub enum QueryErrorDisposition {
     /// A surface (or surface member) the projection boundary cannot
     /// represent. Keeps its existing sentinel output semantics.
     UnsupportedSurface,
+    /// A value position the producer cannot model. This is a typed gap,
+    /// not a completed negative lookup or a TypeScript unknown type.
+    UnsupportedPosition,
     /// A resource / completion-fence partial. `ReturnOnly`: answered to the
     /// caller, never published to a shared cache.
     Partial,
@@ -81,6 +86,13 @@ pub enum QueryErrorDisposition {
 }
 
 impl QueryErrorDisposition {
+    /// A completed positional producer may retain an unresolved position,
+    /// including a missing referenced value, as a gap. This never establishes
+    /// absence: the producer's guarantee and incomplete evidence are required.
+    pub(crate) const fn is_positional_gap(self) -> bool {
+        matches!(self, Self::OptionalAbsence | Self::UnsupportedPosition)
+    }
+
     /// Whether this disposition is the §22 ERROR TYPE — a genuine "this type
     /// IS an error" result, as opposed to a control / recursion / partial
     /// signal. Exactly [`Failure`](Self::Failure) and the two checker
@@ -204,11 +216,10 @@ pub const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::UnsupportedSurface,
             ClosedLiteralDomainUnresolvedReason::Unsupported,
         ),
-        // A position the flow substrate has no model for is a well-formed
-        // "no resolved node", exactly like `Miss` — the flow rail already
-        // folded its own partial rails at the consumer boundary.
+        // A typed gap can survive inside a completed positional composite,
+        // but it establishes neither a standalone value nor absence.
         QueryError::UnmodeledPosition => (
-            QueryErrorDisposition::OptionalAbsence,
+            QueryErrorDisposition::UnsupportedPosition,
             ClosedLiteralDomainUnresolvedReason::MissingDependency,
         ),
         // Resource / completion-fence control — typed partials, `ReturnOnly`.
@@ -218,6 +229,20 @@ pub const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
         QueryError::BudgetExceeded(_) => (
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::BudgetExceeded,
+        ),
+        QueryError::ExecutionAborted(abort) => (
+            QueryErrorDisposition::Partial,
+            match abort {
+                crate::semantic_query::ExecutionAbort::Cancelled => {
+                    ClosedLiteralDomainUnresolvedReason::Cancelled
+                }
+                crate::semantic_query::ExecutionAbort::Superseded => {
+                    ClosedLiteralDomainUnresolvedReason::RevisionMismatch
+                }
+                crate::semantic_query::ExecutionAbort::Shutdown => {
+                    ClosedLiteralDomainUnresolvedReason::Fault
+                }
+            },
         ),
         QueryError::Cancelled => (
             QueryErrorDisposition::Partial,

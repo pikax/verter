@@ -37,13 +37,18 @@ pub mod dispatch_profile;
 pub mod process_stats;
 pub mod session;
 
+#[cfg(test)]
+mod observation_tests;
+#[cfg(test)]
+mod session_tests;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use verter_session::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
-use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
 use verter_workspace::{AmbientLibSpec, MemoryOptions, MemoryWorkspace, WorkspaceAccess};
 
@@ -238,6 +243,14 @@ pub struct JobResult {
 pub struct RetentionCounts {
     pub semantic_nodes: usize,
     pub semantic_memo_entries: usize,
+    /// Memo candidates, superseded variants a slot still holds included.
+    pub semantic_memo_candidates: usize,
+    /// Live artifact versions of the indexed store.
+    pub live_artifacts: usize,
+    /// Superseded artifact versions the store still retains.
+    pub retired_versions: usize,
+    /// Live parse-snapshot leases.
+    pub snapshot_leases: usize,
     pub union_views: usize,
     pub shape_cache_entries: usize,
     pub active_bytes: usize,
@@ -360,12 +373,14 @@ fn configure_project(
     let lib_text = read(dir, lib)?;
     let tsconfig_path = format!("{PROJECT_ROOT}/tsconfig.json");
     workspace.inject_file(tsconfig_path.clone(), Arc::from(tsconfig.as_str()));
-    let mut project = verter_workspace::ide_project_config(
+    // The scenario's `files` sequence is its program order, which orders
+    // the declarations of a symbol merged across files.
+    let project = verter_workspace::configured_ide_project(
+        workspace,
         PROJECT_ROOT.to_string(),
         PROJECT_ROOT.to_string(),
-        Some(tsconfig_path.clone()),
+        &tsconfig_path,
     );
-    project.compiler_options = verter_workspace::load_compiler_options(workspace, &tsconfig_path);
     host.configure_projects(vec![project]);
     match lib_mode {
         LibMode::Ambient => workspace
@@ -449,7 +464,7 @@ fn request(
     scenario_id: &str,
     alias: &str,
     keep_audit: bool,
-) -> (RequestRecord, Option<SemanticNodeId>) {
+) -> (RequestRecord, Option<NodeRoot>) {
     let start = Instant::now();
     let carrier = host.resolve_named_symbol_with_audit(scenario_id, alias, None);
     let micros = micros(start);
@@ -538,7 +553,7 @@ fn wire_node_counts(root: &serde_json::Value) -> (usize, Vec<String>, usize) {
 }
 
 /// The wire bytes of `node`'s answer, or why there are none.
-fn wire_bytes(host: &VerterHost, node: Option<SemanticNodeId>) -> Result<Vec<u8>, String> {
+fn wire_bytes(host: &VerterHost, node: Option<&NodeRoot>) -> Result<Vec<u8>, String> {
     let node = node.ok_or_else(|| "no value to observe".to_string())?;
     host.project_node_to_type_expr_json_bytes(node)
         .ok_or_else(|| "the answer did not materialise".to_string())
@@ -554,11 +569,56 @@ fn observe(bytes: Result<&[u8], String>) -> Observation {
             }
         }
     };
-    let decoded = serde_json::from_slice::<serde_json::Value>(bytes)
+    // The JSON decoder can grow its stack, but TypeExpr's conversion and
+    // both trees' destructors recurse independently of serde. Reserve stack
+    // proportional to structural depth for the entire observation lifetime,
+    // including malformed-input cleanup. Strings do not contribute depth.
+    let mut depth = 0usize;
+    let mut max_depth = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+        } else {
+            match byte {
+                b'"' => quoted = true,
+                b'{' | b'[' => {
+                    depth += 1;
+                    max_depth = max_depth.max(depth);
+                }
+                b'}' | b']' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    let Some(stack_bytes) = max_depth
+        .checked_mul(32 * 1024)
+        .and_then(|n| n.checked_add(512 * 1024))
+    else {
+        return Observation {
+            error: Some("decode the answer: stack size overflow".into()),
+            ..Observation::empty()
+        };
+    };
+    stacker::grow(stack_bytes, || observe_on_stack(bytes))
+}
+
+fn observe_on_stack(bytes: &[u8]) -> Observation {
+    let mut decoder = serde_json::Deserializer::from_slice(bytes);
+    decoder.disable_recursion_limit();
+    let decoded = serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut decoder))
         .map_err(|err| err.to_string())
         .and_then(|value| {
-            let expr =
-                serde_json::from_value::<TypeExpr>(value.clone()).map_err(|err| err.to_string())?;
+            decoder.end().map_err(|err| err.to_string())?;
+            let expr = verter_type_expr::type_expr_from_json(&value)
+                .ok_or_else(|| "invalid TypeExpr".to_string())?;
             Ok((value, expr))
         });
     let (wire, expr) = match decoded {
@@ -599,6 +659,10 @@ fn retention(host: &VerterHost) -> RetentionCounts {
     RetentionCounts {
         semantic_nodes: snapshot.semantic_nodes,
         semantic_memo_entries: snapshot.semantic_memo_entries,
+        semantic_memo_candidates: snapshot.semantic_memo_candidates,
+        live_artifacts: snapshot.live_artifacts,
+        retired_versions: snapshot.retained_retired_versions,
+        snapshot_leases: snapshot.snapshot_leases,
         union_views: snapshot.union_views,
         shape_cache_entries: snapshot.shape_cache_entries,
         active_bytes: snapshot.active_bytes,
@@ -702,13 +766,13 @@ pub fn run_job(
     sink.phase("observe")?;
     for (probe, (node, warm_nodes)) in result.probes.iter_mut().zip(&nodes) {
         let start = Instant::now();
-        let cold_bytes = wire_bytes(&host, *node);
+        let cold_bytes = wire_bytes(&host, node.as_ref());
         probe.observation = Some(observe(cold_bytes.as_deref().map_err(Clone::clone)));
         for (record, warm_node) in probe.warm.iter_mut().zip(warm_nodes) {
             record.same_answer_as_cold = Some(match (node, warm_node) {
-                (Some(cold), Some(warm)) if cold == warm => true,
+                (Some(cold), Some(warm)) if cold.id() == warm.id() => true,
                 (Some(_), Some(_)) => {
-                    matches!((&cold_bytes, wire_bytes(&host, *warm_node)), (Ok(a), Ok(b)) if *a == b)
+                    matches!((&cold_bytes, wire_bytes(&host, warm_node.as_ref())), (Ok(a), Ok(b)) if *a == b)
                 }
                 _ => false,
             });

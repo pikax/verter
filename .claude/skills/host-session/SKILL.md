@@ -771,12 +771,12 @@ Project routing preserves bulk carrier activation and change notifications: reso
 
 ### Retention across a document lifecycle
 
-A document CLOSE is the moment its edited versions become unreachable, and the close lifecycle now releases what the session retained for them instead of leaving it to amortised sweeps: `handle_did_close` asks the indexed artifact store to reclaim retired versions no captured root still sees (`VerterHost::reclaim_retired_artifacts`), `VerterHost::evict` releases the closed document from the semantic substrate (`ProjectTypeStore::release_canonical`: the file's memo entries, shape-cache entries, relation proofs and arena nodes are dropped; ids are never reused, a released node reads as `Opaque(Miss)` and warm reads refuse a result that names one), and the artifact store sweeps as soon as one file holds more than two retired versions (`RECLAIM_TRIGGER_CHAIN_LENGTH`), not only every 64 retirements. The carrier publication store keeps at most two persisted parse candidates per file, prunes superseded lanes when a file publishes new content, and keeps exact audit counters over a bounded event window. Diagnostics publication no longer holds a mutex across the client enqueue: the send registers a cancellable slot under the diagnostics state lock, and a close CANCELS a suspended send instead of waiting for it.
+A document CLOSE is the moment its edited versions become unreachable, and the close lifecycle now releases what the session retained for them instead of leaving it to amortised sweeps: `handle_did_close` asks the indexed artifact store to reclaim retired versions no captured root still sees (`VerterHost::reclaim_retired_artifacts`), `VerterHost::evict` evicts the closed document's semantic caches (`ProjectTypeStore::close_canonical`: memo entries, union views, signature-token roots and shape-cache entries bound to its content; the nodes are destroyed as their last owner releases them, and ids are never reused), and the artifact store sweeps as soon as one file holds more than two retired versions (`RECLAIM_TRIGGER_CHAIN_LENGTH`), not only every 64 retirements. Retirements during an edit burst stay reachable from the store view published before it, so the amortised sweeps then keep them; when the store-view manager replaces that view, and again whenever it hands out its current view, it asks the store to sweep (`FileArtifactStore::reclaim_after_root_release`, a no-op unless a root was released and a sweep left versions behind), so superseded versions and their parse-snapshot leases do not outlive the next answered request even when a caller released the old view only after its replacement was published. The carrier publication store keeps at most two persisted parse candidates per file, prunes superseded lanes when a file publishes new content, and keeps exact audit counters over a bounded event window. Diagnostics publication no longer holds a mutex across the client enqueue: the send registers a cancellable slot under the diagnostics state lock, and a close CANCELS a suspended send instead of waiting for it.
 
 
-**The node release is gated on activity.** Semantic node ids are read by id from many places, often twice within one computation (classify, then take a shape-specific accessor). A released node reads as `Opaque(Miss)`, so the switch must never land between two reads of one computation. `VerterHost::evict` therefore drains the memo immediately (safe: readers hold results by `Arc`) and queues the payload release with the arena size as a watermark; the queue is applied only when no `SemanticActivityGuard` is alive (`project_type_store::semantic_activity`, a Dekker pair on two `SeqCst` atomics), inline when nothing is in flight, otherwise by the last guard to drop. Nodes interned after the close (the reload) are above the watermark and stay. In `verter_lsp` the host is reachable only through `documents::SharedHost`, whose sole accessor returns a guard-carrying `HostRef`; a borrowed `&VerterHost` cannot outlive its guard, so every host call is covered by construction. New host readers outside `verter_lsp` (an embedder calling host methods concurrently with closes) must take `VerterHost::semantic_activity()` per call.
+**A close evicts caches; counted ownership destroys nodes.** `VerterHost::evict` runs `ProjectTypeStore::close_canonical` synchronously: it evicts the semantic-graph and shape-cache owners bound to the closed content (memo candidates, union views, hash-cons memos, signature-token roots, shape entries) and drains the destroyed-node sidecar log. Each closed node is destroyed when its last owner lets go, so a computation still holding one keeps reading the same payload, and nodes the reload interns are never touched. There is no activity gate, no queued release and no watermark; `verter_lsp` holds the host as a plain `Arc<VerterHost>` (`documents::SharedHost`). `retention.closesApplied` / `closeElapsedMaxMicros` / `lastClose` report what closes cost, and `pendingDestroyedNodes` the bounded sidecar log.
 
-**Node ids are monotonic, node storage is chunked.** A `SemanticNodeId` is never reused (memo entries, relation proofs and the close watermark hold ids), but the arena stores slots in 256-id chunks keyed by `id >> CHUNK_BITS` and drops a chunk once every slot in it is released, so its memory follows the live set rather than the ids ever handed out (`node_slot_count` is the id space, `node_storage_slots` the physical slots the retention snapshot reports as `semanticNodeSlots`). A released id reads as `Opaque(Miss)` whether its chunk is gone or not. The relation-proof and relate-key tables are sparse ordinal maps (`semantic_query_memo/intern_table.rs`) for the same reason. `$/verter/getStatistics.retention.heapInUseBytes` is the platform allocator's exact in-use figure (HeapSummary / mallinfo2 / malloc_zone_statistics), the churn lane's retention instrument for the server: unlike RSS it carries no allocator settling.
+**Node ids are monotonic, node storage is chunked.** A `SemanticNodeId` is never reused (ordinals name nodes in keys and sidecars), but the arena stores slots in 256-id chunks keyed by `id >> CHUNK_BITS` and drops a chunk once every slot in it is destroyed, so its memory follows the live set rather than the ids ever handed out (`node_slot_count` is the id space, `node_storage_slots` the physical slots the retention snapshot reports as `semanticNodeSlots`). A destroyed id reads as `Opaque(Miss)` whether its chunk is gone or not. The relation-proof and relate-key tables are sparse ordinal maps (`semantic_query_memo/intern_table.rs`) for the same reason. `$/verter/getStatistics.retention.heapInUseBytes` is the platform allocator's exact in-use figure (HeapSummary / mallinfo2 / malloc_zone_statistics), the churn lane's retention instrument for the server: unlike RSS it carries no allocator settling.
 
 **Framework surface DTOs are windowed per owner.** `FrameworkSurfaceStore` (the per-content props/emits/slots cache behind `vue_macro_dtos_with_ctx`) keeps the newest `CONTENT_VERSIONS_PER_OWNER` content versions per owner file, refreshed on every warm read; an older version's entries are evicted on insert and recomputed on demand. Before the window every edited version kept its full normalized surface for the life of the session.
 
@@ -787,6 +787,7 @@ A document CLOSE is the moment its edited versions become unreachable, and the c
 Three layers prevent tokio runtime starvation during rapid typing:
 
 1. **Latest-value SyncCoordinator** (`sync_coordinator.rs`): dispatch order is part of the contract, because a restart replays every open editor at once. (a) ONE document per dispatch — the provider sync is awaited inline, so a batch taken at once is a batch nothing can overtake; deposits are absorbed before every choice. (b) The choice is the document the USER touched most recently: `PendingSignal::user_received_at` (set by `signal`, never by `signal_diagnostics_only` / semantic-ready / refresh / importer / init re-arms, which restamp `received_at` for every open document) maxed with a live `touch` (`SyncCoordinatorHandle::touch`, fed by `touch_mru` on every interactive request); background-only work follows, newest first. (c) Provider diagnostic pulls are bounded (`max_inflight_diagnostics`: tsserver-family 2, TSGO 8): a pull handed to the provider sits in a queue this side cannot reorder, so its depth is the floor on how long the next document the user turns to must wait. With every slot taken no timer is armed; a `PullSlot` guard frees the slot on completion AND cancellation and wakes the loop. `didChange` performs no provider I/O. It commits the registry/host snapshot, replaces the file's pending signal in a map, and best-effort wakes a capacity-one channel. The single coordinator debounces the latest value per canonical file; edits cancel only detached stale diagnostic tasks, never a provider-state commit that may be mid-transaction.
+   A live touch is consumed only when diagnostics publication is handed off. Lane contention, sync retry and dependency holds preserve it in the pending signal; a touch received during an inline sync survives the older publication. The deterministic control is `a_document_touch_survives_a_busy_lane_retry`.
 2. **Version-fenced staged push diagnostics**: LSP uses push diagnostics exclusively (no pull/`diagnostic_provider`). After the quiet window, the coordinator computes the provider-free Verter/ownership batch and publishes it immediately if URI, source identity, and exact document version still match. Provider diagnostics run afterward on a cancellable detached task and replace that batch with the merged result under the same exact-version/source fence. A slow or hung provider therefore cannot starve Verter-owned errors/hints, while a newer edit cannot publish an older batch. Completion of optional native semantic enrichment broadcasts a versioned `SemanticReady` event that invalidates only the Verter diagnostic cache and schedules a diagnostics-only pass: it never repeats provider file sync or graph refresh. Broadcast lag recovers by scheduling every open document once; channel closure terminates the coordinator instead of spinning.
    **Background pulls never fill the window** (`max_background_diagnostics` = `max_inflight - 1`, clamped to 1..=2). A pull is background when its signal has no `user_received_at` and its document has no live touch (re-arms, semantic-ready, refreshes, importer arms). Background work is excluded from both the deadline and the choice once that bound is reached, so one slot always remains for a document the user turns to; and the bound is small in absolute terms because every background pull is an engine check competing with the interactive request the user is waiting on.
 
@@ -1263,3 +1264,48 @@ class facts are served fresh without entering the pure-content store.
 `template_converter_inputs` is linkage-only. Semantic class domains flow
 through the opaque, revision-checked `TemplateClassDomainIndex`; callers must
 not manufacture raw class-domain tuples or recover domains from display text.
+
+## Injected ambient-root ingestion
+
+Configured-opening linearity is checked by changed-member visitation counts
+over four doubling populations that each span every directory bucket. Visits
+are bounded by twice the member count and grow by at most twice the preceding
+row. Exact global contributor counts and the never-upserted ambient-library
+contributor remain required; scheduler wait time is not the growth oracle.
+
+`MemorySnapshot::changes_since` captures a revision and the latest transition of
+only members changed after a workspace-local cursor. Both concrete workspaces
+expose it through `WorkspaceRead::snapshot_changes_since`; transaction readers
+forward it. Each consumer retains its own cursor, so sharing a workspace does
+not let one host consume another host's changes. Repeated edits replace the old
+transition; removal tombstones retain only the canonical and latest revision,
+not source bytes. Storage is proportional to distinct canonicals seen by the
+snapshot, rather than the number of edits.
+
+The global-contributor index serializes snapshot classification and owns its
+cursor, reset when the host store is cleared or its workspace replaced. Upsert
+classifies its own source; injected-root ingestion skips that canonical and
+classifies only the remaining changed members. Ordinary TypeScript ambient and
+script globals stay pending until contribution collection makes them
+IndexedReady. A snapshot-only edit evicts stale host content using
+`evict_loaded_content`, preserving the workspace overlay; removals retract
+pending and indexed contributions only when the workspace has neither an
+active overlay nor a backing file. A filesystem snapshot tombstone may merely
+invalidate its disk cache on editor close. Custom
+workspaces without incremental membership use the existing revision/listing
+contract. Semantic lookup never enumerates all concrete-workspace members.
+
+### Internal node roots and current ownership counts
+
+Internal semantic reads carry a `SemanticDeliveryLease`; scratch entries,
+materialized shape values, macro mirror products and delivered flow-return
+results retain their node operands. Counted ownership is the sole lifetime
+authority: a node is destroyed by its last owner's release, and a close never
+revokes a held one. There is no canonical sweep, watermark or activity gate.
+
+`HostRetentionSnapshot::semantic_node_ownership` reports current live nodes,
+root acquisitions, retained child occurrences and permanent nodes. Statistics
+expose `semanticNodeRoots`, `semanticNodeInternalEdges` and
+`semanticNodePermanentNodes`. These required current counts add no observation
+history. See the [ownership reference](../type-resolution/references/counted-node-ownership.md)
+for the ownership contract, the close and the sidecar cleanup.

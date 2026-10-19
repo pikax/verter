@@ -922,6 +922,10 @@ fn chatmessages_budget_tripped_value_partial_does_not_warm_final_result_cache() 
     );
 
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/workspace/src/runtime/components/ChatMessages.vue";
 
     let (_meta, resolution) = host
@@ -1481,16 +1485,16 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
 
 // ════════════════════════════════════════════════════════════════════
 // Runaway-fuse termination backstop: the fuse is ARMED by default
-// (`projection_op_budget == 0` ⇒ effective cap 2000); `Instantiate` /
+// (`projection_op_budget == 0` ⇒ the finite default cap); `Instantiate` /
 // `Conditional` / the
 // projection keys count toward the request-wide cap unconditionally. The
 // fuse is the genuine termination backstop for the open-generic
 // expansion-storm class.
 //
-// An open-generic surface whose enumeration costs > 2000 ops therefore
+// An open-generic surface whose enumeration exceeds its configured cap
 // TRIPS the fuse → returns a structurally-valid `Partial(BUDGET_EXCEEDED)`
 // → is correctly REFUSED warm admission (the no-poison invariant). A
-// surface that genuinely needs more than 2000 ops to publish complete
+// surface that genuinely needs more than its allowance to publish complete
 // metadata (the deep open `extends` chain over a wide generic interface
 // plus many `defineModel`s — nuxt-ui's `Table.vue` class) is NOT
 // finite-large-terminating-under-the-fuse: it stays degraded-but-
@@ -1511,8 +1515,8 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
 // generic interfaces whose members are generic-conditional
 // instantiations, an open SFC `generic="T"`, a
 // `withDefaults(defineProps<BigProps<T>>())`, and many `defineModel<…>()`.
-// Enumerating that open surface costs > 2000 `Instantiate`/`Conditional`
-// ops, so under the ARMED fuse it trips — exactly the runaway-trip the
+// Enumerating that open surface exceeds the test's explicit low allowance
+// for `Instantiate`/`Conditional` ops — exactly the runaway-trip the
 // no-poison invariant (test (c) below) exercises.
 // ════════════════════════════════════════════════════════════════════
 
@@ -1520,12 +1524,12 @@ fn consumer_indexed_access_through_symbolic_omit_works() {
 /// linear `extends` hops, `WIDTH` generic-conditional members per level.
 /// Enumerating `BigProps<T>` over the open `T` instantiates each level
 /// and evaluates each member's conditional generic — a cost that exceeds
-/// the 2000-op armed-fuse cap, so the surface trips the fuse.
+/// test's explicit low allowance, so the surface trips the fuse.
 fn finite_large_generic_dts() -> String {
     use std::fmt::Write as _;
 
     // Sized so that enumerating the open generic surface costs well over
-    // the 2000-op default cap while remaining finite and well under the
+    // the test's explicit low allowance while remaining finite and well under the
     // walker depth cap. LEVELS drives `Instantiate` (one per `extends`
     // hop); WIDTH * LEVELS drives the per-member `Instantiate` +
     // `Conditional` work.
@@ -1623,7 +1627,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "typed-channel-fixture".to_string(),
+            context: "typed-channel-fixture".into(),
         }),
     );
     let tree = typed_sealed.into_type_expr(cap.authority());
@@ -1641,7 +1645,7 @@ fn budget_exceeded_typed_channel_vs_inert_identical_spelling() {
             domain: BudgetDomain::ProjectionOperation,
             limit: 1,
             actual: 2,
-            context: "typed-channel-fixture".to_string(),
+            context: "typed-channel-fixture".into(),
         }),
     );
     let carrier =
@@ -1696,6 +1700,10 @@ fn genuine_runaway_budget_trip_still_refused_warm_admission() {
     ];
     let project = build_hermetic_project_with_budget(files, 1);
     let host = project.host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/workspace/src/BigTable.vue";
 
     let (_meta, resolution) = host

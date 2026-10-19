@@ -145,14 +145,14 @@ fn warm_resolve_builds_nothing() {
     let cold = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
-        .project_node_to_type_expr_for_test(cold_node)
+        .project_node_to_type_expr_for_test(cold_node.id())
         .expect("cold node must project");
 
     host.provenance().reset();
     let warm = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("warm resolve must succeed");
     let warm_expr = host
-        .project_node_to_type_expr_for_test(warm_node)
+        .project_node_to_type_expr_for_test(warm_node.id())
         .expect("warm node must project");
 
     let provenance = snap(&host);
@@ -196,7 +196,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     let cold = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let cold_node = cold.expect("cold resolve must succeed");
     let cold_expr = host
-        .project_node_to_type_expr_for_test(cold_node)
+        .project_node_to_type_expr_for_test(cold_node.id())
         .expect("cold node must project");
     assert!(
         host.project_type_store()
@@ -220,7 +220,7 @@ fn clear_compile_cache_retains_fresh_indexed_ready() {
     let warm = host.resolve_named_symbol(SCRATCH_ID, "Unrelated", Some(ProjectionMode::Expanded));
     let warm_node = warm.expect("post-clear resolve must succeed");
     let warm_expr = host
-        .project_node_to_type_expr_for_test(warm_node)
+        .project_node_to_type_expr_for_test(warm_node.id())
         .expect("post-clear node must project");
 
     let provenance = snap(&host);
@@ -2737,14 +2737,14 @@ fn fenced_indexed_serve_semantic_memo_build_is_served_but_not_admitted() {
 
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(owner),
+            canonical_id: verter_type_expr::OwnedStr::from(owner),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Owner"),
+        name: verter_type_expr::OwnedStr::from("Owner"),
     });
 
     // Park the owner's IndexedReady flight pre-fence (flight 0 →
@@ -2855,9 +2855,9 @@ fn fenced_declaring_serve_class_surface_static_is_served_but_not_admitted() {
     let project_identity = host.host_view_project_identity_for(barrel).fold_u32();
     let key = SemanticQueryKey::ResolveClassSurface {
         decl_slot: ResolvedDeclSlotIdentity::type_slot(
-            Arc::from(barrel),
+            verter_type_expr::OwnedStr::from(barrel),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Klass"),
+            verter_type_expr::OwnedStr::from("Klass"),
             project_identity,
             env.type_env_hash,
             env.lib_env_hash,
@@ -3367,7 +3367,7 @@ fn fenced_indexed_serve_template_analysis_is_served_but_not_persisted() {
             .get(VUE_OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_none(),
         "a template derived from a FENCED (ReturnOnly) IndexedReady serve \
@@ -3389,7 +3389,7 @@ fn fenced_indexed_serve_template_analysis_is_served_but_not_persisted() {
             .get(VUE_OWNER)
             .and_then(|cc| {
                 cc.raw_template_analysis()
-                    .map(|entry| Arc::clone(&entry.template))
+                    .map(|entry| entry.template.clone())
             })
             .is_some(),
         "a template computed from store-authoritative inputs is persisted \

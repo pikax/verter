@@ -160,7 +160,7 @@ fn merged_decl_lowers_to_distinct_carrier_not_intersection() {
     match host
         .project_type_store()
         .semantic_graph()
-        .node_data(node)
+        .node_data(node.id())
         .as_deref()
     {
         Some(SemanticNodeData::MergedDecl { contributors }) => {

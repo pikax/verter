@@ -14,7 +14,7 @@ pub struct ResolvedExportTarget {
 }
 
 /// The syntactic kind of a resolved type declaration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub enum ResolvedDeclarationKind {
     Interface,
     TypeAlias,
@@ -31,7 +31,7 @@ pub struct ResolvedLocalTypeSymbolMetadata {
 
 /// Where a requested type name resolved to: the declaring file, owner,
 /// resolved name, span and kind.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedTypeDeclaration {
     pub requested_name: String,
     pub declaration_id: Option<DeclarationId>,
@@ -57,7 +57,7 @@ pub struct ValueDeclIdentity {
 /// An imported type-registry symbol resolved to its defining declaration: the
 /// owning file and owner, the exported name, the narrowed body facts and the
 /// canonical files it depends on.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct ResolvedImportedRegistrySymbol {
     pub canonical_id: String,
     pub owner: verter_type_expr::TopLevelOwnerId,
@@ -68,5 +68,6 @@ pub struct ResolvedImportedRegistrySymbol {
     /// classify node-domain; the carrier itself stays `Send + Sync`
     /// cache-safe (`ImportedRegistryDb` stores it cross-request).
     pub body: verter_type_expr::facts::PreparedTypeBodyFacts,
-    pub canonical_dependencies: std::collections::BTreeSet<String>,
+    /// Sorted and free of duplicates.
+    pub canonical_dependencies: Box<[String]>,
 }

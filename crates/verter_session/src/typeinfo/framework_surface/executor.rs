@@ -676,14 +676,14 @@ impl ExecutorResolveCtx<'_> {
         // one-level `Shallow` surface synthesiser. NO second resolver.
         let decl = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from(base.owner_canonical.as_ref()),
+                canonical_id: verter_type_expr::OwnedStr::from(base.owner_canonical.as_ref()),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from(base.symbol_name.as_ref()),
+            name: verter_type_expr::OwnedStr::from(base.symbol_name.as_ref()),
         })) {
             QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
             QueryResult::Recursive(node) => node,
@@ -693,7 +693,7 @@ impl ExecutorResolveCtx<'_> {
             self.ctx,
             dispatch,
             decl,
-            Arc::from(path.to_vec().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
             ProjectionReductionContext::published(ProjectionMode::Shallow),
             None,
         ) {

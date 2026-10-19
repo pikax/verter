@@ -53,8 +53,7 @@ use verter_session_query::facts::{
 use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt;
 use verter_type_engine::resolver_core::ResolverContext;
 use verter_type_engine::semantic_query::{
-    DepSignature, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi,
-    SemanticQueryKey,
+    ResolveDeclKey, ScopeId, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SemanticQueryKey,
 };
 use verter_type_engine::semantic_query_memo::{
     semantic_graph_read_set_signature, SemanticGraphStore,
@@ -158,14 +157,14 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
 fn resolve_decl_key(canonical: &str, name: &str) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -238,14 +237,14 @@ fn typeof_same_canonical_edit_rejects_warm_entry() {
     let key = dispatch.typeof_key_for(
         verter_type_engine::semantic_query::ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from(c),
+                canonical_id: verter_type_expr::OwnedStr::from(c),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("val"),
+            name: verter_type_expr::OwnedStr::from("val"),
         },
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -312,9 +311,9 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
     ));
     let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(c),
+            verter_type_expr::OwnedStr::from(c),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Box"),
+            verter_type_expr::OwnedStr::from("Box"),
         ),
         Arc::from(vec![string_arg].into_boxed_slice()),
         verter_type_engine::semantic_query::InstantiateContext::non_file(
@@ -355,6 +354,161 @@ fn instantiate_same_canonical_edit_rejects_warm_entry() {
         graph.get_validated(&key, ctx).is_none(),
         "Instantiate: a content edit to the declaring file MUST reject the warm memo \
          entry via strict self-root validation",
+    );
+}
+
+/// The facts the `Instantiate` entry of `name` over the argument `published`
+/// publishes when one transaction instantiates it over each of `arguments`
+/// in order, in a fresh host holding `files` (the declaration lives in the
+/// first).
+fn instantiation_entry_facts(
+    files: &[(&str, &str)],
+    name: &str,
+    arguments: &[verter_type_engine::semantic_query::PrimitiveKind],
+    published: verter_type_engine::semantic_query::PrimitiveKind,
+) -> Vec<FactVersionRef> {
+    let sequence: Vec<_> = arguments.iter().map(|argument| (name, *argument)).collect();
+    instantiations_entry_facts(files, &sequence, (name, published))
+}
+
+/// The facts the `Instantiate` entry of `published` publishes when one
+/// transaction instantiates each declaration of `sequence` over its
+/// argument in order, in a fresh host holding `files` (the declarations
+/// live in the first).
+fn instantiations_entry_facts(
+    files: &[(&str, &str)],
+    sequence: &[(&str, verter_type_engine::semantic_query::PrimitiveKind)],
+    published: (&str, verter_type_engine::semantic_query::PrimitiveKind),
+) -> Vec<FactVersionRef> {
+    let host = host();
+    for (path, source) in files {
+        upsert(&host, path, source);
+    }
+    let canonical = files[0].0;
+    let dispatch = host.semantic_dispatch();
+    let graph = host.project_type_store().semantic_graph();
+    let key = |(name, argument): (&str, verter_type_engine::semantic_query::PrimitiveKind)| {
+        let argument = graph.intern_node(SemanticNodeData::Primitive(argument));
+        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+            verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
+                verter_type_expr::OwnedStr::from(canonical),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from(name),
+            ),
+            Arc::from(vec![argument].into_boxed_slice()),
+            verter_type_engine::semantic_query::InstantiateContext::non_file(
+                verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                    verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                ),
+                Default::default(),
+                verter_type_engine::project_semantic_dispatch::BodySourceWitness::mint_for_unit_tests(),
+            ),
+        ))
+    };
+    for (name, argument) in sequence {
+        assert!(
+            matches!(
+                dispatch.execute_type_node(key((name, *argument))),
+                verter_type_engine::semantic_query::QueryResult::Value(_)
+            ),
+            "`{name}<{argument:?}>` must instantiate"
+        );
+    }
+    let carrier = graph
+        .entry_read_set_signature_for_tests(&key(published))
+        .unwrap_or_else(|| panic!("`{published:?}` must admit its instantiation"));
+    let mut facts: Vec<FactVersionRef> =
+        verter_session_query::facts::fact_cache::signature_entries(&carrier.facts)
+            .cloned()
+            .collect();
+    facts.sort();
+    facts.dedup();
+    facts
+}
+
+/// An instantiation serves its declaration file's `IndexedReady` record and
+/// every file importing it (a candidate augmenter, made indexed before the
+/// augmentation scan); a transaction serves each once and answers its later
+/// instantiations from that serve. The record answered is the file's own
+/// and the replay delivers what serving it read, so an instantiation
+/// answered from the transaction publishes exactly the facts it publishes
+/// when it is the first to serve the files.
+#[test]
+fn a_replayed_declaration_serve_publishes_the_facts_its_first_serve_does() {
+    use verter_type_engine::semantic_query::PrimitiveKind;
+    let files = [
+        (
+            "/sg_self_root/replayed_serve/box.ts",
+            "export interface Box<T> { value: T }\n",
+        ),
+        (
+            "/sg_self_root/replayed_serve/user.ts",
+            "import type { Box } from './box';\nexport type Boxed = Box<string>;\n",
+        ),
+    ];
+    let after_first = instantiation_entry_facts(
+        &files,
+        "Box",
+        &[PrimitiveKind::String, PrimitiveKind::Number],
+        PrimitiveKind::Number,
+    );
+    let alone = instantiation_entry_facts(
+        &files,
+        "Box",
+        &[PrimitiveKind::Number],
+        PrimitiveKind::Number,
+    );
+    assert!(
+        alone.iter().any(|fact| format!("{fact:?}").contains("user.ts")),
+        "fixture invariant: serving the importing candidate is a fact the instantiation reads: {alone:?}"
+    );
+    assert_eq!(
+        after_first, alone,
+        "an instantiation answered from the transaction's recorded serves must publish \
+         the facts of serving its declaration file and its candidates"
+    );
+}
+
+/// A declaration file's serve is the transaction's, not one
+/// declaration's: an instantiation of a second declaration of the file,
+/// whose own body is lowered for the first time, answers the file's
+/// `IndexedReady` record from the serve the first declaration's
+/// instantiation recorded, and still publishes every fact serving the file
+/// reads.
+#[test]
+fn a_sibling_declaration_answered_from_the_recorded_serve_publishes_its_facts() {
+    use verter_type_engine::semantic_query::PrimitiveKind;
+    let files = [
+        (
+            "/sg_self_root/sibling_serve/shapes.ts",
+            "export interface Box<T> { value: T }
+export interface Crate<T> { items: T[] }
+",
+        ),
+        (
+            "/sg_self_root/sibling_serve/user.ts",
+            "import type { Box, Crate } from './shapes';
+export type Both = [Box<string>, Crate<string>];
+",
+        ),
+    ];
+    let after_sibling = instantiations_entry_facts(
+        &files,
+        &[
+            ("Box", PrimitiveKind::String),
+            ("Crate", PrimitiveKind::Number),
+        ],
+        ("Crate", PrimitiveKind::Number),
+    );
+    let alone = instantiations_entry_facts(
+        &files,
+        &[("Crate", PrimitiveKind::Number)],
+        ("Crate", PrimitiveKind::Number),
+    );
+    assert_eq!(
+        after_sibling, alone,
+        "an instantiation answered from a sibling declaration's recorded serve must \
+         publish the facts of serving its declaration file and its candidates"
     );
 }
 
@@ -439,7 +593,8 @@ fn resolve_macro_payload_same_canonical_edit_rejects_warm_entry() {
 /// per observed self-root, pinned to the OBSERVED hash.
 #[test]
 fn read_set_signature_prepends_observed_self_roots() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[])
             .expect("a single observed self-root builds a carrier");
@@ -457,9 +612,9 @@ fn read_set_signature_prepends_observed_self_roots() {
 /// torn observation — the producer returns `None` (non-cacheable).
 #[test]
 fn read_set_signature_rejects_conflicting_self_root_hashes() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![
-        (Arc::from("/w/a.ts"), [0x11; 16]),
-        (Arc::from("/w/a.ts"), [0x22; 16]),
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = vec![
+        (verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16]),
+        (verter_type_expr::OwnedStr::from("/w/a.ts"), [0x22; 16]),
     ];
     let result = semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &[]);
     assert!(
@@ -474,7 +629,8 @@ fn read_set_signature_rejects_conflicting_self_root_hashes() {
 /// rail — the producer returns `None`.
 #[test]
 fn read_set_signature_rejects_traced_self_root_hash_mismatch() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x99; 16],
@@ -511,7 +667,8 @@ fn paged_traced_set(root: FactVersionRef) -> Arc<[FactVersionRef]> {
 /// self-root `FileWholeHash` held on an evidence page is still a torn read.
 #[test]
 fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_page() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x99; 16],
@@ -530,7 +687,8 @@ fn read_set_signature_rejects_a_traced_self_root_hash_mismatch_on_an_evidence_pa
 /// every traced fact is kept.
 #[test]
 fn a_paged_agreeing_self_root_keeps_its_precise_root() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = paged_traced_set(FactVersionRef::FileWholeHash {
         canonical_id: "/w/a.ts".to_string(),
         hash: [0x11; 16],
@@ -563,7 +721,8 @@ fn a_paged_agreeing_self_root_keeps_its_precise_root() {
 /// preserved verbatim.
 #[test]
 fn read_set_signature_merges_traced_cross_file_facts() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::Parse(
         verter_session_query::facts::fact_cache::ParseFactRef {
             canonical_id: "/w/dep.ts".to_string(),
@@ -595,7 +754,8 @@ fn read_set_signature_merges_traced_cross_file_facts() {
 /// facts rail — a project-shape change still invalidates the entry.
 #[test]
 fn read_set_signature_keeps_traced_project_generation_fact() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/a.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/a.ts"), [0x11; 16])];
     let traced = vec![FactVersionRef::ProjectGeneration { generation: 7 }];
     let carrier =
         semantic_graph_read_set_signature(&StrictWorldTestView::default(), &observed, &traced)
@@ -613,10 +773,10 @@ fn read_set_signature_keeps_traced_project_generation_fact() {
 /// them as one strict-world witness rather than one precise fact per root.
 #[test]
 fn oversized_self_root_set_builds_a_bounded_carrier() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
         .map(|index| {
             (
-                Arc::from(format!("/w/root-{index}.ts")),
+                verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
                 [(index % 251) as u8; 16],
             )
         })
@@ -649,10 +809,10 @@ fn oversized_self_root_set_builds_a_bounded_carrier() {
 /// page included — and keeps every other traced fact.
 #[test]
 fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
         .map(|index| {
             (
-                Arc::from(format!("/w/root-{index}.ts")),
+                verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
                 [(index % 251) as u8; 16],
             )
         })
@@ -684,10 +844,10 @@ fn an_oversized_root_set_strips_a_paged_root_fact_beside_its_witness() {
 
 #[test]
 fn oversized_self_root_compaction_strictly_checks_every_root() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> = (0..=FACT_PAGE_WIDTH)
         .map(|index| {
             (
-                Arc::from(format!("/w/root-{index}.ts")),
+                verter_type_expr::OwnedStr::from(format!("/w/root-{index}.ts")),
                 [(index % 251) as u8; 16],
             )
         })
@@ -754,7 +914,8 @@ fn generic_content_aggregate_is_not_a_strict_self_root_witness() {
 /// carried by its strict-world witness — never refused.
 #[test]
 fn post_finalise_self_root_merge_pages_the_completed_carrier() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/root.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
     let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
@@ -781,7 +942,8 @@ fn post_finalise_self_root_merge_pages_the_completed_carrier() {
 
 #[test]
 fn completed_structural_carrier_at_exactly_one_page_keeps_its_precise_root() {
-    let observed: Vec<(Arc<str>, [u8; 16])> = vec![(Arc::from("/w/root.ts"), [0x11; 16])];
+    let observed: Vec<(verter_type_expr::OwnedStr, [u8; 16])> =
+        vec![(verter_type_expr::OwnedStr::from("/w/root.ts"), [0x11; 16])];
     let traced: Vec<FactVersionRef> = (0..FACT_PAGE_WIDTH - 1)
         .map(|generation| FactVersionRef::ProjectGeneration {
             generation: generation as u64,
@@ -946,7 +1108,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
             cold_ran = true;
             (
                 verter_type_engine::semantic_query::QueryResult::Value(recompute_node),
-                Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                verter_type_engine::semantic_query::DepSignature::default(),
             )
         },
     );
@@ -955,7 +1117,7 @@ fn execute_cooperative_fast_path_validates_self_root() {
         "execute_cooperative's fast path MUST validate the entry's carrier before serving \
          it warm — an entry self-rooted on an untracked canonical must miss and re-run cold",
     );
-    match read.value {
+    match read.value().clone() {
         verter_type_engine::semantic_query::QueryResult::Value(node) => assert_eq!(
             node, recompute_node,
             "the recomputed node must surface, not the stale entry",
@@ -1010,7 +1172,7 @@ fn relation_memo_warm_read_validates_self_root() {
     assert!(
         store
             .get_relation_payload(ctx, &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "the relation memo's warm read MUST validate the stored entry's self-version-rooted \
          carrier strictly — an entry self-rooted on an untracked canonical must miss",
@@ -1049,7 +1211,7 @@ fn relation_memo_warm_read_serves_validated_entry() {
 
     let cached = store
         .get_relation_payload(ctx, &key)
-        .map(|served| served.value);
+        .map(|served| served.value().clone());
     assert!(
         matches!(
             cached.as_ref().map(|payload| &payload.outcome),
@@ -1226,7 +1388,7 @@ fn structural_node_kind_publishes_no_file_self_root() {
              with NO file self-root FileWholeHash",
         );
         // A carrier with no self-roots validates vacuously.
-        let entry = graph.get_validated(&key, ctx).map(|r| r.value);
+        let entry = graph.get_validated(&key, ctx).map(|r| r.value().clone());
         assert!(
             entry.is_some(),
             "a structural KeyOf entry (no file self-root) must warm-validate vacuously",
@@ -1259,9 +1421,9 @@ fn file_derived_object_node(host: &VerterHost, canonical: &str) -> SemanticNodeI
         .expect("file IndexedReady materialises");
     let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
         ),
         Arc::from(Vec::new().into_boxed_slice()),
         verter_type_engine::semantic_query::InstantiateContext::non_file(
@@ -1372,6 +1534,10 @@ fn key_of_same_canonical_edit_rejects_warm_entry() {
 #[test]
 fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base_c = "/sg_self_root/merged_base.ts";
     let aug_c = "/sg_self_root/merged_augmenter.ts";
     upsert(&host, base_c, "export type Foo = { a: number };\n");
@@ -1401,8 +1567,12 @@ fn key_of_over_cross_file_merged_decl_rejects_warm_entry_on_augmenter_edit() {
     // base_scope)`), with contributor nodes spanning two files.
     let contributors: Arc<[SemanticNodeId]> =
         Arc::from(vec![base_node, aug_node].into_boxed_slice());
-    let merged =
-        graph.intern_node_with_scope(SemanticNodeData::MergedDecl { contributors }, base_scope);
+    let merged = graph.intern_node_with_scope(
+        SemanticNodeData::MergedDecl {
+            contributors: verter_type_engine::semantic_query::PayloadArray::from(contributors),
+        },
+        base_scope,
+    );
 
     let dispatch = host.semantic_dispatch();
     let key = SemanticQueryKey::KeyOf {
@@ -1477,7 +1647,7 @@ fn project_path_same_canonical_edit_rejects_warm_entry() {
 
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![verter_type_engine::semantic_query::PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
@@ -1672,6 +1842,7 @@ fn builtin_utility_instantiation_roots_on_argument_file() {
     // `c`'s file — a genuine file-derived argument for the utility.
     let source = file_derived_object_node(&host, c);
     let dispatch = host.semantic_dispatch();
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
 
     // `Pick<Foo, 'a'>` — args are [source_object_node, key_set]. The
@@ -1797,9 +1968,9 @@ fn non_builtin_instantiation_roots_on_type_argument_file() {
     // scoped to `arg`'s file. The declaring file is `gen`.
     let key = SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(gen),
+            verter_type_expr::OwnedStr::from(gen),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Box"),
+            verter_type_expr::OwnedStr::from("Box"),
         ),
         Arc::from(vec![arg_node].into_boxed_slice()),
         verter_type_engine::semantic_query::InstantiateContext::non_file(
@@ -2155,11 +2326,11 @@ fn session_overlay_warm_validation_matrix() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: overlay-current → warm HIT ------------------------
@@ -2493,11 +2664,11 @@ fn session_overlay_parse_fact_carrier_warm_validation() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: overlay-current (Parse fact) → warm HIT -----------
@@ -2756,11 +2927,11 @@ fn session_tombstone_rejects_base_rooted_warm_entry() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     // --- Case 1: deleted (FileWholeHash self-root) → MISS ----------
@@ -3022,11 +3193,11 @@ fn session_tombstone_rejects_cross_file_dependency_whole_hash() {
                     cold_ran = true;
                     (
                         QueryResult::Value(recompute_node),
-                        Arc::from(Vec::new().into_boxed_slice()) as DepSignature,
+                        verter_type_engine::semantic_query::DepSignature::default(),
                     )
                 },
             );
-            (cold_ran, read.value, recompute_node)
+            (cold_ran, read.value().clone(), recompute_node)
         };
 
     let overlays: FxHashMap<String, Arc<str>> = FxHashMap::default();

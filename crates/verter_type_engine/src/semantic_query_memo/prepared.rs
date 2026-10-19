@@ -40,7 +40,7 @@ use rustc_hash::FxBuildHasher;
 use crate::semantic_query::demand::{MaterializedPoint, ProjectionPath};
 use crate::semantic_query::SemanticQueryKey;
 
-use super::family::{family_and_slot, point_for_slot, requested_path_for_key, FamilyKey, ModeSlot};
+use super::family::{point_for_slot, requested_path_for_key, FamilyKey, ModeSlot};
 
 /// Hash a [`SemanticQueryKey`] with the same fixed hasher
 /// [`PreparedKeyHandle::prepare`] caches — lets a by-key probe against
@@ -54,6 +54,8 @@ pub(super) fn hash_key(key: &SemanticQueryKey) -> u64 {
 /// field is a pure function of `key`; see the module docs for the
 /// equality contract.
 struct PreparedQueryIdentity {
+    _signature: Option<crate::signature_kernel::SignatureEpochLease>,
+    _roots: super::node_roots::NodeRootSet,
     key: SemanticQueryKey,
     family: FamilyKey,
     slot: ModeSlot,
@@ -73,7 +75,13 @@ impl PreparedKeyHandle {
     /// `family_and_slot` walk, ONE requested-point build, ONE key
     /// hash. The key is moved in, never cloned.
     pub fn prepare(key: SemanticQueryKey) -> Self {
-        let (family, slot) = family_and_slot(&key);
+        Self::prepare_in(None, key)
+    }
+
+    /// [`Self::prepare`] whose interned family operands are owned in
+    /// `arena`, the graph that issued the key.
+    fn prepare_in(arena: Option<&Arc<super::arena::NodeArenaCore>>, key: SemanticQueryKey) -> Self {
+        let (family, slot) = super::family::family_and_slot_in(arena, &key);
         let requested_path = requested_path_for_key(&key);
         // Same formula as `family::requested_point_for_key`, reusing
         // the `family_and_slot` result instead of re-projecting. Keys
@@ -85,6 +93,8 @@ impl PreparedKeyHandle {
         };
         let cached_hash = hash_key(&key);
         Self(Arc::new(PreparedQueryIdentity {
+            _signature: None,
+            _roots: Default::default(),
             key,
             family,
             slot,
@@ -115,6 +125,68 @@ impl PreparedKeyHandle {
     }
 }
 
+impl super::SemanticGraphStore {
+    /// Prepare `key` with its operands rooted, for a key built from live
+    /// construction operands.
+    pub(crate) fn prepare_rooted_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
+        self.try_prepare_rooted_key(key)
+            .expect("a prepared key has live counted operands")
+    }
+
+    /// Prepare `key` with its operands rooted. A key naming a destroyed
+    /// (`StaleSemanticOperand`) or never-allocated (`ForeignSemanticOperand`)
+    /// operand is refused: it can neither be answered nor cached.
+    pub(crate) fn try_prepare_rooted_key(
+        &self,
+        key: SemanticQueryKey,
+    ) -> Result<PreparedKeyHandle, crate::semantic_query::QueryError> {
+        let mut prepared = self.prepare_probe_key(key);
+        self.try_root_prepared_key(&mut prepared)?;
+        Ok(prepared)
+    }
+
+    /// The prepared identity of `key` for a warm probe: its family, slot,
+    /// requested point and hash, with its operands still owned by the
+    /// caller that holds `key`'s nodes. A probe that hits returns the
+    /// stored result's own lease and drops this identity; one that goes on
+    /// to claim roots it first ([`Self::try_root_prepared_key`]), because a
+    /// claim keeps it past the caller's hold.
+    pub(super) fn prepare_probe_key(&self, key: SemanticQueryKey) -> PreparedKeyHandle {
+        let signature = match &key {
+            SemanticQueryKey::ReadSignatureResult(key) => self
+                .signature_store()
+                .lease_epoch(key.descriptor.epoch())
+                .ok(),
+            _ => None,
+        };
+        let mut prepared = PreparedKeyHandle::prepare_in(Some(&self.arena.core), key);
+        Arc::get_mut(&mut prepared.0)
+            .expect("a fresh prepared identity is unshared")
+            ._signature = signature;
+        prepared
+    }
+
+    /// Root a probe identity's family operands in this arena, so the
+    /// identity outlives the caller's hold on them. A destroyed or
+    /// never-allocated operand is refused.
+    pub(super) fn try_root_prepared_key(
+        &self,
+        prepared: &mut PreparedKeyHandle,
+    ) -> Result<(), crate::semantic_query::QueryError> {
+        let mut nodes = super::node_roots::RootIds::new();
+        prepared.family().for_each_node_id(|node| {
+            if node.0 < super::UNALLOCATABLE_ID_FLOOR {
+                nodes.push(node);
+            }
+        });
+        let roots = self.root_nodes(nodes)?;
+        Arc::get_mut(&mut prepared.0)
+            .expect("a probe identity is unshared until its claim")
+            ._roots = roots;
+        Ok(())
+    }
+}
+
 impl verter_execution::tasks::ProducerIdentity for PreparedQueryIdentity {
     fn producer_hash(&self) -> u64 {
         self.cached_hash
@@ -138,6 +210,35 @@ impl PreparedKeyHandle {
     /// This handle as a producer identity to match against.
     pub(super) fn as_task_producer_ref(&self) -> &dyn verter_execution::tasks::ProducerIdentity {
         self.0.as_ref()
+    }
+
+    /// The heap a prepared identity keeps reachable beyond its own block,
+    /// when `producer` is one: its key, the family projected from it (which
+    /// shares the key's slices and names), its requested path and point,
+    /// and its operand roots, each `Arc` allocation once per `aliases`. The
+    /// signature epoch a lease pins is the epoch's own charge.
+    pub(crate) fn producer_heap_bytes(
+        producer: &dyn verter_execution::tasks::ProducerIdentity,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> Option<usize> {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        let PreparedQueryIdentity {
+            _signature,
+            _roots,
+            key,
+            family,
+            slot: _,
+            requested_path,
+            requested_point,
+            cached_hash: _,
+        } = producer.downcast_ref::<PreparedQueryIdentity>()?;
+        Some(
+            super::family_footprint::query_key_heap_bytes(key, aliases)
+                + super::family_footprint::family_key_heap_bytes(family, aliases)
+                + requested_path.owned_heap_bytes(aliases)
+                + requested_point.path().owned_heap_bytes(aliases)
+                + _roots.owned_heap_bytes(aliases),
+        )
     }
 
     /// Whether `producer` is the semantic producer for exactly `key`, whose

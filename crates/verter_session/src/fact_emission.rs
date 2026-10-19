@@ -37,7 +37,6 @@
 
 use std::sync::Arc;
 
-use dashmap::DashMap;
 use rustc_hash::FxHashMap;
 use verter_session_query::analysis::types::hash_16;
 use verter_session_query::analysis::types::Hash16;
@@ -375,7 +374,7 @@ pub(crate) fn emit_parse_facts_counting_inventory(
             .synthesised_value_bodies()
             .map(|(key, body)| (key.clone(), Arc::clone(body)))
             .collect(),
-        computed: Arc::new(DashMap::default()),
+        computed: Arc::new(verter_semantic_source::per_file_map::per_file_map()),
     };
 
     (
@@ -403,13 +402,42 @@ pub(crate) struct LazyBodyFactSource {
     /// — their facts compute from the eager `LoweredValueDecl`, never
     /// the lazy memo.
     synthesised_value_bodies: FxHashMap<verter_type_expr::DeclBindingKey, Arc<LoweredValueDecl>>,
-    computed: Arc<DashMap<FactKey, Fact>>,
+    computed: Arc<verter_semantic_source::per_file_map::PerFileMap<FactKey, Fact>>,
 }
 
 impl LazyBodyFactSource {
     pub(crate) fn compute(&self, key: &FactKey) -> Option<Fact> {
         if let Some(hit) = self.computed.get(key) {
             return Some(hit.clone());
+        }
+        // A class `Member` fact — the member-read fingerprint a class member
+        // read roots on — computes from the class's lease-only selection of
+        // the elements declaring the name, never from the whole body.
+        if let FactKey::Member {
+            exporter,
+            name: verter_type_expr::PropertyKey::String(member),
+            space: SymbolSpace::Type,
+        } = key
+        {
+            let outcome = verter_type_engine::fact_tracing::consume_source_read(
+                self.memo.class_member_read_hash_in(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    exporter.as_ref(),
+                    member,
+                ),
+            )?;
+            // A truncated fingerprint cannot certify the elements it did not
+            // fully walk: decline, so the read keeps conservative evidence.
+            if outcome.budget_exceeded {
+                return None;
+            }
+            let fact = Fact {
+                key: key.clone(),
+                semantic_hash: outcome.hash,
+                display_hash: compute_display_hash(&outcome.hash),
+            };
+            self.computed.insert(key.clone(), fact.clone());
+            return Some(fact);
         }
         // `name` is the backing LOCAL declaration name probed against the
         // body memo; the emitted `Fact.key` stays the original requested

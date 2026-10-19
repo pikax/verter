@@ -88,12 +88,12 @@ defineProps<{ msg: string; count: number }>();\n\
 fn decl_body_locator(canonical: &str, symbol: &str) -> AuthoredBodyLocator {
     AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
     })
 }
 
@@ -172,9 +172,9 @@ fn authored_macro_type_argument_routes_to_the_sole_hot_mirror_producer() {
 
     let locator = AuthoredBodyLocator::MacroPayload(MacroPayloadLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(SFC_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(SFC_ID),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: LocatorSymbolSpace::Value,
         },
         macro_index: u32::try_from(macro_index).unwrap(),
@@ -215,6 +215,7 @@ fn closed_leaf_sources_lower_in_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // A primitive leaf lowers to the primitive node.
     let primitive = dispatch
@@ -318,6 +319,7 @@ fn closed_ref_leaf_uses_exact_instance_owner_when_module_import_has_same_name() 
     const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
     let host = owner_isolation_fixture();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
@@ -337,11 +339,12 @@ fn synthesized_symbol_ref_uses_exact_anchor_owner_when_module_import_has_same_na
     const OWNER: &str = "/w/semantic-source/OwnerIsolation.vue";
     let host = owner_isolation_fixture();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let source = SemanticTypeSource::Synthesized(ResolvedLocalShape::Ref(SymbolBodyLocator {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(OWNER),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            symbol: Arc::from("Shared"),
+            symbol: verter_type_expr::OwnedStr::from("Shared"),
             space: LocatorSymbolSpace::Type,
         },
     }));
@@ -365,17 +368,18 @@ fn closed_tuple_leaf_union_element_raises_to_the_ordered_union_node() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // The realized emit-payload shape: `[payload: string | number]` as a
     // closed tuple whose single element carries the nested leaf-union fact.
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
         readonly: false,
-        elements: Arc::from(
+        elements: From::from(
             vec![TupleElementFact {
                 label: Some("payload".to_string()),
                 optional: false,
                 rest: false,
-                ty: FactOrLocator::LeafUnion(Arc::from(
+                ty: FactOrLocator::LeafUnion(From::from(
                     vec![
                         LeafTypeFact::Primitive(PrimitiveName::String),
                         LeafTypeFact::Primitive(PrimitiveName::Number),
@@ -469,8 +473,9 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
-    let shape = ResolvedLocalShape::Object(Arc::from(
+    let shape = ResolvedLocalShape::Object(From::from(
         vec![
             SynthesizedMemberFact {
                 name: "flag".to_string(),
@@ -485,12 +490,14 @@ fn synthesized_object_source_composes_a_surface_with_lowered_member_values() {
                 optional: true,
                 ty: FactOrLocator::Locator(TypeBodySlot {
                     anchor: AuthoredAnchor {
-                        canonical_id: Arc::from(OWNER_ID),
+                        canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                        symbol: Arc::from("Base"),
+                        symbol: verter_type_expr::OwnedStr::from("Base"),
                         space: LocatorSymbolSpace::Type,
                     },
-                    path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                    ),
                 }),
                 span_origin: MemberSpansOrigin::Synthetic(SourceSynthetic),
             },
@@ -665,7 +672,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                 SemanticNodeData::new_bare_ref(
                     Arc::from("Anchor"),
                     NodeScopeId::File {
-                        canonical_id: Arc::from(SCOPE),
+                        canonical_id: verter_type_expr::OwnedStr::from(SCOPE),
                         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                         whole_hash,
                         local_scope: None,
@@ -673,7 +680,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
                     Arc::from(Vec::new().into_boxed_slice()),
                 ),
                 NodeScopeId::File {
-                    canonical_id: Arc::from(SCOPE),
+                    canonical_id: verter_type_expr::OwnedStr::from(SCOPE),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash,
                     local_scope: None,
@@ -683,10 +690,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
 
     fn carrier_for(seed: SemanticNodeId) -> SyntheticCarrierKey {
         SyntheticCarrierKey {
-            scope_canonical_id: Arc::from(SCOPE),
+            scope_canonical_id: From::from(SCOPE),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("items"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("items"),
             value_node: seed.0,
         }
     }
@@ -715,7 +722,7 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
         let dispatch = ProjectSemanticDispatch::new(ctx);
         dispatch
             .raise_semantic_type_source_to_hot(
-                &SemanticTypeSource::SyntheticSlotBinding(Arc::new(carrier.clone())),
+                &SemanticTypeSource::SyntheticSlotBinding(From::from(carrier.clone())),
                 SourceRaiseContext {
                     scope_canonical_id: SCOPE,
                     scope_owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -735,6 +742,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
 
     // Control — an UNFENCED deepen admits its reduced shape.
     let control = fixture();
+    let _control_scope = control
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let control_carrier = carrier_for(intern_seed(&control));
     assert!(
         drive(&control, &control_carrier),
@@ -750,6 +761,10 @@ fn fenced_serve_synthetic_binding_deepen_is_not_admitted() {
     // fenced at a STABLE generation (no bump, so a GenerationSuperseded gate cannot
     // mask the refusal).
     let fenced = fixture();
+    let _fenced_scope = fenced
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let fenced_carrier = carrier_for(intern_seed(&fenced));
     {
         let rctx = RequestContext::new(1, Arc::from(SCOPE), false, None);
@@ -811,7 +826,7 @@ mod query_error_raise_routing {
             domain: BudgetDomain::SolverResolveSteps,
             limit: 10,
             actual: 11,
-            context: "raise-routing fixture".to_string(),
+            context: "raise-routing fixture".into(),
         }
     }
 
@@ -828,8 +843,8 @@ mod query_error_raise_routing {
     #[test]
     fn recursive_ref_raises_as_a_carrier_not_absence() {
         let outcome = route(QueryError::RecursiveRef {
-            name: Arc::from("TreeNode"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("TreeNode"),
+            args: Default::default(),
         });
         let SourceRaiseOutcome::Raised(hot) = outcome else {
             panic!("RecursiveRef must RAISE as recursion, got {outcome:?}");
@@ -840,9 +855,9 @@ mod query_error_raise_routing {
     #[test]
     fn decl_placeholder_raises_as_the_expandable_carrier() {
         let outcome = route(QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Foo"),
+            name: verter_type_expr::OwnedStr::from("Foo"),
             whole_hash: Default::default(),
         });
         let SourceRaiseOutcome::Raised(hot) = outcome else {
@@ -857,8 +872,8 @@ mod query_error_raise_routing {
     fn an_unmintable_control_carrier_stays_typed() {
         let outcome = SourceRaiseOutcome::from_error(
             QueryError::RecursiveRef {
-                name: Arc::from("TreeNode"),
-                args: std::sync::Arc::from([]),
+                name: verter_type_expr::OwnedStr::from("TreeNode"),
+                args: Default::default(),
             },
             |_| None,
         );
@@ -876,7 +891,7 @@ mod query_error_raise_routing {
         let chain: Arc<[Arc<str>]> =
             Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice());
         let outcome = route(QueryError::AliasCycle {
-            chain: Arc::clone(&chain),
+            chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain.clone()),
         });
         let SourceRaiseOutcome::Failed(QueryError::AliasCycle { chain: observed }) = outcome else {
             panic!("AliasCycle must stay a typed control carrier, got {outcome:?}");
@@ -912,9 +927,9 @@ mod query_error_raise_routing {
     #[test]
     fn genuine_failures_travel_as_typed_failures() {
         for err in [
-            QueryError::Other(Arc::from("boom")),
+            QueryError::Other(verter_type_expr::OwnedStr::from("boom")),
             QueryError::UnsupportedIntrinsic {
-                name: Arc::from("NoSuchIntrinsic"),
+                name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
             },
             QueryError::ValueDomainMismatch {
                 expected: SemanticQueryValueTag::TypeNode,
@@ -970,8 +985,9 @@ fn closed_leaf_union_with_duplicate_leaves_raises_to_the_singleton_literal() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
-    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
         vec![
             LeafTypeFact::StringLiteral("a".to_string()),
             LeafTypeFact::StringLiteral("a".to_string()),
@@ -1013,15 +1029,16 @@ fn nested_leaf_union_with_duplicate_leaves_composes_the_singleton_literal() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
         readonly: false,
-        elements: Arc::from(
+        elements: From::from(
             vec![TupleElementFact {
                 label: Some("payload".to_string()),
                 optional: false,
                 rest: false,
-                ty: FactOrLocator::LeafUnion(Arc::from(
+                ty: FactOrLocator::LeafUnion(From::from(
                     vec![
                         LeafTypeFact::StringLiteral("a".to_string()),
                         LeafTypeFact::StringLiteral("a".to_string()),
@@ -1076,8 +1093,9 @@ fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
-    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(Arc::from(
+    let source = SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(From::from(
         vec![
             LeafTypeFact::StringLiteral("a".to_string()),
             LeafTypeFact::StringLiteral("b".to_string()),
@@ -1105,7 +1123,7 @@ fn closed_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     assert_eq!(
         graph.node_scope(raised.node()),
         Some(verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -1127,15 +1145,16 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     let host = host();
     upsert_ts(&host, OWNER_ID, OWNER);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let source = SemanticTypeSource::Closed(ClosedTypeFact::Tuple(TuplePayloadFact {
         readonly: false,
-        elements: Arc::from(
+        elements: From::from(
             vec![TupleElementFact {
                 label: Some("payload".to_string()),
                 optional: false,
                 rest: false,
-                ty: FactOrLocator::LeafUnion(Arc::from(
+                ty: FactOrLocator::LeafUnion(From::from(
                     vec![
                         LeafTypeFact::StringLiteral("a".to_string()),
                         LeafTypeFact::StringLiteral("b".to_string()),
@@ -1172,7 +1191,7 @@ fn nested_leaf_union_multi_arm_re_anchors_to_the_owning_fact_scope() {
     assert_eq!(
         graph.node_scope(element),
         Some(verter_type_engine::semantic_query::NodeScopeId::File {
-            canonical_id: Arc::from(OWNER_ID),
+            canonical_id: verter_type_expr::OwnedStr::from(OWNER_ID),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,

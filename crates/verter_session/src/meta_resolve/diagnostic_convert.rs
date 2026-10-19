@@ -251,9 +251,11 @@ mod tests {
     fn shallow_to_expansion_maps_instantiation_error_to_dedicated_variant() {
         let diag = ShallowDiagnostic::InstantiationError {
             decl: dummy_decl(),
-            error: verter_type_engine::semantic_query::QueryError::Other(std::sync::Arc::from(
-                "synthetic",
-            )),
+            error: verter_type_engine::project_semantic_dispatch::walk::DiagnosticError::for_tests(
+                verter_type_engine::semantic_query::QueryError::Other(
+                    verter_type_expr::OwnedStr::from("synthetic"),
+                ),
+            ),
         };
         let proj = shallow_to_expansion(&diag);
         assert_eq!(proj.reason, ExpansionStopReason::InstantiationError);
@@ -280,8 +282,10 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_unresolved_surface_arm_to_unresolved_reference() {
         let diag = ShallowDiagnostic::UnresolvedSurfaceArm {
-            name: std::sync::Arc::from("NotFoundHeritage"),
-            owner_canonical: std::sync::Arc::from("/src/types.ts"),
+            name: verter_session_query::retention::owned::OwnedStr::from("NotFoundHeritage"),
+            owner_canonical: verter_session_query::retention::owned::OwnedStr::from(
+                "/src/types.ts",
+            ),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         };
         let proj = shallow_to_expansion(&diag);

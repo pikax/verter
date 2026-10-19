@@ -232,7 +232,7 @@ fn project_vue_default_path(host: &VerterHost, canonical_id: &str, path: &[&str]
             panic!("Instantiate(.vue default) base for {canonical_id} errored: {e:?}")
         }
     };
-    let segments: Arc<[PathSegment]> = path
+    let segments: verter_type_expr::OwnedSlice<PathSegment> = path
         .iter()
         .map(|s| {
             PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
@@ -308,14 +308,14 @@ fn typeof_default_construct_return_node(
     let typeof_node = match dispatch.execute_type_node(dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from(canonical_id),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                 owner: verter_type_expr::TopLevelOwnerId::instance(0),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::instance(0),
                 ),
             },
-            name: Arc::from("default"),
+            name: verter_type_expr::OwnedStr::from("default"),
         },
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -329,21 +329,21 @@ fn typeof_default_construct_return_node(
     let SemanticNodeData::Object(view) = graph
         .node_data(typeof_node)
         .as_deref()
-        .cloned()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         .unwrap_or_else(|| panic!("TypeOf(default) for {canonical_id} must be an Object surface"))
     else {
         panic!("TypeOf(default) for {canonical_id} must be a constructor-like Object surface");
     };
     assert_eq!(
-        view.construct_signatures.len(),
+        view.construct_signatures().len(),
         1,
         "the synthesized .vue default's typeof carries exactly one construct signature"
     );
-    let ctor_fn = view.construct_signatures[0];
+    let ctor_fn = view.construct_signatures()[0];
     let SemanticNodeData::Signature { return_type, .. } = graph
         .node_data(ctor_fn)
         .as_deref()
-        .cloned()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         .unwrap_or_else(|| panic!("construct signature of {canonical_id} must be a Function node"))
     else {
         panic!("construct signature of {canonical_id} must be a Function node");
@@ -437,9 +437,9 @@ fn instantiate_vue_default_rejects_wrong_module_owner() {
     let node = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
         verter_type_engine::semantic_query::InstantiateKey::new(
             verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                Arc::from(A),
+                verter_type_expr::OwnedStr::from(A),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("default"),
+                verter_type_expr::OwnedStr::from("default"),
             ),
             Arc::from(Vec::new().into_boxed_slice()),
             verter_type_engine::semantic_query::InstantiateContext::non_file(

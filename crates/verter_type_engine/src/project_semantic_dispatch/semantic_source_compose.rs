@@ -8,6 +8,7 @@
 //! ENTRIES, strict-raise sink, and locator absolutization stay in the parent module.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     FactOrLocator, FunctionSignatureFact, IndexedAccessFact, LeafTypeFact, ObjectMemberFact,
@@ -56,7 +57,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         NodeScopeId::File {
-            canonical_id: Arc::from(ctx.scope_canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(ctx.scope_canonical_id),
             owner: ctx.scope_owner,
             whole_hash,
             local_scope: None,
@@ -96,7 +97,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(list)) => self
                 .graph()
-                .intern_node_with_scope(SemanticNodeData::Union(list.clone()), scope.clone()),
+                .intern_node_with_scope(SemanticNodeData::Union(list.share()), scope.clone()),
             _ => node,
         }
     }
@@ -491,11 +492,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     return;
                 }
                 let run_fact = ObjectShapeFact {
-                    members: Arc::from(std::mem::take(run).into_boxed_slice()),
+                    members: From::from(std::mem::take(run).into_boxed_slice()),
                 };
                 let node = self.compose_object_fact_node(&run_fact, ctx).node();
-                let Some(SemanticNodeData::Object(surface)) =
-                    self.graph().node_data(node).as_deref().cloned()
+                let Some(SemanticNodeData::Object(surface)) = self
+                    .graph()
+                    .node_data(node)
+                    .as_deref()
+                    .map(crate::semantic_query::SemanticNodeData::clone)
                 else {
                     return;
                 };
@@ -526,7 +530,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         flush_run(&mut run, &mut effects);
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
-                effects: Arc::from(effects),
+                effects: crate::semantic_query::PayloadArray::from(effects),
             }),
             scope.clone(),
         ))
@@ -728,7 +732,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, param)| crate::semantic_query::FunctionParam {
-                name: param.name.as_deref().map(Arc::from),
+                name: param.name.as_deref().map(OwnedStr::from),
                 ty: match param.ty.as_ref() {
                     Some(slot) => self.raise_required_interior(
                         ctx,
@@ -775,29 +779,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // partial / ReturnOnly. The carrier records the SAME served
             // position.
             verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
-                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                let mut carrier = crate::semantic_query::SignatureReturnCarrier::Function(
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                 );
                 let return_type = match ctx.with_interior_step(
                     crate::project_semantic_dispatch::interior_source::InteriorSourceStep::ReturnType,
                     || {
-                        self.execute_function_return_source(
-                            &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                        self.probe_signature_flow_return(
+                            identity,
                             ctx.scope_canonical_id,
                         )
                     },
                 ) {
-                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                    super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
                         inferred_predicate = result.inferred_predicate();
                         result.return_type()
                     }
-                    super::flow_return::FunctionReturnNode::Declared(hot) => hot.node(),
-                    super::flow_return::FunctionReturnNode::DeclaredMiss
-                    | super::flow_return::FunctionReturnNode::NoValue(_) => {
-                        ctx.record_interior_failure();
+                    super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                        carrier = crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
                         self.miss_node(&scope)
-                    }
-                    super::flow_return::FunctionReturnNode::Absent => self.miss_node(&scope),
+                    },
                 };
                 (return_type, carrier)
             }
@@ -856,12 +857,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             },
                         )
                     });
-                    let display_name: Arc<str> = Arc::from(param.name.as_str());
+                    let display_name = OwnedStr::from(param.name.as_str());
                     let param_node = self.graph().intern_node_with_scope(
                         SemanticNodeData::TypeParam {
                             decl: crate::semantic_query::DeclIdentity::from_scope(
                                 &scope,
-                                Arc::clone(&display_name),
+                                display_name.clone(),
                             ),
                             // The shared signature-scoped binder convention
                             // (`BinderIdentityMode::Signature`): display-name-keyed
@@ -869,7 +870,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             param_index: 0,
                             constraint,
                             default,
-                            display_name: Arc::clone(&display_name),
+                            display_name: OwnedStr::from(&display_name),
                         },
                         scope.clone(),
                     );
@@ -882,6 +883,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 })
                 .collect();
+        let return_carrier = match return_carrier {
+            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source) => {
+                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(
+                    source.with_bindings(
+                        type_parameters
+                            .iter()
+                            .map(|parameter| (Arc::<str>::from(&parameter.name), parameter.param)),
+                    ),
+                )
+            }
+            carrier => carrier,
+        };
         let kind = if construct {
             crate::semantic_query::SignatureKind::Construct
         } else {
@@ -890,9 +903,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Signature {
                 kind,
-                params: Arc::from(params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
                 return_type,
-                type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_parameters.into_boxed_slice(),
+                ),
                 // The fact-composition path does not carry occurrence-grade
                 // provenance today; the overload-set producer treats an
                 // occurrence-less candidate as an honest `Miss`.
@@ -924,7 +939,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .enumerate()
             .map(|(ordinal, element)| TupleElement {
-                label: element.label.as_deref().map(Arc::from),
+                label: element.label.as_deref().map(OwnedStr::from),
                 value: ctx.with_interior_step(
                     crate::project_semantic_dispatch::interior_source::InteriorSourceStep::TupleElement {
                         ordinal: ordinal as u32,
@@ -937,7 +952,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect();
         HotTypeRef::new(self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(elements.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(elements.into_boxed_slice()),
                 readonly: tuple.readonly,
             },
             scope,
@@ -967,7 +982,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             node = self.graph().intern_node_with_scope(
                 SemanticNodeData::IndexedAccess {
                     object: node,
-                    index: IndexKey::String(Arc::from(key.as_str())),
+                    index: IndexKey::String(verter_type_expr::OwnedStr::from(key.as_str())),
                 },
                 scope.clone(),
             );
@@ -979,10 +994,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 /// Map a fact-side declaration origin onto the graph member's origin file.
 fn declaration_origin_file(
     origin: &verter_type_expr::facts::DeclarationOrigin,
-) -> Option<Arc<str>> {
+) -> Option<verter_type_expr::OwnedStr> {
     match origin {
         verter_type_expr::facts::DeclarationOrigin::Declared(canonical) => {
-            Some(Arc::clone(canonical))
+            Some(verter_type_expr::OwnedStr::from(canonical))
         }
         verter_type_expr::facts::DeclarationOrigin::Synthetic => None,
     }

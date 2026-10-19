@@ -28,9 +28,9 @@ const CANONICAL: &str = "/ws/mixed-return-equation.ts";
 fn flow_identity(name: &str) -> FlowFunctionReturnIdentity {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(name),
+            symbol: verter_type_expr::OwnedStr::from(name),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -45,7 +45,7 @@ fn call_key(
 ) -> ResolveCallKey {
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             offset,
         },
         callee,
@@ -62,6 +62,7 @@ fn call_key(
 /// snapshot, so its lifecycle transitions are the only thing under test.
 fn empty_session_setup() -> InferenceSessionSetup {
     InferenceSessionSetup::new(
+        verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from([]),
         VariancePhase::Covariant,
         InferencePassKind::CallApplicability,
@@ -200,6 +201,7 @@ fn mixed_seeded_component_close_stages_both_domains() {
 fn flow_call_expression_records_a_resolve_call_hold() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let flow_key = dispatch.flow_return_key_for(&flow_identity("indexedCall"));
     let idx = dispatch
         .dispatch_txn

@@ -209,7 +209,7 @@ struct BundleMemoEntry {
     /// How far the memoised value may travel. `RequestOnly` entries
     /// replay their refusal on EVERY hit.
     reuse: ReuseClass,
-    bundle: Arc<PreparedDeclBundle>,
+    bundle: crate::resolver_core::CachedValue<PreparedDeclBundle>,
 }
 
 /// The ONE request-world prepared-decl bundle memo.
@@ -273,7 +273,10 @@ impl RequestBundleMemo {
         canonical: &str,
         world: BundleMemoWorld,
         token: StoreViewCompatToken,
-    ) -> Option<(Arc<PreparedDeclBundle>, ReuseClass)> {
+    ) -> Option<(
+        crate::resolver_core::CachedValue<PreparedDeclBundle>,
+        ReuseClass,
+    )> {
         if !self.nonempty.load(Ordering::Acquire) {
             return None;
         }
@@ -281,7 +284,7 @@ impl RequestBundleMemo {
         // One owned key per miss is the price of a tuple key; the
         // `nonempty` fast path keeps it off the empty-memo hot path.
         let entry = entries.get(&(canonical.to_owned(), world))?;
-        (entry.token == token).then(|| (Arc::clone(&entry.bundle), entry.reuse))
+        (entry.token == token).then(|| (entry.bundle.clone(), entry.reuse))
     }
 
     /// Memoise a request-reusable bundle for the rest of this request.
@@ -294,7 +297,7 @@ impl RequestBundleMemo {
         world: BundleMemoWorld,
         token: StoreViewCompatToken,
         reuse: ReuseClass,
-        bundle: Arc<PreparedDeclBundle>,
+        bundle: crate::resolver_core::CachedValue<PreparedDeclBundle>,
     ) {
         if !reuse.is_request_reusable() {
             return;
@@ -925,6 +928,12 @@ pub(crate) struct RequestStoreView<'a> {
     base_is_current: bool,
     /// The receipts this view has validated (see [`ValidatedReceipts`]).
     validated_receipts: ValidatedReceipts,
+    /// The retained signatures this view has validated (see
+    /// [`ValidatedSignatures`]).
+    validated_signatures: ValidatedSignatures,
+    /// The project environment this request read per canonical (see
+    /// [`RequestProjectEnv`]).
+    project_env: RequestProjectEnv,
     /// The request's ownership of the base's captured content generation in
     /// the workspace freshness history: from the moment the view is built,
     /// retiring history cannot raise the transition floor past the
@@ -938,6 +947,111 @@ pub(crate) struct RequestStoreView<'a> {
     /// Test-only: how many facts that are not receipts this view validated.
     #[cfg(test)]
     leaf_validations: AtomicUsize,
+}
+
+/// One retained signature a request view validated: the signature itself
+/// (held alive, so its address names it alone), the strict self-roots it
+/// was validated under, and the completion state it was validated at.
+struct ValidatedSignature {
+    signature: Arc<[FactVersionRef]>,
+    strict: Box<[Box<str>]>,
+    state: CompletionOverlayState,
+}
+
+/// The retained signatures one request view validated, so a warm read that
+/// meets a signature again in the same request answers without walking it.
+///
+/// Sound for the reasons [`ValidatedReceipts`] is: a validation's answer is
+/// a function of the base (proven current at construction and never
+/// replaced), the completion overlay's exact state and the strict
+/// self-roots, and the last two are part of the key. Only positive answers
+/// are kept, each recorded after the state was confirmed unchanged across
+/// the whole validation. Request-scoped, dropped with the view.
+#[derive(Default)]
+struct ValidatedSignatures(
+    parking_lot::Mutex<rustc_hash::FxHashMap<usize, smallvec::SmallVec<[ValidatedSignature; 1]>>>,
+);
+
+impl ValidatedSignatures {
+    fn address(signature: &Arc<[FactVersionRef]>) -> usize {
+        Arc::as_ptr(signature).cast::<FactVersionRef>() as usize
+    }
+
+    fn contains(
+        &self,
+        signature: &Arc<[FactVersionRef]>,
+        strict: &[&str],
+        state: CompletionOverlayState,
+    ) -> bool {
+        self.0
+            .lock()
+            .get(&Self::address(signature))
+            .is_some_and(|validated| {
+                validated.iter().any(|entry| {
+                    Arc::ptr_eq(&entry.signature, signature)
+                        && entry.state == state
+                        && entry.strict.len() == strict.len()
+                        && entry
+                            .strict
+                            .iter()
+                            .zip(strict)
+                            .all(|(held, root)| held.as_ref() == *root)
+                })
+            })
+    }
+
+    fn insert(
+        &self,
+        signature: &Arc<[FactVersionRef]>,
+        strict: &[&str],
+        state: CompletionOverlayState,
+    ) {
+        self.0
+            .lock()
+            .entry(Self::address(signature))
+            .or_default()
+            .push(ValidatedSignature {
+                signature: Arc::clone(signature),
+                strict: strict.iter().map(|root| Box::from(*root)).collect(),
+                state,
+            });
+    }
+}
+
+/// The owning project's environment for each canonical a request keyed a
+/// query by: its env hashes, project identity and effective compiler
+/// options. They are read live from the workspace's published root the
+/// first time the request asks for a canonical, then answered from here,
+/// so every query of one request keys under one project environment and
+/// the owner resolution runs once per canonical rather than once per key.
+/// A configuration published while the request runs reaches the next
+/// request, as it would a request that read it before the change.
+#[derive(Default)]
+struct RequestProjectEnv {
+    env_hashes: parking_lot::Mutex<rustc_hash::FxHashMap<Box<str>, crate::session_view::EnvHashes>>,
+    identities: parking_lot::Mutex<
+        rustc_hash::FxHashMap<Box<str>, crate::file_artifact_store::ProjectIdentity>,
+    >,
+    compiler_options: parking_lot::Mutex<
+        rustc_hash::FxHashMap<Box<str>, verter_session_query::resolution::SemanticCompilerOptions>,
+    >,
+}
+
+/// `map[canonical]`, reading it with `read` (outside the lock) on the
+/// first request.
+fn read_once<V: Clone>(
+    map: &parking_lot::Mutex<rustc_hash::FxHashMap<Box<str>, V>>,
+    canonical: &str,
+    read: impl FnOnce() -> V,
+) -> V {
+    if let Some(value) = map.lock().get(canonical) {
+        return value.clone();
+    }
+    let value = read();
+    map.lock()
+        .entry(Box::from(canonical))
+        .or_insert(value)
+        .clone()
 }
 
 /// One receipt a request view validated: the receipt, the strict
@@ -1022,6 +1136,8 @@ impl<'a> RequestStoreView<'a> {
             overlay,
             base_is_current: true,
             validated_receipts: ValidatedReceipts::default(),
+            validated_signatures: ValidatedSignatures::default(),
+            project_env: RequestProjectEnv::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1051,6 +1167,8 @@ impl<'a> RequestStoreView<'a> {
             overlay,
             base_is_current,
             validated_receipts: ValidatedReceipts::default(),
+            validated_signatures: ValidatedSignatures::default(),
+            project_env: RequestProjectEnv::default(),
             _freshness: base.lease_freshness(),
             #[cfg(test)]
             validation_step_hook: None,
@@ -1061,6 +1179,70 @@ impl<'a> RequestStoreView<'a> {
         }
     }
 
+    /// [`StoreView::validate_fact_signature`] for a signature a cache
+    /// retains, answered without a walk when this view already validated it
+    /// under the same strict roots and completion state (see
+    /// [`ValidatedSignatures`]).
+    pub(crate) fn validates_retained_signature(
+        &self,
+        sig: &Arc<[FactVersionRef]>,
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        if sig.is_empty() {
+            return true;
+        }
+        if !self.base_is_current {
+            return false;
+        }
+        let state = self.overlay.completion_state();
+        if state != CompletionOverlayState::InFlight
+            && self
+                .validated_signatures
+                .contains(sig, self_root_canonicals, state)
+        {
+            return true;
+        }
+        let valid = self
+            .validate_fact_signature(sig, self_root_canonicals)
+            .is_ok();
+        if valid && self.overlay.completion_state() == state {
+            self.validated_signatures
+                .insert(sig, self_root_canonicals, state);
+        }
+        valid
+    }
+
+    /// The env hashes of `canonical`'s owning project, read with `read` the
+    /// first time this request asks (see [`RequestProjectEnv`]).
+    pub(crate) fn project_env_hashes_for(
+        &self,
+        canonical: &str,
+        read: impl FnOnce() -> crate::session_view::EnvHashes,
+    ) -> crate::session_view::EnvHashes {
+        read_once(&self.project_env.env_hashes, canonical, read)
+    }
+
+    /// The identity of `canonical`'s owning project, read with `read` the
+    /// first time this request asks (see [`RequestProjectEnv`]).
+    pub(crate) fn project_identity_for(
+        &self,
+        canonical: &str,
+        read: impl FnOnce() -> crate::file_artifact_store::ProjectIdentity,
+    ) -> crate::file_artifact_store::ProjectIdentity {
+        read_once(&self.project_env.identities, canonical, read)
+    }
+
+    /// The effective compiler options of `canonical`'s owning project, read
+    /// with `read` the first time this request asks (see
+    /// [`RequestProjectEnv`]).
+    pub(crate) fn project_compiler_options_for(
+        &self,
+        canonical: &str,
+        read: impl FnOnce() -> verter_session_query::resolution::SemanticCompilerOptions,
+    ) -> verter_session_query::resolution::SemanticCompilerOptions {
+        read_once(&self.project_env.compiler_options, canonical, read)
+    }
+
     /// Borrow the request-scoped overlay.
     pub(crate) fn overlay(&self) -> &Arc<CanonicalCompletionOverlay> {
         &self.overlay
@@ -1069,6 +1251,15 @@ impl<'a> RequestStoreView<'a> {
     /// Borrow the base [`HostStoreView`].
     pub(crate) fn base(&self) -> &HostStoreView {
         self.base
+    }
+
+    pub(crate) fn publication_input_fingerprint(&self) -> Option<u64> {
+        self.base_is_current.then(|| {
+            self.base
+                .validation_token()
+                .with_overlay_identity(None)
+                .external_supersession_fingerprint()
+        })
     }
 
     /// Test-only: peek the overlay's `whole_hashes` entry for a
@@ -1369,24 +1560,35 @@ impl<'a> StoreView for RequestStoreView<'a> {
             return Err(0);
         }
 
-        // The aggregated domains of one entry, a consumed result's receipt
-        // answering for every aggregate its evidence reaches.
-        let aggregates = |fact: &FactVersionRef| -> Vec<verter_session_query::facts::fact_cache::CompactionDomain> {
+        // Whether one entry aggregates a domain `matches`, a consumed
+        // result's receipt answering for every aggregate its evidence
+        // reaches.
+        let aggregates_any = |fact: &FactVersionRef,
+                              matches: &dyn Fn(
+            verter_session_query::facts::fact_cache::CompactionDomain,
+        ) -> bool|
+         -> bool {
             match fact {
-                FactVersionRef::Receipt(receipt) => receipt.aggregated_domains().to_vec(),
+                FactVersionRef::Receipt(receipt) => receipt
+                    .aggregated_domains()
+                    .iter()
+                    .any(|domain| matches(*domain)),
                 other => match other.attribution() {
-                    verter_session_query::facts::fact_cache::FactAttribution::DomainAggregate(domain) => vec![domain],
-                    _ => Vec::new(),
+                    verter_session_query::facts::fact_cache::FactAttribution::DomainAggregate(
+                        domain,
+                    ) => matches(domain),
+                    _ => false,
                 },
             }
         };
         let carries_resolution_aggregate = sig.iter().any(|fact| {
-            aggregates(fact)
-                .contains(&verter_session_query::facts::fact_cache::CompactionDomain::Resolution)
+            aggregates_any(fact, &|domain| {
+                domain == verter_session_query::facts::fact_cache::CompactionDomain::Resolution
+            })
         });
         if carries_resolution_aggregate {
             if let Some(index) = sig.iter().position(|fact| {
-                aggregates(fact).iter().any(|domain| {
+                aggregates_any(fact, &|domain| {
                     matches!(
                         domain,
                         verter_session_query::facts::fact_cache::CompactionDomain::Content

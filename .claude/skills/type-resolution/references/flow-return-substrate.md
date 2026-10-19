@@ -1,5 +1,79 @@
 ## Flow-Return Substrate (U6)
 
+Whole-return spread programs retain their immutable construction carriers and
+shared inferred callee operands when the flow completion is sealed. Each body
+is inferred once; no intermediate return prefix is projected into a complete
+surface. Uncontextualised literals containing only leaf data values do not
+allocate or populate an unused object-method receiver; methods, compound values
+and contextual/inherited receiver typing retain their receiver path.
+At a consumer demand, the shared object-spread evaluator peels a
+leading-spread chain with required, public, known-key property tails iteratively
+and applies each copied write once. General operands and non-composable tails
+retain the correlated projection path. Each composed inner object starts its
+own spread operand at union depth zero, preserving its nullable merge and
+depth fuse independently of an enclosing union. Copied metadata and
+overwrite order follow the same named-write policy, and an indexed JS property
+identity avoids scanning the accumulated surface for each collision. Closed
+materialisation remains at the demanding consumer. Union closure, source-edit
+invalidation, open-domain evidence and warm admission retain their existing
+authorities.
+The public named-type regression covers 20, 40, 100 and 300 modules, exact
+literal answers, warm reuse, upstream edits and member/collision work growth
+when the chain length doubles.
+
+Flow-return reads also consume the dispatcher's existing `own_published_read`
+when its pinned view cannot serve a result that the same dispatcher just
+published. The shared workspace-edit fence, cost receipt admission and fact
+replay apply unchanged. Locator lowering and a subsequent signature utility
+therefore reuse one inferred body result within the request, while a source
+edit still forces a fresh inference. When a completed transaction member exists
+and the shared candidate is absent, transaction reuse precedes the dispatcher's
+own publication so its recorded reads, self-roots and refusal are replayed.
+
+Literal switch narrowing partitions the entering parent union once in
+`flow_return_branches.rs`. When every projected discriminant and case test is
+an exact concrete unit, each clause reuses its matching parent member(s), and
+one shared remainder serves default dispatch, exhaustiveness and the implicit
+no-match exit. Clause fall-through still joins its live predecessor state with
+the dispatch state. Unit keys are re-interned from their concrete values in the
+graph's canonical domain, so projected keys and lowered case literals match
+across producer arenas. Broad leaves, enum units, unresolved projections,
+guard clauses (`switch (true)` / `switch (typeof x)`)
+and non-strict nullability retain the general relation-based rules. An exact
+existing discriminant fact also declines partitioning: relation-based dispatch
+re-establishes both the selected parent and its tested member. A selected unit
+tag supplies the case type even after a property write, including recovery
+from an incompatible case label. A union-valued tag instead narrows the
+existing exact-path fact by the clause equality, preserving contradictory
+member writes as `never`. The general remainder preserves that exact member
+fact while any surviving tag is union-valued. Whole-value switches reuse the
+parent remainder for coverage because the parent already carries the entering
+narrowing. Member-switch exhaustiveness tests the entering discriminant fact
+independently of the declared parent arms. The remainder
+narrows both default dispatch and implicit no-match exits
+from the switch entry state, including union-valued and enum discriminants.
+Partly covered parents remain while a separate discriminant fact subtracts
+handled literals. General case dispatch retains both the selected parent and
+the tested-member equality, so reads of union-valued tags see the case literal.
+Break exits retain their own reaching state.
+The assignment union gate inspects named unions through their retained body
+locators and the shared shallow lowerer, following transparent aliases
+iteratively. Generic union bodies use the shared declared-argument binder for
+explicit and defaulted arguments. Parameter-only forwarding preserves those
+arguments without evaluating them; type-producing generic arguments stay with
+the continuation-driven demand. It leaves class/interface surfaces and
+deferred operators lazy: classification must not run their relation-time
+expansion before the binding's value is demanded. Settled `keyof` domains retain
+their key-union rule. Switch enumeration resolves identity carriers through the
+relation authority only at its narrowing demand, without reclassifying every
+member. A reduction keeping every constituent preserves the original declared
+carrier and its print origin.
+The partition is evaluation-local and introduces no reusable-cache authority.
+The finite default limits allow 16,384 selected graph nodes and 32,768 proof
+obligations; the request projection fuse defaults to the checker's 5,000,000-instantiation allowance.
+These limits admit wide finite switches without changing the typed refusal or
+no-warm-admission rules for a request that exceeds its configured allowance.
+
 The whole-function flow-return capability (`U6.FLOW_RETURN_SUBSTRATE`) is a demand-sliced substrate over four artifacts plus one dispatch arm:
 
 - **`FunctionBodySkeleton`** (`crates/verter_semantic/src/analysis/flow/mod.rs`) — an arena-free (`Send + Sync + 'static`, `NoTypeExpr`) shallow statement/control skeleton with a return-site index, a lexical binding index, assignment/kill summaries, and per-site read/write/call + object-literal property footprints. Built once per function content version from the retained parse snapshot; NO type lowering at build time. **Which sub-expressions become their own tracked SITE is not this builder's own judgement**: `SkeletonBuilder::open_site` dispatches on `analysis::flow::value_descent`, the ONE wildcard-free classifier of an expression's value-structural children, and the content half's `Lowerer::lower_expr` dispatches on the SAME verdict. That is the structural fix for a planner/content split: a conditional expression got a structural arm in the CONTENT half while the planner still had no reason to descend into a branch, so every object literal in a branch lowered with each member value on the typed `SliceExpr::Elided` carrier and the whole return failed closed (`k ? { a: 1 } : 2` — `Error(Miss)` cands=0 — while `k ? {} : 2`, with no member value to elide, stayed green: the signature of an under-selected PLAN, not a broken arm). Neither half carries an UNDISPOSITIONED wildcard over `Expression` any more. `lower_expr` does end in `other => match value_descent(other)` — the wildcard is a DELEGATION, not a disposition: the wildcard-free match lives in the classifier, so a new variant does not compile until it is dispositioned THERE, and both halves inherit that disposition in the same change. `ValueDescent::TypeCarrier` is the ONE named asymmetry (the planner descends so a projection into the literal still reaches its members) — under-selection is the bug, and over-selection is not free: the content half's leaf answer for a carrier over a literal with a CALL-sourced spread embeds the spread's unreduced `ReturnType<callee>` carrier, which the leaf's fabricated-value gate refuses, so ONE carrier failed the whole RETURN closed for a value the checker types. So the content half no longer swallows a carrier over an OBJECT LITERAL: the literal keeps its structural lowering and the carrier contributes a MEMBER POLICY instead — see "Object-literal entry lowering" below. Every other carrier still leaf-lowers whole, because its type genuinely is the carrier's rather than its operand's.
@@ -192,6 +266,20 @@ Statement-position calls take the same discipline: a callee is inert only when i
 
 Gap COUNT cannot discriminate these defects — a modeled fact and a proved-inert fact both mint zero gaps — so a regression test for this contract must assert the lowered guard SHAPE or the boundary degradation, never the gap count alone.
 
+### Positional Element Reads
+
+A numeric key of an array, a tuple or a string is the checker's indexed access by the key's type, in expression position and in a declared type alike.
+
+- **Expression position.** A literal-index read rooted at a frame binding reads through the frame's substitution and narrowings. One free of frame bindings (`ROLES[0]` over an imported or module-level `as const` tuple) lowers in `flow_slice_content.rs` to `SliceExpr::ElementAccess` when the shared leaf has no answer, and the evaluator reads its object's type by its key's type (`flow_return_operators.rs` `element_type` → `positional_read`).
+- **Declared types.** A declared type entering the flow (`Waiting::Erase` in `run_expr`) passes `declared_positional_read` first: an `IndexedAccess` of a positional object by a numeric key — `(typeof ROLES)[number]`, `T[0]` — is the element it reads, as the checker resolves a non-generic `T[K]` when it reads the type node — wherever it is nested: a union member (`T[number] | null`, an optional member's `| undefined`), an array or tuple element, an object member or index-signature value, a signature's parameter, return or predicate. The walk is structural and memoized per root evaluation (`declared_type_reads`); it rebuilds a node only when a part reads differently and never unfolds a declaration reference. An access the lane cannot read stays the node it was.
+- **Positions.** A fixed position reads its element (optional ⇒ `| undefined`). A position at or past a rest element reads every element from the rest start on. A position past the end of a tuple with no rest element reads `undefined` per arm (`getTupleElementTypeOutOfStartCount`, beside TS2493) — in every context, so the shared walker answers it. A tuple that is an arm of a composite reads the composite's number index there, through the global `Array` wrapper; when that wrapper is unsettled the read is a miss, never the lone tuple's `undefined`. A position wider than the target's `usize` is still a position (past every element), never a negative key: the walker classifies keys by sign, not by a failed `usize` conversion.
+- **Negative keys.** A negative key reads the number index of every object except a SINGLE tuple with no rest element — a union of tuples (TS2339), a rest-bearing tuple, an array, a string. Of that single tuple the checker answers `undefined` (TS2514) only for an access WRITTEN over it; an instantiated access (`Last<["a","b"]>` over `X[-1]`) reads the number index. So: an expression-position access answers `undefined`; a declared access cannot tell which it is and stays unread; the shared walker, seeing one tuple without the access, misses — it reads the number index only for a tuple that is an arm of a composite split. Deciding this per arm is the defect to avoid: it fabricates `undefined` into `([1, 2] | [1, ...string[]])[-1]` (tsc: `string | 1 | 2`).
+- **Unread arms.** `positional_element` reads each object arm; an arm the walker leaves `Opaque` leaves the whole access unread, never a union carrying an opaque member.
+
+Limits: `noUncheckedIndexedAccess` is not consumed — an array or number-index read in expression position omits the checker's `| undefined` under that option, for frame bindings and module-level bindings alike. Fractional keys are unread.
+
+Acceptance: `a_const_tuple_element_read_is_the_element_the_checker_reads`, `a_negative_key_reads_the_number_index_unless_the_access_decides`, `a_composite_past_end_read_without_a_settled_wrapper_stays_unanswered`, `an_out_of_range_tuple_position_reads_undefined`, `a_return_over_merged_globals_and_a_const_tuple_reads_like_the_checker`, `project_path_tuple_numeric_index_projects_positions_and_broad_union`.
+
 
 ### Flow-Return Substrate (U6) Debt Notes
 
@@ -253,5 +341,3 @@ Gap COUNT cannot discriminate these defects — a modeled fact and a proved-iner
   | FR-D8 | branch-join union arms are neither subtype-reduced nor flattened nor structurally deduped: `k ? {} : 2` publishes `2 \| {}`, `k ? {a:1} : {a:2}` publishes two identical arms, `k ? (k ? {a:1} : 2) : 3` publishes a NESTED union, `k ? k : 2` publishes `boolean \| 2` (no narrowing) | `{}` / `{ a: number }` / `2 \| 3 \| { a: number }` / `2 \| true` | `U6.VALUE_INFERENCE` (union normalization + flow narrowing); the `if` / `return` twin dedups by interned node id the same way, so it is a property of the whole rail | `U6.VALUE_INFERENCE` close |
 
 - **Hoisted nested-function call recovery (U6.CALL_RESOLVE debt).** A bare-identifier call to a name bound by a hoisted nested function declaration in the same body (`function f() { function g() { … } return g(); }`, including the self-shadowing `function f() { function f(): number { … } return f(); }`) shadows every outer same-name callee, but the nested declaration's own return is beyond the direct-call inventory. The slice content lowers such a call to `SliceCall::LocalFunctionShadow` (`crates/verter_semantic_source/src/flow_slice_content.rs`) and the evaluator FAILS CLOSED (`FlowReturnFailure::Unresolved` → ReturnOnly, never admitted) — it never binds the outer callee and never treats the call as a self-recursion hold. Exact recovery (evaluating the nested declaration's own body) is U6.CALL_RESOLVE debt; the fail-closed ReturnOnly stands.
-
-

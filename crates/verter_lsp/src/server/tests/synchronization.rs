@@ -2446,7 +2446,7 @@ async fn open_unresolved_carrier_closes_dropped_owner_api_path_keeps_ide_tsx() {
     // Fresh IDE output this pass → the TSX is re-synced and the conversion
     // commits the forced-Unresolved state.
     let ide = verter_session::IdeResponse {
-        code: std::sync::Arc::from("export default {}"),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
         source_map: None,
         is_jsx: false,
         destructured_block: None,
@@ -13254,7 +13254,7 @@ async fn a_scanner_started_closed_yields_when_the_document_opens_after_compile()
     let (_, before) = tokio::join!(
         crate::workspace_scanner::sync_file_to_provider(
             id,
-            &host,
+            host,
             Some(&server.documents),
             &profile,
             server.project_sync.as_ref(),
@@ -13323,7 +13323,7 @@ async fn a_scanner_started_closed_is_refused_when_the_document_opens_after_its_l
     let (_, before) = tokio::join!(
         crate::workspace_scanner::sync_file_to_provider(
             id,
-            &host,
+            host,
             Some(&server.documents),
             &profile,
             server.project_sync.as_ref(),

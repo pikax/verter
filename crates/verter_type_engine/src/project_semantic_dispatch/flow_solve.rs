@@ -715,7 +715,7 @@ pub struct FlowResourcePolicy { pub slice_budget: FlowSliceBudget, pub max_oblig
 
 #[rustfmt::skip]
 impl Default for FlowResourcePolicy {
-    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 1024 } }
+    fn default() -> Self { Self { slice_budget: FlowSliceBudget::default(), max_obligations: 32_768 } }
 }
 
 /// The validated structural work of one execution. This capability carries
@@ -893,7 +893,7 @@ pub fn derive_demand_subject(
     for segment in projection.path.as_slice() {
         match segment {
             PathSegment::Member(verter_type_expr::PropertyKey::String(name)) => {
-                path.push(Arc::clone(name));
+                path.push(Arc::<str>::from(name));
             }
             PathSegment::Member(_) | PathSegment::Index(_) => {
                 return Err(FlowDemandPlanError::UnrepresentableDemand);
@@ -926,11 +926,11 @@ fn derive_execution_subject(
     }
     let name = match point.projection.path.as_slice() {
         [PathSegment::Member(crate::semantic_query::PropertyKey::String(name))]
-        | [PathSegment::Index(crate::semantic_query::IndexKey::String(name))] => Arc::clone(name),
+        | [PathSegment::Index(crate::semantic_query::IndexKey::String(name))] => name.clone(),
         _ => return Err(FlowDemandPlanError::UnrepresentableDemand),
     };
     Ok(FlowDemandSubject {
-        projection_path: Arc::from([name]),
+        projection_path: Arc::from([Arc::<str>::from(name)]),
     })
 }
 
@@ -1159,6 +1159,8 @@ pub fn build_flow_demand_plan_from_execution(
                 observed: u32::try_from(next).unwrap_or(u32::MAX),
             });
         }
+        // Ids are dense spec positions: the runtime finds an obligation's
+        // record by its id as an index (`flow_obligation_state::record_of`).
         let id = FlowObligationId(u32::try_from(specs.len()).unwrap_or(u32::MAX));
         specs.push(FlowObligationSpec::new(id, requirement, origin, basis, expected_dependencies, expected_suboperations));
         Ok(id)
@@ -1338,13 +1340,10 @@ pub fn build_flow_demand_plan_from_execution(
                 }
             }
             F::Capture => {
-                // A class DECLARATION anchors on the declared binding
-                // identity. Its capture SET is beyond this skeleton's
-                // authority (no index record serves a class member), so the
-                // subject installs as the family's accepted typed gap —
-                // never an omission. A function declaration's captures ride
-                // every site that reads it, as that site's own closure
-                // below.
+                // A class DECLARATION anchors on its exact binding identity.
+                // Its finite constructor type does not enumerate its runtime
+                // capture set. Keep that independent obligation as a typed gap.
+                // Value-source certificates never discharge full capture proof.
                 for node in &selected {
                     let FlowNodeKind::Binding(binding) = graph.node_kind(*node) else { continue };
                     if !matches!(bundle.skeleton().binding(binding).kind, SkeletonBindingKind::Class) { continue; }
@@ -1540,6 +1539,7 @@ pub enum FlowPartialReason {
     NoDemandInstalled, StaleBasis, OperationNotProvable, ResultContractMismatch,
     ObligationSetMismatch, IncompleteObligations, Gap(FlowGap), Failed(FlowFailure),
     NonConverged, DegradedValue,
+    IncompleteValue(crate::semantic_query::surface_resolution::NonEmptyReasons),
     /// The evaluation evidence (value / report / convergence / handle) does
     /// not carry the serving dispatch's current evaluation provenance — a
     /// foreign store or a stale request generation.
@@ -1640,7 +1640,7 @@ impl CompleteFlowResult {
         value: FlowReturnResult,
         convergence: FlowConvergenceEvidence,
     ) -> Option<Self> {
-        if value.degradation().is_some() {
+        if !value.fact().status().is_complete() {
             return None;
         }
         Some(Self::new(CompleteFlowResultParts {
@@ -1652,14 +1652,13 @@ impl CompleteFlowResult {
     }
 }
 
-/// The normative three-way outcome of one flow solve: the complete
-/// proof-bearing result, a partial carrying its usable value, or a
-/// no-value failure. Only [`FlowSolveOutcome::Complete`] is a warm
-/// candidate; the other two arms keep the evaluated payload usable by
-/// tolerant consumers without ever minting admission.
+/// A flow solve's completion proof, usable approximation, unavailable value,
+/// or execution abort. Only [`FlowSolveOutcome::Complete`] admits; only
+/// `Complete` and `Partial` carry independently valid evaluated values.
 #[rustfmt::skip]
 #[derive(Debug, Clone)]
 pub enum FlowSolveOutcome {
+    Aborted(crate::semantic_query::ExecutionAbort),
     Complete(CompleteFlowResult),
     Partial(PartialFlowResult),
     NoValue(NoValueFlowResult),
@@ -1677,8 +1676,48 @@ impl FlowSolveOutcome {
     pub fn warm_candidate(&self) -> Option<&CompleteFlowResult> {
         match self {
             Self::Complete(complete) => Some(complete),
-            Self::Partial(_) | Self::NoValue(_) => None,
+            Self::Partial(_) | Self::NoValue(_) | Self::Aborted(_) => None,
         }
+    }
+}
+
+/// Classify rejected evidence separately from missing completion proof.
+pub(super) fn flow_refusal_outcome(
+    basis: FlowDemandBasis,
+    reason: FlowPartialReason,
+    value: &FlowReturnResult,
+) -> FlowSolveOutcome {
+    use crate::semantic_query::ExecutionAbort;
+    let abort = match &reason {
+        FlowPartialReason::StaleBasis | FlowPartialReason::ForeignProvenance => {
+            Some(ExecutionAbort::Superseded)
+        }
+        FlowPartialReason::Failed(failure) => match failure.class {
+            FlowFailureClass::Cancelled => Some(ExecutionAbort::Cancelled),
+            FlowFailureClass::StaleBasis => Some(ExecutionAbort::Superseded),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(abort) = abort {
+        crate::request_context::observe_execution_abort(abort);
+        return FlowSolveOutcome::Aborted(abort);
+    }
+    match reason {
+        FlowPartialReason::NoDemandInstalled
+        | FlowPartialReason::ObligationSetMismatch
+        | FlowPartialReason::Failed(FlowFailure {
+            class: FlowFailureClass::Panic | FlowFailureClass::Internal,
+        }) => FlowSolveOutcome::NoValue(NoValueFlowResult {
+            basis,
+            reason,
+            failure: crate::semantic_query::FlowReturnFailure::Unresolved,
+        }),
+        _ => FlowSolveOutcome::Partial(PartialFlowResult {
+            basis,
+            reason,
+            value: value.clone(),
+        }),
     }
 }
 
@@ -1694,7 +1733,8 @@ impl FlowSolveOutcome {
 /// runtime's current records with every obligation `Discharged`, and the
 /// runtime-observed convergence matches the plan's policy. Every gap,
 /// stale basis, cancellation, budget exhaustion, panic marker, internal
-/// failure, non-convergence, or degraded value is a typed partial.
+/// failure, non-convergence, or degraded value is classified from the rejected
+/// evidence: proof refusal may retain a value; invalid execution never does.
 ///
 /// VISIBILITY is crate-internal by design, and deliberately wider than
 /// the sole production caller (`finalize_flow_demand`). The mint is not
@@ -1719,7 +1759,7 @@ pub fn finalize_flow_solve(
     runtime: &ObligationRuntime, handle: FlowDemandHandle, plan: &FlowDemandPlan, completion: SealedFlowCompletion,
 ) -> FlowSolveOutcome {
     let value = completion.value().clone();
-    let partial = |reason: FlowPartialReason| FlowSolveOutcome::Partial(PartialFlowResult { basis: plan.basis().clone(), reason, value: value.clone() });
+    let partial = |reason: FlowPartialReason| flow_refusal_outcome(plan.basis().clone(), reason, &value);
 
     let Some(installed) = runtime.flow_basis(handle) else { return partial(FlowPartialReason::NoDemandInstalled) };
     if installed != plan.basis() { return partial(FlowPartialReason::StaleBasis); }
@@ -1754,6 +1794,11 @@ pub fn finalize_flow_solve(
         return partial(FlowPartialReason::NonConverged);
     }
     if completion.value().degradation().is_some() { return partial(FlowPartialReason::DegradedValue); }
+    match completion.value().fact() {
+        crate::semantic_query::FactResult::Complete(_) => {}
+        crate::semantic_query::FactResult::Approximate { causes, .. }
+        | crate::semantic_query::FactResult::Unavailable { causes } => return partial(FlowPartialReason::IncompleteValue(causes)),
+    }
 
     FlowSolveOutcome::Complete(CompleteFlowResult::new(CompleteFlowResultParts {
         basis: plan.basis().clone(), value: completion.value().clone(),

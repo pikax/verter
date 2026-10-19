@@ -4,11 +4,11 @@
 // interface, enum or library augmentation): two scenarios with the same one
 // cannot share a program (the project workload keeps one of them).
 //
-// A scenario is ONE TypeScript module (`scenario.ts`) that both arms read
-// byte for byte, and, for the program family, the companion files of its
-// program (`files`: name to text), which every arm reads as root files of the
-// same project. The module declares two type aliases the harness demands, in
-// this order:
+// A scenario is a TypeScript project that both arms read byte for byte: its
+// entry module (`scenario.ts`) and, for a multi-file scenario, the companion
+// files of its program (`files`: name to text), which every arm reads as root
+// files of the same project. The entry declares two type aliases the harness
+// demands, in this order:
 //
 //   __BenchInit  a trivial alias (`0`); its request absorbs each tool's
 //                one-time lazy initialisation and is reported separately;
@@ -61,16 +61,6 @@ export function companionFiles(scenario) {
   return Object.keys(scenario?.files ?? {});
 }
 
-/**
- * The digest of everything a scenario contributes to its program: the
- * module's alone for a one-module scenario (so its recorded digests stay
- * valid), else the module and every companion file.
- */
-export function scenarioSha256(scenario) {
-  if (!companionFiles(scenario).length) return sha256Text(scenario.source);
-  return sha256Text(JSON.stringify({ source: scenario.source, files: scenario.files }));
-}
-
 /** Write a scenario's companion files into `dir`; returns their digests by name. */
 export function writeCompanions(dir, scenario) {
   const inputs = {};
@@ -103,6 +93,101 @@ export function allScenarios() {
       "1",
     ),
   );
+
+  // Conditional mapped values over a large, concrete source key domain.
+  for (const count of [1000, 3000, 10000]) {
+    out.push(
+      scenario(
+        `mapped-index-tags-${count}`,
+        "mapped-index",
+        `index a conditional mapping over all ${count} source keys`,
+        `interface Big { ${range(count)
+          .map((i) => `k${i}: ${i % 3 === 0 ? i : i % 3 === 1 ? `"s${i}"` : "boolean"};`)
+          .join(" ")} }\n`,
+        '{ [K in keyof Big]: Big[K] extends number ? "n" : Big[K] extends string ? "s" : "b" }[keyof Big]',
+      ),
+    );
+  }
+
+  // Mapped types over concrete sources resolve to the object type: a class
+  // built from a stack of mixins, the intersection a builder accumulates,
+  // an imported interface's keys remapped by a recursive template
+  // conditional, and a generic interface heritage chain.
+  for (const count of [10, 25, 40]) {
+    let call = "Base";
+    let mixins = "";
+    for (const i of range(count)) {
+      mixins += `function M${i}<TBase extends Ctor>(B: TBase) { return class extends B { p${i} = ${i} as const; }; }\n`;
+      call = `M${i}(${call})`;
+    }
+    out.push(
+      scenario(
+        `mapped-expand-mixins-${count}`,
+        "mapped-expand",
+        `map over the keys of a class built from ${count} mixins`,
+        "type Ctor<T = {}> = new (...args: any[]) => T;\n" +
+          "class Base { base = -1 as const; }\n" +
+          mixins +
+          `class C extends ${call} {}\n` +
+          "declare const __v: { [K in keyof C]: C[K] };\n",
+        "typeof __v",
+      ),
+    );
+  }
+  for (const count of [50, 200, 500]) {
+    out.push(
+      scenario(
+        `mapped-expand-builder-${count}`,
+        "mapped-expand",
+        `map over the intersection a builder accumulates over ${count} calls`,
+        "interface Builder<T> {\n" +
+          "  add<K extends string, V extends string | number | boolean>(k: K, v: V): Builder<T & { [P in K]: V }>;\n" +
+          "  build(): { [K in keyof T]: T[K] };\n" +
+          "}\n" +
+          "declare function builder(): Builder<{}>;\n" +
+          `const r = builder()${range(count)
+            .map((i) => `.add("a${i}", ${i})`)
+            .join("")}.build();\n`,
+        "typeof r",
+      ),
+    );
+  }
+  for (const count of [100, 1000, 3000]) {
+    out.push(
+      scenario(
+        `mapped-expand-remap-${count}`,
+        "mapped-expand",
+        `remap the ${count} keys of an imported interface through a recursive template conditional`,
+        'import type { Model } from "./model";\n' +
+          "type Kebab<S extends string> = S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S;\n" +
+          "declare const __v: { [K in keyof Model as Kebab<K & string>]: Model[K] };\n",
+        "typeof __v",
+        {
+          files: {
+            "model.ts": `export interface Model {${range(count)
+              .map((i) => ` field_${i}_name_x: ${i};`)
+              .join("")} }\n`,
+          },
+        },
+      ),
+    );
+  }
+  for (const depth of [10, 40, 100]) {
+    const last = depth - 1;
+    out.push(
+      scenario(
+        `mapped-expand-heritage-${depth}`,
+        "mapped-expand",
+        `map over the keys of a generic interface heritage chain ${depth} levels deep`,
+        "interface L0<T> { p0: T }\n" +
+          range(depth - 1)
+            .map((i) => `interface L${i + 1}<T> extends L${i}<[T]> { p${i + 1}: T }\n`)
+            .join("") +
+          `declare const __v: { [K in keyof L${last}<0>]: L${last}<0>[K] };\n`,
+        "typeof __v",
+      ),
+    );
+  }
 
   // Relations: object unions related position by position, and reversed.
   for (const m of [200, 600, 1800, 3200]) {
@@ -325,6 +410,58 @@ export function allScenarios() {
     );
   }
 
+  // Recursive conditionals over an `as const` route tree: n parents of five
+  // children each, every name and every joined path collected by inferring
+  // through the readonly tuples.
+  const routeTree = (n) =>
+    `const routes = [\n${range(n)
+      .map(
+        (i) =>
+          `  { name: "r${i}", path: "/r${i}", children: [${range(5)
+            .map((j) => `{ name: "r${i}c${j}", path: "c${j}" }`)
+            .join(", ")}] },\n`,
+      )
+      .join("")}] as const;\n` +
+    "type Names<R> = R extends readonly (infer E)[]\n" +
+    "  ? E extends { name: infer N } ? N | (E extends { children: infer C } ? Names<C> : never) : never\n" +
+    "  : never;\n" +
+    'type Paths<R, P extends string = ""> = R extends readonly (infer E)[]\n' +
+    "  ? E extends { path: infer S extends string }\n" +
+    "    ? `${P}${S}` | (E extends { children: infer C } ? Paths<C, `${P}${S}/`> : never)\n" +
+    "    : never\n" +
+    "  : never;\n";
+  for (const n of [20, 100, 300]) {
+    out.push(
+      scenario(
+        `route-tree-names-${n}`,
+        "recursive-inference",
+        `every name of an as-const route tree of ${n} parents with five children each`,
+        routeTree(n),
+        "Names<typeof routes>",
+      ),
+    );
+    out.push(
+      scenario(
+        `route-tree-paths-${n}`,
+        "recursive-inference",
+        `every joined path of an as-const route tree of ${n} parents with five children each`,
+        routeTree(n),
+        "Paths<typeof routes>",
+      ),
+    );
+  }
+  // The names alone past two thousand parents: twelve thousand names, every
+  // child name collected through the recursive branch.
+  out.push(
+    scenario(
+      "route-tree-names-2000",
+      "recursive-inference",
+      "every name of an as-const route tree of 2000 parents with five children each",
+      routeTree(2000),
+      "Names<typeof routes>",
+    ),
+  );
+
   // Inference.
   for (const n of [1025, 5000]) {
     out.push(
@@ -369,7 +506,7 @@ export function allScenarios() {
       ),
     );
   }
-  for (const n of [10, 100, 1000]) {
+  for (const n of [10, 100, 1000, 6000]) {
     out.push(
       scenario(
         `infer-pattern-repeat-${n}`,
@@ -478,6 +615,118 @@ export function allScenarios() {
       "typeof v",
     ),
   );
+
+  for (const n of [128, 512, 1000, 2048]) {
+    out.push(
+      scenario(
+        `switch-discriminated-${n}`,
+        "flow",
+        `${n} discriminated members, one returning case per member, no default`,
+        `type U = ${union(range(n).map((i) => `{ kind: "k${i}"; v${i}: ${i} }`))};\n` +
+          `function f(x: U) { switch (x.kind) {\n` +
+          range(n)
+            .map((i) => `case "k${i}": return x.v${i};\n`)
+            .join("") +
+          `} }\n`,
+        "ReturnType<typeof f>",
+        { beyond: union(range(n)) },
+      ),
+    );
+  }
+
+  for (const n of [20, 100, 400]) {
+    out.push(
+      scenario(
+        `contextual-this-${n}`,
+        "inference",
+        `${n} object methods read data inferred before their contextual ThisType receiver`,
+        "declare global { interface ThisType<T> {} }\n" +
+          "declare function defineComponent<D, M>(o: { data(): D; methods: M & ThisType<D & M> }): { [K in keyof M]: M[K] extends () => infer R ? R : never };\n" +
+          `const comp = defineComponent({ data() { return { ${range(n)
+            .map((i) => `d${i}: ${i} as const`)
+            .join(", ")} }; }, methods: { ${range(n)
+            .map((i) => `m${i}() { return this.d${i}; }`)
+            .join(", ")} } });\n`,
+        "typeof comp",
+        {
+          beyond: `{ ${range(n)
+            .map((i) => `m${i}: ${i};`)
+            .join(" ")} }`,
+        },
+      ),
+    );
+  }
+
+  for (const n of [20, 100, 300]) {
+    const files = Object.fromEntries(
+      range(n).map((i) => [
+        `m-${i}.ts`,
+        i === 0
+          ? "export function f0() { return { k0: 0 as const }; }\n"
+          : `import { f${i - 1} } from "./m-${i - 1}";\n` +
+            `export function f${i}() { const p = f${i - 1}(); return { ...p, k${i}: ${i} as const }; }\n`,
+      ]),
+    );
+    out.push(
+      scenario(
+        `return-chain-${n}`,
+        "flow",
+        `${n} modules, each spreading its predecessor's inferred return`,
+        `import { f${n - 1} } from "./m-${n - 1}";\n`,
+        `ReturnType<typeof f${n - 1}>`,
+        {
+          files,
+          beyond: `{ ${range(n)
+            .map((i) => `k${i}: ${i};`)
+            .join(" ")} }`,
+        },
+      ),
+    );
+  }
+
+  // Declaration merging: one interface merged from many contributing files.
+  for (const n of [100, 500, 2000]) {
+    out.push(
+      scenario(
+        `augment-global-${n}`,
+        "augmentation",
+        `a global interface merged from ${n} script contributors, read through every member's tag`,
+        "",
+        'BenchRegistry[keyof BenchRegistry]["tag"]',
+        {
+          globalScope: "BenchRegistry",
+          files: Object.fromEntries(
+            range(n).map((i) => [
+              `reg-${i}.ts`,
+              `interface BenchRegistry { r${i}: { id: ${i}; tag: "t${i}" } }\n`,
+            ]),
+          ),
+        },
+      ),
+    );
+  }
+  for (const n of [100, 500, 2000]) {
+    out.push(
+      scenario(
+        `augment-module-${n}`,
+        "augmentation",
+        `a module interface augmented by ${n} modules the entry never imports`,
+        'import type { Props } from "./core";\n',
+        "Props[keyof Props]",
+        {
+          files: {
+            "core.ts": "export interface Props { base: -1 }\nexport {};\n",
+            ...Object.fromEntries(
+              range(n).map((i) => [
+                `plugin-${i}.ts`,
+                `declare module "./core" { interface Props { p${i}: ${i} } }\nexport {};\n`,
+              ]),
+            ),
+          },
+        },
+      ),
+    );
+  }
 
   // Programs: answers that depend on files the module never imports (global
   // and module augmentation, global declaration merging), and a large type
@@ -997,7 +1246,38 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "mapped-index-tags-1000": "quick",
+  "mapped-index-tags-3000": "standard",
+  "mapped-index-tags-10000": "stress",
+  "mapped-expand-mixins-10": "quick",
+  "mapped-expand-mixins-25": "standard",
+  "mapped-expand-mixins-40": "standard",
+  "mapped-expand-builder-50": "quick",
+  "mapped-expand-builder-200": "standard",
+  "mapped-expand-builder-500": "stress",
+  "mapped-expand-remap-100": "quick",
+  "mapped-expand-remap-1000": "standard",
+  "mapped-expand-remap-3000": "stress",
+  "mapped-expand-heritage-10": "quick",
+  "mapped-expand-heritage-40": "standard",
+  "mapped-expand-heritage-100": "standard",
+  "return-chain-20": "quick",
+  "return-chain-100": "standard",
+  "return-chain-300": "standard",
+  "augment-global-100": "quick",
+  "augment-global-500": "standard",
+  "augment-global-2000": "standard",
+  "augment-module-100": "quick",
+  "augment-module-500": "standard",
+  "augment-module-2000": "standard",
+  "contextual-this-20": "quick",
+  "contextual-this-100": "standard",
+  "contextual-this-400": "standard",
   "baseline-empty": "quick",
+  "switch-discriminated-128": "quick",
+  "switch-discriminated-512": "standard",
+  "switch-discriminated-1000": "standard",
+  "switch-discriminated-2048": "stress",
   "relation-aligned-200": "quick",
   "relation-aligned-false-200": "quick",
   "relation-reversed-200": "quick",
@@ -1007,6 +1287,8 @@ export const SCENARIO_TIERS = {
   "alias-chain-50": "quick",
   "conditional-chain-97": "quick",
   "tail-recursive-parse-50": "quick",
+  "route-tree-names-20": "quick",
+  "route-tree-paths-20": "quick",
   "inference-deposits-1025": "quick",
   "overloads-1025": "quick",
   "contravariant-callbacks-10": "quick",
@@ -1045,6 +1327,10 @@ export const SCENARIO_TIERS = {
   "tail-recursive-parse-500": "standard",
   "tail-recursive-parse-999": "standard",
   "tail-recursive-parse-1000": "standard",
+  "route-tree-names-100": "standard",
+  "route-tree-paths-100": "standard",
+  "route-tree-names-300": "standard",
+  "route-tree-paths-300": "standard",
   "inference-deposits-5000": "standard",
   "contravariant-callbacks-100": "standard",
   "contravariant-callbacks-500": "standard",
@@ -1064,6 +1350,8 @@ export const SCENARIO_TIERS = {
   "conditional-chain-500": "stress",
   "infer-pattern-repeat-1000": "stress",
   ...Object.fromEntries(adversarialTierEntries()),
+  "infer-pattern-repeat-6000": "stress",
+  "route-tree-names-2000": "stress",
 };
 
 export const TIERS = ["quick", "standard", "stress"];
@@ -1093,9 +1381,14 @@ export const SETTINGS = [
   { id: "both-off", strictNullChecks: false, noImplicitAny: false },
 ];
 
+/** A scenario's project sources by file name: the entry module, then its companion files. */
+export function projectSources(scenario) {
+  return { "scenario.ts": scenario.source, ...scenario.files };
+}
+
 /**
  * The tsconfig both arms read for `setting`: the library, then the
- * scenario's companion files (the program family), then the module.
+ * scenario's companion files (a multi-file scenario), then the module.
  */
 export function tsconfigText(setting, scenario = null) {
   return (

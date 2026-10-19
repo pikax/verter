@@ -106,7 +106,7 @@ fn evaluate_alias(
 
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     };
     match for_tests::dispatch_execute_type_node_for_tests(host, project_query) {
@@ -127,7 +127,7 @@ fn surface_member_value_ids(
         .node_data(surface_node)
         .expect("surface node must have semantic data");
     let view = match data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!("surface must be an Object, got: {other:?}"),
     };
     view.positive_members()

@@ -182,7 +182,9 @@ pub use membership::{
     static_membership_with_typescript_defaults, FallbackMembership, ProjectMembership,
     SupportedExtensions,
 };
-pub use memory::{MemoryOptions, MemorySnapshot, MemoryWorkspace};
+pub use memory::{
+    MemoryOptions, MemorySnapshot, MemoryWorkspace, SnapshotChanges, SnapshotMemberChange,
+};
 pub use overlay::OverlayStore;
 pub use overlay_residency::OverlayAuthority;
 pub use package_index::PackageIndex;
@@ -198,8 +200,8 @@ pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;
 #[cfg(not(target_arch = "wasm32"))]
 pub use snapshot_builder::{
-    build_selected_project_snapshot, build_workspace_snapshot, configured_project,
-    membership_to_spec, SnapshotBuildResult,
+    build_selected_project_snapshot, build_workspace_snapshot, configured_ide_project,
+    configured_project, membership_to_spec, SnapshotBuildResult,
 };
 pub use traits::{
     EmptyResolverSnapshot, ResolverSnapshot, SourceLoader, WorkspaceAccess, WorkspaceRead,

@@ -1,10 +1,11 @@
-use std::sync::Arc;
-
+use rustc_hash::{FxHashMap, FxHashSet};
 use verter_type_expr::{ExcessPropertyOrigin, MemberVisibility, ObjectMethodKind};
 
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
-use crate::semantic_query::object_spread_projection::evaluator_support;
+use crate::semantic_query::object_spread_projection::{
+    evaluator_support, note_collision_comparison, note_member_visit,
+};
 use crate::semantic_query::{
     AuthoredAccessorEffect, AuthoredMethodEffect, AuthoredPropertyEffect, AuthoredPropertyKey,
     ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain, MemberFacets,
@@ -19,6 +20,37 @@ use verter_session_query::inputs::budget::{BudgetDomain, BudgetExceededFailure};
 const DISTRIBUTION_CAP: usize = 1024;
 const SPREAD_DEPTH_CAP: usize = 8;
 
+/// Hash lookup uses JS property identity; the stored member keeps its authored
+/// spelling for enumeration. Count actual hash-table equality comparisons.
+#[derive(Clone)]
+struct CollisionKey(PropertyKey);
+
+impl CollisionKey {
+    fn new(key: &PropertyKey) -> Self {
+        Self(match key {
+            PropertyKey::Number(number) => {
+                PropertyKey::String(verter_type_expr::OwnedStr::from(number.to_string()))
+            }
+            _ => key.clone(),
+        })
+    }
+}
+
+impl PartialEq for CollisionKey {
+    fn eq(&self, other: &Self) -> bool {
+        note_collision_comparison();
+        self.0 == other.0
+    }
+}
+
+impl Eq for CollisionKey {}
+
+impl std::hash::Hash for CollisionKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.0, state);
+    }
+}
+
 #[derive(Clone)]
 struct MemberState {
     key: PropertyKey,
@@ -30,6 +62,7 @@ struct MemberState {
 #[derive(Clone)]
 struct EvalState {
     members: Vec<MemberState>,
+    member_positions: FxHashMap<CollisionKey, usize>,
     indices: Vec<ObjectProjectionIndex>,
     signatures: Vec<ObjectProjectionSignature>,
     residual_operands: Vec<SemanticNodeId>,
@@ -44,6 +77,7 @@ impl EvalState {
     fn empty() -> Self {
         Self {
             members: Vec::new(),
+            member_positions: FxHashMap::default(),
             indices: Vec::new(),
             signatures: Vec::new(),
             residual_operands: Vec::new(),
@@ -59,9 +93,13 @@ impl EvalState {
     /// property, so a later write under either spelling replaces the
     /// earlier fact (element-access collision, not strict key equality).
     fn member_position(&self, key: &PropertyKey) -> Option<usize> {
-        self.members
-            .iter()
-            .position(|member| member.key.element_access_collides(key))
+        self.member_positions.get(&CollisionKey::new(key)).copied()
+    }
+
+    fn push_member(&mut self, member: MemberState) {
+        self.member_positions
+            .insert(CollisionKey::new(&member.key), self.members.len());
+        self.members.push(member);
     }
 
     fn remember_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
@@ -138,43 +176,50 @@ struct SpreadAlternative {
     residual: bool,
 }
 
+struct PropertySpreadChain {
+    base: SemanticNodeId,
+    programs: Vec<ObjectSpreadProgram>,
+}
+
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    pub fn project_object_spread_for_consumer(
-        &self,
-        program: SemanticNodeId,
-        selector: ObjectProjectionSelector,
-        projection_reduction: crate::semantic_query::ProjectionReductionContext,
-    ) -> QueryResult<ObjectProjectionFormula> {
-        let canonical = self
-            .graph()
-            .node_scope(program)
-            .and_then(|scope| scope.canonical_file())
-            .unwrap_or_else(|| Arc::from(""));
-        let policy = if self.relation_strict_config().exact_optional_property_types {
-            ExactOptionalPropertyPolicy::Enabled
-        } else {
-            ExactOptionalPropertyPolicy::Disabled
-        };
-        let context = self.object_spread_projection_context_for(
-            &canonical,
-            projection_reduction,
-            crate::semantic_query::SubstitutionCanonicalHash::empty(),
-            policy,
-        );
-        match self
-            .execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
-                program,
-                selector,
-                context,
-            })
-            .value
-        {
-            QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
-                QueryResult::Value(formula)
+    construction_ordinal_seam! {
+        fn project_object_spread_for_consumer(
+            &self,
+            program: SemanticNodeId,
+            selector: ObjectProjectionSelector,
+            projection_reduction: crate::semantic_query::ProjectionReductionContext,
+        ) -> QueryResult<ObjectProjectionFormula> {
+            let canonical = self
+                .graph()
+                .node_scope(program)
+                .and_then(|scope| scope.canonical_file())
+                .unwrap_or_else(|| verter_type_expr::OwnedStr::from(""));
+            let policy = if self.relation_strict_config().exact_optional_property_types {
+                ExactOptionalPropertyPolicy::Enabled
+            } else {
+                ExactOptionalPropertyPolicy::Disabled
+            };
+            let context = self.object_spread_projection_context_for(
+                &canonical,
+                projection_reduction,
+                crate::semantic_query::SubstitutionCanonicalHash::empty(),
+                policy,
+            );
+            match self
+                .execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
+                    program,
+                    selector,
+                    context,
+                })
+                .value
+            {
+                QueryResult::Value(SemanticQueryValue::ObjectProjection(formula)) => {
+                    QueryResult::Value(formula)
+                }
+                QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
+                QueryResult::Error(error) => QueryResult::Error(error),
+                QueryResult::Recursive(node) => QueryResult::Recursive(node),
             }
-            QueryResult::Value(_) => QueryResult::Error(QueryError::Miss),
-            QueryResult::Error(error) => QueryResult::Error(error),
-            QueryResult::Recursive(node) => QueryResult::Recursive(node),
         }
     }
 
@@ -190,7 +235,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
             return self.object_projection_failure(QueryError::Miss);
         };
-        let program = program.clone();
+        let program = program.share();
         drop(data);
 
         let start = selector_live_start(&program, selector);
@@ -301,17 +346,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ExcessEligibility::Indeterminate
         } else {
             ExcessEligibility::Eligible {
-                direct_candidates: Arc::from(state.direct_excess_candidates),
+                direct_candidates: verter_type_expr::OwnedSlice::from(
+                    state.direct_excess_candidates,
+                ),
             }
         };
         evaluator_support::alternative(evaluator_support::AlternativeInput {
-            positive: Arc::from(positive),
+            positive: verter_type_expr::OwnedSlice::from(positive),
             selector: selector.clone(),
             closed: state.residual_operands.is_empty(),
-            residual_operands: Arc::from(state.residual_operands),
-            indeterminate_possible_writes: Arc::from(state.possible_writes),
-            indices: Arc::from(indices),
-            signatures: Arc::from(signatures),
+            residual_operands: verter_type_expr::OwnedSlice::from(state.residual_operands),
+            indeterminate_possible_writes: verter_type_expr::OwnedSlice::from(
+                state.possible_writes,
+            ),
+            indices: verter_type_expr::OwnedSlice::from(indices),
+            signatures: verter_type_expr::OwnedSlice::from(signatures),
             excess,
         })
     }
@@ -414,17 +463,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         state
             .accessor_getters
             .retain(|candidate| !candidate.element_access_collides(&key));
-        let facets = evaluator_support::member_facets(
-            effect.readonly,
-            None,
-            false,
-            effect.visibility,
-            effect.spans,
-            effect.declaration_origin.clone(),
-            effect.declared_in_macro_type_arg,
-            effect.merge_role,
-            effect.excess_origin,
-        );
+        let facets = authored_property_facets(effect);
         self.apply_named_write(
             state,
             key.clone(),
@@ -554,6 +593,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn accessor_value(&self, signature: SemanticNodeId, getter: bool) -> SemanticNodeId {
+        let signature = if getter {
+            self.materialize_returned_callable(signature)
+        } else {
+            signature
+        };
         match self.graph().node_data(signature).as_deref() {
             Some(SemanticNodeData::Signature {
                 params,
@@ -566,6 +610,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     params.first().map_or(*return_type, |param| param.ty)
                 }
             }
+            Some(SemanticNodeData::DeferredCallable(callable)) if !getter => callable
+                .parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+                .params
+                .first()
+                .map_or_else(|| self.opaque(QueryError::Miss), |param| param.ty),
             _ => signature,
         }
     }
@@ -601,6 +650,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         copied: bool,
         policy: ExactOptionalPropertyPolicy,
     ) {
+        note_member_visit();
         let value = if optional {
             self.optional_present_value(value, policy)
         } else {
@@ -618,7 +668,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             PositiveKeyPresence::Required
         };
         match state.member_position(&key) {
-            None => state.members.push(MemberState {
+            None => state.push_member(MemberState {
                 key,
                 presence,
                 value: incoming_value,
@@ -666,7 +716,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if policy == ExactOptionalPropertyPolicy::Enabled {
             return value;
         }
-        let Some(SemanticNodeData::Union(arms)) = self.graph().node_data(value).as_deref().cloned()
+        let Some(SemanticNodeData::Union(arms)) = self
+            .graph()
+            .node_data(value)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return value;
         };
@@ -739,10 +793,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::ProjectionReductionContext::structural_transit();
                     let (resolved, _, _) =
                         self.resolve_carrier_subject_node_capturing_suppress(current, transit);
-                    if resolved == current {
+                    if resolved.node == current
+                        || matches!(
+                            resolved.status,
+                            crate::semantic_query::FactStatus::Unavailable(_)
+                        )
+                    {
                         return current;
                     }
-                    current = resolved;
+                    current = resolved.node;
                 }
                 _ => return current,
             }
@@ -834,6 +893,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             SemanticNodeData::ObjectSpreadProgram(_) => {
                 drop(data);
+                if let Some(chain) = self.property_spread_chain(operand)? {
+                    // Each inner object starts its own spread operand at depth
+                    // zero, as the general evaluator does. Outer distribution
+                    // must not suppress its nullable merge or consume its fuse.
+                    let mut states = self.apply_spread_operand(states, chain.base, context, 0)?;
+                    // The inner objects' own writes arrive as copied properties.
+                    // Each required public write overwrites independently of the
+                    // caller's prior state, so no intermediate surface is needed.
+                    for program in chain.programs.iter().rev() {
+                        for effect in program.effects.iter().skip(1) {
+                            let ObjectConstructionEffect::DirectProperty(effect) = effect else {
+                                unreachable!("property_spread_chain validates every tail");
+                            };
+                            let key = effect.key.cloned_known().expect("validated known key");
+                            let facets = authored_property_facets(effect);
+                            for state in &mut states {
+                                state
+                                    .direct_excess_candidates
+                                    .retain(|candidate| !candidate.element_access_collides(&key));
+                                state
+                                    .accessor_getters
+                                    .retain(|candidate| !candidate.element_access_collides(&key));
+                                self.apply_named_write(
+                                    state,
+                                    key.clone(),
+                                    effect.value,
+                                    false,
+                                    facets.clone(),
+                                    true,
+                                    context.optional_property_policy(),
+                                );
+                            }
+                        }
+                    }
+                    return Ok(states);
+                }
                 let nested =
                     self.execute_via_cold_build_helper(SemanticQueryKey::ProjectObjectSpread {
                         program: operand,
@@ -878,6 +973,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Peel immutable property-only prefixes once, leaving general operands to
+    /// the existing correlated evaluator. No prefix is projected or rebuilt.
+    /// Optional writes, computed keys and non-public members need the complete
+    /// inner-object fold before copying and cannot use this composition rule.
+    fn property_spread_chain(
+        &self,
+        mut operand: SemanticNodeId,
+    ) -> Result<Option<PropertySpreadChain>, EvalFailure> {
+        let mut programs = Vec::new();
+        let mut visited = FxHashSet::default();
+        // bounded-loop: visited-set cycle stop returns an uncacheable recursion carrier.
+        loop {
+            if self.snapshot.flags().is_cancelled() {
+                return Err(EvalFailure::Operational(QueryError::Cancelled));
+            }
+            operand = self.normalize_spread_operand_node(operand);
+            let Some(data) = self.graph().node_data(operand) else {
+                return Err(EvalFailure::Operational(QueryError::Miss));
+            };
+            let SemanticNodeData::ObjectSpreadProgram(program) = data.as_ref() else {
+                break;
+            };
+            let [ObjectConstructionEffect::Spread(base), tail @ ..] = program.effects.as_ref()
+            else {
+                break;
+            };
+            if !tail.iter().all(|effect| {
+                matches!(effect, ObjectConstructionEffect::DirectProperty(property)
+                    if !property.optional
+                        && property.visibility.is_public()
+                        && property.key.as_known().is_some())
+            }) {
+                break;
+            }
+            if !visited.insert(operand) {
+                return Err(EvalFailure::Recursive(operand));
+            }
+            programs.push(program.share());
+            operand = *base;
+        }
+        Ok((!programs.is_empty()).then_some(PropertySpreadChain {
+            base: operand,
+            programs,
+        }))
+    }
+
     fn merge_nested_formula(
         &self,
         states: Vec<EvalState>,
@@ -898,6 +1039,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     residual: alternative.closed().is_none(),
                 };
                 alternative.positive().visit(|fact| {
+                    note_member_visit();
                     spread.members.push(MemberState {
                         key: fact.key().clone(),
                         presence: fact.presence(),
@@ -965,6 +1107,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .filter(|member| member.visibility.is_public())
             .filter_map(|member| {
+                note_member_visit();
                 let key = member.key.cloned_known()?;
                 Some(MemberState {
                     key,
@@ -1054,7 +1197,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if let Some(position) = position {
                             state.members[position] = entry;
                         } else {
-                            state.members.push(entry);
+                            state.push_member(entry);
                         }
                     } else if let Some(position) = position {
                         state.members[position].value = ProjectionEvidence::Indeterminate;
@@ -1202,6 +1345,20 @@ fn member_facets_from_surface(member: &SurfaceMember) -> MemberFacets {
         member.declared_in_macro_type_arg,
         member.merge_role,
         member.excess_origin,
+    )
+}
+
+fn authored_property_facets(effect: &AuthoredPropertyEffect) -> MemberFacets {
+    evaluator_support::member_facets(
+        effect.readonly,
+        None,
+        false,
+        effect.visibility,
+        effect.spans,
+        effect.declaration_origin.clone(),
+        effect.declared_in_macro_type_arg,
+        effect.merge_role,
+        effect.excess_origin,
     )
 }
 

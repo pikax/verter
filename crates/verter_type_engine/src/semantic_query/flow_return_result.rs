@@ -55,6 +55,19 @@ use verter_session_query::{flow::completion::NormalCompletion, transports_comple
 /// their own mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlowReturnResult {
+    /// A separate producer proof for a selected member; never promotes fact().
+    independent_member: Option<
+        verter_session_query::retention::owned::Owned<
+            crate::project_semantic_dispatch::flow_return::ExactMemberValue,
+        >,
+    >,
+    /// Quality of the reads supporting this independently valid evaluation.
+    observed_completeness: super::ResultCompleteness,
+    exact_return_keys: Option<
+        verter_session_query::retention::owned::Owned<
+            crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
+        >,
+    >,
     /// The whole-function return type (widened join of every contributor).
     ///
     /// PRIVATE for the same reason as [`Self::degradation`]: the
@@ -101,7 +114,7 @@ pub struct FlowReturnResult {
     /// literal constituents — [`Self::new`] filters by literal VALUE, so
     /// a widened or substituted rebuild can never list a value the
     /// return no longer carries.
-    fresh_literal_arms: std::sync::Arc<[SemanticNodeId]>,
+    fresh_literal_arms: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
     /// The PENDING function-kind return wrap (async / generator /
     /// async-generator), carried as a deferred fact until the value
     /// leaves the frame for publication. While set, `return_type` is the
@@ -131,7 +144,35 @@ pub struct FlowReturnResult {
     /// these ride with it so it is never a silent success. They are the
     /// body's own — a caller of this function reads its signature, not
     /// its errors. Every rebuild carries them.
-    checker_diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+    checker_diagnostics:
+        verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
+    /// The graph ownership of a result handed out of the engine: its
+    /// return node and every node it carries, held for as long as the
+    /// delivered result lives. Transport only — never identity.
+    owner: FlowReturnOwner,
+}
+
+/// A delivered flow-return result's graph ownership. Equality, hashing and
+/// display ignore it.
+#[derive(Clone, Default)]
+pub(super) struct FlowReturnOwner(
+    #[allow(
+        dead_code,
+        reason = "held for its drop: the lease owns the result's nodes"
+    )]
+    crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+);
+
+impl PartialEq for FlowReturnOwner {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for FlowReturnOwner {}
+impl std::fmt::Debug for FlowReturnOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FlowReturnOwner")
+    }
 }
 
 /// What a function's authored kind adds to its body join — see
@@ -174,31 +215,33 @@ pub struct FlowReturnWrap {
 transports_completion!(FlowReturnResult => FlowReturnResult);
 
 impl FlowReturnResult {
-    /// THE construction point of a flow-return value.
-    ///
-    /// `degradation` is the evaluation's OWN observed reason (a
-    /// modeled-`any` substitution it made knowingly). It is not the whole
-    /// verdict: this constructor additionally inspects `return_type` and
-    /// folds [`FlowReturnDegradation::UnresolvedValue`] in whenever the
-    /// value REACHES a semantic-miss carrier
-    /// ([`flow_return_value_is_unresolved`]). The evaluation's own reason
-    /// wins when both apply (first-observed reason, deterministic).
-    ///
-    /// The evaluation is the AUTHORITY on its own degradation: a position
-    /// whose resolver is a named downstream block contributes the typed
-    /// unresolved marker and records
-    /// [`FlowReturnDegradation::UnmodeledPosition`] where it stands. This
-    /// fold is the BACKSTOP for the residue — a leaf lowering that answered
-    /// a miss carrier inside the structure it handed back, which no
-    /// position observed.
-    #[must_use]
-    pub fn new(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        return_type: SemanticNodeId,
-        can_fall_through: NormalCompletion,
-        degradation: Option<FlowReturnDegradation>,
-    ) -> Self {
-        Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
+    construction_ordinal_seam! {
+        /// THE construction point of a flow-return value.
+        ///
+        /// `degradation` is the evaluation's OWN observed reason (a
+        /// modeled-`any` substitution it made knowingly). It is not the whole
+        /// verdict: this constructor additionally inspects `return_type` and
+        /// folds [`FlowReturnDegradation::UnresolvedValue`] in whenever the
+        /// value REACHES a semantic-miss carrier
+        /// ([`flow_return_value_is_unresolved`]). The evaluation's own reason
+        /// wins when both apply (first-observed reason, deterministic).
+        ///
+        /// The evaluation is the AUTHORITY on its own degradation: a position
+        /// whose resolver is a named downstream block contributes the typed
+        /// unresolved marker and records
+        /// [`FlowReturnDegradation::UnmodeledPosition`] where it stands. This
+        /// fold is the BACKSTOP for the residue — a leaf lowering that answered
+        /// a miss carrier inside the structure it handed back, which no
+        /// position observed.
+        #[must_use]
+        fn new(
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
+            return_type: SemanticNodeId,
+            can_fall_through: NormalCompletion,
+            degradation: Option<FlowReturnDegradation>,
+        ) -> Self {
+            Self::new_with_fresh_literal_arms(graph, return_type, can_fall_through, degradation, &[])
+        }
     }
 
     /// [`Self::new`] with the join's surviving fresh literal arms. The
@@ -219,18 +262,94 @@ impl FlowReturnResult {
                 .then_some(FlowReturnDegradation::UnresolvedValue)
         });
         Self {
+            independent_member: None,
+            exact_return_keys: None,
+            observed_completeness: super::ResultCompleteness::Complete,
             return_type,
             can_fall_through,
             degradation,
             fresh_literal_arms: retained_fresh_literal_arms(graph, return_type, fresh_literal_arms),
             facet: FunctionKindFacet::None,
-            checker_diagnostics: std::sync::Arc::from([]),
+            checker_diagnostics: Vec::new().into(),
+            owner: FlowReturnOwner::default(),
         }
+    }
+
+    /// This result owning every graph node it carries, for delivery out of
+    /// the engine. `Err` when a node it names is no longer live: the result
+    /// cannot be delivered.
+    pub(crate) fn delivered(
+        mut self,
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+    ) -> Result<Self, super::QueryError> {
+        let value = super::QueryResult::Value(super::SemanticQueryValue::FlowReturn(
+            verter_session_query::retention::owned::Owned::new(self.clone()),
+        ));
+        self.owner = FlowReturnOwner(graph.lease_delivery(
+            crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(&value),
+        )?);
+        Ok(self)
+    }
+
+    /// Explicit producer availability. An approximation retains the evaluated
+    /// return, including unresolved positions and explanatory causes.
+    pub fn fact(&self) -> super::FactResult<&Self> {
+        if matches!(
+            self.observed_completeness,
+            super::ResultCompleteness::Complete
+        ) && self.degradation.is_none()
+        {
+            return super::FactResult::complete(self);
+        }
+        let mut causes = self.observed_completeness.reasons();
+        if let Some(degradation) = self.degradation {
+            causes = causes.union(
+                crate::project_semantic_dispatch::flow_return::degradation_reason(degradation)
+                    .bit(),
+            );
+        }
+        let causes = super::surface_resolution::NonEmptyReasons::new(causes).unwrap_or_else(|| {
+            super::surface_resolution::NonEmptyReasons::of(super::PartialReason::SemanticQueryFault)
+        });
+        super::FactResult::approximate(self, causes)
+    }
+
+    pub(crate) fn with_observed_completeness(
+        mut self,
+        observed: super::ResultCompleteness,
+    ) -> Self {
+        self.observed_completeness = self.observed_completeness.merge(observed);
+        self
+    }
+
+    pub(crate) fn with_independent_member(
+        mut self,
+        proof: crate::project_semantic_dispatch::flow_return::ExactMemberValue,
+    ) -> Self {
+        self.independent_member = Some(verter_session_query::retention::owned::Owned::new(proof));
+        self
+    }
+
+    pub(crate) fn independent_member(
+        &self,
+        key: &super::FlowReturnKey,
+    ) -> Option<&crate::project_semantic_dispatch::flow_return::ExactMemberValue> {
+        self.independent_member
+            .as_deref()
+            .filter(|proof| proof.matches(key, self.return_type))
     }
 
     /// The diagnostics riding with the value (see the field).
     #[must_use]
-    pub fn checker_diagnostics(&self) -> &std::sync::Arc<[super::CheckerDiagnostic]> {
+    pub fn checker_diagnostics(&self) -> &[super::CheckerDiagnostic] {
+        &self.checker_diagnostics
+    }
+
+    /// The diagnostics' owned allocation, for a rebuild that carries them
+    /// over: a clone shares their one charge.
+    pub(crate) fn checker_diagnostics_owned(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic> {
         &self.checker_diagnostics
     }
 
@@ -239,10 +358,36 @@ impl FlowReturnResult {
     #[must_use]
     pub(crate) fn with_checker_diagnostics(
         mut self,
-        diagnostics: std::sync::Arc<[super::CheckerDiagnostic]>,
+        diagnostics: verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
     ) -> Self {
         self.checker_diagnostics = diagnostics;
         self
+    }
+
+    /// Required value observations invalidate a previously minted certificate.
+    /// Whole-proof refusal is a separate producer outcome and does not use this.
+    pub(crate) fn with_dependent_value_limitations(
+        mut self,
+        reasons: super::PartialReasonSet,
+    ) -> Self {
+        self.independent_member = None;
+        self.observed_completeness = self
+            .observed_completeness
+            .merge(super::ResultCompleteness::partial(reasons));
+        self
+    }
+
+    pub(crate) fn with_exact_return_keys(
+        mut self,
+        proof: crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
+    ) -> Self {
+        self.exact_return_keys = Some(verter_session_query::retention::owned::Owned::new(proof));
+        self
+    }
+    pub(crate) fn exact_return_keys(
+        &self,
+    ) -> Option<&crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain> {
+        self.exact_return_keys.as_deref()
     }
 
     /// The whole-function return type.
@@ -263,6 +408,7 @@ impl FlowReturnResult {
     /// [`FlowReturnDegradation::PartialInterior`].
     #[must_use]
     pub fn with_partial_interior(mut self) -> Self {
+        self.independent_member = None;
         self.degradation
             .get_or_insert(FlowReturnDegradation::PartialInterior);
         self
@@ -273,6 +419,7 @@ impl FlowReturnResult {
     /// when it has one, else [`FlowReturnDegradation::OperationBudget`].
     #[must_use]
     pub(crate) fn with_operation_budget(mut self) -> Self {
+        self.independent_member = None;
         self.degradation
             .get_or_insert(FlowReturnDegradation::OperationBudget);
         self
@@ -281,7 +428,9 @@ impl FlowReturnResult {
     /// The surviving FRESH literal constituents at the return's top
     /// level (see the field). Empty means every kept literal is pinned.
     #[must_use]
-    pub(crate) fn fresh_literal_arms(&self) -> &std::sync::Arc<[SemanticNodeId]> {
+    pub(crate) fn fresh_literal_arms(
+        &self,
+    ) -> &verter_session_query::retention::owned::OwnedSlice<SemanticNodeId> {
         &self.fresh_literal_arms
     }
 
@@ -349,8 +498,15 @@ impl FlowReturnResult {
             &self.fresh_literal_arms,
         );
         Self {
+            observed_completeness: self.observed_completeness,
+            exact_return_keys: (return_type == self.return_type)
+                .then(|| self.exact_return_keys.clone())
+                .flatten(),
+            independent_member: (return_type == self.return_type)
+                .then(|| self.independent_member.clone())
+                .flatten(),
             facet: self.facet,
-            checker_diagnostics: std::sync::Arc::clone(&self.checker_diagnostics),
+            checker_diagnostics: self.checker_diagnostics.clone(),
             ..rebuilt
         }
     }
@@ -364,10 +520,10 @@ fn retained_fresh_literal_arms(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     return_type: SemanticNodeId,
     fresh_literal_arms: &[SemanticNodeId],
-) -> std::sync::Arc<[SemanticNodeId]> {
+) -> verter_session_query::retention::owned::OwnedSlice<SemanticNodeId> {
     use crate::semantic_query::SemanticNodeData;
     if fresh_literal_arms.is_empty() {
-        return std::sync::Arc::from([]);
+        return Vec::new().into();
     }
     let mut top_level: Vec<SemanticNodeId> = Vec::new();
     match graph.node_data(return_type).as_deref() {
@@ -394,7 +550,7 @@ fn retained_fresh_literal_arms(
             retained.push(kept);
         }
     }
-    std::sync::Arc::from(retained.into_boxed_slice())
+    retained.into()
 }
 
 /// Whether a flow-return VALUE reaches a semantic-miss carrier — a node
@@ -420,3 +576,6 @@ fn flow_return_value_is_unresolved(
 ) -> bool {
     graph.node_reaches_unresolved(root)
 }
+
+#[path = "result_footprint.rs"]
+mod result_footprint;

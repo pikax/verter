@@ -35,7 +35,7 @@ use verter_type_engine::structural_carrier_producer::{
 /// invariant: the scope is the owner-supplied lexical root).
 fn fixture_scope() -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from("/fixture.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/fixture.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -54,7 +54,10 @@ fn lower_root(host: &VerterHost, expr: &TypeExpr) -> (Arc<SemanticGraphStore>, S
 }
 
 /// Read an interned node's payload.
-fn node(graph: &SemanticGraphStore, id: SemanticNodeId) -> Arc<SemanticNodeData> {
+fn node(
+    graph: &SemanticGraphStore,
+    id: SemanticNodeId,
+) -> verter_type_engine::semantic_query_memo::NodeData {
     graph.node_data(id).expect("interned node must exist")
 }
 
@@ -103,6 +106,10 @@ fn lowers_bare_ref_with_empty_type_args() {
     // `Foo` (no args, not a binder) → `BareRef { name, scope, type_args: [] }`,
     // NEVER a resolved `DeclRef`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Ref {
         name: Arc::from("Foo"),
         type_arguments: verter_type_expr::empty_type_args(),
@@ -112,7 +119,7 @@ fn lowers_bare_ref_with_empty_type_args() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Foo");
+            assert_eq!(name, "Foo");
             assert_eq!(
                 *scope,
                 fixture_scope(),
@@ -129,6 +136,10 @@ fn lowers_generic_ref_with_structurally_lowered_args() {
     // `Foo<string>` → `BareRef { name, type_args: [Primitive(String)] }`,
     // NEVER a resolved `InstantiationRef`; the arg is structurally lowered.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Ref {
         name: Arc::from("Foo"),
         type_arguments: Arc::from(
@@ -140,7 +151,7 @@ fn lowers_generic_ref_with_structurally_lowered_args() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, _scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Foo");
+            assert_eq!(name, "Foo");
             assert_eq!(type_args.len(), 1, "Foo<string> carries exactly one arg");
             type_args[0]
         }
@@ -220,6 +231,10 @@ fn lowers_unknown_to_raw_fallback_verbatim() {
     // Unsupported raw syntax → `RawFallback { raw }` with the exact text
     // preserved. RawFallback is display/compat only, never a miss signal.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Unknown(UnknownValue::unsupported_syntax("Weird<& Type>"));
     let (graph, root) = lower_root(&host, &expr);
     match &*node(&graph, root) {
@@ -241,6 +256,10 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
     // value-side `value_node` ordinal (content-free identity) while the
     // `value_node` is retained separately as provenance.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     // The backing value is a node the arena holds: a carrier over a node it
     // could still allocate is a forward reference and refuses.
     let backing =
@@ -250,10 +269,10 @@ fn lowers_synthetic_slot_binding_with_content_free_id() {
                 verter_type_engine::semantic_query::PrimitiveKind::String,
             ));
     let key = SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: From::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("row"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("row"),
         value_node: backing.0,
     };
     let expr = TypeExpr::SyntheticSlotBinding(Arc::new(key.clone()));
@@ -283,6 +302,10 @@ fn lowers_typeof_preserving_root_path_and_type_args() {
     // lookup of where the value resolves), with the remaining segments as
     // the projected path and the instantiation args structurally lowered.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::TypeOf(ValueRef {
         path: vec!["factory".to_string(), "make".to_string()],
         type_args: vec![TypeExpr::Primitive(PrimitiveName::String)],
@@ -323,6 +346,10 @@ fn lowers_import_type_with_qualifier_and_args() {
     // `import("./m").Box<string>` → `ImportType` (type position) with exact
     // specifier/qualifier/type_args and the import resolver NEVER called.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::ImportType {
         specifier: Arc::from("./m"),
         qualifier: Arc::from(vec![Arc::<str>::from("Box")].into_boxed_slice()),
@@ -337,7 +364,7 @@ fn lowers_import_type_with_qualifier_and_args() {
             let (specifier, qualifier, typeof_query) =
                 n.import_type_head().expect("ImportType head");
             let type_args = n.carrier_type_args();
-            assert_eq!(specifier.as_ref(), "./m");
+            assert_eq!(specifier, "./m");
             assert_eq!(qualifier.len(), 1);
             assert_eq!(qualifier[0].as_ref(), "Box");
             assert!(!typeof_query, "import(...).Box is type position");
@@ -356,6 +383,10 @@ fn lowers_import_type_with_qualifier_and_args() {
 fn lowers_typeof_import_type_sets_typeof_query() {
     // `typeof import("./m").make<string>` → `ImportType` with typeof_query.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::ImportType {
         specifier: Arc::from("./m"),
         qualifier: Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
@@ -384,6 +415,10 @@ fn lowers_tuple_preserving_rest_element() {
     // per-element label / rest metadata, with the rest value structurally
     // lowered. NEVER a standalone `Rest` node and NO spread normalization.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Tuple {
         elements: Arc::from(
             vec![
@@ -438,6 +473,10 @@ fn lowers_constructor_type_wrapping_a_function_signature() {
     // constructor-ness distinct from a plain function (every producer,
     // eager included, preserves the kind).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -498,6 +537,10 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
     // nodes). Discriminates against a lowerer that collapses the type
     // literal to a root construct signature.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![],
         Some(Arc::new(TypeExpr::Ref {
@@ -514,13 +557,13 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
         SemanticNodeData::Object(view) => {
             assert!(view.positive_members().is_empty(), "no plain members");
             assert_eq!(
-                view.construct_signatures.len(),
+                view.construct_signatures().len(),
                 1,
                 "the construct signature is preserved on the Object surface"
             );
             assert!(
                 matches!(
-                    &*node(&graph, view.construct_signatures[0]),
+                    &*node(&graph, view.construct_signatures()[0]),
                     SemanticNodeData::Signature { .. }
                 ),
                 "the construct signature lowers to a Function node"
@@ -546,6 +589,10 @@ fn generic_function_binds_own_type_param_in_params_and_return() {
     // return `T` resolve to the SAME `TypeParam` binder node, never a
     // `BareRef` and never two distinct nodes.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -601,6 +648,10 @@ fn generic_function_constraint_sees_prior_type_param_binder() {
     // same node the param `x: T` resolves to — NEVER a `BareRef(T)` and never
     // an outer binding.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -673,6 +724,10 @@ fn generic_function_default_sees_prior_type_param_binder() {
     // `= T` sees the PRIOR `T` binder and resolves to the FIRST own type-param
     // binder node (same as the param `x: T`), NEVER a `BareRef(T)`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -743,6 +798,10 @@ fn lowers_indexed_access_as_deferred_shell_with_string_key() {
     // structurally lowered `Foo` carrier and the literal key folds to
     // `IndexKey::String`. NEVER projected/executed.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::IndexedAccess {
         object: Arc::new(TypeExpr::Ref {
             name: Arc::from("Foo"),
@@ -772,6 +831,10 @@ fn lowers_conditional_as_deferred_shell() {
     // with all operands lowered and NO branch decision; a naked type-param
     // check is distributive.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let t_binder = graph.intern_node_with_scope(
         SemanticNodeData::TypeParam {
@@ -779,7 +842,7 @@ fn lowers_conditional_as_deferred_shell() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
         fixture_scope(),
     );
@@ -833,6 +896,10 @@ fn conditional_binds_bare_infer_in_true_branch() {
     // resolve to the SAME `Infer` carrier the `extends` arm interned, NOT leak
     // out as an unbound `BareRef { name: "P" }`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let t_binder = graph.intern_node_with_scope(
         SemanticNodeData::TypeParam {
@@ -840,7 +907,7 @@ fn conditional_binds_bare_infer_in_true_branch() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         },
         fixture_scope(),
     );
@@ -900,6 +967,10 @@ fn conditional_binds_nested_infer_in_true_branch() {
     // `extends` clause still binds `E` for the TRUE branch. The true-branch `E`
     // resolves to the SAME `Infer` carrier nested in the lowered `extends`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
     let ctx = StructuralLowerContext::new_for_tests(&binders);
@@ -965,6 +1036,10 @@ fn conditional_binds_object_member_infer_in_true_branch() {
     // the eager binder `collect_infer_bindings_into_env` covers via its
     // `Object` arm — the structural collector must reach the same coverage.)
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
     let ctx = StructuralLowerContext::new_for_tests(&binders);
@@ -1038,6 +1113,10 @@ fn conditional_binds_function_param_infer_in_true_branch() {
     // `BareRef { name: "P" }`. (The eager binder covers this via its
     // `Function` arm; the structural collector must match it.)
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
     let ctx = StructuralLowerContext::new_for_tests(&binders);
@@ -1118,6 +1197,10 @@ fn conditional_binds_mapped_as_remap_infer_in_true_branch() {
     // fix: the collector descended source/value only, so `R` was never collected
     // and leaked as a `BareRef`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
     let ctx = StructuralLowerContext::new_for_tests(&binders);
@@ -1177,6 +1260,10 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     // args as a `BareRef`, and the own-body member carries its declaration
     // provenance + merge role.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let base_ref = TypeExpr::Ref {
         name: Arc::from("Base"),
@@ -1206,7 +1293,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
     let handle = lower_type_expr_structural_for_tests(&graph, &expr, fixture_scope(), &ctx)
         .expect("structural lowering should succeed");
     let arms: Arc<[SemanticNodeId]> = match &*node(&graph, handle.node()) {
-        SemanticNodeData::Intersection(arms) => arms.members_arc(),
+        SemanticNodeData::Intersection(arms) => Arc::from(&arms[..]),
         other => panic!("expected Intersection, got {other:?}"),
     };
     assert_eq!(arms.len(), 2, "heritage ref arm + own-body object arm");
@@ -1214,7 +1301,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         n @ SemanticNodeData::BareRef(_) => {
             let (name, _scope) = n.bare_ref_head().expect("BareRef head");
             let type_args = n.carrier_type_args();
-            assert_eq!(name.as_ref(), "Base");
+            assert_eq!(name, "Base");
             assert_eq!(type_args.len(), 1, "heritage `Base<string>` keeps its arg");
             assert!(matches!(
                 &*node(&graph, type_args[0]),
@@ -1255,6 +1342,10 @@ fn lowers_mapped_type_as_deferred_shell() {
     // binder `K` is a mapper `TypeParam`, and the `readonly +` modifier maps
     // through. NEVER materialized into per-key members.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Mapped {
         parameter: "K".to_string(),
         source: Arc::new(TypeExpr::KeyOf(Arc::new(TypeExpr::Ref {
@@ -1306,6 +1397,10 @@ fn structural_root_is_an_unmaterialized_carrier() {
     // the root node a `BareRef` / `ImportType` carrier — NOT a reparsed /
     // materialized fallback.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let generic = TypeExpr::Ref {
         name: Arc::from("Foo"),
         type_arguments: Arc::from(
@@ -1378,7 +1473,7 @@ fn lower_eager(host: &VerterHost, expr: &TypeExpr) -> SemanticNodeId {
     let name_resolution = FxHashMap::default();
     let shadowing = ScopeShadowing::empty();
     let mut substitutions = Vec::new();
-    dispatch.shallow_lower_type_expr_with_context_for_tests(
+    let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
         expr,
         &env,
         &fixture_scope(),
@@ -1387,7 +1482,17 @@ fn lower_eager(host: &VerterHost, expr: &TypeExpr) -> SemanticNodeId {
         &shadowing,
         &mut substitutions,
         ProjectionReductionContext::structural_transit(),
-    )
+    );
+    // Keep the node in the caller's construction scope once the lowering
+    // dispatcher is gone.
+    let roots = host
+        .project_type_store()
+        .semantic_graph()
+        .root_nodes([node])
+        .expect("the lowered node is live");
+    drop(dispatch);
+    roots.retain_for_construction();
+    node
 }
 
 /// Lower `expr` via BOTH paths into the host's single shared store and assert
@@ -1440,6 +1545,10 @@ fn conditional_infer_binder(
 #[test]
 fn authored_infer_identity_is_shared_by_structural_and_eager_routes() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = conditional_with_infer("RouteT", PrimitiveName::String);
     let (graph, structural_root) = lower_root(&host, &expr);
     let structural_binder = conditional_infer_binder(&graph, structural_root);
@@ -1468,6 +1577,10 @@ fn authored_infer_identity_survives_relowering_and_unrelated_demand_order() {
     let noise = conditional_with_infer("NoiseT", PrimitiveName::Number);
 
     let host_a = VerterHost::new_standalone(Default::default());
+    let _scope = host_a
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let (graph_a, first) = lower_root(&host_a, &target);
     let (_, second) = lower_root(&host_a, &target);
     assert_eq!(
@@ -1477,6 +1590,10 @@ fn authored_infer_identity_survives_relowering_and_unrelated_demand_order() {
     );
 
     let host_b = VerterHost::new_standalone(Default::default());
+    let _scope_b = host_b
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = lower_root(&host_b, &noise);
     let (graph_b, reordered) = lower_root(&host_b, &target);
     assert_eq!(
@@ -1492,6 +1609,10 @@ fn authored_infer_identity_is_independent_of_concurrent_demand_order() {
     let run = |target_first: bool, barrier: Arc<std::sync::Barrier>| {
         std::thread::spawn(move || {
             let host = VerterHost::new_standalone(Default::default());
+            let _scope = host
+                .project_type_store()
+                .semantic_graph()
+                .enter_node_root_scope();
             let target = conditional_with_infer("ConcurrentT", PrimitiveName::String);
             let noise = conditional_with_infer("ConcurrentNoise", PrimitiveName::Number);
             barrier.wait();
@@ -1519,6 +1640,10 @@ fn authored_infer_identity_is_independent_of_concurrent_demand_order() {
 #[test]
 fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let outer_u = graph.intern_node_with_scope(
         SemanticNodeData::TypeParam {
@@ -1526,7 +1651,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("U"),
+            display_name: verter_type_expr::OwnedStr::from("U"),
         },
         fixture_scope(),
     );
@@ -1574,7 +1699,7 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
         other => panic!("expected conditional, got {other:?}"),
     };
     let elements = match graph.node_data(extends).as_deref() {
-        Some(SemanticNodeData::Tuple { elements, .. }) => Arc::clone(elements),
+        Some(SemanticNodeData::Tuple { elements, .. }) => elements.share_for_tests(),
         other => panic!("expected tuple pattern, got {other:?}"),
     };
     assert!(matches!(
@@ -1590,6 +1715,10 @@ fn structural_infer_predeclaration_does_not_capture_ordinary_sibling_ref() {
 #[test]
 fn structural_equivalence_for_primitive() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Primitive(PrimitiveName::String);
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(matches!(
@@ -1601,6 +1730,10 @@ fn structural_equivalence_for_primitive() {
 #[test]
 fn structural_equivalence_for_literal() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Literal(LiteralValue::String("lit".to_string()));
     let (graph, root) = assert_paths_agree(&host, &expr);
     assert!(matches!(
@@ -1613,6 +1746,10 @@ fn structural_equivalence_for_literal() {
 fn structural_equivalence_for_union() {
     // `string | number` — a union of structural terminals, nothing to resolve.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Union(Arc::from(
         vec![
             TypeExpr::Primitive(PrimitiveName::String),
@@ -1632,6 +1769,10 @@ fn structural_equivalence_for_intersection_of_objects() {
     // `{ a: string } & { b: number }` — an intersection of object literals,
     // every operand structural (no bare-name heritage to resolve).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let obj = |name: &str, prim: PrimitiveName| {
         TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(
@@ -1661,6 +1802,10 @@ fn structural_equivalence_for_intersection_of_objects() {
 #[test]
 fn structural_equivalence_for_array() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Array {
         element: Arc::new(TypeExpr::Primitive(PrimitiveName::String)),
         readonly: false,
@@ -1677,6 +1822,10 @@ fn structural_equivalence_for_tuple_with_rest() {
     // `[head: string, ...tail: number[]]` — labels, the rest flag, and the
     // nested `number[]` must agree element-for-element across both paths.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Tuple {
         elements: Arc::from(
             vec![
@@ -1711,6 +1860,10 @@ fn structural_equivalence_for_tuple_with_rest() {
 fn structural_equivalence_for_function() {
     // `(x: number) => string` — params and return are structural terminals.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),
@@ -1735,6 +1888,10 @@ fn structural_equivalence_for_object_with_members() {
     // members down to their spans / declaration-origin / flags (all part of
     // the interned `SurfaceMember`, so id-equality compares them exactly).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
@@ -1762,6 +1919,10 @@ fn structural_equivalence_for_object_with_members() {
 fn structural_equivalence_for_template_literal() {
     // `` `a${string}b` `` — quasis plus a structural interpolation.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = TypeExpr::TemplateLiteral {
         quasis: vec!["a".to_string(), "b".to_string()],
         expressions: Arc::from(vec![TypeExpr::Primitive(PrimitiveName::String)].into_boxed_slice()),
@@ -1779,6 +1940,10 @@ fn structural_equivalence_for_parenthesized_is_transparent() {
     // lowers identically to the bare `string | number` on BOTH paths, so the
     // parenthesized and unparenthesized roots are the one interned union.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let inner = TypeExpr::Union(Arc::from(
         vec![
             TypeExpr::Primitive(PrimitiveName::String),
@@ -1801,6 +1966,10 @@ fn structural_equivalence_for_nested_composite() {
     // recursion: the union, the array, the nested object, and the tuple must
     // all agree across both paths.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let object_array = TypeExpr::Array {
         element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
             properties: vec![ObjectMember::Property(
@@ -1843,6 +2012,10 @@ fn structural_equivalence_assertion_is_discriminating() {
     // `assert_paths_agree` would FAIL if the structural lowerer diverged from
     // the eager path on any of the agreement fixtures above.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let string_or_number = TypeExpr::Union(Arc::from(
         vec![
             TypeExpr::Primitive(PrimitiveName::String),
@@ -1889,6 +2062,10 @@ fn conditional_reference_binding_survives_nested_same_shape_on_macro_path() {
     // surviving `U` is reinterpreted as a fresh bare infer, yielding the
     // wrong `number`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let binders: [BinderScope; 0] = [];
     let ctx = StructuralLowerContext::new_for_tests(&binders);
@@ -1995,6 +2172,10 @@ fn structural_equivalence_for_constructor_signature() {
     // `new (x: number) => number` (the eager path no longer flattens the
     // construct kind away).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let func = FunctionExpr::synthetic(
         vec![FunctionParam::synthetic(
             Some("x".to_string()),

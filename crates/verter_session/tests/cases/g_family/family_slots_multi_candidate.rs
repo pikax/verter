@@ -57,9 +57,9 @@ fn instantiate_identity_key(host: &VerterHost, canonical: &str, symbol: &str) ->
     verter_session::for_tests::instantiate_key_for_tests(
         host,
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(symbol),
+            verter_type_expr::OwnedStr::from(symbol),
         ),
         Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Identity),
@@ -91,7 +91,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
         QueryResult::Value(value_v1),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
 
@@ -106,7 +106,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
         QueryResult::Value(value_v2),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         200,
     );
 
@@ -130,7 +130,7 @@ fn instantiate_slot_holds_two_concurrent_candidates_for_distinct_views() {
         QueryResult::Value(value_v1_again),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     let count_after_replace = graph.slot_candidate_count_for_tests(&key);
@@ -196,7 +196,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
     // consults.
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let self_roots_empty: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
-    let empty_dispatch: DepSignature = Arc::from(Vec::new());
+    let empty_dispatch: DepSignature = verter_type_engine::semantic_query::DepSignature::default();
     for generation in 100..105u64 {
         graph.publish_with_view_for_tests(
             &host,
@@ -204,7 +204,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
             QueryResult::Value(value),
             ReadSetSignature::empty(),
             Arc::clone(&self_roots_empty),
-            Arc::clone(&empty_dispatch),
+            empty_dispatch.clone(),
             generation,
         );
         graph.publish_with_view_for_tests(
@@ -213,7 +213,7 @@ pub(crate) fn cache_candidate_cap_is_per_family_not_uniform() {
             QueryResult::Value(value),
             ReadSetSignature::empty(),
             Arc::clone(&self_roots_empty),
-            Arc::clone(&empty_dispatch),
+            empty_dispatch.clone(),
             generation,
         );
     }
@@ -312,7 +312,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
     let value_b_c = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
     let self_roots_empty: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
-    let empty_dispatch: DepSignature = Arc::from(Vec::new());
+    let empty_dispatch: DepSignature = verter_type_engine::semantic_query::DepSignature::default();
 
     // Publish candidate A+C (generation 100).
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
@@ -320,7 +320,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
         QueryResult::Value(value_a_c),
         ReadSetSignature::new(Arc::clone(&facts_a_c)),
         Arc::clone(&self_roots_empty),
-        Arc::clone(&empty_dispatch),
+        empty_dispatch.clone(),
         100,
     );
     // Publish candidate B+C (generation 200) — distinct discriminant
@@ -330,7 +330,7 @@ fn multi_candidate_reverse_index_survives_sibling_invalidation() {
         QueryResult::Value(value_b_c),
         ReadSetSignature::new(Arc::clone(&facts_b_c)),
         Arc::clone(&self_roots_empty),
-        Arc::clone(&empty_dispatch),
+        empty_dispatch.clone(),
         200,
     );
 
@@ -441,7 +441,7 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
 
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let self_roots_empty: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
-    let empty_dispatch: DepSignature = Arc::from(Vec::new());
+    let empty_dispatch: DepSignature = verter_type_engine::semantic_query::DepSignature::default();
     // The INVALID candidate's fact rail: a `FileWholeHash` for the
     // TRACKED dep file whose hash does not match the live view — the
     // candidate can never validate against the publishing caller's
@@ -466,7 +466,7 @@ pub(crate) fn family_eviction_prefers_invalid_then_lru_valid_hit() {
             QueryResult::Value(value),
             signature,
             Arc::clone(&self_roots_empty),
-            Arc::clone(&empty_dispatch),
+            empty_dispatch.clone(),
             generation,
         );
     };

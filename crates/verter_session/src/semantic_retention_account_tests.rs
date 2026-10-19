@@ -513,8 +513,8 @@ fn the_project_store_charges_its_interned_identities() {
         .intern("/src/components/Accounted.vue");
     assert_eq!(
         account.snapshot().retained_bytes - before,
-        interned.len(),
-        "an interned identity's payload must be charged to the store's account"
+        verter_type_engine::identity_interner::pooled_entry_bytes(interned.len()),
+        "an interned identity's allocation and pool slot must be charged to the store's account"
     );
     drop(store);
     assert_eq!(
@@ -729,7 +729,7 @@ fn no_reachable_candidate_store_retains_off_the_aggregate_account() {
 
     let results = crate::component_meta_result_db::ComponentMetaResultDb::<u32>::new();
     assert!(
-        Arc::ptr_eq(results.retention_account(), &process_local),
+        Arc::ptr_eq(results.retention_account_for_tests(), &process_local),
         "a component-meta result cache built without an explicit account must \
          charge the one process-local account"
     );

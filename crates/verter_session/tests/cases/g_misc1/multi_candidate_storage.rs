@@ -77,7 +77,7 @@ fn r20_two_candidates_coexist_for_same_key() {
     let view_a = view_with(std::slice::from_ref(&fa));
     assert_eq!(
         cache.get_if_valid(&"k".to_string(), &view_a),
-        Some(Arc::new(100)),
+        Some(verter_retention::heap_size::OwnedValue::new(100)),
         "first candidate must survive the second insert"
     );
 
@@ -85,7 +85,7 @@ fn r20_two_candidates_coexist_for_same_key() {
     let view_b = view_with(std::slice::from_ref(&fb));
     assert_eq!(
         cache.get_if_valid(&"k".to_string(), &view_b),
-        Some(Arc::new(200)),
+        Some(verter_retention::heap_size::OwnedValue::new(200)),
         "second candidate must be admitted alongside the first"
     );
 }
@@ -121,7 +121,7 @@ fn r20_fifo_eviction_on_cap_overflow() {
         let v = view_with(std::slice::from_ref(f));
         assert_eq!(
             cache.get_if_valid(&"k".to_string(), &v),
-            Some(Arc::new(val)),
+            Some(verter_retention::heap_size::OwnedValue::new(val)),
             "candidate {val} (post-FIFO) must remain admitted"
         );
     }
@@ -151,7 +151,7 @@ fn r20_hot_read_path_zero_atomic_writes() {
             let v = view_with(&view_facts);
             for _ in 0..1000 {
                 let got = cache.get_if_valid(&"hot".to_string(), &v);
-                assert_eq!(got, Some(Arc::new(7)));
+                assert_eq!(got, Some(verter_retention::heap_size::OwnedValue::new(7)));
             }
         }));
     }
@@ -212,7 +212,7 @@ fn r20_stress_n8_m8() {
                 let want = session as usize * 8 + overlay as usize;
                 assert_eq!(
                     got,
-                    Some(Arc::new(want)),
+                    Some(verter_retention::heap_size::OwnedValue::new(want)),
                     "session {session} overlay {overlay}: own slot must validate"
                 );
             }
@@ -300,7 +300,7 @@ fn r20_view_checks_archive_retired() {
     let matching_view = view_with(std::slice::from_ref(&admitted));
     assert_eq!(
         cache.get_if_valid(&"k".to_string(), &matching_view),
-        Some(Arc::new(42)),
+        Some(verter_retention::heap_size::OwnedValue::new(42)),
         "validation must succeed via the per-candidate \
          fact_dep_signature walk; no `checks_archive` path exists",
     );

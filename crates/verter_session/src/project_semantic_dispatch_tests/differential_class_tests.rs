@@ -17,6 +17,22 @@
 
 use super::differential_harness_tests::{Matrix, Read};
 
+#[test]
+fn deferred_class_return_rebinding_preserves_a_same_file_permutation() {
+    let source = "function maker<A, B>() { class Pair { first!: A; second!: B; } return Pair; }\nfunction swapped<A, B>() { return maker<B, A>(); }";
+    let failures = Matrix::new(source).types(&[
+        (
+            "InstanceType<ReturnType<typeof swapped<string, number>>>['first']",
+            "number",
+        ),
+        (
+            "InstanceType<ReturnType<typeof swapped<string, number>>>['second']",
+            "string",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A class with fields, parameter properties, methods, accessors and statics.
 const MEMBERS: &str = r##"
 class Pt {
@@ -39,6 +55,14 @@ class Pt {
 class OnlyGet { get g() { return "g" as const; } }
 class Init { a = 1; b = this.a + 1; c = [this.a]; }
 class Accessors { #v = 0; get v() { return this.#v; } set v(n: number) { this.#v = n; } }
+function choose(x: string): 1;
+function choose(x: number): 2;
+function choose(x: unknown): 3;
+function choose(x: unknown): 1 | 2 | 3 { return 3; }
+class Box<T> {
+  method(x: T) { return choose(x); }
+  identity(x: T) { return x; }
+}
 "##;
 
 /// Instance fields, `readonly` and optional fields, parameter properties,
@@ -58,6 +82,7 @@ fn class_members_read_as_the_checker_reads_them() {
         ("(typeof Pt)['count']", "number"),
         ("ReturnType<typeof Pt.make>", "Pt"),
         ("ReturnType<typeof Pt.create>", "1"),
+        ("ReturnType<Box<string>['identity']>", "string"),
         ("InstanceType<typeof Pt>", "Pt"),
         (
             "ConstructorParameters<typeof Pt>",
@@ -74,6 +99,72 @@ fn class_members_read_as_the_checker_reads_them() {
     ]);
     failures.extend(matrix.nullness(&[(Read::Type("Pt['opt']"), "string | undefined", "string")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The pinned checker infers `3` under the declaration's `T`, then
+/// specializes the result. The current unproven overload route may refuse
+/// that value, but specializing the body first must never publish `1`.
+#[test]
+fn generic_method_return_inference_precedes_enclosing_specialization() {
+    let verdicts = Matrix::new(MEMBERS).verdicts(&[(
+        Read::Type("ReturnType<Box<string>['method']>"),
+        vec!["3"; 4],
+    )]);
+    for verdict in &verdicts[0] {
+        assert!(
+            verdict.matched || verdict.class == "GAP",
+            "declaration inference must precede enclosing specialization: {}",
+            verdict.lane
+        );
+    }
+    super::flow_return_class_tests::with_dispatch(MEMBERS, |dispatch| {
+        let key = verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                verter_type_expr::OwnedStr::from("/ws/cls/classes.ts"),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                verter_type_expr::OwnedStr::from("Box"),
+                verter_type_expr::facts::FunctionPartIdentity::Member {
+                    member_path: verter_type_expr::OwnedSlice::from([0u32]),
+                },
+                0,
+            ),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
+            context: dispatch.flow_return_context_for("/ws/cls/classes.ts"),
+            demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let verter_type_engine::semantic_query::FlowReturnStep::Complete(result) =
+            dispatch.execute_flow_return(key.clone())
+        else {
+            panic!("the declaration body retains its typed result");
+        };
+        if result.fact().status().is_complete() {
+            assert_eq!(
+                crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                    dispatch,
+                    result.return_type(),
+                    0
+                ),
+                "3"
+            );
+        } else {
+            assert!(matches!(
+                result.fact().status(),
+                verter_type_engine::semantic_query::FactStatus::Approximate(_, _)
+                    | verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+            ));
+            assert_eq!(result.degradation(), Some(verter_type_engine::semantic_query::FlowReturnDegradation::UnrepresentableCallee));
+            assert_eq!(
+                dispatch.graph().slot_candidate_count_for_tests(
+                    &verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(
+                        key
+                    ))
+                ),
+                0
+            );
+        }
+    });
 }
 
 /// `clone(): Pt` inside `class Pt` returns `Pt`: the annotation names the
@@ -394,19 +485,10 @@ fn class_expressions_and_single_mixins_read_as_the_checker_reads_them() {
 }
 
 /// `Timed(Tagged(Plain))` is an instance with `time`, `stamp`, `tag` and `p`,
-/// and is below `Plain`.
-///
-/// What the lane gives:
-/// - `InstanceType<typeof Both>['time']`: the checker answers `number`; the
-///   lane measured `<opaque Miss>`.
-/// - `InstanceType<typeof Both>['tag']`: the checker answers `string`; the lane
-///   measured `<opaque Miss>`.
-/// - `ReturnType<InstanceType<typeof Both>['stamp']>`: the checker answers
-///   `number`; the lane measured `<opaque Miss>`.
-/// - `[InstanceType<typeof Both>] extends [Plain] ? 1 : 2`: the checker answers
-///   `1`; the lane measured `<unreduced conditional>`.
+/// and is below `Plain`: the outer mixin's constructor and the inner
+/// application's constructors are one intersection, each mixin mixing its
+/// instance into `Plain`'s construct signature.
 #[test]
-#[ignore = "a mixin applied to a mixin application carries every layer's members"]
 fn a_nested_mixin_application_carries_every_layer() {
     let matrix = Matrix::new(MIXINS);
     let failures = matrix.types(&[

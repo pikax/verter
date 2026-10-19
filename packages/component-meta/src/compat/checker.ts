@@ -44,11 +44,12 @@ import {
 import {
   createMetaRuntime,
   getMetaRuntime,
-  stableSelectiveConfigHash,
+  inlineConfigHash,
+  hashTsconfigConfig,
   resolvePath as runtimeResolvePath,
   normalizePath as runtimeNormalizePath,
-  parseTsconfig,
   extractPathAliases,
+  tsconfigProjectConfig,
 } from "../runtime/index.js";
 import type {
   BootstrapFn,
@@ -185,6 +186,8 @@ export interface CheckerWorkspace {
     projects: Array<{
       root: string;
       workspaceRoot: string;
+      /** A tsconfig the native loader reads compiler options and membership from. */
+      tsconfigPath?: string;
       compilerOptions?: {
         baseUrl?: string;
         paths?: Array<{ pattern: string; targets: string[] }>;
@@ -216,14 +219,26 @@ async function readFileSafe(absPath: string, ws: CheckerWorkspace): Promise<stri
   return (await ws.readFile(runtimeNormalizePath(absPath))) ?? null;
 }
 
+/** Volar's `required` flag is a boolean and cannot carry an unavailable fact. */
+type KnownRequiredProp = PropMeta & { required: boolean };
+
+function hasRequiredFact(prop: PropMeta): prop is KnownRequiredProp {
+  return typeof prop.required === "boolean";
+}
+
 /**
  * Map a Verter PropMeta to Volar PropertyMeta.
+ * An unavailable required fact has no Volar boolean; callers that project one prop throw,
+ * and {@link mapComponentMeta} omits that prop instead of publishing `required: false`.
  */
 export function mapPropMeta(
   prop: PropMeta,
   options?: MetaCheckerOptions,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): PropertyMeta {
+  if (!hasRequiredFact(prop)) {
+    throw new Error(`component-meta compat cannot project ${prop.name} without a required fact`);
+  }
   const classification = classifyCompatPropDescriptor(prop, typeRegistry);
   switch (classification.kind) {
     case "any":
@@ -288,7 +303,7 @@ type CompatPropDescriptorClassification =
   | { kind: "default" };
 
 function classifyCompatPropDescriptor(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): CompatPropDescriptorClassification {
   if (prop.type.kind === "unknown") {
@@ -687,7 +702,7 @@ function normalizeCompatTags(tags: Array<{ name: string; text?: string }> | unde
 }
 
 function buildCompatPropertyMeta(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   type: string,
   schema: PropertyMetaSchema,
   overrides?: Partial<Pick<PropertyMeta, "description" | "tags">>,
@@ -704,7 +719,7 @@ function buildCompatPropertyMeta(
   };
 }
 
-function renderCompatAnyPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatAnyPropMeta(prop: KnownRequiredProp): PropertyMeta {
   return {
     name: prop.name,
     description: prop.description ?? "",
@@ -720,7 +735,7 @@ function renderCompatAnyPropMeta(prop: PropMeta): PropertyMeta {
   };
 }
 
-function renderCompatNumberishPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatNumberishPropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required ? "Numberish" : "Numberish | undefined";
   return buildCompatPropertyMeta(prop, type, {
     kind: "enum",
@@ -729,7 +744,7 @@ function renderCompatNumberishPropMeta(prop: PropMeta): PropertyMeta {
   });
 }
 
-function renderCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatBooleanishPropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required ? "Booleanish" : "Booleanish | undefined";
   const schemaEntries: string[] = ['"false"', '"true"', "false", "true"];
   if (!prop.required) {
@@ -758,7 +773,7 @@ function renderCompatBooleanishPropMeta(prop: PropMeta): PropertyMeta {
 }
 
 function renderCompatSlotsPropMeta(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   slotNames: readonly string[],
 ): { type: string; schema: PropertyMetaSchema } {
   const objectType = `{ ${slotNames.map((name) => `${name}?: ClassNameValue`).join("; ")}; }`;
@@ -777,7 +792,7 @@ function renderCompatSlotsPropMeta(
       };
 }
 
-function renderCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatReferrerPolicyPropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required
     ? "HTMLAttributeReferrerPolicy"
     : "HTMLAttributeReferrerPolicy | undefined";
@@ -789,7 +804,7 @@ function renderCompatReferrerPolicyPropMeta(prop: PropMeta): PropertyMeta {
 }
 
 function renderCompatFunctionArrayUnionPropMeta(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   functionArm: FunctionDescriptor,
   arrayElement: FunctionDescriptor,
   typeRegistry?: Map<string, TypeDescriptor>,
@@ -838,7 +853,7 @@ function renderCompatFunctionArrayUnionPropMeta(
   });
 }
 
-function renderCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatPrefetchOnPropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required
     ? '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }>'
     : '"visibility" | "interaction" | Partial<{ visibility: boolean; interaction: boolean; }> | undefined';
@@ -854,7 +869,7 @@ function renderCompatPrefetchOnPropMeta(prop: PropMeta): PropertyMeta {
   });
 }
 
-function renderCompatNuxtLinkToPropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatNuxtLinkToPropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required ? "string | St | vt" : "string | St | vt | undefined";
   return buildCompatPropertyMeta(prop, type, {
     kind: "enum",
@@ -868,7 +883,7 @@ function renderCompatNuxtLinkToPropMeta(prop: PropMeta): PropertyMeta {
   });
 }
 
-function renderCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta {
+function renderCompatHtmlButtonTypePropMeta(prop: KnownRequiredProp): PropertyMeta {
   const type = prop.required
     ? '"button" | "submit" | "reset"'
     : '"button" | "submit" | "reset" | undefined';
@@ -880,7 +895,7 @@ function renderCompatHtmlButtonTypePropMeta(prop: PropMeta): PropertyMeta {
 }
 
 function renderCompatStringBrandUnionPropMeta(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   arms: readonly TypeDescriptor[],
 ): PropertyMeta {
   const renderedArms = arms.map((arm) => ({
@@ -1120,7 +1135,7 @@ function normalizeTypeString(type: string): string {
 }
 
 function preferredCompatPropTypeText(
-  prop: PropMeta,
+  prop: KnownRequiredProp,
   typeRegistry?: Map<string, TypeDescriptor>,
 ): string {
   const descriptorText = normalizeOptionalCompatTypeText(
@@ -1896,7 +1911,7 @@ export function mapComponentMeta(
 ): VolarComponentMeta {
   return {
     type: 0,
-    props: meta.props.map((p) => mapPropMeta(p, options, typeRegistry)),
+    props: meta.props.filter(hasRequiredFact).map((p) => mapPropMeta(p, options, typeRegistry)),
     events: meta.events.map((e) => mapEventMeta(e, options, typeRegistry)),
     slots: meta.slots
       .filter((s) => isCompatVisibleSlot(s))
@@ -2313,15 +2328,12 @@ export async function createChecker(
   const normalizedAbsPath = runtimeResolvePath(tsconfigPath);
   const projectRoot = dirname(normalizedAbsPath);
   const workspace = createWorkspace(projectRoot);
-  const parsed = await parseTsconfig(normalizedAbsPath, workspace);
   const input: EngineKeyInput = {
     backend: "napi",
     root: runtimeNormalizePath(projectRoot),
     configKind: "tsconfig",
     tsconfigPath: runtimeNormalizePath(normalizedAbsPath),
-    configHash: stableSelectiveConfigHash(
-      parsed?.config ?? { tsconfigPath: runtimeNormalizePath(normalizedAbsPath) },
-    ),
+    configHash: hashTsconfigConfig(normalizedAbsPath),
     nativeFlags: {
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,
@@ -2345,10 +2357,10 @@ export async function createChecker(
       hostConfig,
       workspace,
     );
-    if (parsed) {
-      const aliases = extractPathAliases(parsed.config, runtimeNormalizePath(projectRoot));
-      workspace.configureProjects([aliases]);
-    }
+    // The native loader reads the tsconfig itself: compiler options and the
+    // `files` / `include` / `exclude` membership that orders the program's
+    // files.
+    workspace.configureProjects([tsconfigProjectConfig(normalizedAbsPath, projectRoot)]);
     return { nativeProject, baseFileIds: [] };
   };
   const engine = await runtime.getOrCreateEngine(input, bootstrap);
@@ -2410,7 +2422,7 @@ export async function createCheckerByJson(
     backend: "napi",
     root: runtimeNormalizePath(absRoot),
     configKind: "inline",
-    configHash: stableSelectiveConfigHash(config),
+    configHash: inlineConfigHash(config),
     nativeFlags: {
       analysisLevel: "full",
       auditEnabled: options?.logging?.audit ?? false,

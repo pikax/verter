@@ -25,7 +25,43 @@ use super::*;
 pub type ProduceHookForTests =
     Arc<dyn Fn(&SemanticQueryKey, &dyn Fn(SemanticQueryKey)) + Send + Sync>;
 
+/// Completion contents retained by an invalidated subscriber flight.
+#[derive(Clone, Copy)]
+pub enum ExhaustedJoinAbortForTests {
+    RetainCompletion,
+    OtherSentinel,
+}
+
+/// Restores the store's subscriber fault even when a test assertion fails.
+pub struct ExhaustedJoinAbortGuard<'s> {
+    store: &'s SemanticGraphStore,
+    previous: Option<(SemanticQueryKey, ExhaustedJoinAbortForTests)>,
+}
+
+impl Drop for ExhaustedJoinAbortGuard<'_> {
+    fn drop(&mut self) {
+        *self.store.exhausted_join_abort.lock() = self.previous.take();
+    }
+}
+
 impl SemanticGraphStore {
+    /// Abort a completed subscriber flight with its retry allowance exhausted.
+    /// The completion's delivery flags remain untouched, so tests exercise the
+    /// subscriber's own disposition rather than inheriting a producer refusal.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_exhausted_join_abort(
+        &self,
+        key: SemanticQueryKey,
+        completion: ExhaustedJoinAbortForTests,
+    ) -> ExhaustedJoinAbortGuard<'_> {
+        let previous = self.exhausted_join_abort.lock().replace((key, completion));
+        ExhaustedJoinAbortGuard {
+            store: self,
+            previous,
+        }
+    }
+
     /// Test-only: install `hook` to run whenever a dispatch's synchronous
     /// entry has claimed a key's producer and is about to build it — the
     /// point a test holds a producer at to let other tasks subscribe to it,
@@ -82,13 +118,13 @@ impl SemanticGraphStore {
             let mut state = inflight.state.lock();
             state.aborted = true;
             if state.completed.is_none() {
-                state.completed = Some(QueryResult::Error(QueryError::Other(Arc::from(
-                    "aborted by test_trigger_inflight_abort",
-                ))));
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted by test_trigger_inflight_abort"),
+                )));
                 state.dep_signature = Some(empty_signature());
             }
         }
-        inflight.ready.notify_all();
+        inflight.wake_subscribers();
         true
     }
 
@@ -136,6 +172,17 @@ impl SemanticGraphStore {
     pub fn test_joiner_on_condvar_count(&self) -> usize {
         self.joiner_on_condvar_count
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only work counter: how many candidates reverse-index reads
+    /// have inspected while registering unindexed candidates, so a test
+    /// can bound the registration work one read does.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn test_reverse_index_registration_visits(&self) -> usize {
+        self.reverse_index_registration_visits
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Test-only observability accessor: how many joiners forked away from
@@ -237,4 +284,14 @@ impl Drop for TestForceColdAbortGuard<'_> {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::SeqCst);
     }
+}
+
+/// The issuing graph for identity fixtures built from synthetic ordinals
+/// that no graph allocated. Such operands name no live node, so a record
+/// issued here owns nothing.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn synthetic_operand_graph() -> &'static SemanticGraphStore {
+    static GRAPH: std::sync::OnceLock<SemanticGraphStore> = std::sync::OnceLock::new();
+    GRAPH.get_or_init(SemanticGraphStore::default)
 }

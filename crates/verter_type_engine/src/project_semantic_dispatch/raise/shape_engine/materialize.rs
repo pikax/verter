@@ -38,7 +38,7 @@ use crate::semantic_query::{QueryError, SemanticNodeId};
 /// Purely positional — it names WHICH child slot the fold descended through,
 /// so a consumer can locate the degraded leaf inside the compat tree without
 /// re-parsing any spelling.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum MaterializePathSegment {
     UnionArm(u32),
     IntersectionArm(u32),
@@ -83,7 +83,7 @@ pub(crate) enum MaterializePathSegment {
 }
 
 /// Which slot of an object member carries the degraded leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum ObjectMemberSlot {
     /// Computed property / method key expression.
     Key,
@@ -96,7 +96,7 @@ pub(crate) enum ObjectMemberSlot {
 }
 
 /// Which slot of a type parameter carries the degraded leaf.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub(crate) enum TypeParameterSlot {
     Constraint,
     Default,
@@ -106,7 +106,7 @@ pub(crate) enum TypeParameterSlot {
 /// [`TypeExpr`]: the TYPED reason plus the positional path from the tree root.
 /// The reason is the ONLY control channel — the compat tree leaf at this
 /// position is inert [`UnknownValue`] text.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub struct DegradedLeaf {
     path: Arc<[MaterializePathSegment]>,
     reason: QueryError,
@@ -339,8 +339,19 @@ impl RaisedShapeAlgebra for MaterializeTypeExprAlg {
         // mapping). No raw-string classification reads it back.
         MaterializedTypeExpr::degraded(err.clone())
     }
-    fn recursive_ref(&mut self, name: Arc<str>) -> MaterializedTypeExpr {
-        MaterializedTypeExpr::exact(TypeExpr::recursive_ref(name.as_ref(), Vec::new()))
+    fn recursive_ref(
+        &mut self,
+        name: Arc<str>,
+        type_arguments: Vec<MaterializedTypeExpr>,
+    ) -> MaterializedTypeExpr {
+        fold_compound(
+            type_arguments
+                .into_iter()
+                .enumerate()
+                .map(|(i, arg)| (MaterializePathSegment::ReferenceArgument(i as u32), arg))
+                .collect(),
+            |exprs| TypeExpr::recursive_ref(name.as_ref(), exprs),
+        )
     }
     fn reference(
         &mut self,

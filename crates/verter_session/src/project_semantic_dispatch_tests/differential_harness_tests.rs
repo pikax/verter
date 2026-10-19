@@ -1,8 +1,9 @@
 //! The differential lane the `differential_*` tests compare against the
 //! checker: one host carrying the four `strictNullChecks` × `noImplicitAny`
 //! projects, a probe module upserted verbatim into each, and every row read
-//! back through the public audited flow-return boundary, reduced to the
-//! altitude the checker prints and spelled as the checker prints it.
+//! back through the public audited flow-return boundary for diagnostics and
+//! the producer's selected return-value fact, reduced and spelled as the
+//! checker prints it. Runtime capture completion remains a separate fact.
 //!
 //! A row is either a TYPE probe — answered as the return of a generated
 //! function whose body returns a local declared as the probe — or a
@@ -261,7 +262,7 @@ impl<'a> Matrix<'a> {
 
     /// One host carrying every setting's project with the probe module for
     /// `rows` (and the library and sibling files) upserted into it.
-    fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
+    pub(super) fn host(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Arc<VerterHost> {
         let host = Arc::new(matrix_host(self.settings));
         let module = self.module(rows);
         for (index, setting) in self.settings.iter().enumerate() {
@@ -324,7 +325,9 @@ impl<'a> Matrix<'a> {
                         verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
                         0,
                     ),
-                    normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+                    normalized_type_args: verter_type_expr::OwnedSlice::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
                     context: dispatch.flow_return_context_for(&canonical),
                     demand: ReturnProjectionDemand::whole_return(),
                     input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -333,15 +336,59 @@ impl<'a> Matrix<'a> {
                 let read = dispatch.execute_read(
                     verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
                 );
-                if read.result_is_partial {
+                if read.result_is_partial() {
                     unproven.push(format!(
                         "`{function}` [{}]: its proof does not close ({:?})",
-                        setting.label, read.partial_reasons
+                        setting.label,
+                        read.partial_reasons()
                     ));
                 }
             }
         }
         unproven
+    }
+
+    pub(super) fn return_relation_work(&self, function: &str) -> (u64, usize, usize) {
+        let host = self.host(&[]);
+        let canonical = format!("{}/probe.ts", self.settings[0].root);
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let key = verter_type_engine::semantic_query::FlowReturnKey {
+            function: dispatch.flow_function_slot_for(
+                Arc::from(canonical.as_str()),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                Arc::from(function),
+                verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+                0,
+            ),
+            normalized_type_args: verter_type_expr::OwnedSlice::from([]),
+            context: dispatch.flow_return_context_for(&canonical),
+            demand: ReturnProjectionDemand::whole_return(),
+            input: verter_type_engine::semantic_query::FlowInputContext::empty(),
+            result_contract: super::flow_solve::flow_return_result_contract_id(),
+        };
+        let before = dispatch.graph().stats_snapshot().relation_check_count;
+        let argument_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests();
+        let binding_before =
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests();
+        let result = dispatch.execute_read(
+            verter_type_engine::semantic_query::SemanticQueryKey::FlowReturn(Box::new(key)),
+        );
+        assert!(
+            !result.result_is_partial(),
+            "{function}: {:?}",
+            result.partial_reasons()
+        );
+        (
+            dispatch.graph().stats_snapshot().relation_check_count - before,
+            verter_type_engine::project_semantic_dispatch::call_resolve::argument_work_for_tests()
+                - argument_before,
+            verter_type_engine::project_semantic_dispatch::call_resolve::binding_work_for_tests()
+                - binding_before,
+        )
     }
 
     /// Each row's verdict in each setting, in row then setting order.
@@ -685,9 +732,9 @@ mod thread_cpu {
 fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (Observed, Vec<u32>) {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -711,12 +758,25 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let _demand_scope = scoped.then(|| {
         super::LexicalDemandScopeGuard::push(&dispatch.lexical_demand_scope, Arc::from(canonical))
     });
+    let value_fact =
+        match dispatch.execute_flow_return_value_fact(dispatch.flow_return_key_for(&identity)) {
+            Ok(fact) => fact,
+            Err(abort) => return (Observed::NoValue(format!("{abort:?}")), diagnostics),
+        };
+    let value = match &value_fact {
+        verter_type_engine::semantic_query::FactResult::Complete(value)
+        | verter_type_engine::semantic_query::FactResult::Approximate { value, .. } => *value,
+        verter_type_engine::semantic_query::FactResult::Unavailable { .. } => {
+            return (Observed::Partial, diagnostics);
+        }
+    };
     let Some(node) = dispatch
         .normalize_node_keeping_declaration_refs_for_tests(
-            result.return_type(),
+            value,
             ProjectionReductionContext::published(ProjectionMode::Expanded),
         )
         .into_complete_node()
@@ -725,7 +785,8 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     };
     let text = print(&dispatch, node, 0);
     let observed = match result.degradation() {
-        None => Observed::Clean(text),
+        None if value_fact.status().is_complete() => Observed::Clean(text),
+        None => Observed::Degraded(text, format!("{:?}", value_fact.status())),
         Some(degradation) => Observed::Degraded(text, format!("{degradation:?}")),
     };
     (observed, diagnostics)
@@ -737,7 +798,7 @@ fn print(
     node: SemanticNodeId,
     depth: usize,
 ) -> String {
-    if depth > 12 {
+    if depth > 64 {
         return "<unrendered deep>".to_owned();
     }
     let graph = dispatch.graph();
@@ -798,28 +859,28 @@ fn print(
         // An object type with one call signature and nothing else prints as
         // that signature's function type.
         SemanticNodeData::Object(surface)
-            if surface.call_signatures.len() == 1
-                && surface.construct_signatures.is_empty()
-                && surface.index_signatures.is_empty()
+            if surface.call_signatures().len() == 1
+                && surface.construct_signatures().is_empty()
+                && surface.index_signatures().is_empty()
                 && surface.positive_members().is_empty() =>
         {
-            signature_text(dispatch, surface.call_signatures[0], depth, " => ")
+            signature_text(dispatch, surface.call_signatures()[0], depth, " => ")
         }
         SemanticNodeData::Object(surface) => {
             let mut members: Vec<String> = Vec::new();
-            for signature in surface.call_signatures.iter() {
+            for signature in surface.call_signatures().iter() {
                 members.push(format!(
                     "{};",
                     signature_text(dispatch, *signature, depth, ": ")
                 ));
             }
-            for signature in surface.construct_signatures.iter() {
+            for signature in surface.construct_signatures().iter() {
                 members.push(format!(
                     "{};",
                     signature_text(dispatch, *signature, depth, ": ")
                 ));
             }
-            for index in surface.index_signatures.iter() {
+            for index in surface.index_signatures().iter() {
                 members.push(format!(
                     "{}[x: {}]: {};",
                     if index.readonly { "readonly " } else { "" },

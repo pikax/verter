@@ -17,8 +17,6 @@
 //! honest source degrades to the typed Unknown leaf — never a fabricated
 //! locator minted from a node.
 
-use std::sync::Arc;
-
 use verter_session_query::analysis::type_expand::{
     ExpandedCallSignature, ExpandedIndexSignature, ExpandedObjectShape, ExpandedParameter,
     ExpandedProperty,
@@ -34,7 +32,7 @@ use verter_type_expr::TypeExpr;
 
 use super::ComponentMetaQueryEngine;
 use verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext;
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 
 use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
@@ -87,7 +85,7 @@ impl ComponentMetaQueryEngine<'_> {
             scope_owner,
             &named,
         )?;
-        let view = self.dispatch.resolve_typeinfo_surface_view(
+        let view = self.dispatch.resolve_typeinfo_surface(
             node.node(),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -122,6 +120,7 @@ impl ComponentMetaQueryEngine<'_> {
     ) -> Option<ExpandedObjectShape> {
         let dispatch = self.dispatch;
         let raised = dispatch
+            .owning()
             .raise_semantic_type_source_to_hot(
                 tag_source,
                 SourceRaiseContext {
@@ -133,8 +132,9 @@ impl ComponentMetaQueryEngine<'_> {
                     interior_failures: None,
                 },
             )
+            .into_value_in(self.builder())
             .at_optional_boundary()?;
-        let view = dispatch.resolve_typeinfo_surface_view(
+        let view = dispatch.resolve_typeinfo_surface(
             raised.node(),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
@@ -168,7 +168,7 @@ impl ComponentMetaQueryEngine<'_> {
         let parent = self.intrinsic_root_parent_source(scope_canonical_id, scope_owner, type_name);
 
         let dispatch = self.dispatch;
-        let view = dispatch.resolve_typeinfo_surface_view(
+        let view = dispatch.resolve_typeinfo_surface(
             node,
             ProjectionReductionContext::published(ProjectionMode::Shallow),
         )?;
@@ -203,12 +203,14 @@ impl ComponentMetaQueryEngine<'_> {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
             TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(declaration.canonical_source.as_str()),
+                    canonical_id: verter_type_expr::OwnedStr::from(
+                        declaration.canonical_source.as_str(),
+                    ),
                     owner: declaration.owner,
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::default(),
             },
         )))
     }
@@ -279,9 +281,9 @@ fn expanded_shape_from_surface_view(
     // object-shape extraction (the established round-trip convention). A
     // signature node that is not `Function`-shaped contributes nothing.
     let call_signatures = surface
-        .call_signatures
+        .call_signatures()
         .iter()
-        .chain(surface.construct_signatures.iter())
+        .chain(surface.construct_signatures().iter())
         .filter_map(|signature| expanded_call_signature_from_node(dispatch, *signature))
         .collect::<Vec<_>>();
 
@@ -291,7 +293,7 @@ fn expanded_shape_from_surface_view(
     // never a failure state.
     let mut index_signatures =
         surface
-            .index_signatures
+            .index_signatures()
             .iter()
             .map(|signature| ExpandedIndexSignature {
                 key_type: verter_type_expr::facts::SourcePosition::Present(
@@ -305,7 +307,7 @@ fn expanded_shape_from_surface_view(
             .collect::<Vec<_>>();
     // Genuinely-open surface (flag set, no concrete payload) → open placeholder
     // (string keyspace, typed-degraded value).
-    if surface.has_known_index_signature() && surface.index_signatures.is_empty() {
+    if surface.has_known_index_signature() && surface.index_signatures().is_empty() {
         index_signatures.push(ExpandedIndexSignature {
             key_type: verter_type_expr::facts::SourcePosition::Present(SemanticTypeSource::Closed(
                 ClosedTypeFact::Leaf(LeafTypeFact::Primitive(
@@ -318,6 +320,7 @@ fn expanded_shape_from_surface_view(
     }
 
     ExpandedObjectShape {
+        domain_guarantee: None,
         properties,
         index_signatures,
         call_signatures,
@@ -342,7 +345,7 @@ fn member_value_source(
     if let Some(leaf) = dispatch.node_leaf_fact(value) {
         return SemanticTypeSource::Closed(ClosedTypeFact::Leaf(leaf));
     }
-    let key = || FactPropertyKey::String(Arc::from(name));
+    let key = || FactPropertyKey::String(verter_type_expr::OwnedStr::from(name));
     let (base, mut path) = match parent {
         Some(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(slot))) => {
             (AuthoredBodyLocator::DeclBody(slot.clone()), Vec::new())
@@ -351,7 +354,7 @@ fn member_value_source(
             AuthoredBodyLocator::DeclBody(fact.object.clone()),
             fact.index_path
                 .iter()
-                .map(|hop| FactPropertyKey::String(Arc::from(hop.as_str())))
+                .map(|hop| FactPropertyKey::String(verter_type_expr::OwnedStr::from(hop.as_str())))
                 .collect(),
         ),
         Some(SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath { base, path })) => {
@@ -362,7 +365,7 @@ fn member_value_source(
     path.push(key());
     SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
         base,
-        path: Arc::from(path.into_boxed_slice()),
+        path: From::from(path.into_boxed_slice()),
     })
 }
 
@@ -376,7 +379,7 @@ fn expanded_call_signature_from_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Option<ExpandedCallSignature> {
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::Signature {
         params,
         return_type,
@@ -401,7 +404,7 @@ fn expanded_call_signature_from_node(
             })
             .collect(),
         return_type: leaf_or_degraded_source(dispatch, *return_type),
-        type_parameters: Arc::from(
+        type_parameters: From::from(
             type_parameters
                 .iter()
                 .enumerate()

@@ -19,6 +19,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
+use verter_session_query::declarations::module_exports::ModuleExportBinding;
 
 use super::build::AmbientModuleBlock;
 use super::ProjectSemanticDispatch;
@@ -40,12 +41,12 @@ fn file_root(
 ) -> ValueRootKey {
     ValueRootKey {
         scope: crate::semantic_query::ScopeId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             local_scope: None,
             binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -85,13 +86,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 .whole_hash;
                             let mut object =
                                 self.assigned_module_object(&assigned, None, interop, context)?;
-                            push_root(&mut object.1, (Arc::from(dependency.as_str()), hash));
+                            push_root(
+                                &mut object.1,
+                                (verter_type_expr::OwnedStr::from(dependency.as_str()), hash),
+                            );
                             Some(object)
                         }
                         None => self.file_module_object(&dependency, context),
                     },
                     None => {
-                        let blocks = self.ambient_module_blocks(&target.source_specifier);
+                        let blocks =
+                            self.ambient_module_blocks(canonical, &target.source_specifier);
                         match blocks
                             .iter()
                             .find(|block| block.export_assignment.is_some())
@@ -143,85 +148,103 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         module: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
+        // Eager import-type lowering also enters here, outside a query.
+        // Join an existing demand so nested reads keep its budget and trips.
+        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+        if let Some(reasons) = initial_trip {
+            self.fold_local_partial_completeness(reasons);
+            return None;
+        }
         let indexed = self.ctx.ensure_indexed_ready_serve(module)?.indexed;
-        let mut roots: Vec<ObservedGraphSelfRoot> = vec![(Arc::from(module), indexed.whole_hash)];
-        let mut names: Vec<String> = Vec::new();
-        let mut visited: FxHashSet<String> = FxHashSet::default();
-        visited.insert(module.to_owned());
-        self.collect_module_export_names(module, true, &mut names, &mut visited, &mut roots);
-        names.sort();
-        names.dedup();
-        let mut members = Vec::with_capacity(names.len());
-        for name in names {
-            let (resolved, route_facts) = self
-                .ctx
-                .resolve_imported_type_root_with_facts(module, &name);
-            self.ctx.observe_borrowed_signature(&route_facts);
-            let root = match resolved {
-                Some(identity) => file_root(
-                    identity.canonical_id.as_ref(),
-                    identity.owner,
-                    identity.symbol_name.as_ref(),
-                ),
-                None => file_root(
-                    module,
-                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    &name,
-                ),
+        let table = self.ctx.module_export_table(module)?;
+        self.ctx.observe_borrowed_signature(&table.facts);
+        let mut roots = Vec::new();
+        let mut seen = FxHashSet::default();
+        let mut walk = verter_session_query::facts::fact_cache::ReceiptWalk::default();
+        let mut observe = |fact: &verter_session_query::facts::fact_cache::FactVersionRef| {
+            match fact {
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id,
+                    hash,
+                } if seen.insert((canonical_id.clone(), *hash)) => {
+                    roots.push((
+                        verter_type_expr::OwnedStr::from(canonical_id.as_str()),
+                        *hash,
+                    ));
+                }
+                _ => {}
+            }
+            true
+        };
+        for fact in table.facts.iter() {
+            match fact {
+                verter_session_query::facts::fact_cache::FactVersionRef::Receipt(receipt) => {
+                    walk.leaves(receipt, &mut observe);
+                }
+                fact => {
+                    observe(fact);
+                }
+            }
+        }
+        let (bindings, ordering_work) = table.ordered_bindings();
+        if let Err(reasons) = self.connected_demand().charge_units(ordering_work) {
+            self.fold_local_partial_completeness(reasons);
+            return None;
+        }
+        let mut members = Vec::with_capacity(bindings.len());
+        for (name, binding) in bindings {
+            let node = match binding {
+                Some(ModuleExportBinding::Value(identity)) => {
+                    let root = file_root(
+                        identity.canonical_id.as_ref(),
+                        identity.owner,
+                        identity.symbol_name.as_ref(),
+                    );
+                    match self.execute_read(self.typeof_key_for(root, context)).value {
+                        QueryResult::Value(node)
+                            if !matches!(
+                                self.graph().node_data(node).as_deref(),
+                                Some(SemanticNodeData::Opaque(_)) | None
+                            ) =>
+                        {
+                            node
+                        }
+                        _ => continue,
+                    }
+                }
+                Some(ModuleExportBinding::Namespace(dependency)) => {
+                    self.graph().intern_node_with_scope(
+                        SemanticNodeData::new_import_type(
+                            dependency.clone(),
+                            verter_type_expr::OwnedSlice::from([]),
+                            Arc::from([]),
+                            true,
+                        ),
+                        NodeScopeId::File {
+                            canonical_id: verter_type_expr::OwnedStr::from(module),
+                            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                            whole_hash: indexed.whole_hash,
+                            local_scope: None,
+                        },
+                    )
+                }
+                None => continue,
             };
-            members.push((Arc::from(name.as_str()), root));
+            members.push(Self::module_member(name.clone(), node, module));
         }
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(module),
+            canonical_id: verter_type_expr::OwnedStr::from(module),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        Some((self.value_object(members, scope, module, context), roots))
-    }
-
-    /// The export names of `module`: its own exports (`default` among them
-    /// only when `own`), then the names each `export * from` target exports.
-    fn collect_module_export_names(
-        &self,
-        module: &str,
-        own: bool,
-        names: &mut Vec<String>,
-        visited: &mut FxHashSet<String>,
-        roots: &mut Vec<ObservedGraphSelfRoot>,
-    ) {
-        use verter_session_query::inputs::shallow::ExportTarget;
-        let Some(indexed) = self
-            .ctx
-            .ensure_indexed_ready_serve(module)
-            .map(|serve| serve.indexed)
-        else {
-            return;
-        };
-        push_root(roots, (Arc::from(module), indexed.whole_hash));
-        let shallow = &indexed.shallow_state;
-        for (name, target) in &shallow.exports {
-            let type_only = matches!(target, ExportTarget::Reexport { is_type: true, .. });
-            if type_only || (!own && name == "default") {
-                continue;
-            }
-            names.push(name.clone());
-        }
-        let ordinary = verter_type_expr::TopLevelOwnerId::ordinary_file();
-        for wildcard in &shallow.wildcard_reexports {
-            if wildcard.owner != ordinary {
-                continue;
-            }
-            let Some(source) = self
-                .ctx
-                .resolve_type_dependency_canonical(module, &wildcard.source_specifier)
-            else {
-                continue;
-            };
-            if visited.insert(source.clone()) {
-                self.collect_module_export_names(&source, false, names, visited, roots);
-            }
-        }
+        Some((
+            self.graph().intern_node_with_scope(
+                SemanticNodeData::Object(SurfaceView::from_members(members, None)),
+                scope,
+            ),
+            roots,
+        ))
     }
 
     /// The object an ambient module's `declare module` blocks declare: the
@@ -246,7 +269,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             push_root(
                 &mut roots,
-                (Arc::clone(&block.canonical), indexed.whole_hash),
+                (
+                    verter_type_expr::OwnedStr::from(block.canonical.clone()),
+                    indexed.whole_hash,
+                ),
             );
             let shallow = &indexed.shallow_state;
             let headers = &shallow.headers;
@@ -274,7 +300,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .indexed
             .whole_hash;
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&first.canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first.canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
@@ -314,21 +340,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         && entry.module_kind == FileModuleKind::Script
                 })
                 .collect();
-        declarations.sort_by(|left, right| {
-            self.ctx
-                .declaration_sequence_rank(left.artifact_key.canonical.as_ref())
-                .cmp(
-                    &self
-                        .ctx
-                        .declaration_sequence_rank(right.artifact_key.canonical.as_ref()),
-                )
-                .then_with(|| {
-                    left.artifact_key
-                        .canonical
-                        .as_ref()
-                        .cmp(right.artifact_key.canonical.as_ref())
-                })
-        });
+        self.sort_in_program_order(
+            demand_canonical,
+            &mut declarations,
+            |entry| entry.artifact_key.canonical.as_ref(),
+            |_, _| std::cmp::Ordering::Equal,
+        );
         let first = declarations.first()?;
         let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
         let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
@@ -343,7 +360,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             else {
                 continue;
             };
-            push_root(&mut roots, (Arc::from(canonical), indexed.whole_hash));
+            push_root(
+                &mut roots,
+                (
+                    verter_type_expr::OwnedStr::from(canonical),
+                    indexed.whole_hash,
+                ),
+            );
             let headers = &indexed.shallow_state.headers;
             instantiated |= headers.namespace_is_instantiated(None, entry.owner, name);
             for member in headers.namespace_value_members(None, entry.owner, Some(name)) {
@@ -367,7 +390,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .indexed
             .whole_hash;
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&first_canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(first_canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
@@ -408,14 +431,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             })
             .collect();
         let node_scope = NodeScopeId::File {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
         Some((
             self.value_object(members, node_scope, canonical, context),
-            vec![(Arc::from(canonical), indexed.whole_hash)],
+            vec![(
+                verter_type_expr::OwnedStr::from(canonical),
+                indexed.whole_hash,
+            )],
         ))
     }
 
@@ -432,7 +458,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<ModuleObject> {
         let canonical = assigned.scope.canonical_id.as_ref();
         let indexed = self.ctx.ensure_indexed_ready_serve(canonical)?.indexed;
-        let roots = vec![(Arc::clone(&assigned.scope.canonical_id), indexed.whole_hash)];
+        let roots = vec![(assigned.scope.canonical_id.clone(), indexed.whole_hash)];
         let whole = match self
             .execute_read(self.typeof_key_for(assigned.clone(), context))
             .value
@@ -452,7 +478,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     crate::semantic_query::ProjectionMode::Shallow,
                 ),
             )
-            .map(|surface| surface.positive_members().to_vec())
+            .map(|surface| {
+                surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
         let headers = &indexed.shallow_state.headers;
         let merged: Vec<(Arc<str>, ValueRootKey)> = headers
@@ -478,7 +510,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         members.sort_by(|left, right| left.key.as_string().cmp(&right.key.as_string()));
         let node_scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&assigned.scope.canonical_id),
+            canonical_id: assigned.scope.canonical_id.clone(),
             owner: assigned.scope.owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
@@ -534,7 +566,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Each named root's `typeof`; a root with no value (a type-only
     /// export) is no member.
-    fn typeof_members(
+    pub(super) fn typeof_members(
         &self,
         members: Vec<(Arc<str>, ValueRootKey)>,
         context: crate::semantic_query::ProjectionReductionContext,
@@ -542,6 +574,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         members
             .into_iter()
             .filter_map(|(name, root)| {
+                // The retained lexical inventory proves a type-only export
+                // has no value. Do not dispatch a failed value probe for it.
+                if self
+                    .ctx
+                    .shallow_file_state(root.scope.canonical_id.as_ref())
+                    .is_some_and(|state| {
+                        state
+                            .visible_local_type_owner(root.scope.owner, root.name.as_ref())
+                            .is_some()
+                            && state
+                                .visible_value_binding(root.scope.owner, root.name.as_ref())
+                                .is_none()
+                            && !state.headers.namespace_blocks.iter().any(|block| {
+                                block.owner == root.scope.owner
+                                    && block.qualified_name == root.name.as_ref()
+                            })
+                    })
+                {
+                    return None;
+                }
                 let node = match self.execute_read(self.typeof_key_for(root, context)).value {
                     QueryResult::Value(node) => node,
                     _ => return None,
@@ -575,9 +627,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         )
     }
 
-    fn module_member(name: Arc<str>, value: SemanticNodeId, origin: &str) -> SurfaceMember {
+    pub(super) fn module_member(
+        name: impl Into<verter_type_expr::OwnedStr>,
+        value: SemanticNodeId,
+        origin: &str,
+    ) -> SurfaceMember {
         SurfaceMember {
-            key: crate::semantic_query::AuthoredPropertyKey::String(name),
+            key: crate::semantic_query::AuthoredPropertyKey::String(name.into()),
             value,
             optional: false,
             readonly: false,
@@ -589,7 +645,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // It has no one declaration site; its declaration lives in the
             // module.
             spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: Some(Arc::from(origin)),
+            declaration_origin: Some(verter_type_expr::OwnedStr::from(origin)),
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
         }

@@ -893,6 +893,49 @@ impl ResolveCallSelection {
         dispatch: &super::ProjectSemanticDispatch<'_, C>,
         return_type: SemanticNodeId,
     ) -> ResolvedCallResult {
+        // A source-owned return is inferred in its declaration environment.
+        // Apply the selected signature's actual header images only after
+        // the existing return equation has produced its value.
+        let return_type = match self {
+            Self::Selected {
+                selected_signature: SelectedSignature::General(node),
+                ..
+            } => match dispatch.graph().node_data(*node).as_deref() {
+                Some(crate::semantic_query::SemanticNodeData::Signature {
+                    return_carrier:
+                        crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source),
+                    ..
+                }) => source.apply_result(dispatch, return_type),
+                Some(crate::semantic_query::SemanticNodeData::Signature {
+                    return_carrier, ..
+                }) => return_carrier
+                    .owned_flow_source()
+                    .map_or(return_type, |source| {
+                        source.apply_result(dispatch, return_type)
+                    }),
+                Some(crate::semantic_query::SemanticNodeData::DeferredCallable(callable)) => {
+                    callable
+                        .parts(&crate::semantic_query::ResolveCallConsumer::witness())
+                        .return_carrier
+                        .owned_flow_source()
+                        .map_or(return_type, |source| {
+                            source.apply_result(dispatch, return_type)
+                        })
+                }
+                _ => return_type,
+            },
+            Self::Selected {
+                selected_signature: SelectedSignature::Deferred(callable),
+                ..
+            } => callable
+                .parts(&crate::semantic_query::ResolveCallConsumer::witness())
+                .return_carrier
+                .owned_flow_source()
+                .map_or(return_type, |source| {
+                    source.apply_result(dispatch, return_type)
+                }),
+            _ => return_type,
+        };
         match self {
             Self::Selected {
                 selected,
@@ -910,7 +953,7 @@ impl ResolveCallSelection {
                 },
                 substitution: substitution.clone(),
                 return_type,
-                fresh_literal_returns: std::sync::Arc::from(fresh_literal_returns.as_slice()),
+                fresh_literal_returns: fresh_literal_returns.clone().into(),
                 recovery_diagnostic: *recovery_diagnostic,
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
@@ -1578,12 +1621,56 @@ pub mod flow_obligation_state {
     #[derive(Debug)]
     pub(super) struct InstalledFlowDemand {
         basis: FlowDemandBasis,
+        /// One record per planned spec, in plan order: the record of
+        /// obligation `id` sits at index `id.0` (see [`record_of`]).
         obligations: Vec<FlowObligationRecord>,
+        /// How many records are still `Pending` or `Running` — maintained by
+        /// every state write, so closing the expansion frontier is a
+        /// constant-time check instead of a scan per transition.
+        open: usize,
         convergence: FlowConvergenceObservation,
         phase: FlowDemandPhase,
     }
 
+    /// Whether `state` keeps the expansion frontier open.
+    fn is_open(state: &ObligationState) -> bool {
+        matches!(state, ObligationState::Pending | ObligationState::Running)
+    }
+
+    /// The record of obligation `id` in an installed demand's records.
+    /// The planner mints obligation ids densely in spec order and the
+    /// runtime installs one record per spec in that order, so the record
+    /// of `id` is the one at index `id.0`; a record whose spec carries a
+    /// different id there is not this obligation, and the lookup fails
+    /// closed rather than scanning.
+    pub fn record_of(
+        records: &[FlowObligationRecord],
+        id: FlowObligationId,
+    ) -> Option<&FlowObligationRecord> {
+        records
+            .get(id.0 as usize)
+            .filter(|record| record.spec.id == id)
+    }
+
     impl InstalledFlowDemand {
+        fn new(
+            basis: FlowDemandBasis,
+            obligations: Vec<FlowObligationRecord>,
+            convergence: FlowConvergenceObservation,
+            phase: FlowDemandPhase,
+        ) -> Self {
+            let open = obligations
+                .iter()
+                .filter(|record| is_open(&record.state))
+                .count();
+            Self {
+                basis,
+                obligations,
+                open,
+                convergence,
+                phase,
+            }
+        }
         /// The phase gate for obligation transitions: once convergence has
         /// begun (or the demand is sealed), no obligation expansion or
         /// transition is legal.
@@ -1599,31 +1686,34 @@ pub mod flow_obligation_state {
             &self,
             id: FlowObligationId,
         ) -> Result<&FlowObligationRecord, FlowTransitionError> {
-            self.obligations
-                .iter()
-                .find(|r| r.spec.id == id)
-                .ok_or(FlowTransitionError::UnknownObligation)
+            record_of(&self.obligations, id).ok_or(FlowTransitionError::UnknownObligation)
         }
-        fn record_mut(
+        /// Replace obligation `id`'s state, keeping the open count exact,
+        /// and close the expansion frontier when nothing is left open.
+        fn set_state(
             &mut self,
             id: FlowObligationId,
-        ) -> Result<&mut FlowObligationRecord, FlowTransitionError> {
-            self.obligations
-                .iter_mut()
-                .find(|r| r.spec.id == id)
-                .ok_or(FlowTransitionError::UnknownObligation)
+            state: ObligationState,
+        ) -> Result<(), FlowTransitionError> {
+            self.record(id)?;
+            let record = &mut self.obligations[id.0 as usize];
+            let was_open = is_open(&record.state);
+            let now_open = is_open(&state);
+            record.state = state;
+            match (was_open, now_open) {
+                (true, false) => self.open -= 1,
+                (false, true) => self.open += 1,
+                _ => {}
+            }
+            self.refresh_expansion_closure();
+            Ok(())
         }
         /// Advance `Discharging` → `ExpansionClosed` once every obligation
         /// is terminal (the expansion frontier is closed).
         fn refresh_expansion_closure(&mut self) {
             if self.phase == FlowDemandPhase::Discharging
                 && !self.obligations.is_empty()
-                && self.obligations.iter().all(|record| {
-                    !matches!(
-                        record.state,
-                        ObligationState::Pending | ObligationState::Running
-                    )
-                })
+                && self.open == 0
             {
                 self.phase = FlowDemandPhase::ExpansionClosed;
             }
@@ -1813,7 +1903,7 @@ pub mod flow_obligation_state {
                 };
                 records.push(FlowObligationRecord { spec: spec.clone(), state });
             }
-            let phase = if !records.is_empty() && records.iter().all(|record| !matches!(record.state, ObligationState::Pending | ObligationState::Running)) {
+            let phase = if !records.is_empty() && records.iter().all(|record| !is_open(&record.state)) {
                 FlowDemandPhase::ExpansionClosed
             } else {
                 FlowDemandPhase::Discharging
@@ -1822,12 +1912,12 @@ pub mod flow_obligation_state {
                 index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
                 identity: self.instance_identity,
             };
-            self.flow_demands.push(InstalledFlowDemand {
-                basis: plan.basis().clone(),
-                obligations: records,
-                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+            self.flow_demands.push(InstalledFlowDemand::new(
+                plan.basis().clone(),
+                records,
+                FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
                 phase,
-            });
+            ));
             handle
         }
 
@@ -1845,12 +1935,12 @@ pub mod flow_obligation_state {
                 index: u32::try_from(self.flow_demands.len()).unwrap_or(u32::MAX),
                 identity: self.instance_identity,
             };
-            self.flow_demands.push(InstalledFlowDemand {
-                basis: plan.basis().clone(),
-                obligations: Vec::new(),
-                convergence: FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
-                phase: FlowDemandPhase::Discharging,
-            });
+            self.flow_demands.push(InstalledFlowDemand::new(
+                plan.basis().clone(),
+                Vec::new(),
+                FlowConvergenceObservation { policy: plan.convergence(), iterations: 0, stable: false },
+                FlowDemandPhase::Discharging,
+            ));
             handle
         }
 
@@ -1908,10 +1998,7 @@ pub mod flow_obligation_state {
                 ancestry: basis.ancestry,
                 dependencies, suboperations,
             };
-            let demand = &mut self.flow_demands[index];
-            demand.record_mut(id)?.state = ObligationState::Discharged(evidence);
-            demand.refresh_expansion_closure();
-            Ok(())
+            self.flow_demands[index].set_state(id, ObligationState::Discharged(evidence))
         }
         /// Transition Pending|Running → Gap. Test surface: production
         /// gaps install at plan-install time, never mid-solve.
@@ -2080,11 +2167,8 @@ pub mod flow_obligation_state {
         fn transition(&mut self, handle: FlowDemandHandle, id: FlowObligationId, next: impl FnOnce(&ObligationState) -> Option<ObligationState>) -> Result<(), FlowTransitionError> {
             let Some(demand) = self.flow_demand_mut(handle) else { return Err(FlowTransitionError::NoDemandInstalled) };
             demand.ensure_obligations_mutable()?;
-            let record = demand.record_mut(id)?;
-            let Some(state) = next(&record.state) else { return Err(FlowTransitionError::IllegalTransition) };
-            record.state = state;
-            demand.refresh_expansion_closure();
-            Ok(())
+            let Some(state) = next(&demand.record(id)?.state) else { return Err(FlowTransitionError::IllegalTransition) };
+            demand.set_state(id, state)
         }
     }
 }
@@ -2167,6 +2251,22 @@ pub struct CompletedSccMember {
     pub(crate) inline_flight: Option<InlineMemberFlight>,
 }
 
+impl CompletedSccMember {
+    /// Own the member's decided payload in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::Relation(self.payload.clone()),
+                ),
+            );
+        }
+        self
+    }
+}
+
 impl RelationDomainRuntime {
     /// The session `id`. Sessions are appended in the order their ids are
     /// allocated and never reordered, so the stack is sorted by id and a
@@ -2188,6 +2288,44 @@ impl RelationDomainRuntime {
         self.sessions
             .binary_search_by_key(&id, |session| session.id)
             .ok()
+    }
+
+    /// The first stack position a session must hold to be visible: the
+    /// newest binding-disabled barrier, or the bottom of the stack.
+    fn visible_floor(&self) -> usize {
+        self.binding_disabled_session_barriers
+            .last()
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The stack positions of the visible collecting sessions, innermost
+    /// first.
+    fn visible_collecting_positions(&self) -> impl Iterator<Item = usize> + '_ {
+        let floor = self.visible_floor();
+        self.collecting_ids
+            .iter()
+            .rev()
+            .filter_map(|&id| self.session_position(id))
+            .take_while(move |&position| position >= floor)
+            .filter(|&position| self.sessions[position].state == InferenceSessionState::Collecting)
+    }
+
+    /// Drop the finished sessions from the top of the collecting ids. A
+    /// session never returns to collecting once it leaves it; one absent
+    /// from the stack (a contextual collector suspended while its candidate
+    /// relates) is kept, so it is searched again once it returns.
+    fn prune_finished_collecting(&mut self) {
+        while let Some(&id) = self.collecting_ids.last() {
+            match self.session_position(id) {
+                Some(position)
+                    if self.sessions[position].state != InferenceSessionState::Collecting =>
+                {
+                    self.collecting_ids.pop();
+                }
+                _ => break,
+            }
+        }
     }
 }
 
@@ -2225,6 +2363,13 @@ pub struct RelationDomainRuntime {
     /// newest length watermark are inactive; a genuinely nested call may push
     /// a fresh session above it and infer normally.
     binding_disabled_session_barriers: Vec<usize>,
+    /// The ids of the sessions that may still be collecting, in id order:
+    /// every session opened, less the finished ones found on top. Finished
+    /// sessions stay on [`Self::sessions`] for the rest of the transaction,
+    /// so finding the innermost collecting session by scanning that stack
+    /// costs every session the transaction ever opened; this keeps the
+    /// search to the open ones.
+    collecting_ids: Vec<SessionId>,
     /// Literal interpretation for the current call argument relation. Empty
     /// outside call-owned collection, so ordinary relation inference is
     /// unchanged.
@@ -2300,6 +2445,26 @@ pub struct CompletedFlowReturnMember {
     /// The materialised point set the member's compute ACTUALLY produced
     /// (§3.4) — carried to the fenced member publish.
     pub(crate) materialized: crate::semantic_query::demand::MaterializedSet,
+}
+
+impl CompletedFlowReturnMember {
+    /// Own the member's proven value in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::FlowReturn(
+                        verter_session_query::retention::owned::Owned::new(
+                            self.result.value().clone(),
+                        ),
+                    ),
+                ),
+            );
+        }
+        self
+    }
 }
 
 /// What reusing a completed flow result replays at the demanding site: the
@@ -2396,12 +2561,41 @@ pub struct CompletedResolveCallMember {
     pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
 }
 
+impl CompletedResolveCallMember {
+    /// Own the member's admitted result in its inline flight until the
+    /// batched publish stages it.
+    pub(crate) fn held(mut self, graph: &crate::semantic_query_memo::SemanticGraphStore) -> Self {
+        if let Some(flight) = self.inline_flight.as_mut() {
+            flight.hold_value(
+                graph,
+                &crate::semantic_query::QueryResult::Value(
+                    crate::semantic_query::SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(
+                            self.result.get().clone(),
+                        ),
+                    ),
+                ),
+            );
+        }
+        self
+    }
+}
+
 /// The flow-return domain runtime: the completed flow members queued
 /// for the relation root's batched publish. Contributor maps ride the
 /// in-flight frames and the tagged pending ledger (a popped member's
 /// decided outcome is final at pop — same-slot recursive edges are
 /// coinductive holds, never unresolved failures), so the domain owns
 /// no parallel contributor ledger.
+#[derive(Debug, Clone)]
+pub(crate) struct ClosedFlowValue {
+    pub(crate) key: FlowReturnKey,
+    pub(crate) value: FlowReturnResult,
+    pub(crate) proof: Option<super::flow_solve::CompleteFlowResult>,
+    pub(crate) self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    pub(crate) cache_suppress: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct FlowReturnDomainRuntime {
     /// SCC-closed flow members queued for the root's batched publish
@@ -2414,7 +2608,7 @@ pub struct FlowReturnDomainRuntime {
     /// targets outside the solving component (never the store). This is a
     /// VALUE-computation input, not an admission channel: admission is
     /// `completed_members`' proof typing alone.
-    pub(crate) closed_values: Vec<(FlowReturnKey, FlowReturnResult)>,
+    pub(crate) closed_values: Vec<ClosedFlowValue>,
     /// The typed failure of the in-flight machinery ROOT's close — the
     /// caller-return payload channel: the family memo admits only COMPLETE
     /// values, so a degraded root's typed failure rides the transaction to
@@ -2431,6 +2625,9 @@ pub struct FlowReturnDomainRuntime {
 /// The call-resolution domain runtime.
 #[derive(Debug)]
 pub struct ResolveCallDomainRuntime {
+    /// The flow route owns this continuation between contextual deliveries.
+    /// It is installed only while that route asks the call executor.
+    pub(super) contextual: Option<super::call_resolve::ContextualCallState>,
     /// The relation the candidate being checked is applicable under: the
     /// subtype pass of a multi-candidate call, else assignability.
     pub(crate) applicability: crate::semantic_query::RelationKind,
@@ -2452,6 +2649,7 @@ pub struct ResolveCallDomainRuntime {
 impl Default for ResolveCallDomainRuntime {
     fn default() -> Self {
         Self {
+            contextual: None,
             applicability: crate::semantic_query::RelationKind::Assignable,
             completed_members: Vec::new(),
             last_root_failure: None,
@@ -2474,6 +2672,217 @@ pub struct CheckerDispatchTransaction {
     pub flow: FlowReturnDomainRuntime,
     /// The call-resolution domain runtime.
     pub call: ResolveCallDomainRuntime,
+    /// The type-body augmentation folds completed on this transaction.
+    pub augmentation: AugmentationPlanTable,
+    /// The declaration kinds read on this transaction.
+    pub decl_kinds: DeclKindTable,
+    /// The declaration files' `IndexedReady` records instantiations read on
+    /// this transaction.
+    pub indexed_serves: IndexedServeTable,
+}
+
+/// A declaration file's `IndexedReady` record this transaction served
+/// completely: the record, the edit clocks it was served under, how far the
+/// read may travel, and what serving it again replays.
+#[derive(Debug, Clone)]
+pub struct TransactionIndexedServe {
+    pub record: Option<Arc<verter_session_query::inputs::indexed::IndexedInputRecord>>,
+    pub(super) served_at: super::WorkspaceEdit,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The `IndexedReady` records served on this transaction, by declaration
+/// file. A canonical names no content version, so a record answers only
+/// under the edit clocks it was served under: an edit since moves them and
+/// the file is served afresh.
+#[derive(Default)]
+pub struct IndexedServeTable {
+    served: FxHashMap<Arc<str>, TransactionIndexedServe>,
+}
+
+impl std::fmt::Debug for IndexedServeTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IndexedServeTable")
+            .field("served", &self.served.len())
+            .finish()
+    }
+}
+
+impl IndexedServeTable {
+    /// The completed serve of `canonical` under the edit clocks `at`, if any.
+    pub(super) fn get(
+        &self,
+        canonical: &str,
+        at: super::WorkspaceEdit,
+    ) -> Option<&TransactionIndexedServe> {
+        self.served
+            .get(canonical)
+            .filter(|served| served.served_at == at)
+    }
+
+    /// Record a completed serve. Only a request-reusable class enters; a
+    /// later serve under newer clocks replaces an older one.
+    pub(super) fn complete(&mut self, canonical: Arc<str>, served: TransactionIndexedServe) {
+        if served.reuse.is_request_reusable() {
+            self.served.insert(canonical, served);
+        }
+    }
+}
+
+/// A declaration kind this transaction read completely: the kind, how far
+/// the read may travel, and what reusing it replays.
+#[derive(Debug, Clone)]
+pub struct TransactionDeclKind {
+    pub kind: Option<verter_session_query::declarations::TypeDeclKind>,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The declaration kinds read on this transaction, keyed by the content
+/// identity that fixes them.
+#[derive(Default)]
+pub struct DeclKindTable {
+    kinds: FxHashMap<crate::semantic_query::DeclIdentity, TransactionDeclKind>,
+}
+
+impl std::fmt::Debug for DeclKindTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeclKindTable")
+            .field("kinds", &self.kinds.len())
+            .finish()
+    }
+}
+
+impl DeclKindTable {
+    /// The completed read of `identity`'s kind, if any.
+    pub fn get(
+        &self,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> Option<&TransactionDeclKind> {
+        self.kinds.get(identity)
+    }
+
+    /// Record a completed read. Only a request-reusable class enters; the
+    /// first completion answers every later demand.
+    pub fn complete(
+        &mut self,
+        identity: crate::semantic_query::DeclIdentity,
+        read: TransactionDeclKind,
+    ) {
+        if !read.reuse.is_request_reusable() {
+            return;
+        }
+        self.kinds.entry(identity).or_insert(read);
+    }
+}
+
+/// The demand a type-body augmentation fold answers: the declaration the
+/// target and name select, the arguments its contributors bind, the
+/// requesting file (it orders the contributors) and the contributor the
+/// caller already holds as its base body. The projection context is not
+/// part of it: a fold is context-free until it is projected.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AugmentationPlanKey {
+    pub target: verter_session_query::resolution::AugmentationTargetKind,
+    pub decl_name: Arc<str>,
+    pub type_arguments: Arc<[SemanticNodeId]>,
+    pub request_canonical: Arc<str>,
+    pub excluded_contributor: Option<Arc<str>>,
+}
+
+impl AugmentationPlanKey {
+    /// The demand an absent fold answers. No contributor exists for the
+    /// declaration whatever its arguments, so the arguments are not part
+    /// of it.
+    pub fn absence(&self) -> AugmentationAbsenceKey {
+        AugmentationAbsenceKey {
+            target: self.target.clone(),
+            decl_name: Arc::clone(&self.decl_name),
+            request_canonical: Arc::clone(&self.request_canonical),
+            excluded_contributor: self.excluded_contributor.clone(),
+        }
+    }
+}
+
+/// The declaration a fold read no contributor for: its target and name,
+/// the requesting file and the contributor the caller already holds.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AugmentationAbsenceKey {
+    pub target: verter_session_query::resolution::AugmentationTargetKind,
+    pub decl_name: Arc<str>,
+    pub request_canonical: Arc<str>,
+    pub excluded_contributor: Option<Arc<str>>,
+}
+
+/// A fold this transaction completed that read no contributor: how far
+/// the read may travel and what reusing it replays.
+pub struct TransactionAugmentationAbsence {
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// A type-body fold completed on this transaction: the plan, how far it
+/// may travel, and what reusing it replays (the same rails a completed
+/// flow result replays).
+pub struct TransactionAugmentationPlan {
+    pub(super) plan: Arc<super::build::AugmentationPlan>,
+    pub reuse: verter_session_query::facts::reuse::ReuseClass,
+    pub replay: FlowMemberReuse,
+}
+
+/// The type-body augmentation folds completed on this transaction, keyed
+/// by their demand. Like [`FlowResultTable`] it holds only complete,
+/// request-reusable folds, evicts nothing and lives exactly as long as the
+/// transaction.
+#[derive(Default)]
+pub struct AugmentationPlanTable {
+    plans: FxHashMap<AugmentationPlanKey, TransactionAugmentationPlan>,
+    absences: FxHashMap<AugmentationAbsenceKey, TransactionAugmentationAbsence>,
+}
+
+impl std::fmt::Debug for AugmentationPlanTable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AugmentationPlanTable")
+            .field("plans", &self.plans.len())
+            .field("absences", &self.absences.len())
+            .finish()
+    }
+}
+
+impl AugmentationPlanTable {
+    /// The completed fold of `key`, if any.
+    pub fn get(&self, key: &AugmentationPlanKey) -> Option<&TransactionAugmentationPlan> {
+        self.plans.get(key)
+    }
+
+    /// Record `key`'s completed fold. Only a request-reusable class
+    /// enters; the first completion answers every later demand.
+    pub fn complete(&mut self, key: AugmentationPlanKey, plan: TransactionAugmentationPlan) {
+        if !plan.reuse.is_request_reusable() {
+            return;
+        }
+        self.plans.entry(key).or_insert(plan);
+    }
+
+    /// The completed absent fold of `key`, if any.
+    pub fn absence(&self, key: &AugmentationAbsenceKey) -> Option<&TransactionAugmentationAbsence> {
+        self.absences.get(key)
+    }
+
+    /// Record that `key`'s fold read no contributor. Only a
+    /// request-reusable class enters; the first completion answers every
+    /// later demand.
+    pub fn complete_absence(
+        &mut self,
+        key: AugmentationAbsenceKey,
+        absence: TransactionAugmentationAbsence,
+    ) {
+        if !absence.reuse.is_request_reusable() {
+            return;
+        }
+        self.absences.entry(key).or_insert(absence);
+    }
 }
 
 /// One entry of a tagged flow component awaiting its equation fixed
@@ -2570,54 +2979,45 @@ impl CheckerDispatchTransaction {
                 .is_none_or(|last| last.id < id),
             "sessions are appended in id order"
         );
+        self.relation.prune_finished_collecting();
         self.relation.sessions.push(session);
+        self.relation.collecting_ids.push(id);
         id
+    }
+
+    /// The sessions that may still collect: on the transaction and
+    /// collecting, or taken out of it by a continuation that holds them.
+    /// Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collecting_sessions_for_tests(&self) -> usize {
+        self.relation
+            .collecting_ids
+            .iter()
+            .filter(|&&id| {
+                self.relation.session_position(id).is_none_or(|position| {
+                    self.relation.sessions[position].state == InferenceSessionState::Collecting
+                })
+            })
+            .count()
     }
 
     /// The active (innermost `Collecting`) session, if any.
     pub(crate) fn active_session_mut(&mut self) -> Option<&mut InferenceSession> {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation
-            .sessions
-            .get_mut(start..)?
-            .iter_mut()
-            .rev()
-            .find(|s| s.state == InferenceSessionState::Collecting)
+        self.relation.prune_finished_collecting();
+        let position = self.relation.visible_collecting_positions().next()?;
+        self.relation.sessions.get_mut(position)
     }
 
     pub(crate) fn active_session(&self) -> Option<&InferenceSession> {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation
-            .sessions
-            .get(start..)?
-            .iter()
-            .rev()
-            .find(|s| s.state == InferenceSessionState::Collecting)
+        let position = self.relation.visible_collecting_positions().next()?;
+        self.relation.sessions.get(position)
     }
 
     /// Whether a collecting session visible here infers `param_node`.
     pub(crate) fn collecting_session_infers(&self, param_node: SemanticNodeId) -> bool {
-        let start = self
-            .relation
-            .binding_disabled_session_barriers
-            .last()
-            .copied()
-            .unwrap_or(0);
-        self.relation.sessions.get(start..).is_some_and(|sessions| {
-            sessions.iter().any(|session| {
-                session.state == InferenceSessionState::Collecting && session.infers(param_node)
-            })
-        })
+        self.relation
+            .visible_collecting_positions()
+            .any(|position| self.relation.sessions[position].infers(param_node))
     }
 
     pub(crate) fn begin_binding_disabled(&mut self) {
@@ -2764,4 +3164,4 @@ impl CheckerDispatchTransaction {
 
 #[cfg(test)]
 #[path = "dispatch_txn_tests.rs"]
-mod dispatch_txn_tests;
+pub(super) mod dispatch_txn_tests;

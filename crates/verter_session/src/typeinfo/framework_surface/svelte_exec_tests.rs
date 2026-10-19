@@ -19,9 +19,9 @@ fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> Typ
         {
             verter_type_expr::PropCallableRole::SvelteSnippet {
                 symbol: verter_type_expr::ResolvedSymbolIdentity {
-                    canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                    canonical_id: "/node_modules/svelte/index.d.ts".into(),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Snippet"),
+                    symbol: "Snippet".into(),
                 },
                 exactness: ResolutionExactness::ExactSymbolic,
                 provenance: ResolutionProvenance::FrameworkSurface,
@@ -212,6 +212,23 @@ fn an_untyped_props_destructure_resolves_through_the_shared_surface() {
         vec![("disabled".to_string(), true), ("label".to_string(), false),],
         "the untyped destructure's public keys did not reach the shared props surface"
     );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        unreachable!("props_rows already required a resolved surface");
+    };
+    assert!(
+        matches!(
+            value.domain_guarantee,
+            None | Some(
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+                    kind: 1,
+                    open: false,
+                    ..
+                }
+            )
+        ),
+        "a closed untyped destructure stays a complete closed domain: {:?}",
+        value.domain_guarantee
+    );
 }
 
 #[test]
@@ -231,17 +248,26 @@ fn a_component_with_no_props_call_keeps_the_legacy_surface_reachable() {
 #[test]
 fn an_open_rest_props_destructure_publishes_no_closed_surface() {
     // A top-level rest element leaves the enumerated public-key set INCOMPLETE.
-    // Publishing only `label` would make TypeScript reject every prop the rest
-    // element deliberately accepts, so the surface claims nothing rather than
-    // claiming a closed set that is wrong.
+    // Publishing only `label` would close a domain the author left open, and
+    // `Missing` would let the classifier treat that open set as exact absence.
     let outcome = runes_props_surface(
         "/RestProps.svelte",
         "<script>\n  let { label, ...rest } = $props();\n</script>\n\n<p>{label}</p>\n",
     );
+    let ResolvedOutcome::Resolved(value) = &outcome else {
+        panic!("an open-key `$props()` destructure publishes an open domain: {outcome:?}");
+    };
     assert!(
-        matches!(outcome, ResolvedOutcome::Missing),
-        "an open-key `$props()` destructure must not publish a closed surface: {outcome:?}"
+        value.props.is_none(),
+        "enumerated keys are not published as a closed member list"
     );
+    let guarantee = value
+        .domain_guarantee
+        .as_ref()
+        .expect("the open domain carries a producer claim");
+    assert_eq!(guarantee.kind, 1);
+    assert!(guarantee.open);
+    assert!(guarantee.causes.is_empty());
 }
 
 /// An UNRESOLVABLE `$props()` type must not publish zero props as a
@@ -278,6 +304,42 @@ fn a_resolved_empty_props_type_still_publishes_supported_empty() {
     assert!(
         props.fields.is_empty(),
         "the empty interface declares no props"
+    );
+}
+
+#[test]
+fn a_local_callback_alias_retains_complete_props_and_shallow_type() {
+    let outcome = runes_props_surface(
+        "/Callbacks.svelte",
+        r#"<script lang="ts">
+type Handler = (id: string) => void;
+interface Props {
+  onMove: (x: number, y: number) => void;
+  onToggle?: (on?: boolean) => void;
+  onSelect: Handler;
+  label: string;
+}
+let { onMove, onToggle, onSelect, label = "untitled" }: Props = $props();
+</script>
+<div>{label}</div>"#,
+    );
+    let ResolvedOutcome::Resolved(dtos) = outcome else {
+        panic!("authored callback types must remain complete: {outcome:?}");
+    };
+    let props = dtos.props.as_ref().expect("the authored props surface");
+    assert_eq!(props.fields.len(), 4);
+    assert!(props
+        .fields
+        .iter()
+        .all(|field| field.callable_role == verter_type_expr::PropCallableRole::Other));
+    let selected = props
+        .fields
+        .iter()
+        .find(|field| field.analysis.name == "onSelect")
+        .unwrap();
+    assert_eq!(
+        selected.analysis.type_annotation.as_deref(),
+        Some("Handler")
     );
 }
 
@@ -351,6 +413,13 @@ fn unavailable_script_facts_surface_is_partial_not_missing() {
         value.props.is_none(),
         "no exact props DTO may be fabricated"
     );
+    let guarantee = value
+        .domain_guarantee
+        .as_ref()
+        .expect("unavailable script facts carry an unavailable claim");
+    assert_eq!(guarantee.kind, 3);
+    assert_eq!(guarantee.causes, vec![104]);
+    assert!(guarantee.open);
     assert!(
         diagnostics
             .iter()
@@ -862,7 +931,7 @@ fn ntuple(
         .into_iter()
         .map(
             |(label, value)| verter_type_engine::semantic_query::TupleElement {
-                label: label.map(Arc::from),
+                label: label.map(verter_type_expr::OwnedStr::from),
                 value,
                 optional: false,
                 rest: false,
@@ -871,7 +940,9 @@ fn ntuple(
         .collect();
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::Tuple {
-            elements: Arc::from(elements.into_boxed_slice()),
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
+                elements.into_boxed_slice(),
+            ),
             readonly: false,
         },
     )
@@ -888,12 +959,12 @@ fn nsnippet(
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
             base: verter_type_engine::semantic_query::DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                decl_name: Arc::from("Snippet"),
+                decl_name: verter_type_expr::OwnedStr::from("Snippet"),
             },
-            args: Arc::from(args.into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(args.into_boxed_slice()),
         },
     )
 }
@@ -912,7 +983,7 @@ fn nsnippet_function(
     graph.intern_node(
         verter_type_engine::semantic_query::SemanticNodeData::Signature {
             kind: verter_type_engine::semantic_query::SignatureKind::Call,
-            params: Arc::from(
+            params: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::FunctionParam::synthetic(
                         Some(Arc::from("this")),
@@ -934,7 +1005,9 @@ fn nsnippet_function(
             return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
                 void,
             ),
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             signature_span: None,
             return_type_span: None,
             predicate: None,
@@ -952,6 +1025,7 @@ fn snippet_carrier_params_tuple_expands_to_ordered_dto_bindings() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let item_ty = nprim(
@@ -1027,6 +1101,7 @@ fn snippet_carrier_empty_params_tuple_yields_present_bindingless_slot() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let snippet = nsnippet(&graph, vec![ntuple(&graph, Vec::new())]);
@@ -1057,6 +1132,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let open = graph.intern_node(
@@ -1065,7 +1141,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
             param_index: 0,
             constraint: None,
             default: None,
-            display_name: Arc::from("Params"),
+            display_name: verter_type_expr::OwnedStr::from("Params"),
         },
     );
     let snippet = nsnippet(&graph, vec![open]);
@@ -1087,6 +1163,7 @@ fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings()
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let item_ty = nprim(
@@ -1153,6 +1230,7 @@ fn snippet_function_empty_rest_tuple_yields_no_dto_bindings() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let callable = nsnippet_function(&graph, ntuple(&graph, Vec::new()));
@@ -1183,6 +1261,7 @@ fn snippet_unlabelled_tuple_elements_fall_back_to_arg_index_names() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let a = nprim(
@@ -1226,6 +1305,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let a_ty = nprim(
@@ -1605,7 +1685,9 @@ fn assert_callback_row_param_resolves_precisely(
         ctx,
         &dispatch,
         row_param_ty,
-        Arc::from(Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
+        ),
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Shallow,
         ),
@@ -2345,9 +2427,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     };
     let args_data = graph.node_data(*args_node).expect("Args graph node");
     assert_eq!(
-        args_data
-            .bare_ref_head()
-            .map(|(name, _scope)| name.as_ref()),
+        args_data.bare_ref_head().map(|(name, _scope)| name),
         Some("Args"),
         "the unresolved exact-owner import stays an authored BareRef"
     );
@@ -2377,7 +2457,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
     let read = dispatch.execute_read(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -2386,13 +2466,13 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         },
     );
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "the carrier-bearing surface is COMPLETE and cacheable — its read-set \
          carries the owner's ImportRoute recovery fact, so the appearance of \
          the missing dependency invalidates the warm entry instead of a \
          permanent partial (got partial={}, suppress={})",
-        read.result_is_partial,
-        read.cache_suppress,
+        read.result_is_partial(),
+        read.cache_suppress(),
     );
 
     // DTO surface half: the normalizer DROPS `bad` and keeps `good`.
@@ -2441,6 +2521,10 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         &recovered_view,
         recovered_overlay,
     );
+    // The fresh resolution reads through the post-upsert view: a dispatch
+    // bound to the earlier view keeps validating against that earlier world.
+    let recovered_dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&recovered_ctx);
     let recovered_facts = host
         .resolve_svelte_script_facts_with_ctx(&recovered_ctx, component)
         .expect_exact("svelte facts after the dependency appears");
@@ -2449,10 +2533,14 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         .props_type
         .as_ref()
         .expect("props type");
-    let recovered_surface =
-        navigate_param_to_object_surface(&recovered_ctx, &dispatch, component, recovered_props)
-            .resolved_for_tests()
-            .expect("props surface after recovery");
+    let recovered_surface = navigate_param_to_object_surface(
+        &recovered_ctx,
+        &recovered_dispatch,
+        component,
+        recovered_props,
+    )
+    .resolved_for_tests()
+    .expect("props surface after recovery");
     let recovered_filtered = retain_test_snippet_members(&recovered_surface, &["bad", "good"]);
     let recovered_resolved = macro_surface_shell(
         recovered_filtered,
@@ -2460,7 +2548,7 @@ fn snippet_unresolved_params_carrier_drops_the_slot_at_the_dto_surface() {
         component,
     );
     let recovered_slots =
-        svelte_snippet_slot_fields_from_typeinfo_surface(&dispatch, &recovered_resolved);
+        svelte_snippet_slot_fields_from_typeinfo_surface(&recovered_dispatch, &recovered_resolved);
     let recovered_bad = recovered_slots
         .iter()
         .find(|s| s.name == "bad")
@@ -2579,7 +2667,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
     let read = dispatch.execute_read(
         verter_type_engine::semantic_query::SemanticQueryKey::ProjectPath {
             base,
-            path: Arc::from(
+            path: verter_type_expr::OwnedSlice::from(
                 Vec::<verter_type_engine::semantic_query::PathSegment>::new().into_boxed_slice(),
             ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
@@ -2588,7 +2676,7 @@ fn snippet_resolved_params_preparation_stays_complete_and_cacheable() {
         },
     );
     assert!(
-        !read.result_is_partial && !read.cache_suppress,
+        !read.result_is_partial() && !read.cache_suppress(),
         "the fully resolved path remains Complete and cacheable"
     );
 }
@@ -2615,6 +2703,7 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let absent = SemanticNodeId(u64::MAX);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let cap = super::TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
 
     // Degraded output: an object whose member value is unraisable degrades

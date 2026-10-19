@@ -18,19 +18,12 @@
 //! The assertions discriminate `ProjectGeneration` conversion from the
 //! deliberately unsupported `RouteGeneration` mapping.
 
-use std::sync::Arc;
-
 use verter_session::for_tests::dispatch_dep_signature_facts_for_tests;
 use verter_session_query::facts::fact_cache::FactVersionRef;
-use verter_type_engine::semantic_query::{DepSignature, DepVersion};
+use verter_type_engine::semantic_query::{DepEntry, DepSignature, DepVersion};
 
-fn make_dep_sig(entries: Vec<(&str, DepVersion)>) -> DepSignature {
-    Arc::from(
-        entries
-            .into_iter()
-            .map(|(canon, ver)| (Arc::from(canon), ver))
-            .collect::<Vec<_>>(),
-    )
+fn make_dep_sig(entries: Vec<DepEntry>) -> DepSignature {
+    DepSignature::new(entries)
 }
 
 // ----------------------------------------------------------------------------
@@ -43,7 +36,10 @@ fn dispatch_bridge_converts_project_generation() {
     // `FactVersionRef::ProjectGeneration` carrying the same
     // generation. Pre-fix the joint `RouteGeneration | ProjectGeneration`
     // arm drops it and the accumulator is empty.
-    let sig = make_dep_sig(vec![("x.ts", DepVersion::ProjectGeneration(77))]);
+    let sig = make_dep_sig(vec![DepEntry::new(
+        "x.ts",
+        DepVersion::ProjectGeneration(77),
+    )]);
 
     let result = dispatch_dep_signature_facts_for_tests(&sig);
 
@@ -67,8 +63,8 @@ fn dispatch_bridge_drops_route_generation() {
     // bridge drops it (defensive floor). The sibling `WholeHash`
     // entry still converts so the call is observably non-empty.
     let sig = make_dep_sig(vec![
-        ("a.ts", DepVersion::RouteGeneration(9)),
-        ("b.ts", DepVersion::WholeHash([3u8; 16])),
+        DepEntry::new("a.ts", DepVersion::RouteGeneration(9)),
+        DepEntry::new("b.ts", DepVersion::WholeHash([3u8; 16])),
     ]);
 
     let result = dispatch_dep_signature_facts_for_tests(&sig);
@@ -103,9 +99,9 @@ fn dispatch_bridge_mixed_signature_converts_project_drops_route() {
     // bridge keeps the WholeHash + ProjectGeneration and drops
     // only the RouteGeneration.
     let sig = make_dep_sig(vec![
-        ("scope.ts", DepVersion::WholeHash([5u8; 16])),
-        ("scope.ts", DepVersion::ProjectGeneration(404)),
-        ("route.ts", DepVersion::RouteGeneration(1)),
+        DepEntry::new("scope.ts", DepVersion::WholeHash([5u8; 16])),
+        DepEntry::new("scope.ts", DepVersion::ProjectGeneration(404)),
+        DepEntry::new("route.ts", DepVersion::RouteGeneration(1)),
     ]);
 
     let result = dispatch_dep_signature_facts_for_tests(&sig);

@@ -16,6 +16,8 @@ import { fileURLToPath } from "node:url";
 
 import {
   BENCH_TAG,
+  buildSummary,
+  defaultValidator,
   loadManifest,
   main,
   MANIFEST_DIR,
@@ -89,6 +91,7 @@ describe("manifest validation", () => {
     ["settings-subset", /the harness runs either strict alone or all/],
     ["unknown-scenario", /scenario no-such-scenario selects no scenario/],
     ["duplicate-cell", /duplicate cell/],
+    ["bad-require-all-matched", /requireAllMatched must be true or false/],
   ];
   for (const [name, message] of rejected)
     test(`rejects ${name}`, () => assert.throws(() => loadManifest(name, FIXTURES), message));
@@ -118,6 +121,33 @@ describe("manifest validation", () => {
     );
     assert.equal(r.status, 2);
     assert.match(r.stderr, /unknown arm tsc-watch/);
+  });
+});
+
+describe("skr-scale-answers", () => {
+  test("demands the larger answers exactly and keeps the timing cells", () => {
+    const { manifest, run } = loadManifest("skr-scale-answers");
+    assert.equal(run.requireAllMatched, true);
+    for (const id of ["infer-pattern-repeat-6000", "route-tree-names-2000"]) {
+      assert.ok(run.scenarios.includes(id), id);
+      for (const arm of ["verter", "tsc-cli"])
+        assert.ok(
+          manifest.requiredCells.some((c) => c.scenario === id && c.arm === arm),
+          `${id} ${arm}`,
+        );
+    }
+    for (const id of [
+      "route-tree-names-300",
+      "route-tree-paths-300",
+      "infer-pattern-repeat-1000",
+      "reference-infer-aliases-1000",
+    ])
+      assert.ok(
+        manifest.requiredCells.some(
+          (c) => c.scenario === id && c.arm === "verter" && c.metrics.includes("coldMs"),
+        ),
+        id,
+      );
   });
 });
 
@@ -196,10 +226,17 @@ function syntheticResults({ arms = ["verter", "tsc-api", "verter-counted"], drop
 }
 
 /** Run valid-minimal through a stand-in harness; returns the exit code, summary and harness args. */
-async function fakeRun({ results, harnessStatus = 0, validatorProblems = [], worker = null }) {
+async function fakeRun({
+  results,
+  harnessStatus = 0,
+  validatorProblems = [],
+  worker = null,
+  run = "valid-minimal",
+}) {
   const out = freshDir();
   let harnessArgs = null;
-  const argv = ["--run", "valid-minimal", "--manifest-dir", FIXTURES, "--out", out];
+  let validatorOptions = null;
+  const argv = ["--run", run, "--manifest-dir", FIXTURES, "--out", out];
   if (worker) {
     const path = join(out, "worker.json");
     writeFileSync(path, JSON.stringify(worker));
@@ -216,10 +253,13 @@ async function fakeRun({ results, harnessStatus = 0, validatorProblems = [], wor
         }
         return { status: harnessStatus };
       },
-      validate: () => validatorProblems,
+      validate: (_path, options) => {
+        validatorOptions = options;
+        return validatorProblems;
+      },
     }),
   );
-  return { code, summary: readSummary(out), harnessArgs };
+  return { code, summary: readSummary(out), harnessArgs, validatorOptions };
 }
 
 describe("real run", () => {
@@ -311,6 +351,190 @@ describe("real run", () => {
     const { summary } = await fakeRun({ results: null, harnessStatus: 2 });
     for (const p of Object.values(summary.prerequisites)) assert.equal(p.status, "unavailable");
     assert.ok(summary.cells.every((c) => c.status === "missing"));
+  });
+});
+
+/** Synthetic harness results for skr-augment-scaleb with the given retention-proof verdicts. */
+function augmentResults(verdicts, { dropSession = null, classes = {} } = {}) {
+  const stat = (v) => ({ n: 3, min: v, median: v, max: v });
+  const verter = {
+    class: "matched",
+    metrics: { firstTypeMs: stat(20), coldMs: stat(25), peakBytes: stat(50_000_000) },
+  };
+  const ids = [
+    "augment-global-growth",
+    "augment-global-baseline",
+    "augment-module-growth",
+    "augment-module-baseline",
+  ];
+  const sessionCells = ids
+    .filter((id) => id !== dropSession)
+    .map((id) => {
+      const cell = { key: id, arms: { verter: { class: classes[id] ?? "matched" } } };
+      if (id.endsWith("-growth")) {
+        const verdict = verdicts[id] ?? "passed";
+        cell.retentionProof = {
+          baseline: id.replace("-growth", "-baseline"),
+          first: 500,
+          verdict,
+          pairs: verdict === "n/a" ? 0 : 9,
+          figures: null,
+          problems: verdict === "failed" ? ["snapshotLeases 3503 exceeds the baseline's 2003"] : [],
+        };
+      }
+      return cell;
+    });
+  return {
+    schema: 1,
+    meta: {
+      options: { tier: "standard", arms: ["verter"], settings: "strict" },
+      scenarios: {
+        "augment-global-2000/strict": { id: "augment-global-2000" },
+        "augment-module-2000/strict": { id: "augment-module-2000" },
+      },
+      sessions: Object.fromEntries(ids.map((id) => [id, { id }])),
+    },
+    invocations: [],
+    summary: {
+      cells: ["augment-global-2000", "augment-module-2000"].map((id) => ({
+        key: `${id}/strict`,
+        arms: { verter },
+      })),
+      sessions: { cells: sessionCells },
+    },
+  };
+}
+
+describe("session retention proofs", () => {
+  const loaded = loadManifest("skr-augment-scaleb");
+  const summarize = (results) =>
+    buildSummary(loaded, {
+      dryRun: false,
+      worker: readWorker(null),
+      results,
+      harness: { status: 0 },
+      validatorProblems: [],
+    });
+
+  test("the manifest runs its scenarios and both growth sessions with their baselines", () => {
+    assert.deepEqual(loaded.run.sessions, [
+      "augment-global-growth",
+      "augment-global-baseline",
+      "augment-module-growth",
+      "augment-module-baseline",
+    ]);
+    const only = loaded.run.harnessArgs[loaded.run.harnessArgs.indexOf("--only") + 1];
+    assert.deepEqual(only.split(","), [...loaded.manifest.scenarios, ...loaded.run.sessions]);
+  });
+
+  test("passing proofs are read on any worker", () => {
+    const summary = summarize(augmentResults({}));
+    assert.equal(summary.validation.verdict, "passed", summary.validation.problems.join("\n"));
+    const growth = summary.sessions.find((x) => x.session === "augment-module-growth");
+    assert.equal(growth.retentionProof.verdict, "passed");
+    assert.equal(growth.answerClass, "matched");
+  });
+
+  const failing = [
+    [
+      "a failed proof",
+      augmentResults({ "augment-global-growth": "failed" }),
+      /augment-global-growth: retained growth beyond the answers against augment-global-baseline: snapshotLeases/,
+    ],
+    [
+      "a proof with nothing compared",
+      augmentResults({ "augment-module-growth": "n/a" }),
+      /augment-module-growth: the retention proof has no completed pair to compare/,
+    ],
+    [
+      "a passing proof over a growth session that answered wrongly",
+      augmentResults({}, { classes: { "augment-global-growth": "mismatch" } }),
+      /augment-global-growth: the retention proof needs augment-global-growth to answer every demand, its class is mismatch/,
+    ],
+    [
+      "a passing proof over a baseline that refused",
+      augmentResults({}, { classes: { "augment-module-baseline": "refusal" } }),
+      /augment-module-growth: the retention proof needs augment-module-baseline to answer every demand, its class is refusal/,
+    ],
+    [
+      "a missing session",
+      augmentResults({}, { dropSession: "augment-module-baseline" }),
+      /session augment-module-baseline is missing/,
+    ],
+  ];
+  for (const [label, results, message] of failing)
+    test(`fails on ${label}`, () => {
+      const summary = summarize(results);
+      assert.equal(summary.validation.verdict, "failed");
+      assert.ok(
+        summary.validation.problems.some((p) => message.test(p)),
+        summary.validation.problems.join("\n"),
+      );
+    });
+
+  test("a growth session without its baseline is rejected", () => {
+    const manifest = {
+      ...loaded.manifest,
+      sessions: ["augment-global-growth", "augment-module-growth", "augment-module-baseline"],
+    };
+    const { problems } = validateManifest(manifest, loaded.path);
+    assert.ok(
+      problems.some((p) =>
+        /augment-global-growth is proved against augment-global-baseline, which sessions does not list/.test(
+          p,
+        ),
+      ),
+      problems.join("\n"),
+    );
+    const unknown = validateManifest(
+      { ...loaded.manifest, sessions: ["no-such-session"] },
+      loaded.path,
+    );
+    assert.ok(unknown.problems.some((p) => /session no-such-session is not a session/.test(p)));
+  });
+});
+
+describe("answer policy", () => {
+  test("a manifest without requireAllMatched validates answers as findings", async () => {
+    const { code, summary, validatorOptions } = await fakeRun({ results: syntheticResults() });
+    assert.equal(code, 0);
+    assert.deepEqual(validatorOptions, { requireAllMatched: false });
+    assert.equal(summary.run.requireAllMatched, false);
+  });
+
+  test("an opted-in manifest forwards the policy and fails on the validator's rejection", async () => {
+    const { code, summary, validatorOptions } = await fakeRun({
+      run: "valid-require-all-matched",
+      results: syntheticResults(),
+      validatorProblems: [
+        "baseline-empty/strict|verter: Verter's answer is refusal (BudgetExceeded); --require-all-matched",
+      ],
+    });
+    assert.deepEqual(validatorOptions, { requireAllMatched: true });
+    assert.equal(summary.run.requireAllMatched, true);
+    assert.equal(code, 1);
+    assert.ok(summary.validation.problems.some((p) => /--require-all-matched/.test(p)));
+  });
+
+  test("the default validator passes the policy to validate.mjs as --require-all-matched", () => {
+    // A stand-in validate.mjs that rejects exactly when it is told every
+    // answer must match: the policy is forwarded, its FAIL lines read back.
+    const dir = freshDir();
+    const script = join(dir, "validate-stand-in.mjs");
+    writeFileSync(
+      script,
+      'if (process.argv.includes("--require-all-matched")) {\n' +
+        '  console.log("FAIL: synthetic: Verter\'s answer is partial (x); --require-all-matched");\n' +
+        "  process.exit(1);\n" +
+        "}\n" +
+        'console.log("validation passed");\n',
+    );
+    const results = join(dir, "results.json");
+    writeFileSync(results, "{}");
+    assert.deepEqual(defaultValidator(results, { requireAllMatched: false, script }), []);
+    assert.deepEqual(defaultValidator(results, { requireAllMatched: true, script }), [
+      "synthetic: Verter's answer is partial (x); --require-all-matched",
+    ]);
   });
 });
 

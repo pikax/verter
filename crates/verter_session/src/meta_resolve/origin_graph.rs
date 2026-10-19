@@ -25,6 +25,7 @@ use super::resolved_state::SurfaceNodeIdentities;
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub(crate) fn build_origin_graph(
     graph: &Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>,
+    construction: &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     surface_identities: Option<&SurfaceNodeIdentities>,
 ) -> verter_protocol::types::OriginGraphDto {
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -35,7 +36,7 @@ pub(crate) fn build_origin_graph(
     // Step 9.2 / F6 scoped origin export: when surface_identities are
     // populated, reverse-walk via walk_origin_chain starting from each
     // surface node and collect only the reachable subgraph. Falls back
-    // to export_all_origin_edges when surface_identities is None
+    // to export_origin_edges_in_scope when surface_identities is None
     // (audit-off path or pre-populated state).
     let all_edges = if let Some(ids) = surface_identities {
         let mut roots: Vec<verter_type_engine::semantic_query::SemanticNodeId> = Vec::new();
@@ -64,6 +65,9 @@ pub(crate) fn build_origin_graph(
         if roots.is_empty() {
             return OriginGraphDto::default();
         }
+        // The surface identities are construction ordinals of this graph;
+        // the walk reads them inside the lane the graph's grant opens.
+        let _lane = construction.enter_scope();
         let mut reached: FxHashSet<verter_type_engine::semantic_query::SemanticNodeId> =
             FxHashSet::default();
         let mut worklist: VecDeque<verter_type_engine::semantic_query::SemanticNodeId> =
@@ -88,7 +92,8 @@ pub(crate) fn build_origin_graph(
         }
         collected
     } else {
-        graph.export_all_origin_edges()
+        let _lane = construction.enter_scope();
+        graph.export_origin_edges_in_scope()
     };
 
     if all_edges.is_empty() {
@@ -110,7 +115,7 @@ pub(crate) fn build_origin_graph(
             }
             let idx = nodes.len() as u32;
             let (kind, label) = graph
-                .node_data(id)
+                .read_in_scope(id)
                 .map(|d| {
                     use verter_type_engine::semantic_query::SemanticNodeData;
                     let k = format!("{:?}", *d).split_once('{').map_or_else(

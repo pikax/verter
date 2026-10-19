@@ -105,9 +105,7 @@ fn raise_node_to_sealed_carrier(
     let sealed = match cap.materialize_output_type_expr(node) {
         Some(sealed) => sealed,
         None => {
-            if verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-                .is_none()
-            {
+            if dispatch.graph().read_in_scope(node).is_none() {
                 // GENUINE absence (no typed payload minted for this id): the
                 // exact `missing_output` — NON-partial.
                 wrap_output_type_expr(
@@ -154,8 +152,7 @@ fn authored_package_alias_for_carrier(
     owner_canonical: &str,
     node: SemanticNodeId,
 ) -> Option<String> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity } = data.as_ref()
     else {
         return None;
@@ -214,7 +211,11 @@ fn reduce_field_value_node(
             input_node,
         );
     if package_backed {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(
+            dispatch,
+            input_node,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
     let gates = super::classify_node_reduction_gates(dispatch, input_node);
     if gates.generic_instantiation_ref {
@@ -225,11 +226,19 @@ fn reduce_field_value_node(
                 input_node,
             );
         if reaches_cycle {
-            return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+            return raise_node_to_sealed_carrier(
+                dispatch,
+                input_node,
+                verter_type_engine::semantic_query::DepSignature::default(),
+            );
         }
     }
     if !(gates.contains_reducible_operator || gates.generic_instantiation_ref) {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(
+            dispatch,
+            input_node,
+            verter_type_engine::semantic_query::DepSignature::default(),
+        );
     }
 
     let context = crate::meta_resolve::materialize::node_materialize_reduction_context(
@@ -254,7 +263,7 @@ fn reduce_field_value_node(
             dispatch, input_node,
         ) == Some(false)
     {
-        return raise_node_to_sealed_carrier(dispatch, input_node, Arc::from(Vec::new()));
+        return raise_node_to_sealed_carrier(dispatch, input_node, verter_type_engine::semantic_query::DepSignature::default());
     }
     reduced
 }
@@ -393,7 +402,7 @@ fn member_shape_peek_or_compute(
             // Package-backed roots stay shallow carriers. Admit so sibling members of
             // the same package-backed parent reuse the verdict at peek time.
             let Some(package_backed_fence) = package_backed_fence_opt else {
-                return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+                return raise_node_to_sealed_carrier(dispatch, member_value, verter_type_engine::semantic_query::DepSignature::default());
             };
             let value = raise_node_to_sealed_carrier(dispatch, member_value, package_backed_fence);
             return admit_member_shape_if_possible(ctx, &key, value, &scope);
@@ -402,7 +411,7 @@ fn member_shape_peek_or_compute(
         // canonical's authoritative hash was unavailable mid-gate, in which case it
         // refuses (`None`) and the carrier is returned without admission.
         let Some(package_backed_fence) = package_backed_fence_opt else {
-            return raise_node_to_sealed_carrier(dispatch, member_value, Arc::from(Vec::new()));
+            return raise_node_to_sealed_carrier(dispatch, member_value, verter_type_engine::semantic_query::DepSignature::default());
         };
 
         // (3) Node reduction gates — the leaf / bare-carrier / generic-instantiation /
@@ -432,7 +441,7 @@ fn member_shape_peek_or_compute(
             }
             fence
         } else {
-            Arc::from(Vec::new())
+            verter_type_engine::semantic_query::DepSignature::default()
         };
 
         // The carrier-stop decision lives on the dispatch-layer reduction-demand
@@ -565,22 +574,20 @@ fn combine_dep_signatures(
     b: &verter_type_engine::semantic_query::DepSignature,
     scope_canonical_id: &str,
 ) -> verter_type_engine::semantic_query::DepSignature {
-    let mut out: Vec<(Arc<str>, verter_type_engine::semantic_query::DepVersion)> =
+    let mut out: Vec<verter_type_engine::semantic_query::DepEntry> =
         Vec::with_capacity(a.len() + b.len());
-    let mut seen: rustc_hash::FxHashSet<(
-        Arc<str>,
-        verter_type_engine::semantic_query::DepVersion,
-    )> = rustc_hash::FxHashSet::default();
+    let mut seen: rustc_hash::FxHashSet<(&str, &verter_type_engine::semantic_query::DepVersion)> =
+        rustc_hash::FxHashSet::default();
     for entry in a.iter().chain(b.iter()) {
-        if entry.0.as_ref() == scope_canonical_id || entry.0.as_ref().is_empty() {
+        if entry.canonical() == scope_canonical_id || entry.canonical().is_empty() {
             continue;
         }
-        let pair = (Arc::clone(&entry.0), entry.1.clone());
-        if seen.insert(pair.clone()) {
-            out.push(pair);
+        if seen.insert((entry.canonical(), entry.version())) {
+            // The clone shares the entry's owned canonical.
+            out.push(entry.clone());
         }
     }
-    Arc::from(out.into_boxed_slice())
+    verter_type_engine::semantic_query::DepSignature::new(out.into_boxed_slice())
 }
 
 /// Append the gate fence's dep entries to the materialised
@@ -670,7 +677,7 @@ fn admit_member_shape_if_possible(
     ) {
         return value;
     }
-    let scope = key.scope_canonical().clone();
+    let scope = key.scope_canonical();
     let Some(observed_scope) = ctx.observe_materialize_scope(scope.as_ref()) else {
         return value;
     };
@@ -758,8 +765,12 @@ pub(crate) fn surface_member_to_expanded_field(
     // object surface — that would re-open the breadth leak.
     let exactness = {
         let dispatch = query_engine.dispatch;
-        let resolved_value =
-            resolve_member_value_for_classification(dispatch, member.value, carrier_mode);
+        let resolved_value = resolve_member_value_for_classification(
+            dispatch,
+            query_engine.builder(),
+            member.value,
+            carrier_mode,
+        );
         classify_node(dispatch, resolved_value)
     };
     // Peek the per-member graph-native materialiser cache BEFORE any
@@ -833,57 +844,58 @@ pub(crate) fn surface_member_to_expanded_field(
             // survives to the published surface"); a reduce that kept a
             // symbolic / package-backed / carrier-stop shape keeps the
             // authored source unchanged.
-            None => match published_member_source_upgrade_for_node(
-                dispatch,
-                materialized.node_id(),
-                shallow_source.is_none(),
-            )
-            .or(authored_source)
-            {
-                Some(source) => verter_type_expr::facts::SourcePosition::Present(source),
-                // No authored position, no use-site slot, no upgrade on the
-                // published node: the STRUCTURAL member-source projection. A
-                // member value with a valid structural replay address (an
-                // imported function / inline object / rich tuple / array /
-                // composite / instantiation) publishes its faithful shallow
-                // carrier — the closed/ref upgrade on the admitted node, or
-                // the projected MEMBER-PATH replay route off the macro's
-                // stamped type-argument base (the consumer re-resolves it on
-                // demand through the one shared dispatch; nothing flattens
-                // eagerly). ONLY a genuine miss stays the typed
-                // source-construction FAILURE: an operationally partial
-                // materialization (a torn read is never a replay-address
-                // proof), an unknown-materializing resolver failure carrier,
-                // or a structural value with no stamped base to replay off.
-                // A stable unresolved reference/import is itself a faithful
-                // Complete carrier. There
-                // is no proven-open producer position on this arm: every
-                // member enumerated from a type-based macro surface carries a
-                // REQUIRED value-type position (runtime/unannotated positions
-                // are separately typed `Absent` at their producers). Emit
-                // PAYLOAD sources never land here — the normalized
-                // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
-                // member-path / callable-params replay) own them.
-                None => match value_position {
-                    MemberValuePosition::ShallowMember => {
-                        // Source construction is anchored in the admitted
-                        // member's original carrier node, not the reduced
-                        // result node. A terminal reduction may legitimately
-                        // stop on an `Opaque(RecursiveRef)` or projection miss
-                        // while the authored member path remains a faithful,
-                        // replayable address. Partiality is retained on the
-                        // materialized outcome and still refuses cache
-                        // admission; it does not erase the best safe carrier.
-                        let structural = structural_member_value_source(
+            None => {
+                match published_member_source_upgrade_for_node(
+                    dispatch,
+                    materialized.node_id(),
+                    shallow_source.is_none(),
+                )
+                .or(authored_source)
+                {
+                    Some(source) => verter_type_expr::facts::SourcePosition::Present(source),
+                    // No authored position, no use-site slot, no upgrade on the
+                    // published node: the STRUCTURAL member-source projection. A
+                    // member value with a valid structural replay address (an
+                    // imported function / inline object / rich tuple / array /
+                    // composite / instantiation) publishes its faithful shallow
+                    // carrier — the closed/ref upgrade on the admitted node, or
+                    // the projected MEMBER-PATH replay route off the macro's
+                    // stamped type-argument base (the consumer re-resolves it on
+                    // demand through the one shared dispatch; nothing flattens
+                    // eagerly). ONLY a genuine miss stays the typed
+                    // source-construction FAILURE: an operationally partial
+                    // materialization (a torn read is never a replay-address
+                    // proof), an unknown-materializing resolver failure carrier,
+                    // or a structural value with no stamped base to replay off.
+                    // A stable unresolved reference/import is itself a faithful
+                    // Complete carrier. There
+                    // is no proven-open producer position on this arm: every
+                    // member enumerated from a type-based macro surface carries a
+                    // REQUIRED value-type position (runtime/unannotated positions
+                    // are separately typed `Absent` at their producers). Emit
+                    // PAYLOAD sources never land here — the normalized
+                    // `ResolvedEmitOccurrence.payload_source` rows (closed tuple /
+                    // member-path / callable-params replay) own them.
+                    None => match value_position {
+                        MemberValuePosition::ShallowMember => {
+                            // Source construction is anchored in the admitted
+                            // member's original carrier node, not the reduced
+                            // result node. A terminal reduction may legitimately
+                            // stop on an `Opaque(RecursiveRef)` or projection miss
+                            // while the authored member path remains a faithful,
+                            // replayable address. Partiality is retained on the
+                            // materialized outcome and still refuses cache
+                            // admission; it does not erase the best safe carrier.
+                            let structural = structural_member_value_source(
                             dispatch,
                             member.value,
                             &member
                                 .key
                                 .cloned_known()
                                 .expect("publication authority admits only known string keys"),
-                            type_arg_base,
+                            type_arg_base.map(|base| verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone())).as_ref(),
                         );
-                        match structural {
+                            match structural {
                             Some(source) => {
                                 verter_type_expr::facts::SourcePosition::Present(source)
                             }
@@ -891,9 +903,10 @@ pub(crate) fn surface_member_to_expanded_field(
                                 verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
                             ),
                         }
-                    }
-                },
-            },
+                        }
+                    },
+                }
+            }
         }
     };
     // Provenance downgrade through transparent carriers: a member reached
@@ -960,6 +973,7 @@ pub(crate) fn surface_member_to_expanded_field(
 /// revalidation surface as the projector's other dispatches.
 fn resolve_member_value_for_classification(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     value: SemanticNodeId,
     carrier_mode: bool,
 ) -> SemanticNodeId {
@@ -971,34 +985,31 @@ fn resolve_member_value_for_classification(
     // and classifies `ExactConcrete` — the same hop the path-walker / query
     // entry run. Done in `Navigate` (carrier-preserving for deeper structure);
     // the alias unwrap below then proceeds on the resolved `DeclRef`.
-    let value =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
-            .as_deref()
-        {
-            Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
-                dispatch.resolve_carrier_subject_node(
+    let value = match dispatch.graph().read_in_scope(value).as_deref() {
+        Some(data) if data.bare_ref_head().is_some() || data.import_type_head().is_some() => {
+            dispatch
+                .owning()
+                .resolve_carrier_subject_node(
                     value,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 )
-            }
-            _ => value,
-        };
-    let should_expand =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value)
-            .as_deref()
-        {
-            Some(SemanticNodeData::DeclRef { .. }) => true,
-            // Carrier-mode: do NOT expand a generic instantiation to
-            // its shallow object surface — that would breadth-
-            // enumerate the instantiated type's members (a Rule-5
-            // shallow-by-default violation). The un-expanded node
-            // classifies as `ExactSymbolic`, the correct exactness
-            // for a carrier.
-            Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
-            _ => false,
-        };
+                .into_value_in(builder)
+        }
+        _ => value,
+    };
+    let should_expand = match dispatch.graph().read_in_scope(value).as_deref() {
+        Some(SemanticNodeData::DeclRef { .. }) => true,
+        // Carrier-mode: do NOT expand a generic instantiation to
+        // its shallow object surface — that would breadth-
+        // enumerate the instantiated type's members (a Rule-5
+        // shallow-by-default violation). The un-expanded node
+        // classifies as `ExactSymbolic`, the correct exactness
+        // for a carrier.
+        Some(SemanticNodeData::InstantiationRef { .. }) => !carrier_mode,
+        _ => false,
+    };
     if !should_expand {
         return value;
     }
@@ -1010,8 +1021,8 @@ fn resolve_member_value_for_classification(
         ),
     });
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
-    emit_dispatch_dep_signature_facts(dispatch, &read.dep_signature);
-    match read.value {
+    emit_dispatch_dep_signature_facts(dispatch, read.dep_signature());
+    match *read.value() {
         QueryResult::Value(id) => id,
         _ => value,
     }
@@ -1027,6 +1038,7 @@ pub(crate) fn project_model(
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
     cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
 ) -> Option<ExpandedField> {
+    let _scope = query_engine.dispatch.enter_construction_scope();
     if !mac.is_type_based {
         return None;
     }
@@ -1061,7 +1073,7 @@ pub(crate) fn project_model(
         verter_type_engine::semantic_query::PropertyKey::identifier(model_name.as_str());
     let _member_cursor = cursor.descend_published_member(&model_key)?;
 
-    let (payload_node, presence_outcome, exactness, contains_reducible) = {
+    let (payload_owner, presence_outcome, exactness, contains_reducible) = {
         let dispatch = query_engine.dispatch;
         // `project_model` is a ROOT publication path that keeps a root cursor
         // (the `descend_published_member` gate above). It resolves + admits the
@@ -1094,10 +1106,7 @@ pub(crate) fn project_model(
         // branches on that typed state, never on a fabricated sentinel
         // string. No `TypeExpr` is materialised for the decision.
         let presence_outcome: SemanticOutcome<()> =
-            match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                payload_node,
-            ) {
+            match dispatch.graph().read_in_scope(payload_node) {
                 Some(_) => SemanticOutcome::Value(()),
                 None => SemanticOutcome::Degraded(QueryError::RaiseMiss),
             };
@@ -1106,14 +1115,10 @@ pub(crate) fn project_model(
         // `project_model` makes no decision on any materialised value.
         let contains_reducible = super::classify_node_reduction_gates(dispatch, payload_node)
             .contains_reducible_operator;
-        (
-            payload_node,
-            presence_outcome,
-            exactness,
-            contains_reducible,
-        )
+        (payload, presence_outcome, exactness, contains_reducible)
     };
 
+    let payload_node = payload_owner.node();
     if let SemanticOutcome::Degraded(reason) = presence_outcome {
         // Record the degradation so the consumer observes the missing
         // payload through the diagnostic stream rather than as a silent
@@ -1252,13 +1257,16 @@ fn materialize_output_source(
                 verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                     ProjectionMode::Navigate,
                 );
-            let hot = dispatch
-                .raise_semantic_type_source_to_hot_strict(
-                    other,
-                    scope_canonical_id,
-                    scope_owner,
-                    transit_ctx,
-                )
+            // The raised carrier owns the node while the cap materialises it.
+            let raised = dispatch.owning().raise_semantic_type_source_to_hot_strict(
+                other,
+                scope_canonical_id,
+                scope_owner,
+                transit_ctx,
+            );
+            let hot = raised
+                .value()
+                .clone()
                 .map_err(|failure| match failure {
                     verter_type_engine::project_semantic_dispatch::semantic_source::StrictSourceRaiseFailure::InteriorMiss(path) => {
                         crate::meta_resolve::ComponentMetaOutputFailure::InteriorSourceMiss { path }
@@ -1295,6 +1303,7 @@ fn materialize_output_source(
                             // deref).
                             QueryErrorDisposition::ControlCarrier
                             | QueryErrorDisposition::UnsupportedSurface
+                            | QueryErrorDisposition::UnsupportedPosition
                             | QueryErrorDisposition::Partial
                             | QueryErrorDisposition::Failure => {
                                 crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {

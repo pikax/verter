@@ -7,7 +7,8 @@ import "verter/v1/compiler_intrinsics.proto";
 message ComponentMetaPayload {
   uint32 schema_version = 1;
   TypeGraph type_graph = 2;
-  repeated TypeRegistryEntry type_registry = 3;
+  reserved 3;
+  reserved "type_registry";
   ComponentMetaBody body = 4;
   // Audit-only. Populated only when host audit_enabled=true AND
   // footprint_capture=true (matches LSP hover-provenance gate at
@@ -240,6 +241,7 @@ message UnknownNode {
 
 message InferNode {
   uint32 name_id = 1;
+  uint32 constraint_node_id = 2;
 }
 
 message RestNode {
@@ -270,11 +272,16 @@ message TypeRegistryEntry {
 message ComponentMetaBody {
   uint32 file_path_id = 1;
   bool options_api = 2;
-  repeated PropMeta props = 3;
-  repeated EventMeta events = 4;
-  repeated SlotMeta slots = 5;
-  repeated ModelMeta models = 6;
-  repeated ExposedMeta exposed = 7;
+  reserved 3;
+  reserved "props";
+  reserved 4;
+  reserved "events";
+  reserved 5;
+  reserved "slots";
+  reserved 6;
+  reserved "models";
+  reserved 7;
+  reserved "exposed";
   repeated ComponentUsage components = 8;
   repeated TemplateRefMeta template_refs = 9;
   repeated ImportMeta imports = 10;
@@ -282,20 +289,29 @@ message ComponentMetaBody {
   repeated VueApiCallMeta vue_api_calls = 12;
   repeated StyleMeta styles = 13;
   ComponentFlags flags = 14;
-  repeated AcceptedPropMeta accepted_props = 15;
-  repeated AcceptedEventMeta accepted_events = 16;
-  AcceptedSurfaceCompleteness accepted_surface_completeness = 17;
-  RootReachability root_reachability = 18;
-  FallthroughSurface fallthrough_surface = 19;
+  reserved 15;
+  reserved "accepted_props";
+  reserved 16;
+  reserved "accepted_events";
+  reserved 17;
+  reserved "accepted_surface_completeness";
+  reserved 18;
+  reserved "root_reachability";
+  reserved 19;
+  reserved "fallthrough_surface";
   ComponentMetaResolution resolution = 20;
   RootInfo root_info = 21;
-  PublicInstanceMeta public_instance = 22;
+  reserved 22;
+  reserved "public_instance";
   reserved 23;
   reserved "sfc_blocks";
   repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 24;
   OrderedSfcStructure ordered_sfc_structure = 25;
-  ComponentContractAvailability component_public_contract = 26;
+  reserved 26;
+  reserved "component_public_contract";
+  // Compatibility summary derived exclusively from the facts below.
   ResultCompleteness result_completeness = 27;
+  ComponentFacts facts = 28;
 }
 
 // Typed completeness of the published component surface. COMPLETE means the
@@ -335,6 +351,7 @@ message ExpansionDiagnostic {
 }
 
 message TypePublication {
+  repeated uint32 fact_causes = 10;
   TypePublicationKind kind = 1;
   TypePublicationFailure failure = 2;
   TypePublicationAbsence absence = 3;
@@ -466,7 +483,14 @@ message PublicSlotBinding {
   PublicTypeReference type = 2;
 }
 
+message BoolFact {
+  FactGuarantee guarantee = 1;
+  optional bool value = 2;
+}
+
 message PropMeta {
+  BoolFact required_fact = 13;
+  BoolFact has_default_fact = 14;
   uint32 name_id = 1;
   uint32 type_node_id = 2;
   ExpansionMetadata type_expansion = 3;
@@ -1504,4 +1528,211 @@ enum ResolutionDiagnosticKind {
   RESOLUTION_DIAGNOSTIC_KIND_INSTANTIATION_ERROR = 13;
   RESOLUTION_DIAGNOSTIC_KIND_EMPTY_UNION_ARM = 14;
   RESOLUTION_DIAGNOSTIC_KIND_CONNECTED_MEMORY_LIMIT = 15;
+}
+
+// Decoder-only compatibility carrier. Current producers never emit this body.
+message LegacyComponentMetaBody {
+  uint32 file_path_id = 1;
+  bool options_api = 2;
+  repeated PropMeta props = 3;
+  repeated EventMeta events = 4;
+  repeated SlotMeta slots = 5;
+  repeated ModelMeta models = 6;
+  repeated ExposedMeta exposed = 7;
+  repeated ComponentUsage components = 8;
+  repeated TemplateRefMeta template_refs = 9;
+  repeated ImportMeta imports = 10;
+  repeated BindingMeta bindings = 11;
+  repeated VueApiCallMeta vue_api_calls = 12;
+  repeated StyleMeta styles = 13;
+  ComponentFlags flags = 14;
+  repeated AcceptedPropMeta accepted_props = 15;
+  repeated AcceptedEventMeta accepted_events = 16;
+  AcceptedSurfaceCompleteness accepted_surface_completeness = 17;
+  RootReachability root_reachability = 18;
+  FallthroughSurface fallthrough_surface = 19;
+  ComponentMetaResolution resolution = 20;
+  RootInfo root_info = 21;
+  PublicInstanceMeta public_instance = 22;
+  reserved 23;
+  reserved "sfc_blocks";
+  repeated MacroExpansionDiagnosticEntry macro_expansion_diagnostics = 24;
+  OrderedSfcStructure ordered_sfc_structure = 25;
+  ComponentContractAvailability component_public_contract = 26;
+  ResultCompleteness result_completeness = 27;
+}
+message LegacyComponentMetaPayload {
+  uint32 schema_version = 1;
+  TypeGraph type_graph = 2;
+  repeated TypeRegistryEntry type_registry = 3;
+  LegacyComponentMetaBody body = 4;
+  OriginGraph origin_graph = 5;
+}
+// Causes are open numeric vocabulary. Readers retain unknown values.
+// Values 1..17 retain the legacy partial-reason meanings.
+enum FactCause {
+  FACT_CAUSE_UNSPECIFIED = 0;
+  FACT_CAUSE_BUDGET_EXCEEDED = 1;
+  FACT_CAUSE_CANCELLED = 2;
+  FACT_CAUSE_SUPERSEDED_GENERATION = 3;
+  FACT_CAUSE_UNSTABLE_STATE = 4;
+  FACT_CAUSE_SAME_PATH_RECURSION = 5;
+  FACT_CAUSE_WALKER_FATAL = 6;
+  FACT_CAUSE_PROPAGATED = 7;
+  FACT_CAUSE_DEFERRED_EVALUATION_LIMIT = 8;
+  FACT_CAUSE_STRUCTURAL_FACT_DEMAND_LIMIT = 9;
+  FACT_CAUSE_SEMANTIC_QUERY_FAULT = 10;
+  FACT_CAUSE_MISSING_SEMANTIC_NODE_DATA = 11;
+  FACT_CAUSE_PROJECTION_WORK_LIMIT = 12;
+  FACT_CAUSE_CONNECTED_QUERY_DEPTH_LIMIT = 13;
+  FACT_CAUSE_MISSING_DEPENDENCY = 14;
+  FACT_CAUSE_FLOW_RETURN_UNINFERRED = 15;
+  FACT_CAUSE_FLOW_RETURN_UNVERIFIED = 16;
+  FACT_CAUSE_FLOW_RETURN_NO_SURFACE = 17;
+  FACT_CAUSE_UNDECIDED_CONDITIONAL = 18;
+  FACT_CAUSE_CONNECTED_MEMORY_LIMIT = 19;
+  FACT_CAUSE_OPERATION_BUDGET = 20;
+  FACT_CAUSE_INVALID_GRAPH = 100;
+  FACT_CAUSE_LEGACY_PARTIAL = 101;
+  FACT_CAUSE_UNREPRESENTABLE_VALUE = 102;
+  FACT_CAUSE_INCOMPLETE_VALUE = 103;
+  FACT_CAUSE_MISSING_GUARANTEE = 104;
+  FACT_CAUSE_UNREPRESENTABLE_PAYLOAD = 105;
+  FACT_CAUSE_ADAPTER_UNAVAILABLE = 106;
+  FACT_CAUSE_COMPONENT_META_UNAVAILABLE = 107;
+  FACT_CAUSE_UNRAISABLE_SOURCE = 110;
+  FACT_CAUSE_REQUIRED_SOURCE_UNAVAILABLE = 111;
+  FACT_CAUSE_INTERIOR_SOURCE_MISS = 112;
+  FACT_CAUSE_SHELL_MATERIALIZATION_MISS = 113;
+  FACT_CAUSE_UNKNOWN_MATERIALIZING_INTERIOR = 114;
+}
+enum FactKind {
+  FACT_KIND_UNSPECIFIED = 0;
+  FACT_KIND_COMPLETE = 1;
+  FACT_KIND_APPROXIMATE = 2;
+  FACT_KIND_UNAVAILABLE = 3;
+}
+message FactGuarantee {
+  FactKind kind = 1;
+  repeated uint32 causes = 2;
+}
+message ComponentFacts {
+  PropsFact props = 1;
+  EventsFact events = 2;
+  SlotsFact slots = 3;
+  ModelsFact models = 4;
+  ExposedFact exposed = 5;
+  AcceptedPropsFact accepted_props = 6;
+  AcceptedEventsFact accepted_events = 7;
+  RootReachabilityFact root_reachability = 8;
+  FallthroughSurfaceFact fallthrough_surface = 9;
+  PublicInstanceFact public_instance = 10;
+  ComponentContractFact component_public_contract = 11;
+  TypeRegistryFact type_registry = 12;
+  // Original delivery/refusal disposition. Recovery facets never promote it.
+  FactGuarantee delivery = 13;
+}
+
+message PropsFact {
+  FactGuarantee guarantee = 1;
+  PropsValue value = 2;
+}
+message PropsValue {
+  repeated PropMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message EventsFact {
+  FactGuarantee guarantee = 1;
+  EventsValue value = 2;
+}
+message EventsValue {
+  repeated EventMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message SlotsFact {
+  FactGuarantee guarantee = 1;
+  SlotsValue value = 2;
+}
+message SlotsValue {
+  repeated SlotMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message ModelsFact {
+  FactGuarantee guarantee = 1;
+  ModelsValue value = 2;
+}
+message ModelsValue {
+  repeated ModelMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message ExposedFact {
+  FactGuarantee guarantee = 1;
+  ExposedValue value = 2;
+}
+message ExposedValue {
+  repeated ExposedMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message AcceptedPropsFact {
+  FactGuarantee guarantee = 1;
+  AcceptedPropsValue value = 2;
+}
+message AcceptedPropsValue {
+  repeated AcceptedPropMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message AcceptedEventsFact {
+  FactGuarantee guarantee = 1;
+  AcceptedEventsValue value = 2;
+}
+message AcceptedEventsValue {
+  repeated AcceptedEventMeta entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
+}
+
+message RootReachabilityFact {
+  FactGuarantee guarantee = 1;
+  RootReachability value = 2;
+  bool absent = 3;
+}
+
+message FallthroughSurfaceFact {
+  FactGuarantee guarantee = 1;
+  FallthroughSurface value = 2;
+  bool absent = 3;
+}
+
+message PublicInstanceFact {
+  FactGuarantee guarantee = 1;
+  PublicInstanceMeta value = 2;
+  bool absent = 3;
+}
+
+message ComponentContractFact {
+  FactGuarantee guarantee = 1;
+  ComponentPublicContract value = 2;
+  bool absent = 3;
+}
+
+message TypeRegistryFact {
+  FactGuarantee guarantee = 1;
+  TypeRegistryValue value = 2;
+}
+message TypeRegistryValue {
+  repeated TypeRegistryEntry entries = 1;
+  // Open domains prove positive membership only; omission never proves absence.
+  bool open = 2;
 }

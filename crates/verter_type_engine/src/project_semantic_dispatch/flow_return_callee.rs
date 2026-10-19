@@ -544,30 +544,65 @@ impl CallValue {
         let Some(data) = graph.node_data(function_node) else {
             return SignatureCall::NotCallable;
         };
-        let SemanticNodeData::Signature {
-            return_type,
-            type_parameters,
-            params,
-            ..
-        } = &*data
-        else {
-            return SignatureCall::NotCallable;
+        let (return_type, return_carrier, type_parameters, params) = match data.as_ref() {
+            SemanticNodeData::Signature {
+                return_type,
+                return_carrier,
+                type_parameters,
+                params,
+                ..
+            } => (
+                *return_type,
+                return_carrier.clone(),
+                Arc::clone(type_parameters.as_arc()),
+                Arc::clone(params.as_arc()),
+            ),
+            SemanticNodeData::DeferredCallable(callable) => {
+                let header =
+                    callable.parts(&crate::semantic_query::ResolveOverloadSetConsumer::witness());
+                (
+                    dispatch.opaque(QueryError::Miss),
+                    header.return_carrier.clone(),
+                    Arc::clone(header.type_parameters),
+                    Arc::clone(header.params),
+                )
+            }
+            _ => return SignatureCall::NotCallable,
         };
-        let return_type = *return_type;
-        let type_parameters = Arc::clone(type_parameters);
-        let params = Arc::clone(params);
         drop(data);
+        let demand_source = matches!(
+            return_carrier,
+            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+        ) || matches!(
+            graph.node_data(return_type).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::Miss))
+        );
+        let return_type = match return_carrier.result_source() {
+            crate::semantic_query::SignatureResultSource::Function(
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            ) if demand_source => {
+                match dispatch.execute_function_return_source(
+                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
+                    identity.anchor.canonical_id.as_ref(),
+                ) {
+                    super::flow_return::FunctionReturnNode::Flow(result) => dispatch
+                        .apply_signature_return_source(&return_carrier, result.return_type()),
+                    _ => return SignatureCall::ReturnMiss,
+                }
+            }
+            _ => return_type,
+        };
         let mut clause_params = Vec::with_capacity(type_parameters.len());
         for decl in type_parameters.iter() {
             let param = match decl.default {
-                None => CalleeClauseParam::bare(Arc::clone(&decl.name)),
+                None => CalleeClauseParam::bare(Arc::<str>::from(&decl.name)),
                 Some(default) => {
                     let inference = ClauseParamInference::at_call(
                         site,
                         dispatch.first_signature_param_occurrence(&params, decl.name.as_ref()),
                     );
                     match CalleeClauseParam::with_default(
-                        Arc::clone(&decl.name),
+                        Arc::<str>::from(&decl.name),
                         site,
                         inference,
                         || Some(default),
@@ -688,7 +723,10 @@ fn reduce_instantiated_return(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     let graph = dispatch.arena();
-    let Some(SemanticNodeData::Intersection(members)) = graph.node_data(node).as_deref().cloned()
+    let Some(SemanticNodeData::Intersection(members)) = graph
+        .node_data(node)
+        .as_deref()
+        .map(crate::semantic_query::SemanticNodeData::clone)
     else {
         return node;
     };

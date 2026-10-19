@@ -148,7 +148,7 @@ impl DocumentRegistry {
         *self.semantic_workspace.write() = Some(Arc::clone(&workspace));
         if let Some(host) = self.semantic_host.read().clone() {
             let semantic_workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.host().set_workspace(semantic_workspace);
+            host.as_ref().set_workspace(semantic_workspace);
         }
         // A task may have been scheduled after the pre-install fence while a
         // host still held the old workspace. Advance once more after every host
@@ -171,19 +171,18 @@ impl DocumentRegistry {
         // projection host was constructed with: it must never analyse a
         // vertical the server's own admission excludes.
         let framework = self.host().framework_options().clone();
-        let host = super::SharedHost::new(Arc::new(VerterHost::new_standalone(
-            verter_session::HostConfig {
+        let host: super::SharedHost =
+            Arc::new(VerterHost::new_standalone(verter_session::HostConfig {
                 analysis_scope: Some(verter_semantic::analysis::AnalysisScope::LSP),
                 // Isolation is also a fairness boundary: native enrichment cannot
                 // occupy the projection scheduler or saturate all host CPU workers.
                 host_cpu_threads: Some(1),
                 framework,
                 ..verter_session::HostConfig::default()
-            },
-        )));
+            }));
         if let Some(workspace) = self.semantic_workspace.read().clone() {
             let workspace: Arc<dyn verter_workspace::WorkspaceAccess> = workspace;
-            host.host().set_workspace(workspace);
+            host.as_ref().set_workspace(workspace);
         }
         *slot = Some(host.clone());
         host
@@ -261,7 +260,7 @@ impl DocumentRegistry {
                 // One guard for the whole blocking computation: the semantic
                 // host is never closed on today, and this keeps that a fact
                 // the gate enforces rather than one this call relies on.
-                let host = semantic_host.host();
+                let host = semantic_host.as_ref();
                 let request = UpsertRequest {
                     canonical_id: Some(work_canonical.clone()),
                     input_id: work_canonical.clone(),
@@ -355,7 +354,7 @@ impl DocumentRegistry {
                             &mut template.prop_definitions,
                             semantic_props,
                         );
-                        analysis.template = Some(Arc::new(template));
+                        analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(template));
                     }
                 }
                 let semantic_structure = is_framework_carrier
@@ -821,7 +820,9 @@ impl DocumentRegistry {
                     template.prop_definitions.push(prop);
                 }
             }
-            result.template = Some(Arc::new(template));
+            result.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                template,
+            ));
         }
 
         (!result.imports.is_empty()
@@ -958,9 +959,9 @@ mod tests {
         ];
         let role = verter_type_expr::PropCallableRole::SvelteSnippet {
             symbol: verter_type_expr::ResolvedSymbolIdentity {
-                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                canonical_id: "/node_modules/svelte/index.d.ts".into(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Snippet"),
+                symbol: "Snippet".into(),
             },
             exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
             provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,

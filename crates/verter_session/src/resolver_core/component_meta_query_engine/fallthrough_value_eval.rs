@@ -22,7 +22,6 @@ use crate::resolver_core::fallthrough::{
     intersect_known_spread_keys, normalize_public_spread_key, structural_substitute_typeof_refs,
     DynamicRootCandidate, FallthroughPropOverrideSet, KnownSpreadKeys,
 };
-use verter_type_engine::project_semantic_dispatch::node_data_for;
 
 use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeData, SemanticNodeId};
 
@@ -177,7 +176,10 @@ impl ComponentMetaQueryEngine<'_> {
                         waiting.pop();
                         let object = value;
                         value = object.and_then(|object| {
-                            dispatch.indexed_member_value(scope_canonical_id, object, name)
+                            dispatch
+                                .owning()
+                                .indexed_member_value(scope_canonical_id, object, name)
+                                .into_value_in(self.builder())
                         });
                         if callee {
                             if let (Some(object), Some(Pending::Call(call))) =
@@ -278,12 +280,15 @@ impl ComponentMetaQueryEngine<'_> {
         if let Some(env) = env {
             let substituted = structural_substitute_typeof_refs(lowered, scope_owner, env);
             if substituted != *lowered {
-                return dispatch.lower_type_expr_in_owner_scope_with_mode(
-                    scope_canonical_id,
-                    scope_owner,
-                    &substituted,
-                    ProjectionMode::Navigate,
-                );
+                return dispatch
+                    .owning()
+                    .lower_type_expr_in_owner_scope_with_mode(
+                        scope_canonical_id,
+                        scope_owner,
+                        &substituted,
+                        ProjectionMode::Navigate,
+                    )
+                    .into_value_in(self.builder());
             }
         }
 
@@ -296,7 +301,10 @@ impl ComponentMetaQueryEngine<'_> {
             scope_owner,
             lowered,
         ) {
-            return Some(admitted.node());
+            // The admitted carrier is dropped here; the engine's builder keeps
+            // its node for the rest of the evaluation.
+            let node = admitted.node();
+            return self.builder().node_ref(node).ok().map(|_| node);
         }
         // (4) Key-domain fallback. The class-A terminal admits only a FULLY
         // materialized expanded surface, but the fallthrough readers consume
@@ -305,12 +313,15 @@ impl ComponentMetaQueryEngine<'_> {
         // exposes its exact spread keys. Lower the expression eagerly and let
         // the node-domain readers decide what the node statically exposes —
         // a shape with no static key surface still reads as unknown.
-        dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            lowered,
-            ProjectionMode::Expanded,
-        )
+        dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                lowered,
+                ProjectionMode::Expanded,
+            )
+            .into_value_in(self.builder())
     }
 
     /// Node-domain spread-key reader for a root-consumption spread value
@@ -441,12 +452,15 @@ impl ComponentMetaQueryEngine<'_> {
         expr: &TypeExpr,
     ) -> Option<SemanticNodeId> {
         let dispatch = self.dispatch;
-        dispatch.lower_type_expr_in_owner_scope_with_mode(
-            scope_canonical_id,
-            scope_owner,
-            expr,
-            ProjectionMode::Navigate,
-        )
+        dispatch
+            .owning()
+            .lower_type_expr_in_owner_scope_with_mode(
+                scope_canonical_id,
+                scope_owner,
+                expr,
+                ProjectionMode::Navigate,
+            )
+            .into_value_in(self.builder())
     }
 
     /// Resolve one indexed call over its evaluated callee, receiver and
@@ -463,22 +477,31 @@ impl ComponentMetaQueryEngine<'_> {
         let dispatch = self.dispatch;
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
-            explicit_type_args.push(dispatch.lower_type_expr_in_owner_scope_with_mode(
-                scope_canonical_id,
-                scope_owner,
-                argument,
-                ProjectionMode::Navigate,
-            )?);
+            explicit_type_args.push(
+                dispatch
+                    .owning()
+                    .lower_type_expr_in_owner_scope_with_mode(
+                        scope_canonical_id,
+                        scope_owner,
+                        argument,
+                        ProjectionMode::Navigate,
+                    )
+                    .into_value_in(self.builder())?,
+            );
         }
         // The callee's polymorphic `this` is the receiver it is read
         // through.
         let callee = receiver.map_or(callee, |receiver| {
-            dispatch.bind_callee_receiver(callee, receiver)
+            dispatch
+                .owning()
+                .bind_callee_receiver(callee, receiver)
+                .into_value_in(self.builder())
         });
-        let result = dispatch.execute_indexed_resolve_call(
-            verter_type_engine::semantic_query::ResolveCallKey {
+        let result = dispatch
+            .owning()
+            .execute_indexed_resolve_call(verter_type_engine::semantic_query::ResolveCallKey {
                 point: verter_type_engine::semantic_query::ProgramPointId {
-                    canonical_id: Arc::from(scope_canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
                     offset: call.point,
                 },
                 callee,
@@ -495,8 +518,8 @@ impl ComponentMetaQueryEngine<'_> {
                 explicit_type_args: Arc::from(explicit_type_args.into_boxed_slice()),
                 flow: verter_type_engine::semantic_query::FlowNarrowingKey::empty(),
                 context: dispatch.resolve_call_context_for(scope_canonical_id),
-            },
-        );
+            })
+            .into_value_in(self.builder());
         if result.is_none() {
             verter_type_engine::request_context::mark_request_result_partial();
         }
@@ -537,7 +560,7 @@ fn known_spread_keys_from_node_inner(
         NodeWalkStep::Halt => return None,
         NodeWalkStep::Visit => {}
     }
-    let result = match node_data_for(dispatch.graph(), node) {
+    let result = match dispatch.graph().read_in_scope(node) {
         None => None,
         Some(data) => match data.as_ref() {
             // The `Alias` identity hop is the node equivalent of the
@@ -630,9 +653,9 @@ fn known_spread_keys_from_surface(
         }
     }
     if surface.has_known_index_signature()
-        || !surface.index_signatures.is_empty()
-        || !surface.call_signatures.is_empty()
-        || !surface.construct_signatures.is_empty()
+        || !surface.index_signatures().is_empty()
+        || !surface.call_signatures().is_empty()
+        || !surface.construct_signatures().is_empty()
     {
         result.exact = false;
     }
@@ -721,7 +744,7 @@ fn collect_dynamic_root_candidates_from_node_inner(
         NodeWalkStep::Halt => return DynamicRootCandidateSet::default(),
         NodeWalkStep::Visit => {}
     }
-    let out = match node_data_for(dispatch.graph(), node) {
+    let out = match dispatch.graph().read_in_scope(node) {
         None => DynamicRootCandidateSet::default(),
         Some(data) => match data.as_ref() {
             SemanticNodeData::Literal(LiteralValue::String(tag)) => {

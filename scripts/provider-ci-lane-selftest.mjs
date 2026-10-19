@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -14,10 +15,101 @@ import {
   buildProviderLaneFilterExpr,
   verifyProviderCiPartition,
 } from "./provider-ci-internals.mjs";
-import { providerCargoInvocations, verifyArchive } from "./provider-ci.mjs";
+import {
+  providerCargoInvocations,
+  providerTestTimer,
+  runProviderLane,
+  verifyArchive,
+} from "./provider-ci.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(SCRIPT_DIR, "..");
+
+test("provider runner stays serial, collects later failures, and keeps timing advisory", async () => {
+  for (const outcome of ["pass", "fail", "interrupt"]) {
+    let calls = 0;
+    let active = 0;
+    let output = "";
+    let diagnostics = "";
+    let stopped = 0;
+    const verdict = await runProviderLane("tsserver", {
+      spawnCargo(command, args) {
+        assert.equal(command, "cargo");
+        assert.ok(args.includes("--test-threads=1"));
+        assert.ok(args.includes("--color=never"));
+        assert.equal(active++, 0, "a provider invocation must finish before the next starts");
+        const index = calls++;
+        const child = new EventEmitter();
+        child.stdout = new EventEmitter();
+        setImmediate(() => {
+          child.stdout.emit("data", Buffer.from("running 1 test\ntest actual::body ... "));
+          child.stdout.emit("data", Buffer.from("ok\ntest result: ok.\n"));
+          if (outcome === "interrupt" && index === 0) process.emit("SIGINT");
+          active--;
+          child.emit("close", outcome === "fail" && index === 0 ? 1 : 0, null);
+        });
+        return child;
+      },
+      stopChild: () => {
+        stopped++;
+      },
+      writeStdout: (chunk) => {
+        output += chunk;
+      },
+      writeStderr: (text) => {
+        diagnostics += text;
+      },
+      saveTimings(rows) {
+        assert.equal(rows.length, calls);
+        assert.ok(rows.every((row) => row.name === "actual::body"));
+        throw new Error("read-only timing directory");
+      },
+    });
+    assert.equal(verdict, outcome === "pass" ? 0 : 1);
+    assert.equal(calls, outcome === "interrupt" ? 1 : providerCargoInvocations("tsserver").length);
+    assert.equal(stopped, outcome === "interrupt" ? 1 : 0);
+    assert.match(output, /test actual::body \.\.\. ok/);
+    assert.match(diagnostics, /PROVIDER TEST TIME unavailable: read-only timing directory/);
+  }
+});
+
+test("serial provider timings exclude setup and handle split output and failed tests", () => {
+  let now = 0;
+  const rows = [];
+  const timer = providerTestTimer(
+    (row) => rows.push(row),
+    () => now,
+  );
+  timer.push("Compiling a crate\nrunning 3 tests\ntest slow::ro");
+  now = 100;
+  timer.push("undtrip ... ");
+  now = 350;
+  timer.push("ok\ntest rejected ... ");
+  now = 850;
+  timer.push("FAILED\ntest omitted ... ignored\n\nfailures:\n");
+  timer.push("test fabricated ... ok\ntest result: FAILED.\n");
+  now = 10_000;
+  timer.push("running 1 test\ntest src/protocol.rs - decode (line 42) - should panic ... ");
+  now = 10_050;
+  timer.push("ok\ntest result: ok.\n");
+  assert.deepEqual(rows, [
+    { name: "slow::roundtrip", status: "ok", elapsedMs: 250 },
+    { name: "rejected", status: "FAILED", elapsedMs: 500 },
+    { name: "omitted", status: "ignored", elapsedMs: 0 },
+    { name: "src/protocol.rs - decode (line 42)", status: "ok", elapsedMs: 50 },
+  ]);
+  timer.push("running 2 tests\ntest long_running ... ");
+  now = 11_000;
+  timer.push("test long_running has been running for over 60 seconds\n");
+  now = 12_000;
+  timer.push("ok\ntest interrupted ... ");
+  now = 13_000;
+  timer.finish();
+  assert.deepEqual(rows.slice(-2), [
+    { name: "long_running", status: "ok", elapsedMs: 1950 },
+    { name: "interrupted", status: "incomplete", elapsedMs: 1000 },
+  ]);
+});
 
 function yamlJob(source, name) {
   const start = source.indexOf(`\n  ${name}:`);
@@ -170,7 +262,7 @@ test("CI builds one provider-free archive and runs providers serially in their o
   const providers = yamlJob(workflow, "rust-providers-live");
   const success = yamlJob(workflow, "ci-success");
 
-  assert.match(build, /cargo nextest archive --workspace/);
+  assert.match(build, /node scripts\/compile-fixture-artifacts\.mjs archive --workspace/);
   assert.match(build, /node scripts\/provider-ci\.mjs verify --archive-file/);
   // Each step that lists the archive carries its own bound below the job's.
   assert.match(
@@ -204,21 +296,62 @@ test("CI builds one provider-free archive and runs providers serially in their o
     /cargo nextest|install-action@nextest|name:\s*rust-nextest-archive|download-artifact/,
   );
   assert.match(success, /^\s*- rust-providers-live\s*$/m);
-  for (const lane of ["tsserver", "tsgo"]) {
-    assert.match(providers, new RegExp(`provider-ci\\.mjs run ${lane}`));
-  }
-  assert.match(providers, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
-  assert.match(providers, /packages\/typescript-plugin\/src/);
-  assert.match(providers, /--exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/);
+  // Pull request CI runs tsgo, the main platform. tsserver, the legacy engine,
+  // and its plugin run in the scheduled tsserver nightly workflow.
+  assert.match(providers, /provider-ci\.mjs run tsgo/);
   assert.match(providers, /VERTER_REQUIRE_TSGO:\s*"1"/);
+  assert.doesNotMatch(providers, /VERTER_REQUIRE_TSSERVER/);
+  assert.doesNotMatch(
+    workflow,
+    /provider-ci\.mjs run tsserver|vitest run packages\/typescript-plugin\//,
+  );
   assert.doesNotMatch(core, /VERTER_REQUIRE_TS(?:GO|SERVER)/);
+
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  assert.match(nightly, /^name: tsserver nightly$/m);
+  assert.match(nightly, /^\s+schedule:\s*$/m);
+  assert.match(nightly, /^\s+workflow_dispatch:\s*$/m);
+  const tsserver = yamlJob(nightly, "providers");
+  assert.match(tsserver, /provider-ci\.mjs run tsserver/);
+  assert.match(tsserver, /VERTER_REQUIRE_TSSERVER:\s*"1"/);
+  assert.doesNotMatch(tsserver, /cargo nextest|install-action@nextest/);
+  const plugin = yamlJob(nightly, "plugin");
+  assert.match(
+    plugin,
+    /vitest run packages\/typescript-plugin\/src --exclude ['"]packages\/typescript-plugin\/src\/tsc\/\*\*['"]/,
+  );
+  // The one job a watcher reads must depend on every lane in the workflow.
+  const result = yamlJob(nightly, "result");
+  const jobs = nightly.slice(nightly.search(/^jobs:\s*$/m));
+  const lanes = [...jobs.matchAll(/^ {2}([a-z0-9-]+):\r?\n/gm)]
+    .map((match) => match[1])
+    .filter((job) => !["jobs", "result"].includes(job));
+  assert.ok(lanes.length >= 5, `expected the nightly lanes, found ${lanes.join(", ")}`);
+  for (const job of lanes) {
+    assert.match(result, new RegExp(`needs:.*\\b${job}\\b`), `the nightly result must need ${job}`);
+  }
+  // Timings are written under CARGO_TARGET_DIR (default target/). The upload
+  // must use that same root or a relocated target dir drops the artifact.
+  assert.match(
+    providers,
+    /path:\s*\$\{\{\s*format\('\{0\}\/provider-timings\/\*\.json',\s*env\.CARGO_TARGET_DIR\s*\|\|\s*'target'\)\s*\}\}/,
+  );
+  assert.doesNotMatch(providers, /path:\s*target\/provider-timings\/\*\.json/);
 });
 
-test("native-only TypeScript plugin specs remain with the native artifact", () => {
-  const workflow = readFileSync(join(REPO_ROOT, ".github", "workflows", "ci.yml"), "utf8");
-  const native = yamlJob(workflow, "native-test");
-  assert.match(native, /vitest run packages\/typescript-plugin\/src\/tsc/);
-  assert.doesNotMatch(native, /pnpm --filter @verter\/typescript-plugin test/);
+test("native-only TypeScript plugin specs run after a native build in the tsserver nightly", () => {
+  const nightly = readFileSync(
+    join(REPO_ROOT, ".github", "workflows", "tsserver-nightly.yml"),
+    "utf8",
+  );
+  const plugin = yamlJob(nightly, "plugin");
+  const build = plugin.indexOf("pnpm run build:native");
+  const specs = plugin.indexOf("vitest run packages/typescript-plugin/src/tsc");
+  assert.ok(build !== -1 && specs !== -1 && build < specs, "src/tsc specs run after build:native");
+  assert.doesNotMatch(plugin, /pnpm --filter @verter\/typescript-plugin test/);
 
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8"));
   assert.match(pkg.scripts["test:scripts"], /provider-ci-lane-selftest\.mjs/);

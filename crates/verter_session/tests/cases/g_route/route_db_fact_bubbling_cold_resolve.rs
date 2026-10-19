@@ -57,7 +57,7 @@ fn rk(provider: &str, name: &str) -> verter_session::resolver_core::RouteNameKey
 }
 
 /// `FactVersionRef` with a recognisable 16-byte pattern. The pattern
-/// is what the closure stores via `insert_arc_with_kind` inside the
+/// is what the closure stores via `insert_value_with_kind` inside the
 /// singleflight, and what the re-read returns. The tracer assertion
 /// below matches against this exact ref.
 fn route_fact() -> FactVersionRef {

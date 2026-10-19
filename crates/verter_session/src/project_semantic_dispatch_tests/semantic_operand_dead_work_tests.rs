@@ -160,7 +160,10 @@ fn stats(host: &VerterHost) -> verter_type_engine::semantic_query::SemanticGraph
     host.project_type_store().semantic_graph().stats_snapshot()
 }
 
-fn graph_node_data(host: &VerterHost, node: SemanticNodeId) -> Arc<SemanticNodeData> {
+fn graph_node_data(
+    host: &VerterHost,
+    node: SemanticNodeId,
+) -> verter_type_engine::semantic_query_memo::NodeData {
     host.project_type_store()
         .semantic_graph()
         .node_data(node)
@@ -257,8 +260,8 @@ fn arm_locator(symbol: &str, ordinal: u32) -> AuthoredBodyLocator {
     )
 }
 
-fn path_of(names: &[&str]) -> Arc<[PathSegment]> {
-    Arc::from(
+fn path_of(names: &[&str]) -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         names
             .iter()
             .map(|name| PathSegment::Member(PropertyKey::identifier(Arc::from(*name))))
@@ -272,7 +275,7 @@ fn path_of(names: &[&str]) -> Arc<[PathSegment]> {
 struct MatrixRow {
     label: &'static str,
     /// The selective demand. `None` = whole-surface force.
-    path: Option<Arc<[PathSegment]>>,
+    path: Option<verter_type_expr::OwnedSlice<PathSegment>>,
     /// Mint the row's operand (may itself assert the mint succeeded).
     operand:
         fn(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> SemanticOperand,
@@ -316,7 +319,7 @@ fn run_matrix_row(row: &MatrixRow) {
     let nodes_before = interned_nodes(&host);
     let stats_before = stats(&host);
     let (forced, dead_fact_reads) = dead_file_fact_reads(&host, || match &row.path {
-        Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
+        Some(path) => force_projecting(&dispatch, &operand, context, path.clone()),
         None => match dispatch.force_semantic_operand_for_tests(
             &operand,
             SemanticOperandForceRequest::new_for_tests(context),
@@ -398,7 +401,7 @@ fn run_matrix_row(row: &MatrixRow) {
     let warm_window = trace_len();
     let warm_nodes_before = interned_nodes(&host);
     let warm_forced = match &row.path {
-        Some(path) => force_projecting(&dispatch, &operand, context, Arc::clone(path)),
+        Some(path) => force_projecting(&dispatch, &operand, context, path.clone()),
         None => match dispatch.force_semantic_operand_for_tests(
             &operand,
             SemanticOperandForceRequest::new_for_tests(context),
@@ -447,7 +450,7 @@ fn run_matrix_row(row: &MatrixRow) {
 fn dead_key_for(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     locator: AuthoredBodyLocator,
-    path: Option<Arc<[PathSegment]>>,
+    path: Option<verter_type_expr::OwnedSlice<PathSegment>>,
 ) -> SemanticQueryKey {
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let projection = match path {
@@ -539,10 +542,10 @@ fn row_conditional_dead_branch() -> MatrixRow {
             (Counter::ConditionalDecided, 1),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 0),
-            // The conditional's OWN live substitution (T → string into the
-            // check, extends, and both branch shells) — the dead branch
-            // contributes no substitution beyond these.
-            (Counter::SubstituteMisses, 6),
+            // The conditional's live substitutions: parameters absent from
+            // the winning branch need no rewrite, and the dead branch
+            // contributes none.
+            (Counter::SubstituteMisses, 2),
             // The force family entry itself (authored Instantiate).
             (Counter::Instantiations, 1),
             (Counter::DeferredMisses, 0),
@@ -646,7 +649,9 @@ fn row_unrelated_mapped_key() -> MatrixRow {
                 // The whole mapped surface nobody demanded.
                 SemanticQueryKey::ProjectPath {
                     base,
-                    path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    path: verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                 },
                 // The unrelated produced members.
@@ -708,7 +713,9 @@ fn row_remap_dropped_value() -> MatrixRow {
             Vec::new()
         },
         expected_cold_classes: &[
-            ("Conditional", 5),
+            // Each original key drives one remap decision. The unbound
+            // declaration's K stays deferred and must not add probes.
+            ("Conditional", 3),
             ("Instantiate", 2),
             ("KeyOf", 1),
             ("LowerLocator", 2),
@@ -723,14 +730,17 @@ fn row_remap_dropped_value() -> MatrixRow {
             // value materialisation — the two dropped keys' values are
             // never forced.
             (Counter::MappedPerK, 1),
-            (Counter::OriginEdges, 9),
+            // The unbound condition stays an authored carrier, so it emits no
+            // evaluated-query origin or deferred-evaluation miss.
+            (Counter::OriginEdges, 8),
             // The remap key domain and the survivor's value body
             // substitute their binders — the DROPPED keys' value bodies
             // contribute none of these substitutions.
-            (Counter::SubstituteMisses, 19),
+            (Counter::SubstituteMisses, 9),
             (Counter::Instantiations, 2),
-            // One memo probe per deferred evaluation that misses.
-            (Counter::DeferredMisses, 6),
+            // One memo probe per deferred evaluation that misses; a root
+            // the evaluator finishes as itself takes none.
+            (Counter::DeferredMisses, 3),
             (Counter::ConditionalDecided, 3),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 2),
@@ -868,6 +878,7 @@ fn builtin_utility_route_is_one_instantiate_family() {
 
     let host = host_with_source();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let _trace = enable_dispatch_trace_for_test();
 
     let graph = host.project_type_store().semantic_graph();

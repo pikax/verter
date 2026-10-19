@@ -48,6 +48,52 @@ fn host_with(source: &str) -> Arc<VerterHost> {
     host
 }
 
+#[test]
+fn repeated_callbacks_allocate_in_the_linear_class() {
+    let mut measurements = Vec::new();
+    for count in [10, 100, 128, 256, 500, 512] {
+        let parameters = (0..count)
+            .map(|i| format!("f{i}: (x: T) => void"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let arguments = vec![r#"(x: "a") => {}"#; count].join(", ");
+        let source = format!(
+            "type Init = 0; declare function co<T>({parameters}): T; const r = co({arguments}); export type Result = typeof r;"
+        );
+        let host = host_with(&source);
+        let (init, _) = host
+            .resolve_named_symbol_with_audit(FILE, "Init", None)
+            .into_parts();
+        assert!(init.unwrap().is_some());
+        reset_alloc_counter();
+        let (answer, _) = host
+            .resolve_named_symbol_with_audit(FILE, "Result", None)
+            .into_parts();
+        let bytes = super::alloc_bytes();
+        let peak = peak_live_bytes();
+        let answer = answer.unwrap().expect("the callback result resolves");
+        let json = host.project_node_to_type_expr_json_bytes(&answer).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        let expression = verter_type_expr::type_expr_from_json(&value).unwrap();
+        assert_eq!(
+            expression,
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String("a".into()))
+        );
+        measurements.push((bytes, peak));
+    }
+    eprintln!("callback (allocated bytes, peak live bytes): {measurements:?}");
+    for adjacent in [
+        [measurements[2], measurements[3]],
+        [measurements[3], measurements[5]],
+    ] {
+        assert!(adjacent[0].0 > 0 && adjacent[1].0 > adjacent[0].0);
+        assert!(
+            adjacent[1].0 < 3 * adjacent[0].0,
+            "doubling callbacks allocates a quadratic volume: {measurements:?}"
+        );
+    }
+}
+
 /// The fixed cost of setting one connected demand up beside what it
 /// constructs: lowering the two names and opening the relation.
 const DEMAND_SETUP_BYTES: i64 = 4 << 20;
@@ -56,7 +102,7 @@ const DEMAND_SETUP_BYTES: i64 = 4 << 20;
 /// read, under `limit` construction bytes when given: whether `S` holds, the
 /// bytes the demand charged, and the peak live bytes the allocator handed
 /// out on this thread meanwhile.
-fn relate_measured(count: usize, limit: Option<usize>) -> (bool, usize, i64) {
+fn relate_measured(count: usize, limit: Option<u64>) -> (bool, u64, i64) {
     let host = host_with(&reversed_unions(count));
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "S", "S", None);
     let _ = verter_session::for_tests::relate_named_types_for_tests(&host, FILE, "T", "T", None);

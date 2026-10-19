@@ -65,6 +65,28 @@ pub struct SymbolContributors {
     pub fingerprint: Hash16,
 }
 
+/// Which file-scope declarations of a global name an augmentation
+/// collection orders beside its augmenting blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileScopeContribution {
+    /// A script's interface of the name, and its namespace of the name
+    /// where the file declares no interface of it: the declarations a type
+    /// body merges.
+    TypeBody,
+    /// A script's value of the name: the blocks of an enum merged across
+    /// files (the collector keeps those that declare an enum).
+    EnumBlock,
+}
+
+/// One slot in the shared declaration-precedence order of an augmentation
+/// collection. Indices address the caller's immutable augmenter/population
+/// arrays; the order owns no bodies or copied contributor entries.
+#[derive(Debug, Clone, Copy)]
+pub enum AugmentationCandidate {
+    Augmenter(usize),
+    FileScope(usize),
+}
+
 impl SymbolContributors {
     pub fn empty() -> Self {
         Self {

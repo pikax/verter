@@ -58,9 +58,9 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
     // never re-synthesised.
     let payload = verter_type_expr::locators::MacroPayloadLocator {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from("/c.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/c.vue"),
             owner: verter_type_expr::TopLevelOwnerId::instance(0),
-            symbol: Arc::from("default"),
+            symbol: verter_type_expr::OwnedStr::from("default"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         macro_index: 0,
@@ -111,6 +111,7 @@ fn slot_field_function_source_publishes_payload_else_closed_function_fact() {
         .expect("upsert /c.vue");
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             &closed,
@@ -299,6 +300,7 @@ fn imported_alias_source_demands_to_the_resolved_union_through_the_bridge() {
 
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let raised = dispatch
         .raise_semantic_type_source_to_hot(
             source,

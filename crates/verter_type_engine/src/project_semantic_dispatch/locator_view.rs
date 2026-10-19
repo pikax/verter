@@ -46,6 +46,7 @@ pub(super) struct DeclBodyProjection {
     substitution_checkpoint: usize,
     memo: ViewMemo,
     completeness: ResultCompleteness,
+    extent: super::locator_view_worklist::ProjectionExtent,
     plan: BodyPlan,
     run: Option<ProjectionRun>,
     seam: ProjectionSeam,
@@ -186,7 +187,7 @@ impl ProjectionStamp {
 pub struct LocatorViewInputs<'a> {
     pub env: &'a FxHashMap<String, SemanticNodeId>,
     pub scope: &'a NodeScopeId,
-    pub name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    pub name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     pub scope_payload: Option<&'a DeclarationScopePayload>,
     pub shadowing: &'a ScopeShadowing,
     pub authored_resolution_debt: Option<&'a super::carrier::AuthoredResolutionDebtFrame>,
@@ -206,7 +207,7 @@ pub type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), Sema
 pub struct ProjectionBenchCase {
     root: SemanticNodeId,
     scope: NodeScopeId,
-    name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     scope_payload: Option<DeclarationScopePayload>,
     shadowing: ScopeShadowing,
 }
@@ -217,7 +218,7 @@ pub struct ProjectionBenchCase {
 /// [`ProjectSemanticDispatch::project_view_node_worklist`].
 #[cfg(any(test, feature = "test-support"))]
 pub struct ProjectionBenchHarness<'a, C: crate::resolver_core::ResolverCapabilities> {
-    dispatch: ProjectSemanticDispatch<'a, C>,
+    dispatch: super::ThreadDispatch<'a, C>,
     env: FxHashMap<String, SemanticNodeId>,
     substitutions: Vec<(Arc<str>, SemanticNodeId)>,
     memo: ViewMemo,
@@ -260,12 +261,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .dispatch
             .lower_locator(AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from(canonical_id),
+                    canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from(symbol),
+                    symbol: verter_type_expr::OwnedStr::from(symbol),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                ),
             })) {
             crate::semantic_query::QueryResult::Value(root) => root,
             crate::semantic_query::QueryResult::Recursive(root) => root,
@@ -278,7 +281,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         let scope = NodeScopeId::File {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash,
             local_scope: None,
@@ -287,7 +290,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectionBenchHarness<'
             .iter()
             .map(|(local_name, defining_canonical, defining_symbol)| {
                 (
-                    Arc::from(*local_name),
+                    verter_type_expr::OwnedStr::from(*local_name),
                     ResolvedRootIdentity::new_in_owner(
                         *defining_canonical,
                         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -416,7 +419,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // peer-merge reducer then mis-buckets as OWN surface, losing
             // own-body-shadows-heritage precedence.
             Some(SemanticNodeData::MergedDecl { contributors }) => BodyPlan::Merged {
-                contributors: Arc::clone(contributors),
+                contributors: Arc::clone(contributors.as_arc()),
                 next: 0,
                 ids: Vec::with_capacity(contributors.len()),
                 current: None,
@@ -462,6 +465,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitution_checkpoint,
             memo: ViewMemo::default(),
             completeness: ResultCompleteness::Complete,
+            extent: super::locator_view_worklist::ProjectionExtent::Projected,
             plan,
             run: None,
             seam,
@@ -476,7 +480,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         projection: &mut DeclBodyProjection,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
-        mut delivery: Option<SemanticNodeId>,
+        mut delivery: Option<super::locator_view_worklist::ProjectionDelivery>,
     ) -> BodyProjectionPoll {
         // Every root this call projects belongs to one connected demand.
         let (_connected_guard, _) = self.enter_connected_demand(false);
@@ -496,6 +500,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         projection.run = None;
                         projection.completeness =
                             projection.completeness.merge(outcome.completeness);
+                        projection.extent = projection.extent.join(outcome.extent);
                         projection.feed(outcome.node);
                     }
                 }
@@ -516,6 +521,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         Err(outcome) => {
                             projection.completeness =
                                 projection.completeness.merge(outcome.completeness);
+                            projection.extent = projection.extent.join(outcome.extent);
                             projection.feed(outcome.node);
                         }
                     }
@@ -527,11 +533,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ProjectedViewOutcome {
                             node: projection.shape,
                             completeness: projection.completeness,
+                            extent: projection.extent,
                         }
                     } else {
                         ProjectedViewOutcome {
                             node: projected,
                             completeness: projection.completeness,
+                            extent: projection.extent,
                         }
                     });
                 }
@@ -702,7 +710,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             BodyPlan::Merged { ids, .. } => self.graph().intern_preserving_scope(
                 projection.shape,
                 SemanticNodeData::MergedDecl {
-                    contributors: Arc::from(ids.into_boxed_slice()),
+                    contributors: crate::semantic_query::PayloadArray::from(ids.into_boxed_slice()),
                 },
             ),
         }
@@ -765,7 +773,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
             ),
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.clone(), Arc::clone(args))
+                (base.clone(), Arc::clone(args.as_arc()))
             }
             _ => return None,
         };

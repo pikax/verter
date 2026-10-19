@@ -1149,7 +1149,9 @@ defineEmits<{ change: [value: number]; close: [] }>()
     let host = project.host();
     let analysis = host
         .get_component_meta("/App.vue")
-        .expect("component must resolve");
+        .expect("component must resolve")
+        .analysis()
+        .clone();
     assert_eq!(
         analysis.events.len(),
         2,
@@ -1180,9 +1182,9 @@ defineEmits<{ change: [value: number]; close: [] }>()
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 macro_index: 99,
@@ -1245,7 +1247,9 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
     let host = project.host();
     let mut analysis = host
         .get_component_meta("/App.vue")
-        .expect("component must resolve");
+        .expect("component must resolve")
+        .analysis()
+        .clone();
     assert_eq!(
         analysis.events.len(),
         1,
@@ -1260,9 +1264,9 @@ defineEmits<{ (event: 'change', value: number): boolean }>()
         verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(
             verter_type_expr::locators::MacroPayloadLocator {
                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                    canonical_id: Arc::from("/App.vue"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/App.vue"),
                     owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                    symbol: Arc::from("default"),
+                    symbol: verter_type_expr::OwnedStr::from("default"),
                     space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                 },
                 macro_index: 99,
@@ -2205,7 +2209,9 @@ defineEmits<{ save: [id: number] }>()
     let host = project.host();
     let analysis = host
         .get_component_meta("/App.vue")
-        .expect("component must resolve");
+        .expect("component must resolve")
+        .analysis()
+        .clone();
     assert_eq!(analysis.events.len(), 1, "fixture declares exactly 1 event");
 
     // PRESENT arm: the untampered analysis materializes the real source.

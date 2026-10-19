@@ -54,6 +54,7 @@ pub(crate) mod fallthrough;
 pub(crate) mod imported_type_root;
 pub(crate) mod intrinsic_projection;
 pub(crate) mod jsdoc_resolve;
+pub(crate) mod module_exports;
 pub(crate) mod overlay_materialize;
 pub(crate) mod overlay_priority;
 pub(crate) mod prepared_decl;
@@ -66,6 +67,7 @@ pub(crate) mod template_class_facts;
 // `crate::host_manage::extract_*` paths used by `meta.rs`,
 // `component_meta_host.rs`, and `component_meta_resolution_policy.rs`
 // after the Domain K free functions moved to `component_meta_extract.rs`.
+#[allow(unused_imports)]
 pub(crate) use self::component_meta_extract::{
     extract_component_meta_from_resolved, extract_component_meta_from_resolved_with_facts,
     populate_public_instance_sidecar, ComponentMetaExtractOutcome,
@@ -1048,7 +1050,11 @@ impl ImportedRuntimeValueResolver for HostRuntimeValueResolver<'_> {
     fn prepared_value_decl(
         &self,
         source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    > {
         self.host
             .prepared_value_decl_in(&source.canonical_id, source.owner, &source.name)
     }

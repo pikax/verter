@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use rustc_hash::FxHashMap;
 use verter_type_expr::MemberVisibility;
 
@@ -99,22 +97,27 @@ pub(crate) fn named_native_props_outcome(
     root_owner: verter_type_expr::TopLevelOwnerId,
     root_name: &str,
 ) -> ResolvedNativePropsOutcome {
+    // The projection composes construction labels across operations (the
+    // resolved base, its surface, each member's rendered display), so it
+    // holds an explicit builder owner for them; the rows it returns carry
+    // only graph-free text.
+    let _builder = dispatch.enter_construction_scope();
     let read = dispatch.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(root_canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(root_canonical),
             owner: root_owner,
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 root_owner,
             ),
         },
-        name: Arc::from(root_name),
+        name: verter_type_expr::OwnedStr::from(root_name),
     }));
     verter_type_engine::meta_resolve::emit_dispatch_dep_signature_facts(
         dispatch,
-        &read.dep_signature,
+        read.dep_signature(),
     );
-    let (base, recursive) = match read.value {
+    let (base, recursive) = match *read.value() {
         QueryResult::Value(node) => (node, false),
         QueryResult::Recursive(node) => (node, true),
         QueryResult::Error(_) => return ResolvedNativePropsOutcome::Miss,
@@ -128,7 +131,7 @@ pub(crate) fn named_native_props_outcome(
             ctx,
             dispatch,
             base,
-            Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
             ProjectionReductionContext::macro_object_surface(
                 ProjectionMode::Shallow,
                 SurfaceProvenanceContext::MacroTypeArgOwnBody,

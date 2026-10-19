@@ -42,9 +42,9 @@ use crate::resolver_core::bare_name_resolve::{
 };
 use crate::resolver_core::scope_shadowing::ScopeShadowing;
 use crate::semantic_query::{
-    DeclIdentity, HashValue, NodeScopeId, PartialReasonSet, PathSegment, ProjectionMode,
-    ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
-    SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
+    DeclIdentity, FactStatus, HashValue, NodeScopeId, PartialReasonSet, PathSegment,
+    ProjectionMode, ProjectionReductionContext, QueryError, QueryResult, ResolveDeclKey, ScopeId,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// Read-only, value-side resolution context for resolving a graph carrier
@@ -61,7 +61,7 @@ pub struct CarrierResolverContext<'a> {
     /// The prepared-decl `name_resolution` fast-path map (already-resolved
     /// imports from the body-file scope). Consulted before the host-owned
     /// bare-name resolver fallback.
-    name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+    name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     /// The owner declaration-scope payload (scope-local type names /
     /// bindings), consulted by the bare-name resolver fallback. `None` for a
     /// global scope or a pre-bundle fixture.
@@ -94,7 +94,7 @@ pub struct CarrierResolverContext<'a> {
 /// `finish` must be called on every non-panicking exit. The drop assertion makes
 /// that discipline structural while allowing unwind cleanup to remain inert.
 pub struct AuthoredResolutionDebtFrame {
-    canonical_id: Arc<str>,
+    canonical_id: verter_type_expr::OwnedStr,
     owner: verter_type_expr::TopLevelOwnerId,
     outstanding: Cell<bool>,
     finished: Cell<bool>,
@@ -103,7 +103,7 @@ pub struct AuthoredResolutionDebtFrame {
 impl AuthoredResolutionDebtFrame {
     pub(super) fn new(root_identity: &ResolvedRootIdentity) -> Self {
         Self {
-            canonical_id: Arc::clone(&root_identity.canonical_id),
+            canonical_id: root_identity.canonical_id.clone(),
             owner: root_identity.owner,
             outstanding: Cell::new(false),
             finished: Cell::new(false),
@@ -178,7 +178,7 @@ impl<'a> CarrierResolverContext<'a> {
     pub fn new(
         env: &'a FxHashMap<String, SemanticNodeId>,
         scope: &'a NodeScopeId,
-        name_resolution: &'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>,
+        name_resolution: &'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&'a DeclarationScopePayload>,
         shadowing: &'a ScopeShadowing,
         reduction_context: ProjectionReductionContext,
@@ -221,7 +221,9 @@ impl<'a> CarrierResolverContext<'a> {
     }
 
     /// The prepared-decl `name_resolution` fast-path map.
-    pub(crate) fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
+    pub(crate) fn name_resolution(
+        &self,
+    ) -> &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> {
         self.name_resolution
     }
 
@@ -264,8 +266,30 @@ pub(super) enum RefHeadResolution {
 /// arguments are live, allowing structural callers to suspend the resolution
 /// on an explicit worklist instead of recursively projecting from a closure.
 pub(super) enum CarrierResolutionPlan {
-    Ready(SemanticNodeId),
+    Ready(CarrierResolution),
     NeedsArgs(CarrierArgsContinuation),
+}
+
+/// One resolved position and the child producer fact that established it.
+#[derive(Clone, Copy)]
+pub(super) struct CarrierResolution {
+    pub(super) node: SemanticNodeId,
+    pub(super) status: FactStatus,
+}
+
+impl CarrierResolution {
+    fn complete(node: SemanticNodeId) -> Self {
+        Self {
+            node,
+            status: FactStatus::Complete,
+        }
+    }
+}
+
+impl CarrierResolutionPlan {
+    fn complete(node: SemanticNodeId) -> Self {
+        Self::Ready(CarrierResolution::complete(node))
+    }
 }
 
 /// How a resolved head finishes over its arguments: with a node, or with the
@@ -293,9 +317,11 @@ pub(super) enum CarrierArgsContinuation {
     Instantiate {
         identity: DeclIdentity,
         context: ProjectionReductionContext,
+        source_status: FactStatus,
     },
     ApplyTypeof {
         base: SemanticNodeId,
+        source_status: FactStatus,
     },
 }
 
@@ -305,12 +331,98 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
-        // Outside a projection run the reference's position is not known:
-        // it keeps the declaration-level back-edge.
-        match self.plan_carrier_finish(continuation, type_args, &|| true) {
-            CarrierFinish::Node(node) => node,
-            CarrierFinish::Instantiate(key) => self.instantiated_node(key),
+        self.finish_carrier_resolution_fact(continuation, type_args)
+            .node
+    }
+
+    fn finish_carrier_resolution_fact(
+        &self,
+        continuation: CarrierArgsContinuation,
+        type_args: Arc<[SemanticNodeId]>,
+    ) -> CarrierResolution {
+        // Outside a projection run the reference keeps its declaration back-edge.
+        let source_status = match &continuation {
+            CarrierArgsContinuation::ApplyTypeof { source_status, .. }
+            | CarrierArgsContinuation::Instantiate { source_status, .. } => *source_status,
+            _ => FactStatus::Complete,
+        };
+        let mut result = match self.plan_carrier_finish(continuation, type_args, &|| true) {
+            CarrierFinish::Node(node) => CarrierResolution::complete(node),
+            CarrierFinish::Instantiate(key) => self.carrier_resolution_read(key),
+        };
+        result.status = result.status.join(source_status);
+        result
+    }
+
+    fn carrier_resolution_read(&self, key: SemanticQueryKey) -> CarrierResolution {
+        // These consumers previously used execute_type_node; keep their
+        // intent attribution while retaining the full child fact envelope.
+        if !matches!(key, SemanticQueryKey::TypeOf { .. }) {
+            self.record_dispatch_intent_counters(&key);
         }
+        let read = self.execute_read(key);
+        let node = match read.value {
+            QueryResult::Value(node) | QueryResult::Recursive(node) => node,
+            QueryResult::Error(error) => self.opaque(error),
+        };
+        CarrierResolution {
+            node,
+            status: read.fact_status,
+        }
+    }
+
+    /// A resolved argument has one defining scope when its checking environment
+    /// agrees with the reference site. Keep distinct environments and local
+    /// scopes; reuse canonical declaration carriers without reading a member.
+    pub(super) fn canonical_argument_carrier(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let Some(data) = self.graph().node_data(node) else {
+            return node;
+        };
+        let identity = match data.as_ref() {
+            SemanticNodeData::DeclRef { identity } => identity,
+            SemanticNodeData::InstantiationRef { base, .. } => base,
+            _ => return node,
+        };
+        let Some(NodeScopeId::File {
+            canonical_id,
+            local_scope: None,
+            ..
+        }) = self.graph().node_scope(node)
+        else {
+            return node;
+        };
+        if self.ctx.semantic_compiler_options_for(&canonical_id)
+            != self
+                .ctx
+                .semantic_compiler_options_for(&identity.canonical_id)
+            || self.ctx.host_view_env_hashes_for(&canonical_id)
+                != self.ctx.host_view_env_hashes_for(&identity.canonical_id)
+            || self.ctx.host_view_project_identity_for(&canonical_id)
+                != self
+                    .ctx
+                    .host_view_project_identity_for(&identity.canonical_id)
+        {
+            return node;
+        }
+        let result = self.graph().intern_node_with_scope(
+            data.as_ref().clone(),
+            NodeScopeId::File {
+                canonical_id: identity.canonical_id.clone(),
+                owner: identity.owner,
+                whole_hash: identity.whole_hash,
+                local_scope: None,
+            },
+        );
+        if result != node {
+            self.graph().record_origin_edge(
+                result,
+                crate::semantic_query::OriginEdgeKind::Normalize,
+                Arc::from([node]),
+                crate::semantic_query::OriginMeta::None,
+                self.project_generation_signature(),
+            );
+        }
+        result
     }
 
     /// How a resolved head finishes over its lowered arguments: a carrier or
@@ -383,16 +495,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
                 ))
             }
-            CarrierArgsContinuation::Instantiate { identity, context } => {
+            CarrierArgsContinuation::Instantiate {
+                identity, context, ..
+            } => {
                 // An application of a declaration an enclosing
                 // `build_instantiate` frame is still materialising, in a
                 // position the checker defers, is its recursive reference,
@@ -413,16 +527,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CarrierFinish::Instantiate(SemanticQueryKey::Instantiate(
                     crate::semantic_query::InstantiateKey::new(
                         self.type_slot_for(
-                            Arc::clone(&identity.canonical_id),
+                            identity.canonical_id.clone(),
                             identity.owner,
-                            Arc::clone(&identity.decl_name),
+                            identity.decl_name.clone(),
                         ),
                         type_args,
                         self.instantiate_context_for(&identity.canonical_id, context),
                     ),
                 ))
             }
-            CarrierArgsContinuation::ApplyTypeof { base } => {
+            CarrierArgsContinuation::ApplyTypeof { base, .. } => {
                 CarrierFinish::Node(self.apply_typeof_instantiation_args(base, &type_args))
             }
         }
@@ -460,14 +574,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             RefHeadResolution::Resolved(identity) => graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args,
+                    args: crate::semantic_query::PayloadArray::from(args),
                 },
                 scope.clone(),
             ),
             RefHeadResolution::Builtin(identity) => graph.intern_node_with_scope(
                 SemanticNodeData::InstantiationRef {
                     base: identity,
-                    args,
+                    args: crate::semantic_query::PayloadArray::from(args),
                 },
                 scope.clone(),
             ),
@@ -511,6 +625,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// keeps miss / recursive behaviour uniform across both callers). The active
     /// instantiate stack stays dispatcher state (`&self.is_instantiate_active`),
     /// never copied into the context.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn resolve_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
@@ -519,7 +634,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         lower_args: impl FnOnce() -> Arc<[SemanticNodeId]>,
     ) -> SemanticNodeId {
         match self.plan_bare_ref_head(ctx, name, arg_count) {
-            CarrierResolutionPlan::Ready(value) => value,
+            CarrierResolutionPlan::Ready(value) => value.node,
             CarrierResolutionPlan::NeedsArgs(continuation) => {
                 self.finish_carrier_resolution(continuation, lower_args())
             }
@@ -546,87 +661,89 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    /// Intern the LIB-ENVIRONMENT global `name` applied to `args`,
-    /// deliberately BYPASSING lexical scope and userland shadowing.
-    ///
-    /// This is the route a COMPILER-INTERNAL use of a global takes, and it
-    /// is the opposite of an authored annotation. The checker reads its
-    /// own global symbol table for these — `getGlobalRecordSymbol()` for
-    /// the unknown-key `in` intersection, `globalFunctionType` for the
-    /// `typeof x === "function"` narrow — and never resolves the
-    /// identifier `Record` or `Function` in the narrowed expression's
-    /// scope, so a module-local declaration of that name is IRRELEVANT to
-    /// the operation. An authored `x: Record<K, V>` is the opposite case
-    /// and keeps taking
-    /// [`ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context`],
-    /// where `name_resolution` / [`ScopeShadowing`] make userland
-    /// shadowing win. Routing a compiler-internal global through that
-    /// lexical entry made a local `type Record` silently change (or, with
-    /// a shadow check bolted on, suppress) a narrow the checker performs
-    /// regardless.
-    ///
-    /// The mint is the SAME `__builtin__`-sentinel carrier the unshadowed
-    /// bare-name fast paths below produce — the runtime-nominal carrier
-    /// for a global lib type, the builtin-utility route for a lib utility
-    /// — so the produced node is byte-identical to the unshadowed
-    /// lowering and no second `Record` / `Function` spelling exists.
-    ///
-    /// `None` when the environment provides no such global — see
-    /// [`Self::lib_global_is_available`] for exactly what is asked. That
-    /// is the same "the global is unavailable" answer
-    /// `getGlobalRecordSymbol()` returning `undefined` gives the checker,
-    /// which then performs no narrow at all. The caller keeps its typed
-    /// gap and never fabricates one.
-    pub fn lower_lib_global(
-        &self,
-        scope_canonical_id: &str,
-        owner: verter_type_expr::TopLevelOwnerId,
-        name: &Arc<str>,
-        args: Arc<[SemanticNodeId]>,
-        context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
-        if !self.lib_global_is_available(scope_canonical_id, name.as_ref()) {
-            return None;
+    construction_ordinal_seam! {
+        /// Intern the LIB-ENVIRONMENT global `name` applied to `args`,
+        /// deliberately BYPASSING lexical scope and userland shadowing.
+        ///
+        /// This is the route a COMPILER-INTERNAL use of a global takes, and it
+        /// is the opposite of an authored annotation. The checker reads its
+        /// own global symbol table for these — `getGlobalRecordSymbol()` for
+        /// the unknown-key `in` intersection, `globalFunctionType` for the
+        /// `typeof x === "function"` narrow — and never resolves the
+        /// identifier `Record` or `Function` in the narrowed expression's
+        /// scope, so a module-local declaration of that name is IRRELEVANT to
+        /// the operation. An authored `x: Record<K, V>` is the opposite case
+        /// and keeps taking
+        /// [`ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context`],
+        /// where `name_resolution` / [`ScopeShadowing`] make userland
+        /// shadowing win. Routing a compiler-internal global through that
+        /// lexical entry made a local `type Record` silently change (or, with
+        /// a shadow check bolted on, suppress) a narrow the checker performs
+        /// regardless.
+        ///
+        /// The mint is the SAME `__builtin__`-sentinel carrier the unshadowed
+        /// bare-name fast paths below produce — the runtime-nominal carrier
+        /// for a global lib type, the builtin-utility route for a lib utility
+        /// — so the produced node is byte-identical to the unshadowed
+        /// lowering and no second `Record` / `Function` spelling exists.
+        ///
+        /// `None` when the environment provides no such global — see
+        /// [`Self::lib_global_is_available`] for exactly what is asked. That
+        /// is the same "the global is unavailable" answer
+        /// `getGlobalRecordSymbol()` returning `undefined` gives the checker,
+        /// which then performs no narrow at all. The caller keeps its typed
+        /// gap and never fabricates one.
+        fn lower_lib_global(
+            &self,
+            scope_canonical_id: &str,
+            owner: verter_type_expr::TopLevelOwnerId,
+            name: &Arc<str>,
+            args: Arc<[SemanticNodeId]>,
+            context: ProjectionReductionContext,
+        ) -> Option<SemanticNodeId> {
+            if !self.lib_global_is_available(scope_canonical_id, name.as_ref()) {
+                return None;
+            }
+            let whole_hash = self
+                .ctx
+                .shallow_file_state(scope_canonical_id)
+                .map(|shallow| shallow.whole_hash)
+                .unwrap_or_default();
+            let scope = NodeScopeId::File {
+                canonical_id: verter_type_expr::OwnedStr::from(scope_canonical_id),
+                owner,
+                whole_hash,
+                local_scope: None,
+            };
+            let identity = DeclIdentity {
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                whole_hash: HashValue::default(),
+                decl_name: verter_type_expr::OwnedStr::from(name),
+            };
+            if self.runtime_nominal_global_name(name.as_ref()).is_some() {
+                return Some(self.intern_ref_head_carrier(
+                    RefHeadResolution::Builtin(identity),
+                    name,
+                    &scope,
+                    args,
+                ));
+            }
+            if verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
+                .is_some()
+            {
+                return Some(self.finish_carrier_resolution(
+                    CarrierArgsContinuation::Builtin {
+                        identity,
+                        name: Arc::clone(name),
+                        scope,
+                        context,
+                    },
+                    args,
+                ));
+            }
+            None
         }
-        let whole_hash = self
-            .ctx
-            .shallow_file_state(scope_canonical_id)
-            .map(|shallow| shallow.whole_hash)
-            .unwrap_or_default();
-        let scope = NodeScopeId::File {
-            canonical_id: Arc::from(scope_canonical_id),
-            owner,
-            whole_hash,
-            local_scope: None,
-        };
-        let identity = DeclIdentity {
-            canonical_id: Arc::from("__builtin__"),
-            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            whole_hash: HashValue::default(),
-            decl_name: Arc::clone(name),
-        };
-        if self.runtime_nominal_global_name(name.as_ref()).is_some() {
-            return Some(self.intern_ref_head_carrier(
-                RefHeadResolution::Builtin(identity),
-                name,
-                &scope,
-                args,
-            ));
-        }
-        if verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name.as_ref())
-            .is_some()
-        {
-            return Some(self.finish_carrier_resolution(
-                CarrierArgsContinuation::Builtin {
-                    identity,
-                    name: Arc::clone(name),
-                    scope,
-                    context,
-                },
-                args,
-            ));
-        }
-        None
     }
 
     /// Whether the ACTIVE environment provides the lib global `name` —
@@ -726,10 +843,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Intern {
                 head: RefHeadResolution::Builtin(DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: HashValue::default(),
-                    decl_name: Arc::clone(name),
+                    decl_name: verter_type_expr::OwnedStr::from(name),
                 }),
                 name: Arc::clone(name),
                 scope: scope.clone(),
@@ -749,10 +866,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some()
         {
             let builtin_identity = DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::clone(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             };
             return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Builtin {
                 identity: builtin_identity,
@@ -866,7 +983,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope,
                     reduction_context,
                 ) {
-                    return CarrierResolutionPlan::Ready(merged);
+                    return CarrierResolutionPlan::complete(merged);
                 }
             }
         }
@@ -907,7 +1024,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     name.as_ref(),
                 ) {
-                    return CarrierResolutionPlan::Ready(member_type);
+                    return CarrierResolutionPlan::complete(member_type);
                 }
             }
             // Currently-unresolved authored reference. Under the carrier
@@ -928,7 +1045,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope: scope.clone(),
                 });
             }
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
         };
 
         // Recursive-ref back-edge: a 0-arg head resolving to an identity already
@@ -952,12 +1069,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .shallow_file_state(resolved_root.canonical_id.as_ref())
                 .map_or(HashValue::default(), |s| s.whole_hash);
-            return CarrierResolutionPlan::Ready(self.recursive_ref_sentinel(
+            return CarrierResolutionPlan::complete(self.recursive_ref_sentinel(
                 &DeclIdentity {
-                    canonical_id: Arc::clone(&resolved_root.canonical_id),
+                    canonical_id: resolved_root.canonical_id.clone(),
                     owner: resolved_root.owner,
                     whole_hash,
-                    decl_name: Arc::clone(&resolved_root.symbol_name),
+                    decl_name: resolved_root.symbol_name.clone(),
                 },
                 Arc::from([]),
             ));
@@ -968,10 +1085,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .shallow_file_state(resolved_root.canonical_id.as_ref())
             .map_or(HashValue::default(), |s| s.whole_hash);
         let decl_identity = DeclIdentity {
-            canonical_id: Arc::clone(&resolved_root.canonical_id),
+            canonical_id: resolved_root.canonical_id.clone(),
             owner: resolved_root.owner,
             whole_hash,
-            decl_name: Arc::clone(&resolved_root.symbol_name),
+            decl_name: resolved_root.symbol_name.clone(),
         };
 
         // Carrier modes (Navigate / Skeleton / Shallow) intern a transparent
@@ -981,9 +1098,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if matches!(
             mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) {
+        ) || (arg_count == 1
+            && resolved_root.symbol_name.as_ref() == "ThisType"
+            && self
+                .first_global_declaration(
+                    scope
+                        .canonical_file()
+                        .as_deref()
+                        .unwrap_or(&resolved_root.canonical_id),
+                    "ThisType",
+                )
+                .is_some_and(|global| global == resolved_root))
+        {
             if arg_count == 0 {
-                return CarrierResolutionPlan::Ready(self.intern_ref_head_carrier(
+                return CarrierResolutionPlan::complete(self.intern_ref_head_carrier(
                     RefHeadResolution::Resolved(decl_identity),
                     name,
                     scope,
@@ -1001,20 +1129,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through `Instantiate` when the caller supplied args OR the decl has
         // type parameters (defaults must apply); a non-generic, no-arg decl
         // short-circuits to the bare `ResolveDecl` result.
-        let anchor = match self.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        let anchor = self.carrier_resolution_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::clone(&resolved_root.canonical_id),
+                canonical_id: resolved_root.canonical_id.clone(),
                 owner: resolved_root.owner,
                 local_scope: None,
                 binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                     resolved_root.owner,
                 ),
             },
-            name: Arc::clone(&resolved_root.symbol_name),
-        })) {
-            QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-            _ => return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss)),
-        };
+            name: resolved_root.symbol_name.clone(),
+        }));
+        if matches!(anchor.status, FactStatus::Unavailable(_)) {
+            return CarrierResolutionPlan::Ready(anchor);
+        }
+
         let decl_routes_through_instantiate = self
             .ctx
             .prepared_type_decl_return_only(
@@ -1029,6 +1158,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::Instantiate {
                 identity: decl_identity,
                 context: reduction_context,
+                source_status: anchor.status,
             })
         }
     }
@@ -1085,8 +1215,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         ctx: &CarrierResolverContext<'_>,
         owner_canonical: &str,
-        specifier: &Arc<str>,
-        qualifier: &[Arc<str>],
+        specifier: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
         typeof_query: bool,
         arg_count: usize,
         lower_args: impl FnOnce() -> Arc<[SemanticNodeId]>,
@@ -1099,7 +1229,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             typeof_query,
             arg_count,
         ) {
-            CarrierResolutionPlan::Ready(value) => value,
+            CarrierResolutionPlan::Ready(value) => value.node,
             CarrierResolutionPlan::NeedsArgs(continuation) => {
                 self.finish_carrier_resolution(continuation, lower_args())
             }
@@ -1110,8 +1240,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         ctx: &CarrierResolverContext<'_>,
         owner_canonical: &str,
-        specifier: &Arc<str>,
-        qualifier: &[Arc<str>],
+        specifier: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
         typeof_query: bool,
         arg_count: usize,
     ) -> CarrierResolutionPlan {
@@ -1121,7 +1251,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .resolve_type_dependency_canonical(owner_canonical, specifier.as_ref())
         else {
             // Unresolvable specifier — miss WITHOUT lowering the dead args.
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
         };
 
         if typeof_query {
@@ -1131,32 +1261,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `typeof C.make<string>` (the shared `apply_typeof_instantiation_args`).
             let namespace = self.build_import_value_namespace(&dep_canonical, reduction_context);
             let result = if qualifier.is_empty() {
-                namespace
+                CarrierResolution::complete(namespace)
             } else {
-                let path: Arc<[PathSegment]> = Arc::from(
-                    qualifier
-                        .iter()
-                        .map(|seg| {
-                            PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                Arc::clone(seg),
-                            ))
-                        })
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                );
-                match self.execute_type_node(SemanticQueryKey::ProjectPath {
+                let path: verter_type_expr::OwnedSlice<PathSegment> =
+                    verter_type_expr::OwnedSlice::from(
+                        qualifier
+                            .iter()
+                            .map(|seg| {
+                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
+                                    seg.clone(),
+                                ))
+                            })
+                            .collect::<Vec<_>>()
+                            .into_boxed_slice(),
+                    );
+                self.carrier_resolution_read(SemanticQueryKey::ProjectPath {
                     base: namespace,
                     path,
                     context: ProjectionReductionContext::published(ProjectionMode::Navigate)
                         .with_orthogonal_axes_from(reduction_context),
-                }) {
-                    QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                    _ => self.opaque(QueryError::Miss),
-                }
+                })
             };
             if arg_count > 0 {
                 return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ApplyTypeof {
-                    base: result,
+                    base: result.node,
+                    source_status: result.status,
                 });
             }
             return CarrierResolutionPlan::Ready(result);
@@ -1167,14 +1296,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some((first, rest)) = qualifier.split_first() else {
             // A bare `import("./m")` with no qualifier is the whole
             // module-namespace TYPE — not a single addressable declaration.
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
         };
         // A MULTI-SEGMENT qualifier carrying generic args binds them to the
         // TERMINAL segment, which the multi-hop tail (`ProjectPath`, plain
         // member projection) cannot carry — emit an HONEST error carrier rather
         // than silently dropping the args.
         if !rest.is_empty() && arg_count > 0 {
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Other(Arc::from(
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "import-type generic args on a multi-segment qualifier are not yet instantiated",
             ))));
         }
@@ -1186,15 +1315,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // lazily by the head resolver); a multi-hop resolves the head bare and
         // projects the tail.
         let mut injected = ctx.name_resolution().clone();
-        let head_name: Arc<str> = Arc::from(first.as_ref());
+        let head_name = verter_type_expr::OwnedStr::from(first.as_ref());
         let (resolved_head, route_facts) = self
             .ctx
             .resolve_imported_type_root_with_facts(dep_canonical.as_str(), head_name.as_ref());
         self.ctx.observe_borrowed_signature(&route_facts);
         let Some(resolved_head) = resolved_head else {
-            return CarrierResolutionPlan::Ready(self.opaque(QueryError::Miss));
+            return CarrierResolutionPlan::complete(self.opaque(QueryError::Miss));
         };
-        injected.insert(Arc::clone(&head_name), resolved_head);
+        injected.insert(head_name.clone(), resolved_head);
         // Single-segment terminal carries the args; a multi-hop head is bare (its
         // args, if any, were rejected by the error above).
         let head_arg_count = if rest.is_empty() { arg_count } else { 0 };
@@ -1206,84 +1335,93 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ctx.shadowing(),
             reduction_context,
         );
-        let head_plan = self.plan_bare_ref_head(&head_ctx, first, head_arg_count);
+        let head_plan =
+            self.plan_bare_ref_head(&head_ctx, &Arc::<str>::from(first), head_arg_count);
         if rest.is_empty() {
             return head_plan;
         }
-        let head_node = match head_plan {
+        let head = match head_plan {
             CarrierResolutionPlan::Ready(value) => value,
-            CarrierResolutionPlan::NeedsArgs(continuation) => self
-                .finish_carrier_resolution(continuation, Arc::from(Vec::new().into_boxed_slice())),
+            CarrierResolutionPlan::NeedsArgs(continuation) => {
+                self.finish_carrier_resolution_fact(continuation, Arc::from([]))
+            }
         };
-        let path: Arc<[PathSegment]> = Arc::from(
+        let path: verter_type_expr::OwnedSlice<PathSegment> = verter_type_expr::OwnedSlice::from(
             rest.iter()
                 .map(|seg| {
-                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(Arc::clone(
-                        seg,
-                    )))
+                    PathSegment::Member(crate::semantic_query::PropertyKey::identifier(seg.clone()))
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
-        CarrierResolutionPlan::Ready(
-            match self.execute_type_node(SemanticQueryKey::ProjectPath {
-                base: head_node,
-                path,
-                context: ProjectionReductionContext::published(ProjectionMode::Navigate)
-                    .with_orthogonal_axes_from(reduction_context),
-            }) {
-                QueryResult::Value(SemanticQueryOutput { value: id, .. }) => id,
-                _ => self.opaque(QueryError::Miss),
-            },
-        )
+        let mut result = self.carrier_resolution_read(SemanticQueryKey::ProjectPath {
+            base: head.node,
+            path,
+            context: ProjectionReductionContext::published(ProjectionMode::Navigate)
+                .with_orthogonal_axes_from(reduction_context),
+        });
+        result.status = result.status.join(head.status);
+        CarrierResolutionPlan::Ready(result)
     }
 
-    /// Resolve a carrier SUBJECT node to its real semantic node when `node` is a
-    /// `BareRef` / `ImportType` / `TypeOf` carrier, returning the rewritten node
-    /// id; returns `node` UNCHANGED for any non-carrier (or a re-entrant carrier
-    /// already being normalized — the pre-memo cycle guard).
-    ///
-    /// This is the carrier-subject side of the ONE shared resolver. For a
-    /// `BareRef` / `ImportType` carrier it rehydrates a value-side
-    /// [`CarrierResolverContext`] from the carrier's own node-level scope (the
-    /// body file) — an EMPTY `name_resolution` plus the scope's
-    /// `DeclarationScopePayload` + `ScopeShadowing` derived from
-    /// `prepared_decl_bundle`, exactly the shape
-    /// [`Self::lower_type_expr_in_scope_with_context`] uses in production — then
-    /// calls [`Self::resolve_bare_ref_head`] / [`Self::resolve_import_type_head`]
-    /// in the query's `context`. A carrier node carries no body-file
-    /// `name_resolution` map (that map is a lowering-time local), so this path
-    /// recovers the resolution through the `resolve_bare_name_in_scope` fallback;
-    /// the import-type head re-injects its own head binding.
-    ///
-    /// For a `TypeOf` carrier (`typeof value.path<args>`) it re-enters the shared
-    /// dispatch through [`Self::typeof_key_for`] (-> `build_typeof`), projects the
-    /// carrier's internal dotted path in `Navigate`, then applies the carrier's
-    /// instantiation `type_args` — resolve -> project -> apply, the same chain
-    /// the PathWalker's mid-walk `TypeOf` arm runs. This is what resolves an
-    /// empty-path `typeof` macro payload, whose carrier never reaches the
-    /// walker's per-segment arm; the `build_typeof` subquery records the
-    /// value-root `FileWholeHash` / `ImportRoute` facts into the active tracer so
-    /// they bubble into the outer component-meta result signature.
-    pub fn resolve_carrier_subject_node(
+    construction_ordinal_seam! {
+        /// Resolve a carrier SUBJECT node to its real semantic node when `node` is a
+        /// `BareRef` / `ImportType` / `TypeOf` carrier, returning the rewritten node
+        /// id; returns `node` UNCHANGED for any non-carrier (or a re-entrant carrier
+        /// already being normalized — the pre-memo cycle guard).
+        ///
+        /// This is the carrier-subject side of the ONE shared resolver. For a
+        /// `BareRef` / `ImportType` carrier it rehydrates a value-side
+        /// [`CarrierResolverContext`] from the carrier's own node-level scope (the
+        /// body file) — an EMPTY `name_resolution` plus the scope's
+        /// `DeclarationScopePayload` + `ScopeShadowing` derived from
+        /// `prepared_decl_bundle`, exactly the shape
+        /// [`Self::lower_type_expr_in_scope_with_context`] uses in production — then
+        /// calls [`Self::resolve_bare_ref_head`] / [`Self::resolve_import_type_head`]
+        /// in the query's `context`. A carrier node carries no body-file
+        /// `name_resolution` map (that map is a lowering-time local), so this path
+        /// recovers the resolution through the `resolve_bare_name_in_scope` fallback;
+        /// the import-type head re-injects its own head binding.
+        ///
+        /// For a `TypeOf` carrier (`typeof value.path<args>`) it re-enters the shared
+        /// dispatch through [`Self::typeof_key_for`] (-> `build_typeof`), projects the
+        /// carrier's internal dotted path in `Navigate`, then applies the carrier's
+        /// instantiation `type_args` — resolve -> project -> apply, the same chain
+        /// the PathWalker's mid-walk `TypeOf` arm runs. This is what resolves an
+        /// empty-path `typeof` macro payload, whose carrier never reaches the
+        /// walker's per-segment arm; the `build_typeof` subquery records the
+        /// value-root `FileWholeHash` / `ImportRoute` facts into the active tracer so
+        /// they bubble into the outer component-meta result signature.
+        fn resolve_carrier_subject_node(
+            &self,
+            node: SemanticNodeId,
+            context: ProjectionReductionContext,
+        ) -> SemanticNodeId {
+            self.resolve_carrier_subject_fact(node, context).node
+        }
+    }
+
+    pub(super) fn resolve_carrier_subject_fact(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        // ORDINARY (non-evaluator) callers (~19 walk / raise / enumerate /
-        // graph-predicate / slot-binding / output-sink sites): a local
-        // `BuildLocalTaint` observation frame + re-fold into the enclosing
-        // frame, and NO nested non-cacheability tracer. Every nested read here
-        // funnels through the shared read boundary into the local frame; these
-        // callers always run inside an enclosing cold build whose OWN tracer a
-        // direct fenced / lease-miss serve marks through the fan-out, so they
-        // need no dedicated tracer (the ~19 keep their current cost).
-        let observation =
-            crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let resolved = self.resolve_carrier_subject_node_inner(node, context);
-        let observed = observation.finish();
-        self.fold_observed_frame_into_top(&observed);
-        resolved
+    ) -> CarrierResolution {
+        let scope = self.observe_read(|| self.resolve_carrier_subject_node_inner(node, context));
+        let complete = scope.observations_are_complete();
+        match scope.adopt(self) {
+            Ok(mut value) => {
+                if !complete && value.status.is_complete() {
+                    value.status = FactStatus::unavailable(
+                        crate::request_context::current_cold_compute_completeness().reasons(),
+                    );
+                }
+                value
+            }
+            Err(abort) => CarrierResolution {
+                node: self.opaque(QueryError::ExecutionAborted(abort)),
+                status: FactStatus::unavailable(abort.reason_class()),
+            },
+        }
     }
 
     /// Suppress/partial-CAPTURING variant of
@@ -1326,14 +1464,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> (
-        SemanticNodeId,
+        CarrierResolution,
         crate::project_semantic_dispatch::BuildLocalTaint,
         crate::semantic_query::ResultCompleteness,
     ) {
         let completeness_scope = crate::request_context::ColdComputeCompletenessScope::enter();
         let observation =
             crate::project_semantic_dispatch::BuildLocalTaintGuard::push(&self.build_local_taint);
-        let (resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
+        let (mut resolved, finalise) = crate::fact_signature_helpers::install_fact_tracer(
             &crate::fact_signature_helpers::FactTracerBasisSource::from_ctx(self.ctx),
             || self.resolve_carrier_subject_node_inner(node, context),
         );
@@ -1351,15 +1489,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // A `matches!` is NOT exhaustive, so a new refusal variant
         // compiles clean here while silently skipping the suppression.
-        // A stability refusal yields no fact list this carrier can be
-        // rooted on, so it suppresses.
-        if matches!(
+        // A torn read is an execution abort, including when this carrier is
+        // subsequently declined by an independently exact consumer.
+        let mutation_unstable = matches!(
             finalise,
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable
-        ) {
+        );
+        if mutation_unstable {
+            crate::request_context::observe_execution_abort(
+                crate::semantic_query::ExecutionAbort::Superseded,
+            );
             observed.cache_suppress = true;
         }
         let completeness = crate::request_context::current_cold_compute_completeness();
+        if completeness.is_partial() && resolved.status.is_complete() {
+            resolved.status = FactStatus::unavailable(completeness.reasons());
+        }
+        if let Some(abort) = crate::request_context::current_execution_abort()
+            .or(mutation_unstable.then_some(crate::semantic_query::ExecutionAbort::Superseded))
+        {
+            resolved.node = self.opaque(QueryError::ExecutionAborted(abort));
+            resolved.status = FactStatus::unavailable(abort.reason_class());
+        }
+        let completeness = completeness.merge(resolved.status.completeness());
         completeness_scope.discard();
         crate::request_context::fold_result_completeness(completeness);
         self.fold_observed_frame_into_top(&observed);
@@ -1375,10 +1527,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> SemanticNodeId {
+    ) -> CarrierResolution {
         let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
-            return node;
+            return CarrierResolution::complete(node);
         };
         // Fast reject: only the three unresolved-reference carriers are
         // head-resolvable as a query subject.
@@ -1386,7 +1538,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let is_import = data.import_type_head().is_some();
         let is_typeof = data.typeof_head().is_some();
         if !is_bare && !is_import && !is_typeof {
-            return node;
+            return CarrierResolution::complete(node);
         }
         drop(data);
 
@@ -1397,7 +1549,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // termination mechanism; this only prevents a pre-memo carrier ->
         // carrier normalization loop.
         if self.carrier_normalizing.borrow().contains(&node) {
-            return node;
+            return CarrierResolution::complete(node);
         }
         self.carrier_normalizing.borrow_mut().push(node);
 
@@ -1427,7 +1579,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some_and(|data| data.typeof_nominal_identity().is_some())
             {
                 self.carrier_normalizing.borrow_mut().pop();
-                return node;
+                return CarrierResolution::complete(node);
             }
             let (value_root, typeof_path) = {
                 let data = graph.node_data(node).expect("TypeOf carrier data");
@@ -1446,14 +1598,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // (`observe_component_meta_read_suppress`) — the no-poison rail: a
             // partial carrier resolution must not warm any enclosing cache.
             let typeof_key = self.typeof_key_with_path(value_root, typeof_path, context);
-            let root_read = self.execute_read(typeof_key);
-            crate::request_context::observe_component_meta_read_suppress(&root_read);
-            let mut resolved = match root_read.value {
-                QueryResult::Value(id) => id,
-                _ => self.opaque(QueryError::Miss),
-            };
-            if resolved != node && !type_args.is_empty() {
-                resolved = self.apply_typeof_instantiation_args(resolved, &type_args);
+            let mut resolved = self.carrier_resolution_read(typeof_key);
+            if resolved.node != node && !type_args.is_empty() {
+                resolved.node = self.apply_typeof_instantiation_args(resolved.node, &type_args);
             }
             self.carrier_normalizing.borrow_mut().pop();
             return resolved;
@@ -1474,13 +1621,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
         // Rehydrate the value-side resolution inputs from the carrier's scope.
         let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-        let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
         let resolved = if is_bare {
             let (name, scope) = {
                 let data = graph.node_data(node).expect("BareRef carrier data");
                 let (name, scope) = data.bare_ref_head().expect("BareRef head");
-                (Arc::clone(name), scope.clone())
+                (Arc::<str>::from(name), scope.clone())
             };
             // The scope payload is rehydrated from the carrier's PAYLOAD-scope
             // canonical — the exact scope handed to the resolver context — so the
@@ -1503,13 +1650,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // The carrier carries ALREADY-LOWERED args — the lazy `lower_args`
             // closure simply returns them (no lowering happens here).
             let arg_count = type_args.len();
-            self.resolve_bare_ref_head(&ctx, &name, arg_count, move || type_args)
+            match self.plan_bare_ref_head(&ctx, &name, arg_count) {
+                CarrierResolutionPlan::Ready(value) => value,
+                CarrierResolutionPlan::NeedsArgs(continuation) => {
+                    self.finish_carrier_resolution_fact(continuation, type_args)
+                }
+            }
         } else {
             let (specifier, qualifier, typeof_query) = {
                 let data = graph.node_data(node).expect("ImportType carrier data");
                 let (specifier, qualifier, typeof_query) =
                     data.import_type_head().expect("ImportType head");
-                (Arc::clone(specifier), Arc::clone(qualifier), typeof_query)
+                (Arc::<str>::from(specifier), qualifier.clone(), typeof_query)
             };
             let scope = graph.node_scope(node).unwrap_or(NodeScopeId::Global);
             let scope_payload = owner_canonical.as_ref().and_then(|c| {
@@ -1531,20 +1683,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // The carrier carries ALREADY-LOWERED args — the lazy closure
                     // returns them (no lowering here).
                     let arg_count = type_args.len();
-                    self.resolve_import_type_head(
+                    match self.plan_import_type_head(
                         &ctx,
                         owner.as_ref(),
                         &specifier,
                         &qualifier,
                         typeof_query,
                         arg_count,
-                        move || type_args,
-                    )
+                    ) {
+                        CarrierResolutionPlan::Ready(value) => value,
+                        CarrierResolutionPlan::NeedsArgs(continuation) => {
+                            self.finish_carrier_resolution_fact(continuation, type_args)
+                        }
+                    }
                 }
                 // An `ImportType` carrier with no file scope cannot resolve its
                 // relative specifier — an honest miss (mirrors the eager arm's
                 // non-`File` scope guard).
-                None => self.opaque(QueryError::Miss),
+                None => CarrierResolution::complete(self.opaque(QueryError::Miss)),
             }
         };
 
@@ -1564,8 +1720,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// are untouched. The reduction context handed to the head resolver is the
     /// key's own context (so an `Expanded` query resolves the carrier eagerly,
     /// a `Navigate` query carrier-preserves).
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn normalize_carrier_subject_key(&self, key: SemanticQueryKey) -> SemanticQueryKey {
-        match key {
+        self.normalize_carrier_subject_key_with_fact(key).0
+    }
+
+    pub(super) fn normalize_carrier_subject_key_with_fact(
+        &self,
+        key: SemanticQueryKey,
+    ) -> (SemanticQueryKey, Option<CarrierResolution>) {
+        let mut normalized_source = None;
+        let mut resolve = |node, context| {
+            let source = self.resolve_carrier_subject_fact(node, context);
+            normalized_source = Some(source);
+            source.node
+        };
+        let normalized = match key {
             SemanticQueryKey::ProjectPath {
                 base,
                 path,
@@ -1588,7 +1758,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     base
                 } else {
-                    self.resolve_carrier_subject_node(base, context)
+                    resolve(base, context)
                 };
                 SemanticQueryKey::ProjectPath {
                     base,
@@ -1597,21 +1767,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticQueryKey::ProjectMember { base, member, mode } => {
-                let base = self.resolve_carrier_subject_node(
-                    base,
-                    ProjectionReductionContext::published(mode),
-                );
+                let base = resolve(base, ProjectionReductionContext::published(mode));
                 SemanticQueryKey::ProjectMember { base, member, mode }
             }
             SemanticQueryKey::IndexedAccess { base, index, mode } => {
-                let base = self.resolve_carrier_subject_node(
-                    base,
-                    ProjectionReductionContext::published(mode),
-                );
+                let base = resolve(base, ProjectionReductionContext::published(mode));
                 SemanticQueryKey::IndexedAccess { base, index, mode }
             }
             SemanticQueryKey::KeyOf { base, context } => {
-                let base = self.resolve_carrier_subject_node(base, context);
+                let base = resolve(base, context);
                 SemanticQueryKey::KeyOf { base, context }
             }
             SemanticQueryKey::MappedType {
@@ -1619,7 +1783,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 mapper,
                 context,
             } => {
-                let source = self.resolve_carrier_subject_node(source, context);
+                let source = resolve(source, context);
                 SemanticQueryKey::MappedType {
                     source,
                     mapper,
@@ -1632,7 +1796,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // surfaces re-enter THIS normalization through the shallow-synthesis
             // worklist's re-dispatch (not resolved here).
             other => other,
-        }
+        };
+        (normalized, normalized_source)
     }
 
     /// Test-support view of the carrier-normalization prelude's
@@ -1710,6 +1875,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return PartialReasonSet::SEMANTIC_QUERY_FAULT;
         }
         match data.as_ref() {
+            // A found declaration is an exact expandable source. The path
+            // walker owns its instantiation; this prelude has not failed.
+            SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }) => {
+                PartialReasonSet::empty()
+            }
             SemanticNodeData::Opaque(QueryError::BudgetExceeded(_)) => {
                 PartialReasonSet::BUDGET_EXCEEDED
             }

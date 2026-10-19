@@ -18,9 +18,118 @@ use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
     BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, OriginEdgeKind,
-    OriginMeta, PartialReason, QueryError, QueryResult, ResultCompleteness, SemanticNodeData,
-    SemanticNodeId, SemanticQueryKey,
+    OriginMeta, PartialReason, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey,
 };
+
+/// The free type variables below one semantic node, binder-aware: the type
+/// parameters written below it that no generic signature within declares
+/// over the position they are written in, and whether an `infer` reference
+/// sits below it. A node's summary is a function of its immutable payload
+/// and its children's summaries, so it holds for as long as the node id
+/// does.
+#[derive(Clone, Default)]
+pub(super) struct FreeTypeVariables {
+    /// The free type parameters in first-reached order, each once; `None`
+    /// when there are none, so a leaf allocates nothing.
+    params: Option<Arc<[SemanticNodeId]>>,
+    /// Whether an `InferRef` sits below, the constraints and defaults of the
+    /// type parameters written there included.
+    infer_ref: bool,
+}
+
+/// The dispatcher's summaries of [`FreeTypeVariables`] by node, kept for
+/// the dispatcher's lifetime (one request) and dropped with it. Node ids
+/// are append-only and the dispatcher asks only about nodes it keeps
+/// rooted, whose payloads therefore do not change while it holds them, so
+/// a kept summary does not go stale. A node whose last owner releases it
+/// reads as the shared placeholder afterwards; its id is never asked about
+/// again by a dispatcher that did not root it. The summaries are request
+/// state: a semantic task the dispatcher lends its state to inherits them
+/// and whatever it composes comes back to the lender with the rest of the
+/// state ([`ProjectSemanticDispatch::exchange_request_state`]), so reuse
+/// spans the task lifecycle instead of restarting per drive.
+pub(super) type FreeTypeVariableSummaries =
+    rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables>;
+
+/// The ordered union of some summaries' free type parameters. A union
+/// that one summary's set already covers shares that set rather than
+/// copying it, so a chain of wrappers over one parameter holds one set.
+#[derive(Default)]
+struct ParamUnion {
+    shared: Option<Arc<[SemanticNodeId]>>,
+    merged: Option<(Vec<SemanticNodeId>, FxHashSet<SemanticNodeId>)>,
+}
+
+impl ParamUnion {
+    fn add(&mut self, params: &Option<Arc<[SemanticNodeId]>>) {
+        let Some(params) = params else {
+            return;
+        };
+        if let Some((order, members)) = &mut self.merged {
+            for param in params.iter() {
+                if members.insert(*param) {
+                    order.push(*param);
+                }
+            }
+            return;
+        }
+        let Some(shared) = &self.shared else {
+            self.shared = Some(Arc::clone(params));
+            return;
+        };
+        // A short set is checked by scanning; a long one merges by hashing.
+        const SCAN_LIMIT: usize = 8;
+        if Arc::ptr_eq(shared, params)
+            || (shared.len() <= SCAN_LIMIT
+                && params.len() <= shared.len()
+                && params.iter().all(|param| shared.contains(param)))
+        {
+            return;
+        }
+        let mut order = shared.to_vec();
+        let mut members: FxHashSet<SemanticNodeId> = order.iter().copied().collect();
+        for param in params.iter() {
+            if members.insert(*param) {
+                order.push(*param);
+            }
+        }
+        self.shared = None;
+        self.merged = Some((order, members));
+    }
+
+    fn finish(self) -> Option<Arc<[SemanticNodeId]>> {
+        match self.merged {
+            Some((order, _)) => Some(Arc::from(order)),
+            None => self.shared,
+        }
+    }
+
+    /// The union without the parameters `declared` binds. A short
+    /// declaration list is checked by scanning; a long one is indexed, so a
+    /// wide generic signature costs work linear in its parameters.
+    fn finish_without(
+        self,
+        declared: impl ExactSizeIterator<Item = SemanticNodeId> + Clone,
+    ) -> Option<Arc<[SemanticNodeId]>> {
+        const SCAN_LIMIT: usize = 8;
+        let params = self.finish()?;
+        if declared.len() == 0 {
+            return Some(params);
+        }
+        let indexed: Option<FxHashSet<SemanticNodeId>> =
+            (declared.len() > SCAN_LIMIT).then(|| declared.clone().collect());
+        let binds = |param: &SemanticNodeId| match &indexed {
+            Some(indexed) => indexed.contains(param),
+            None => declared.clone().any(|declared| declared == *param),
+        };
+        if !params.iter().any(binds) {
+            return Some(params);
+        }
+        let free: Vec<SemanticNodeId> = params.iter().copied().filter(|p| !binds(p)).collect();
+        (!free.is_empty()).then(|| Arc::from(free))
+    }
+}
 
 /// The infer-routing classification of a conditional's `extends` pattern
 /// (see [`ProjectSemanticDispatch::conditional_infer_route`]): bare
@@ -72,11 +181,13 @@ pub(super) fn conditional_read_fact(
     read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
 ) -> Result<FactResult<SemanticNodeId>, ExecutionAbort> {
     let undecided = NonEmptyReasons::of(PartialReason::UndecidedConditional);
-    if read.result_is_partial {
-        let classes = read.partial_reason_classes();
-        if let Some(abort) = ExecutionAbort::observed_in(ResultCompleteness::partial(classes)) {
+    if let QueryResult::Error(error) = &read.value {
+        if let Some(abort) = ExecutionAbort::from_query_error(error) {
             return Err(abort);
         }
+    }
+    if read.result_is_partial() {
+        let classes = read.partial_reason_classes();
         return Ok(FactResult::unavailable(undecided.with(classes)));
     }
     Ok(match read.value {
@@ -140,6 +251,8 @@ struct ConditionalOperands {
     /// The check the absorbing lattice rows read.
     absorbed_check: SemanticNodeId,
     extends: SemanticNodeId,
+    /// Every tuple position was exact or its own typed checker recovery.
+    checker_recovery: bool,
 }
 
 /// How the decision procedure reaches a conditional's branches.
@@ -157,7 +270,9 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
         dispatch: &ProjectSemanticDispatch<'_, C>,
     ) -> Option<(SemanticNodeId, SemanticNodeId)>;
     /// The pending substitution the branches carry.
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>>;
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>;
     /// One member of a distributed check, decided without distribution.
     fn member(
         &mut self,
@@ -180,7 +295,7 @@ trait ConditionalBranches<C: crate::resolver_core::ResolverCapabilities> {
 struct MaterializedBranches {
     true_branch: SemanticNodeId,
     false_branch: SemanticNodeId,
-    pending: Option<Arc<ConditionalPendingSubstitution>>,
+    pending: Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
@@ -209,7 +324,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         Some((self.true_branch, self.false_branch))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         self.pending.clone()
     }
 
@@ -226,9 +343,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
             false_branch: self.false_branch,
             distributive: false,
             pending: self.pending.as_ref().map(|pending| {
-                pending
-                    .distributed_over(member)
-                    .map_or_else(|| Arc::clone(pending), Arc::new)
+                pending.distributed_over(member).map_or_else(
+                    || pending.clone(),
+                    verter_session_query::retention::owned::Owned::new,
+                )
             }),
         })
     }
@@ -289,7 +407,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
         Some((true_branch, (self.lower_branch)(false)))
     }
 
-    fn pending(&self) -> Option<Arc<ConditionalPendingSubstitution>> {
+    fn pending(
+        &self,
+    ) -> Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>> {
         None
     }
 
@@ -304,71 +424,75 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
-    /// Conditional type (lazy-block evaluation +
-    /// distributive-conditional authority), read from the materialized
-    /// branch handles of a [`SemanticQueryKey::Conditional`].
-    ///
-    /// Evaluates `check extends extends ? true_branch : false_branch`
-    /// using the shared relation engine and returns one of:
-    ///
-    /// - **Distributive union check** — when `distributive == true` AND
-    ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
-    ///   distributes per-member by re-entering the dispatcher with
-    ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
-    ///   check: member, extends, true_branch, false_branch,
-    ///   distributive: false })` for every member, then combines the
-    ///   per-member results through
-    ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
-    ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
-    ///   the `distributive: false` flag on each sub-query (no re-
-    ///   distribution), the family memo's per-member dedup, and the
-    ///   dispatch layer's same-path recursion sentinel. Dispatch owns
-    ///   distributive distribution.
-    /// - **Closed/decidable check** — one of the branch shell references
-    ///   directly (no `Conditional` node interned). Emits a
-    ///   [`OriginEdgeKind::ConditionalSelect`] edge with
-    ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
-    ///   unselected branch is NOT materialised beyond its shell
-    ///   reference (it already has one via the key's
-    ///   `true_branch` / `false_branch` fields), and it is a dead
-    ///   operand for dependency purposes: the result's observed
-    ///   self-roots cover `check`, `extends`, and the WINNER only.
-    /// - **Open/undecidable check** — a
-    ///   [`SemanticNodeData::Conditional`] shell with both branch
-    ///   references intact. Emits
-    ///   [`OriginEdgeKind::ConditionalSelect`] with
-    ///   [`BranchSelection::Deferred`]. Neither branch is recursively
-    ///   materialised; path projection into the result drives
-    ///   per-subexpression lazy expansion.
-    ///
-    /// The relation evaluator handles the decidable shapes the shallow
-    /// walker reaches directly: primitive identity, primitive-to-top/any,
-    /// `never` bottom, exact node identity, and the obvious
-    /// non-assignability cases. Object / union / intersection / generic
-    /// relations stay deferred — the full solver routing lands via the
-    /// `resolve_conditional` dispatch handoff in . Bare-infer
-    /// bindings (`T extends infer X`) are handled by the shortcut below;
-    /// nested-infer in complex patterns defers to the relation engine.
-    pub fn build_conditional(
-        &self,
-        check: SemanticNodeId,
-        extends: SemanticNodeId,
-        true_branch: SemanticNodeId,
-        false_branch: SemanticNodeId,
-        distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
-    ) -> super::walk::QueryBuildOutput {
-        verter_audit::attribute_scope!(ConditionalReduce);
-        self.decide_conditional(
-            check,
-            extends,
-            distributive,
-            &mut MaterializedBranches {
-                true_branch,
-                false_branch,
-                pending,
-            },
-        )
+    construction_ordinal_seam! {
+        /// Conditional type (lazy-block evaluation +
+        /// distributive-conditional authority), read from the materialized
+        /// branch handles of a [`SemanticQueryKey::Conditional`].
+        ///
+        /// Evaluates `check extends extends ? true_branch : false_branch`
+        /// using the shared relation engine and returns one of:
+        ///
+        /// - **Distributive union check** — when `distributive == true` AND
+        ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
+        ///   distributes per-member by re-entering the dispatcher with
+        ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
+        ///   check: member, extends, true_branch, false_branch,
+        ///   distributive: false })` for every member, then combines the
+        ///   per-member results through
+        ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
+        ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
+        ///   the `distributive: false` flag on each sub-query (no re-
+        ///   distribution), the family memo's per-member dedup, and the
+        ///   dispatch layer's same-path recursion sentinel. Dispatch owns
+        ///   distributive distribution.
+        /// - **Closed/decidable check** — one of the branch shell references
+        ///   directly (no `Conditional` node interned). Emits a
+        ///   [`OriginEdgeKind::ConditionalSelect`] edge with
+        ///   [`BranchSelection::True`] or [`BranchSelection::False`]. The
+        ///   unselected branch is NOT materialised beyond its shell
+        ///   reference (it already has one via the key's
+        ///   `true_branch` / `false_branch` fields), and it is a dead
+        ///   operand for dependency purposes: the result's observed
+        ///   self-roots cover `check`, `extends`, and the WINNER only.
+        /// - **Open/undecidable check** — a
+        ///   [`SemanticNodeData::Conditional`] shell with both branch
+        ///   references intact. Emits
+        ///   [`OriginEdgeKind::ConditionalSelect`] with
+        ///   [`BranchSelection::Deferred`]. Neither branch is recursively
+        ///   materialised; path projection into the result drives
+        ///   per-subexpression lazy expansion.
+        ///
+        /// The relation evaluator handles the decidable shapes the shallow
+        /// walker reaches directly: primitive identity, primitive-to-top/any,
+        /// `never` bottom, exact node identity, and the obvious
+        /// non-assignability cases. Object / union / intersection / generic
+        /// relations stay deferred — the full solver routing lands via the
+        /// `resolve_conditional` dispatch handoff in . Bare-infer
+        /// bindings (`T extends infer X`) are handled by the shortcut below;
+        /// nested-infer in complex patterns defers to the relation engine.
+        fn build_conditional(
+            &self,
+            check: SemanticNodeId,
+            extends: SemanticNodeId,
+            true_branch: SemanticNodeId,
+            false_branch: SemanticNodeId,
+            distributive: bool,
+            pending: Option<
+                verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+            >,
+        ) -> super::walk::QueryBuildOutput {
+            verter_audit::attribute_scope!(ConditionalReduce);
+            self.decide_conditional(
+                check,
+                extends,
+                distributive,
+                &mut MaterializedBranches {
+                    true_branch,
+                    false_branch,
+                    pending,
+                },
+            )
+        }
     }
 
     /// Transient lowering ingress. Only selected syntax is lowered; no
@@ -405,7 +529,78 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
-        let operands = self.conditional_operands(check, extends);
+        // Capture the indexed value demand and operand settlement together:
+        // selection adopts their exact facts and execution validity as one read.
+        let authored_check = check;
+        let operand_read = self.observe_read(|| {
+            // An unbound indexed check retains its binder until substitution.
+            let check = if matches!(
+                self.graph().node_data(check).as_deref(),
+                Some(SemanticNodeData::IndexedAccess { .. })
+            ) && !self.conditional_is_deferred(check, extends)
+            {
+                let evaluated = self
+                    .evaluate_deferred_semantic_node_with_context(
+                        check,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    )
+                    .into_complete_active_query_build_node(self)
+                    // An access the evaluation could not read (an open
+                    // generic's element, an absent key) keeps the authored,
+                    // deferred access rather than relating a miss sentinel.
+                    .filter(|node| {
+                        !matches!(
+                            self.graph().node_data(*node).as_deref(),
+                            Some(SemanticNodeData::Opaque(_))
+                        )
+                    })
+                    .unwrap_or(check);
+                self.canonical_argument_carrier(evaluated)
+            } else {
+                check
+            };
+            (check, self.conditional_operands(check, extends))
+        });
+        let operands_complete = operand_read.observations_are_complete();
+        let (check, operands) = match operand_read.adopt(self) {
+            Ok(operands) => operands,
+            Err(abort) => {
+                return super::walk::QueryBuildOutput::from((
+                    QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                    self.project_generation_signature(),
+                ));
+            }
+        };
+        // A decision whose frame waits on an operand's read decides nothing
+        // from the gap it read: its frame runs it again once delivered.
+        if self.decision_waits() {
+            return self.waiting_decision_output();
+        }
+        if !operands_complete
+            && !operands.checker_recovery
+            && !self.is_conditional_checker_recovery(operands.absorbed_check)
+            && !self.is_conditional_checker_recovery(operands.extends)
+        {
+            // A relation can reject an early constituent without demanding
+            // a later one. That short circuit cannot repair an operand whose
+            // normalization already lacked exact evidence: an approximate
+            // `any` might absorb that constituent. Keep the authored operation
+            // whole instead of manufacturing either selected branch.
+            let Some((true_branch, false_branch)) = branches.both(self) else {
+                return self.cancelled_build_output();
+            };
+            return self.keep_conditional(
+                authored_check,
+                extends,
+                (true_branch, false_branch),
+                distributive,
+                branches.pending(),
+                ConditionalBranchSelection::Undecided,
+            );
+        }
+        let demanded_check = check;
         let extends = operands.extends;
         if let Some(absorbed) = self.absorb_conditional(
             operands.absorbed_check,
@@ -425,7 +620,77 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         let check = operands.check;
-        let (selection, infer) = self.conditional_branch_selection(check, extends);
+        // A decision running as its frame demands the operands its relation
+        // relates first, as the checker instantiates a conditional's check
+        // and extends types before relating them: the relation then reads
+        // them answered instead of evaluating them in place. What the
+        // demand observed is the relation's to observe, so it is dropped.
+        if self.deciding_on_the_runtime() {
+            let demanded = self.observe_read(|| {
+                for operand in [check, extends] {
+                    let _ = self.unwrap_identity_carrier_for_relation(operand);
+                }
+            });
+            let _ = demanded.discard();
+            if self.decision_waits() {
+                return self.waiting_decision_output();
+            }
+        }
+        let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
+        if self.decision_waits() {
+            let _ = observation.discard();
+            return self.waiting_decision_output();
+        }
+        let relation_complete = observation.observations_are_complete();
+        let false_recovery = observation.value().0 == ConditionalBranchSelection::False
+            && observation.operation_refusals().iter().any(|refusal| {
+                matches!(
+                    refusal,
+                    super::walk::ShallowDiagnostic::RelationTooComplex { source, target }
+                        if *source == check && *target == extends
+                )
+            });
+        let adopted = if observation.value().0 == ConditionalBranchSelection::Deferred {
+            observation.discard()
+        } else {
+            observation.adopt(self)
+        };
+        let (mut selection, mut infer) = match adopted {
+            Ok(value) => value,
+            Err(abort) => {
+                return super::walk::QueryBuildOutput::from((
+                    QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                    self.project_generation_signature(),
+                ));
+            }
+        };
+        if !relation_complete && selection != ConditionalBranchSelection::Deferred {
+            if false_recovery {
+                if self.cancellation.is_cancelled() {
+                    return self.cancelled_build_output();
+                }
+                // The relation producer's refusal names this exact check
+                // and supplies the checker's false recovery. It is a usable
+                // recovered value, never a ConditionalSelect proof.
+                let recovered = branches.branch(self, false);
+                let mut output = super::walk::QueryBuildOutput::from((
+                    QueryResult::Value(recovered),
+                    self.project_generation_signature(),
+                ))
+                .with_observed_self_roots(
+                    self.observed_self_roots_from_nodes([check, extends, recovered]),
+                );
+                output.approximation =
+                    Some(super::projection_fact::ProjectionInterpretation::CheckerRecovery);
+                branches.committed(self, false, &mut output);
+                return output;
+            }
+            // Member values can first be demanded inside the relation,
+            // after operand normalization. Its scalar verdict cannot prove
+            // a branch unless those adopted observations are exact too.
+            selection = ConditionalBranchSelection::Undecided;
+            infer = None;
+        }
         if let Some(output) = self.absorb_named_error_operand(check, extends) {
             return output;
         }
@@ -436,8 +701,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
                 let take_true = selection == ConditionalBranchSelection::True;
                 let winner = branches.branch(self, take_true);
-                let mut output =
-                    self.commit_conditional_winner(check, extends, winner, selection, infer);
+                let winner = if authored_check != demanded_check {
+                    self.substitute_semantic_type_param(winner, authored_check, demanded_check)
+                } else {
+                    winner
+                };
+                let mut output = self.commit_conditional_winner(
+                    check,
+                    extends,
+                    winner,
+                    selection,
+                    infer,
+                    operands.checker_recovery,
+                );
                 branches.committed(self, take_true, &mut output);
                 output
             }
@@ -455,6 +731,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 )
             }
         }
+    }
+
+    /// What a decision that waits on a read returns: a typed gap its frame
+    /// discards, never a branch.
+    fn waiting_decision_output(&self) -> super::walk::QueryBuildOutput {
+        let reasons = crate::semantic_query::PartialReasonSet::PROPAGATED;
+        let mut output = super::walk::QueryBuildOutput::from((
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { reasons }),
+            self.project_generation_signature(),
+        ));
+        output.cache_suppress = true;
+        output.mark_partial();
+        output.add_partial_reasons(reasons);
+        output
     }
 
     /// A conditional's operands as the checker constructs them before it
@@ -489,12 +779,105 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let declared_check = self
             .conditional_operand_extreme(declared_check)
             .unwrap_or(declared_check);
+        let check_tuple = self.conditional_tuple_operand(check);
+        let extends_tuple = self.conditional_tuple_operand(extends);
+        let recovery = check_tuple.is_some_and(|(_, recovered)| recovered)
+            || extends_tuple.is_some_and(|(_, recovered)| recovered);
+        let constructed = |original, tuple: Option<(SemanticNodeId, bool)>| {
+            tuple.map(|(node, _)| node).or_else(|| {
+                if matches!(
+                    self.graph().node_data(original).as_deref(),
+                    Some(SemanticNodeData::Tuple { .. })
+                ) {
+                    None
+                } else {
+                    self.resolved_conditional_operand(original)
+                }
+            })
+        };
+        let pair = recovery
+            .then(|| {
+                Some((
+                    constructed(check, check_tuple)?,
+                    constructed(extends, extends_tuple)?,
+                ))
+            })
+            .flatten();
+        let checker_recovery = pair.is_some();
+        let (check, extends) = pair.unwrap_or((check, extends));
         ConditionalOperands {
+            checker_recovery,
             check,
             declared_check,
             absorbed_check: self.indexed_access_where_written(declared_check),
             extends,
         }
+    }
+
+    /// Normalize every tuple position through the shared demand. A typed
+    /// recovery is usable here only when all other positions are exact;
+    /// an arbitrary partial value supplies no comparison evidence.
+    fn conditional_tuple_operand(&self, node: SemanticNodeId) -> Option<(SemanticNodeId, bool)> {
+        let probe = self.observe_read(|| self.probe_conditional_tuple_operand(node));
+        if matches!(probe.value(), Some((_, true))) {
+            probe.adopt(self).ok().flatten()
+        } else {
+            // Without recovery the normalized positions are unused: the
+            // relation consumes the original tuple and its symbolic references.
+            probe.discard().ok().flatten()
+        }
+    }
+
+    fn probe_conditional_tuple_operand(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, bool)> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
+            return None;
+        };
+        let mut recovered = false;
+        let mut normalized = Vec::with_capacity(elements.len());
+        for element in elements.iter() {
+            let outcome = self.normalize_node_for_structural_fact_demand(
+                element.value,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            );
+            let value = match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(value) => {
+                    let constructed = self.conditional_operand_extreme(value).unwrap_or(value);
+                    recovered |= self.is_conditional_checker_recovery(constructed);
+                    constructed
+                }
+                super::evaluate::StructuralFactDemandOutcome::Recovered { node: value, .. }
+                    if self.is_conditional_checker_recovery(value) =>
+                {
+                    recovered = true;
+                    value
+                }
+                // A decision whose run waits on a read drops that run:
+                // reading on, it reaches the reads the remaining positions
+                // make in this run rather than one position per run.
+                _ if self.decision_waits() => element.value,
+                _ => return None,
+            };
+            let mut position = element.copy();
+            position.value = value;
+            normalized.push(position);
+        }
+        if !recovered {
+            return Some((node, false));
+        }
+        Some((
+            self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::Tuple {
+                    elements: crate::semantic_query::PayloadArray::from(normalized),
+                    readonly: *readonly,
+                },
+            ),
+            true,
+        ))
     }
 
     /// The conditional kept whole: the checker's deferred type, or, for a
@@ -506,7 +889,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         extends: SemanticNodeId,
         (true_branch, false_branch): (SemanticNodeId, SemanticNodeId),
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending: Option<
+            verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>,
+        >,
         selection: ConditionalBranchSelection,
     ) -> super::walk::QueryBuildOutput {
         let suspended_roots = self.observed_self_roots_from_nodes(
@@ -532,7 +917,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         );
         self.graph().record_conditional_deferred();
         let mut output = super::walk::QueryBuildOutput::from((QueryResult::Value(node), fence))
-            .with_observed_self_roots(suspended_roots);
+            .with_observed_self_roots(suspended_roots)
+            .with_positional_guarantee();
         // A conditional the checker decides and the lane could not is a
         // typed gap: the shell stands where the checker's answer should be,
         // so it is never published complete or warm-admitted.
@@ -565,6 +951,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// ([`Self::absorb_named_error_operand`]), so the relation, not this
     /// read, decides where its evaluation joins the demand.
     fn conditional_operand_extreme(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.probe_optional(|| self.probe_conditional_operand_extreme(operand))
+    }
+
+    fn probe_conditional_operand_extreme(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
         use super::absorb::SpecialKind;
         let graph = self.graph();
         let (arms, is_union) = match graph.node_data(operand).as_deref() {
@@ -601,11 +991,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     SemanticNodeData::Alias(_)
                     | SemanticNodeData::DeclRef { .. }
                     | SemanticNodeData::InstantiationRef { .. }
+                    | SemanticNodeData::IndexedAccess { .. }
                     | SemanticNodeData::TypeOf(_)
                     | SemanticNodeData::BareRef(_)
                     | SemanticNodeData::ImportType(_)
                     | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. }),
-                ) => self.resolved_operand(*arm),
+                ) => self.resolved_conditional_operand(*arm),
                 _ => Some(*arm),
             };
             let Some(arm_type) = arm_type else { continue };
@@ -633,7 +1024,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
-            }) => (Arc::clone(quasis), Arc::clone(expressions)),
+            }) => (quasis.clone(), Arc::clone(expressions.as_arc())),
             _ => return None,
         };
         let read = self.execute_read(SemanticQueryKey::TemplateLiteralReduce {
@@ -651,23 +1042,53 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// The type a name operand resolves to, at structural transit — the
-    /// checker's recovery when an operation's allowance stopped it; `None`
-    /// when its demand does not complete.
-    fn resolved_operand(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
-        self.normalize_node_for_structural_fact_demand(
-            operand,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+    /// Exact operand evidence, or the producer's own checker recovery to
+    /// propagate unchanged. A positional approximation cannot establish a
+    /// lattice extreme, a selected branch, or an exhaustive union domain.
+    pub(super) fn resolved_conditional_operand(
+        &self,
+        operand: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        // An indexed operand consumed by the conditional needs its value,
+        // rather than a shallow apparent surface that merges union arms.
+        let context = if matches!(
+            self.graph().node_data(operand).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ) {
+            crate::semantic_query::ProjectionReductionContext::published(
+                crate::semantic_query::ProjectionMode::Expanded,
+            )
+        } else {
+            crate::semantic_query::ProjectionReductionContext::structural_transit()
+        };
+        match self.normalize_node_for_structural_fact_demand(operand, context) {
+            super::evaluate::StructuralFactDemandOutcome::Complete(node) => Some(node),
+            super::evaluate::StructuralFactDemandOutcome::Recovered { node, .. }
+                if self.is_conditional_checker_recovery(node) =>
+            {
+                Some(node)
+            }
+            _ => None,
+        }
+    }
+
+    fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
         )
-        .into_usable_node()
     }
 
     fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {
         let read = self.execute_read(key);
+        // Conditional branches and their union normalization already carry
+        // a bounded positional representation. Forward the adopted value,
+        // including its gaps, rather than discarding its producer guarantee.
+        let approximation = read.fact_status.interpretation();
         let mut output = super::walk::QueryBuildOutput::from((read.value, read.dep_signature));
         output.cache_suppress = read.cache_suppress;
-        output.set_partial(read.result_is_partial);
-        output.add_partial_reasons(read.partial_reasons);
+        output.merge_completeness(read.fact_status.completeness());
+        output.approximation = approximation;
         output
     }
 
@@ -691,11 +1112,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             extends,
         ]));
         let mut per_member = Vec::with_capacity(members.len());
+        let mut positions_complete = true;
         for &member in members.iter() {
             if self.cancellation.is_cancelled() {
                 return Some(self.cancelled_build_output());
             }
             let member_output = reduce_member(member);
+            positions_complete &= !member_output.result_is_partial()
+                || matches!(
+                    member_output.approximation,
+                    Some(
+                        super::projection_fact::ProjectionInterpretation::Positional
+                            | super::projection_fact::ProjectionInterpretation::CheckerRecovery
+                    )
+                );
             output.cache_suppress |= member_output.cache_suppress;
             output.fold_partial(member_output.result_is_partial());
             output.add_partial_reasons(member_output.partial_reasons());
@@ -718,7 +1148,19 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         output.cache_suppress |= normalized.cache_suppress;
         output.fold_partial(normalized.result_is_partial());
         output.add_partial_reasons(normalized.partial_reasons());
+        // Every distributed branch produced its position; gaps remain in
+        // their own branches rather than being interpreted as absent arms.
+        positions_complete &= !normalized.result_is_partial()
+            || matches!(
+                normalized.approximation,
+                Some(
+                    super::projection_fact::ProjectionInterpretation::Positional
+                        | super::projection_fact::ProjectionInterpretation::CheckerRecovery
+                )
+            );
         output.result = normalized.result;
+        output.approximation = positions_complete
+            .then_some(super::projection_fact::ProjectionInterpretation::Positional);
         Some(output)
     }
 
@@ -731,6 +1173,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         winner: SemanticNodeId,
         selection: ConditionalBranchSelection,
         infer: Option<super::relation::RelationInferBindings>,
+        checker_recovery: bool,
     ) -> super::walk::QueryBuildOutput {
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
@@ -738,6 +1181,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let graph = self.graph();
         let fence = self.project_generation_signature();
         let mut result = winner;
+        let mut selected_output = None;
         if let Some(selected) = infer {
             for binding in selected.bindings.iter() {
                 result = self.substitute_semantic_type_param(result, binding.param, binding.bound);
@@ -745,7 +1189,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     result,
                     OriginEdgeKind::InferBind,
                     Arc::from([check, extends]),
-                    OriginMeta::SubstitutedParam(Arc::clone(&binding.name)),
+                    OriginMeta::SubstitutedParam(binding.name.clone()),
                     fence.clone(),
                 );
             }
@@ -755,37 +1199,62 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 graph.node_data(result).as_deref(),
                 Some(SemanticNodeData::Conditional { .. })
             ) {
-                result = self.evaluate_deferred_semantic_node(result);
+                let output = self
+                    .evaluate_deferred_semantic_node_with_context(
+                        result,
+                        crate::semantic_query::ProjectionReductionContext::published(
+                            crate::semantic_query::ProjectionMode::Expanded,
+                        ),
+                    )
+                    .into_query_build_output(self);
+                match output.result {
+                    QueryResult::Value(value) => result = value,
+                    _ => return output,
+                }
+                selected_output = Some(output);
             }
         }
         if self.cancellation.is_cancelled() {
             return self.cancelled_build_output();
         }
-        let branch = match selection {
-            ConditionalBranchSelection::True => {
-                graph.record_branch_selection_true();
-                BranchSelection::True
-            }
-            ConditionalBranchSelection::False => {
-                graph.record_branch_selection_false();
-                BranchSelection::False
-            }
-            ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
-                unreachable!("only decided winners are committed")
-            }
-        };
-        graph.record_origin_edge(
-            result,
-            OriginEdgeKind::ConditionalSelect,
-            Arc::from([check, extends]),
-            OriginMeta::Branch(branch),
-            fence.clone(),
-        );
-        graph.record_conditional_decided();
-        super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
+        if !checker_recovery {
+            let branch = match selection {
+                ConditionalBranchSelection::True => {
+                    graph.record_branch_selection_true();
+                    BranchSelection::True
+                }
+                ConditionalBranchSelection::False => {
+                    graph.record_branch_selection_false();
+                    BranchSelection::False
+                }
+                ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
+                    unreachable!("only decided winners are committed")
+                }
+            };
+            graph.record_origin_edge(
+                result,
+                OriginEdgeKind::ConditionalSelect,
+                Arc::from([check, extends]),
+                OriginMeta::Branch(branch),
+                fence.clone(),
+            );
+            graph.record_conditional_decided();
+        }
+        let mut output = selected_output
+            .unwrap_or_else(|| {
+                super::walk::QueryBuildOutput::from((QueryResult::Value(result), fence))
+                // Selection already required exact operands and the relation
+                // authority's exact verdict.
+                // The completed winner retains its authored value positions.
+            })
             .with_observed_self_roots(
                 self.observed_self_roots_from_nodes([check, extends, winner, result]),
-            )
+            );
+        if checker_recovery && !output.completeness.is_partial() {
+            output.approximation =
+                Some(super::projection_fact::ProjectionInterpretation::CheckerRecovery);
+        }
+        output
     }
 
     /// The resolved check and its union members, or `None` when the check
@@ -849,12 +1318,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !is_resolvable_shell {
             return None;
         }
+        // An interface or a class names an object type, never a union:
+        // its reference has nothing to distribute over, so it is not
+        // resolved here.
+        let names_object_declaration = match self.graph().node_data(check).as_deref() {
+            Some(
+                SemanticNodeData::DeclRef { identity }
+                | SemanticNodeData::InstantiationRef { base: identity, .. },
+            ) => matches!(
+                self.prepared_decl_kind(identity),
+                Some(
+                    verter_session_query::declarations::TypeDeclKind::Interface
+                        | verter_session_query::declarations::TypeDeclKind::Class
+                )
+            ),
+            _ => false,
+        };
+        if names_object_declaration {
+            return None;
+        }
         let resolved = self
             .normalize_node_for_structural_fact_demand(
                 check,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
-            .into_usable_node()?;
+            .into_complete_node()?;
         union_members_of(resolved)
     }
 
@@ -874,10 +1362,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 whole_hash,
             })) => crate::semantic_query::DeclIdentity {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
-                decl_name: Arc::clone(name),
+                decl_name: name.clone(),
             },
             _ => return node,
         };
@@ -889,12 +1377,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ) {
             return node;
         }
-        self.normalize_node_for_structural_fact_demand(
-            node,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
-        .into_usable_node()
-        .unwrap_or(node)
+        self.resolved_conditional_operand(node).unwrap_or(node)
     }
 
     /// The type an operand denotes where it is written. The checker
@@ -913,11 +1396,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ) {
             return node;
         }
-        self.evaluate_deferred_semantic_node_with_context(
-            node,
-            crate::semantic_query::ProjectionReductionContext::structural_transit(),
-        )
-        .into_active_query_build_node(self)
+        let output = self
+            .evaluate_deferred_semantic_node_with_context(
+                node,
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+            .into_query_build_output(self);
+        let complete = !output.result_is_partial();
+        match output.result {
+            QueryResult::Value(reduced)
+                if complete || self.is_conditional_checker_recovery(reduced) =>
+            {
+                reduced
+            }
+            _ => node,
+        }
     }
 
     /// Conditional branch selection, the last step of the decision
@@ -1329,9 +1822,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<SemanticNodeId> {
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
-                Arc::clone(&base.canonical_id),
+                base.canonical_id.clone(),
                 base.owner,
-                Arc::clone(&base.decl_name),
+                base.decl_name.clone(),
             ),
             Arc::clone(args),
             self.instantiate_context_for(
@@ -1340,7 +1833,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ),
         ));
         let read = self.execute_read(key);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return None;
         }
         match read.value {
@@ -1352,58 +1845,117 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
     fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
-        if !self.type_params_within(&[node]).is_empty() {
-            return true;
-        }
-        let graph = self.graph();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack = vec![node];
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
-                continue;
-            }
-            let Some(data) = graph.node_data(node) else {
-                continue;
-            };
-            if matches!(data.as_ref(), SemanticNodeData::InferRef { .. }) {
-                return true;
-            }
-            let _ = data.for_each_child(|child| stack.push(child));
-        }
-        false
+        let summary = self.free_type_variables(node);
+        summary.params.is_some() || summary.infer_ref
     }
 
     /// The free type parameters `roots` hold anywhere below them — not
-    /// those a generic signature within declares (instantiating a signature
-    /// maps its own type parameters to fresh ones) — read from an explicit
-    /// stack.
+    /// those a generic signature declares within its own scope
+    /// (instantiating a signature maps its own type parameters to fresh
+    /// ones) — in first-reached order, each once.
     pub(super) fn type_params_within(&self, roots: &[SemanticNodeId]) -> Vec<SemanticNodeId> {
+        let mut union = ParamUnion::default();
+        for root in roots {
+            union.add(&self.free_type_variables(*root).params);
+        }
+        union
+            .finish()
+            .map_or_else(Vec::new, |params| params.to_vec())
+    }
+
+    /// The binder-aware summary of the free type variables below `root`
+    /// ([`FreeTypeVariables`]). Each node's summary is composed once from
+    /// its children's and kept for the dispatcher's lifetime, so a type
+    /// that grows by one wrapper per recursive step costs one new summary
+    /// per step, never a walk of everything below it.
+    fn free_type_variables(&self, root: SemanticNodeId) -> FreeTypeVariables {
+        if let Some(found) = self.free_type_variables.borrow().get(&root) {
+            return found.clone();
+        }
         let graph = self.graph();
-        let mut seen: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut bound: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        let mut stack: Vec<SemanticNodeId> = roots.to_vec();
-        let mut params = Vec::new();
-        while let Some(node) = stack.pop() {
-            if !seen.insert(node) {
+        // A node with no children is summarised from its own payload, without
+        // the traversal's containers.
+        if let Some(data) = graph.node_data(root) {
+            let mut has_child = false;
+            let _ = data.for_each_child(|_| has_child = true);
+            if !has_child {
+                let summary = FreeTypeVariables {
+                    params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
+                        .then(|| Arc::from([root])),
+                    infer_ref: matches!(data.as_ref(), SemanticNodeData::InferRef { .. }),
+                };
+                self.free_type_variables
+                    .borrow_mut()
+                    .insert(root, summary.clone());
+                return summary;
+            }
+        }
+        let mut computed: rustc_hash::FxHashMap<SemanticNodeId, FreeTypeVariables> =
+            rustc_hash::FxHashMap::default();
+        let mut on_path: FxHashSet<SemanticNodeId> = FxHashSet::default();
+        // A node reached again while it is still being composed closes a
+        // cycle: what the nodes on it see of each other is incomplete, so
+        // nothing composed by this call is kept.
+        let mut cyclic = false;
+        let mut work = vec![(root, false)];
+        let mut children = Vec::new();
+        while let Some((node, finish)) = work.pop() {
+            if computed.contains_key(&node) {
                 continue;
             }
-            let Some(data) = graph.node_data(node) else {
-                continue;
-            };
-            match data.as_ref() {
-                SemanticNodeData::TypeParam { .. } => {
-                    params.push(node);
+            if !finish {
+                if let Some(found) = self.free_type_variables.borrow().get(&node) {
+                    computed.insert(node, found.clone());
                     continue;
                 }
-                SemanticNodeData::Signature {
-                    type_parameters, ..
-                } => bound.extend(type_parameters.iter().map(|declared| declared.param)),
-                _ => {}
+                if !on_path.insert(node) {
+                    cyclic = true;
+                    continue;
+                }
+                work.push((node, true));
+                if let Some(data) = graph.node_data(node) {
+                    let _ = data.for_each_child(|child| work.push((child, false)));
+                }
+                continue;
             }
-            let _ = data.for_each_child(|child| stack.push(child));
+            on_path.remove(&node);
+            let summary = match graph.node_data(node) {
+                None => FreeTypeVariables::default(),
+                Some(data) => {
+                    children.clear();
+                    let _ = data.for_each_child(|child| children.push(child));
+                    let mut infer_ref = matches!(data.as_ref(), SemanticNodeData::InferRef { .. });
+                    let mut params = ParamUnion::default();
+                    for child in &children {
+                        if let Some(below) = computed.get(child) {
+                            infer_ref |= below.infer_ref;
+                            params.add(&below.params);
+                        }
+                    }
+                    let params = match data.as_ref() {
+                        // A type parameter is free where it is written; its
+                        // constraint and default are read where it is
+                        // declared.
+                        SemanticNodeData::TypeParam { .. } => Some(Arc::from([node])),
+                        SemanticNodeData::Signature {
+                            type_parameters, ..
+                        } => params
+                            .finish_without(type_parameters.iter().map(|declared| declared.param)),
+                        _ => params.finish(),
+                    };
+                    FreeTypeVariables { params, infer_ref }
+                }
+            };
+            computed.insert(node, summary);
         }
-        params.retain(|param| !bound.contains(param));
-        params
+        let summary = computed
+            .get(&root)
+            .cloned()
+            .expect("the traversal composes the root's summary before it ends");
+        if !cyclic {
+            self.free_type_variables.borrow_mut().extend(computed);
+        }
+        summary
     }
 
     /// Whether the checker defers the conditional `check extends extends`
@@ -1469,7 +2021,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             if let SemanticNodeData::InstantiationRef { base, args } = &*data {
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args = Arc::clone(args.as_arc());
                 drop(data);
                 if !args
                     .iter()
@@ -1620,10 +2172,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
         match crate::semantic_query::SemanticQueryApi::execute_type_node(self, key) {
             QueryResult::Value(output)
-                if !matches!(
-                    self.graph().node_data(output.value).as_deref(),
-                    Some(SemanticNodeData::Conditional { .. })
-                ) =>
+                if (output.provenance.fact_status.is_complete()
+                    || self.is_conditional_checker_recovery(output.value))
+                    && !matches!(
+                        self.graph().node_data(output.value).as_deref(),
+                        Some(SemanticNodeData::Conditional { .. })
+                    ) =>
             {
                 output.value
             }

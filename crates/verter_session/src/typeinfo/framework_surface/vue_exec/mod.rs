@@ -99,8 +99,8 @@ use crate::VerterHost;
 use verter_type_engine::fact_signature_helpers::ReadSetSignatureExt as _;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
-    PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult, SemanticQueryApi,
-    SemanticQueryKey, SemanticQueryOutput,
+    FactResult, MemberDomain, PathSegment, ProjectionMode, ProjectionReductionContext, QueryResult,
+    SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
 };
 
 mod normalize;
@@ -412,7 +412,7 @@ impl VerterHost {
                 &host_ctx,
                 &dispatch,
                 base,
-                Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
                 ProjectionReductionContext::published(ProjectionMode::Shallow),
                 None,
             ),
@@ -589,18 +589,21 @@ pub(crate) fn navigate_param_to_object_surface<
     // one-level object surface. An undeferenceable locator is an INCOMPLETE
     // resolution with a named reason — never a fabricated stand-in node and
     // never a silent "no surface".
-    let Some(base) = dispatch
-        .raise_semantic_type_source_to_hot(
-            &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
-            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id: scope_canonical,
-                scope_owner,
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
-                ),
-                interior_failures: None,
-            },
-        )
+    // The raised carrier owns the base for the projection below.
+    let raised = dispatch.owning().raise_semantic_type_source_to_hot(
+        &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
+        verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            scope_canonical_id: scope_canonical,
+            scope_owner,
+            context: ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
+            interior_failures: None,
+        },
+    );
+    let Some(base) = raised
+        .value()
+        .clone()
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {
@@ -624,8 +627,7 @@ pub(crate) fn navigate_param_to_object_surface<
     if let Some(reasons) =
         verter_type_engine::semantic_query::surface_resolution::stable_member_carrier_partiality(
             ctx,
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), base)
-                .as_deref(),
+            dispatch.graph().read_in_scope(base).as_deref(),
         )
     {
         return claims.incomplete(reasons);
@@ -641,7 +643,7 @@ pub(crate) fn navigate_param_to_object_surface<
         ctx,
         dispatch,
         base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     )
@@ -942,7 +944,13 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     let (dtos, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
         &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         || {
-            match resolve_vue_macro_surface_with_ctx(ctx, dispatch, &validated_request) {
+            // The cold compute resolves the surface and then normalizes its
+            // member labels in later operations, so it holds an explicit
+            // builder owner for them; the DTO bundle it yields is graph-free.
+            let _builder = dispatch.enter_construction_scope();
+            let fact = resolve_vue_macro_surface_fact_with_ctx(ctx, dispatch, &validated_request);
+            let (surface, domain_guarantee) = adopt_macro_surface_fact(fact);
+            match surface {
                 Some(macro_surface) => {
                     // Mint the policy-admitted framework-surface token from the
                     // RESOLVED surface; the normalizers consume the token, never a
@@ -950,7 +958,7 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                     // framework-surface resolution sink — so no non-sink code can
                     // reverse-materialize a member `TypeExpr` from a forged surface.
                     let resolved = resolved_vue_surface(macro_surface);
-                    match macro_kind {
+                    let mut dtos = match macro_kind {
                         AnalyzedMacroKind::DefineProps => MacroSurfaceDtos {
                             // A props member is `properties + index signatures`: capture
                             // the surface's index signatures (key/value raised through
@@ -1063,9 +1071,14 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
                         // `resolve_vue_macro_surface_with_ctx` returns `None` for it and
                         // this arm is unreachable.
                         AnalyzedMacroKind::WithDefaults => MacroSurfaceDtos::default(),
-                    }
+                    };
+                    dtos.domain_guarantee = Some(domain_guarantee);
+                    dtos
                 }
-                None => MacroSurfaceDtos::default(),
+                None => MacroSurfaceDtos {
+                    domain_guarantee: Some(domain_guarantee),
+                    ..MacroSurfaceDtos::default()
+                },
             }
         },
     );
@@ -1180,6 +1193,54 @@ pub(crate) fn resolve_vue_macro_surface_with_ctx<
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     request: &VueMacroSurfaceRequest,
 ) -> Option<VueMacroSurface> {
+    adopt_macro_surface_fact(resolve_vue_macro_surface_fact_with_ctx(
+        ctx, dispatch, request,
+    ))
+    .0
+}
+
+fn adopt_macro_surface_fact(
+    fact: FactResult<MemberDomain<VueMacroSurface>>,
+) -> (
+    Option<VueMacroSurface>,
+    verter_session_query::analysis::component_meta::MetadataFactGuarantee,
+) {
+    verter_type_engine::request_context::fold_result_completeness(fact.status().completeness());
+    let mut guarantee = crate::typeinfo::surface_resolution::metadata_guarantee(
+        fact.status(),
+        matches!(
+            &fact,
+            FactResult::Complete(MemberDomain::Open(_))
+                | FactResult::Approximate {
+                    value: MemberDomain::Open(_),
+                    ..
+                }
+        ),
+    );
+    let surface = match fact {
+        FactResult::Complete(MemberDomain::Closed(surface) | MemberDomain::Open(surface))
+        | FactResult::Approximate {
+            value: MemberDomain::Closed(surface) | MemberDomain::Open(surface),
+            ..
+        } => {
+            let mut surface = surface;
+            guarantee.open |=
+                surface.surface.has_index_signature || surface.surface.keyspace.is_some();
+            surface.surface.domain_guarantee = guarantee.clone();
+            Some(surface)
+        }
+        _ => None,
+    };
+    (surface, guarantee)
+}
+
+fn resolve_vue_macro_surface_fact_with_ctx<
+    C: verter_type_engine::resolver_core::ResolverCapabilities,
+>(
+    ctx: &dyn verter_type_engine::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    request: &VueMacroSurfaceRequest,
+) -> FactResult<MemberDomain<VueMacroSurface>> {
     verter_debug_assert_eq!(
         request.level,
         TypeInfoQueryLevel::FullMetadata,
@@ -1191,27 +1252,30 @@ pub(crate) fn resolve_vue_macro_surface_with_ctx<
     // normalization, unresolved-root partiality, one-level projection and
     // incomplete-arm folding all run there. This adapter pairs the graph
     // surface with its declaration-file spans and hydrates JSDoc.
-    let projected =
-        verter_type_engine::project_semantic_dispatch::one_level_surface::project_macro_argument_surface(
+    let claim = verter_type_engine::project_semantic_dispatch::one_level_surface::project_macro_argument_surface_claim(
             ctx,
             dispatch,
             &request.owner_canonical,
             request.macro_index,
             request.macro_kind,
-        )?;
-    let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(
-        ctx,
-        TypeInfoSurface::from_one_level(dispatch.graph(), &projected.surface),
-    );
-    Some(VueMacroSurface {
-        surface,
-        macro_kind: request.macro_kind,
-        owner_canonical: Arc::clone(&request.owner_canonical),
-        macro_index: request.macro_index,
-        macro_call_span: projected.macro_call_span,
-        level: request.level,
-        unresolved_surface_arms: projected.unresolved_surface_arms,
-    })
+        );
+    claim
+        .map(|projected| {
+            let surface = crate::typeinfo::shallow_surface::with_member_jsdoc_spans_from_ctx(
+                ctx,
+                TypeInfoSurface::from_one_level(dispatch.graph(), &projected.surface),
+            );
+            VueMacroSurface {
+                surface,
+                macro_kind: request.macro_kind,
+                owner_canonical: Arc::clone(&request.owner_canonical),
+                macro_index: request.macro_index,
+                macro_call_span: projected.macro_call_span,
+                level: request.level,
+                unresolved_surface_arms: projected.unresolved_surface_arms,
+            }
+        })
+        .into_fact()
 }
 
 #[cfg(test)]
@@ -1266,6 +1330,7 @@ mod partial_admission_tests {
         let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let absent = SemanticNodeId(u64::MAX);
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
 
         // Degraded output: an object whose member value is unraisable

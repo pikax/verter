@@ -36,9 +36,9 @@ struct Trace {
 fn identity(canonical: &str, symbol: &str) -> FlowFunctionReturnIdentity {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -53,13 +53,13 @@ fn candidate_count(host: &Arc<VerterHost>, canonical: &str, function: &str) -> u
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(function),
+            verter_type_expr::OwnedStr::from(function),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: ReturnProjectionDemand::whole_return(),
         input: FlowInputContext::empty(),
@@ -86,7 +86,7 @@ fn call_once(host: &Arc<VerterHost>, canonical: &str, function: &str) -> Sample 
             (
                 result.degradation(),
                 None,
-                host.project_node_to_type_expr_json_bytes(node)
+                host.project_ordinal_to_type_expr_json_bytes_for_test(node)
                     .map(|bytes| String::from_utf8(bytes).expect("UTF-8 TypeExpr JSON")),
                 host.project_node_to_type_expr_for_test(node)
                     .map(|ty| format!("{ty:?}")),
@@ -362,6 +362,10 @@ const OPTIONAL_READ_NARROW: &str = "type Boxed = { k?: \"a\" };\n\
 #[test]
 fn predicate_narrow_over_an_undecided_relation_publishes_no_fact() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let canonical = "/flow-gap-retraction/undecided_relation_narrow.ts";
     upsert(
         &host,
@@ -446,6 +450,10 @@ fn nominal_relation_gap_retracts_only_when_decided() {
 #[test]
 fn nominal_narrow_retracts_when_a_declaration_changes_on_one_host() {
     let host = make_audit_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let decl = "/flow-gap-retraction/edit-decl.ts";
     let consumer = "/flow-gap-retraction/edit-consumer.ts";
     upsert(
@@ -692,23 +700,42 @@ fn a_let_capture_outside_its_container_is_complete_and_warm() {
 
 #[test]
 fn flow_gap_known_gap_results_are_typed_partial_and_never_warm() {
-    let fixtures = [
-        (
-            "g11_sequence",
-            "function makeProps() { return (0, () => \"a\" as const) }",
-            FlowGap::UnmodeledExpression,
-        ),
-        (
-            "g11_this",
-            "function makeProps(this: { value: \"a\" }) { return () => this.value }",
-            FlowGap::UnmodeledExpression,
-        ),
-    ];
+    let fixtures = [(
+        "g11_sequence",
+        "function makeProps() { return (0, () => \"a\" as const) }",
+        FlowGap::UnmodeledExpression,
+    )];
 
     for (id, script, gap) in fixtures {
         let trace = run(id, script, "makeProps");
         record_trace(id, &trace);
         assert_partial(&trace, gap);
+    }
+}
+
+#[test]
+fn declared_receivers_in_returned_arrows_are_complete_and_warm() {
+    let fixtures = [
+        (
+            "explicit_receiver",
+            "function makeProps(this: { value: \"a\" }) { return () => this.value }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"a"}}"#,
+        ),
+        (
+            "nested_arrows",
+            "function makeProps(this: { value: \"a\" }) { return () => () => this.value }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"a"}}}"#,
+        ),
+        (
+            "ordinary_function_receiver",
+            "function makeProps(this: { value: \"a\" }) { return function(this: { value: \"b\" }) { return () => this.value } }",
+            r#"{"kind":"function","parameters":[],"returnType":{"kind":"function","parameters":[],"returnType":{"kind":"literal","literalKind":"string","value":"b"}}}"#,
+        ),
+    ];
+    for (id, script, expected) in fixtures {
+        let trace = run(id, script, "makeProps");
+        record_trace(id, &trace);
+        assert_complete_warm(&trace, Some(expected));
     }
 }
 
@@ -1053,13 +1080,25 @@ fn checker_correct_unannotated_same_closure_write_remains_complete_and_warm() {
 
 #[test]
 fn flow_gap_default_parameter_budget_failure_is_no_value_and_cold() {
+    let host = make_audit_host();
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     // A default the inference's work budget cannot visit: 5,000 elements.
     let default = format!("[{}]", vec!["0"; 5_000].join(", "));
-    let trace = run(
-        "default_budget",
-        &format!("function makeProps(value = {default}) {{ return value }}"),
-        "makeProps",
+    let canonical = "/flow-gap-retraction/default_budget.ts";
+    upsert(
+        &host,
+        canonical,
+        &super::module_script(&format!(
+            "function makeProps(value = {default}) {{ return value }}"
+        )),
+        FileLanguage::script_ts(),
     );
+    let trace = run_on(&host, canonical, "makeProps");
     record_trace("default_budget", &trace);
     let expected = Some(FlowReturnError::Failure(FlowReturnFailure::Budget(
         verter_type_expr::facts::InferenceUnavailableReason::WorkBudgetExceeded,

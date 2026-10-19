@@ -450,6 +450,7 @@ impl<'s> Lowerer<'s> {
             (None, None) => Arc::from(ANONYMOUS_CLASS),
         };
         SliceExpr::Class(Arc::new(SliceClass {
+            declaration: None,
             offset: class.span.start,
             name,
             outer_clauses: self.class_outer_clauses(),
@@ -942,14 +943,20 @@ impl<'s> Lowerer<'s> {
                 .unwrap_or_else(|| (Arc::from(ANONYMOUS_FUNCTION), None));
             if !gate.enclosing_type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
-                    container: class.unwrap_or_else(|| Arc::from(ANONYMOUS_CLASS)),
-                    parameters: Arc::clone(gate.enclosing_type_parameters()),
+                    container: verter_type_expr::OwnedStr::from(
+                        class.unwrap_or_else(|| Arc::from(ANONYMOUS_CLASS)),
+                    ),
+                    parameters: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                        Arc::clone(gate.enclosing_type_parameters()),
+                    ),
                 });
             }
             if !gate.type_parameters().is_empty() {
                 clauses.push(verter_session_query::flow::policy::ClassExpressionClause {
-                    container,
-                    parameters: Arc::clone(gate.type_parameters()),
+                    container: container.into(),
+                    parameters: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                        Arc::clone(gate.type_parameters()),
+                    ),
                 });
             }
         }

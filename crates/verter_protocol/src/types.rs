@@ -1034,16 +1034,16 @@ pub struct OriginEdgeDto {
 
 /// NAPI/WASM boundary DTO for component metadata.
 /// Derived from `ComponentMetaAnalysis` in `verter_semantic::analysis::component_meta`.
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiComponentMeta {
+    pub domain_guarantees:
+        verter_session_query::analysis::component_meta::ComponentDomainGuarantees,
     pub component_public_contract: FfiComponentContractAvailability,
     pub props: Vec<FfiPropMeta>,
     pub events: Vec<FfiEventMeta>,
     pub slots: Vec<FfiSlotMeta>,
     pub models: Vec<FfiModelMeta>,
     pub exposed: Vec<FfiExposedMeta>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub public_instance: Option<FfiPublicInstanceMeta>,
     pub ordered_sfc_structure: FfiOrderedSfcStructure,
     pub type_registry: Vec<FfiResolvedTypeMeta>,
@@ -1060,11 +1060,9 @@ pub struct FfiComponentMeta {
     pub root_info: FfiRootInfo,
     pub root_reachability: FfiRootReachability,
     pub fallthrough_surface: FfiFallthroughSurface,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub macro_expansion_diagnostics: Vec<FfiMacroExpansionDiagnostics>,
     pub options_api: bool,
     pub file_path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub resolution: Option<FfiComponentMetaResolution>,
     /// Typed status of the payload's type-resolution position: `Resolved`
     /// when the payload was produced with the `resolution` sidecar (the
@@ -1086,7 +1084,6 @@ pub struct FfiComponentMeta {
     /// outcome. A `Partial` payload is also refused warm admission by the
     /// producer, so an identical follow-up request recomputes.
     pub result_completeness: FfiResultCompleteness,
-    #[serde(skip_serializing_if = "origin_graph_is_empty")]
     pub origin: OriginGraphDto,
 }
 
@@ -1414,10 +1411,6 @@ pub enum FfiResolutionUnavailableReason {
     ResolutionProviderAbsent,
 }
 
-fn origin_graph_is_empty(g: &OriginGraphDto) -> bool {
-    g.edges.is_empty()
-}
-
 /// Macro-wide expansion diagnostics that apply to an entire macro, not to a
 /// specific property. One entry per macro that has global diagnostics.
 #[derive(Serialize, Clone)]
@@ -1553,23 +1546,18 @@ pub enum FfiSymbolicEquivalenceKind {
     ImportedIndexedAccess,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiPropMeta {
     pub name: String,
     /// Structured type IR (passes through unchanged — TypeExpr implements Serialize).
     pub r#type: Option<verter_type_expr::TypeExpr>,
     pub publication: FfiTypePublication,
     pub terminal_display: FfiTerminalTypeDisplay,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
     pub required: bool,
     pub has_default: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
     /// Producer fact: did the SFC author write this prop name explicitly as
     /// a member of the `defineProps<T>()` type argument's own body (or its
@@ -1582,38 +1570,29 @@ pub struct FfiPropMeta {
     pub declared_in_macro_type_arg: bool,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiEventMeta {
     pub name: String,
-    pub payload: verter_type_expr::TypeExpr,
+    pub payload: Option<verter_type_expr::TypeExpr>,
     pub publication: FfiTypePublication,
     pub terminal_display: FfiTerminalTypeDisplay,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub payload_expansion: Option<FfiExpansionMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_signature: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiSlotMeta {
     pub name: String,
     pub is_scoped: bool,
     pub bindings: Vec<FfiSlotBindingMeta>,
     pub is_required: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub return_type: Option<String>,
     pub return_value: Option<verter_type_expr::TypeExpr>,
     pub return_publication: Option<FfiTypePublication>,
     pub return_terminal_display: Option<FfiTerminalTypeDisplay>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<FfiJsdocTag>,
     /// Producer fact: does this slot come from the component's own AUTHORED
     /// slots surface (the resolved `defineSlots<T>()` macro surface or a
@@ -1624,14 +1603,12 @@ pub struct FfiSlotMeta {
     pub declared_in_macro_type_arg: bool,
 }
 
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone)]
 pub struct FfiSlotBindingMeta {
     pub name: String,
     pub r#type: Option<verter_type_expr::TypeExpr>,
     pub publication: FfiTypePublication,
     pub terminal_display: FfiTerminalTypeDisplay,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub type_expansion: Option<FfiExpansionMetadata>,
 }
 

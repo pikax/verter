@@ -11,7 +11,6 @@ use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use verter_session_query::inputs::indexed::IndexedInputRecord;
 use verter_session_query::inputs::indexed::IndexedInputServe;
-use verter_session_query::inputs::prepared::PreparedInputRecord;
 use verter_session_query::inputs::shallow::ShallowInputRecord;
 use verter_type_engine::resolver_core::request_ports::{
     ExecutionSubmission, IndexedInputs, RouteLookup,
@@ -139,8 +138,12 @@ impl IndexedInputs for crate::VerterHost {
     ) -> Option<verter_session_query::resolution::ProjectId> {
         crate::VerterHost::resolve_project_for_canonical(self, canonical)
     }
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        crate::VerterHost::declaration_sequence_rank(self, canonical)
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder> {
+        crate::VerterHost::program_file_order(self, anchor, ordered)
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
@@ -150,7 +153,10 @@ impl IndexedInputs for crate::VerterHost {
     // Cache accessors -------------------------------------------------
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef> {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::prepared_decl_bundle_with_store_view(self, &view, None, canonical_id)
             .map(|bundle| self.source_input_leases.retain_prepared(bundle))
@@ -325,6 +331,17 @@ impl IndexedInputs for crate::VerterHost {
 
 #[cfg(any(test, feature = "test-support"))]
 impl RouteLookup for crate::VerterHost {
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    > {
+        let view = self.resolver_store_view().into_owned_view();
+        self.module_export_table_with_context(self, &view, canonical)
+    }
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
         self.workspace().reverse_deps_for(canonical)
     }
@@ -356,7 +373,7 @@ impl RouteLookup for crate::VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         let view = crate::VerterHost::resolver_store_view(self).into_owned_view();
         crate::VerterHost::resolve_imported_type_root_with_facts_with_store_view(
@@ -457,8 +474,7 @@ impl RouteLookup for crate::VerterHost {
         consumer_project: ProjectStableKey,
         symbol: &str,
     ) -> Option<AmbientSymbolHit> {
-        self.workspace()
-            .lookup_ambient_symbol(consumer_project, symbol)
+        crate::VerterHost::program_ambient_symbol(self, consumer_project, symbol)
     }
 
     #[inline]
@@ -525,7 +541,7 @@ impl verter_type_engine::resolver_core::request_ports::HostAttachmentPort for cr
 /// Hooks that must re-enter the resolver tier receive the enclosing
 /// adapter as `ctx: &dyn ResolverContext` so the re-entry binds to the
 /// same request-bound context.
-pub(crate) trait RequestBoundLifecycle {
+pub(crate) trait RequestBoundLifecycle: Sync {
     /// The host this request runs against.
     fn host(&self) -> &crate::VerterHost;
 
@@ -557,7 +573,7 @@ pub(crate) trait RequestBoundLifecycle {
         &self,
         ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
         canonical_id: &str,
-    ) -> Option<Arc<PreparedDeclBundle>>;
+    ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>>;
 
     fn prepared_type_decl(
         &self,
@@ -566,7 +582,7 @@ pub(crate) trait RequestBoundLifecycle {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -577,7 +593,7 @@ pub(crate) trait RequestBoundLifecycle {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -758,7 +774,9 @@ where
     }
     fn host_view_env_hashes_for(&self, canonical: &str) -> crate::session_view::EnvHashes {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::host_view_env_hashes_for");
-        self.0.host().host_view_env_hashes_for(canonical)
+        self.0.request_view().project_env_hashes_for(canonical, || {
+            self.0.host().host_view_env_hashes_for(canonical)
+        })
     }
     fn host_view_project_identity(&self) -> crate::file_artifact_store::ProjectIdentity {
         verter_type_engine::count_resolver_context_call!(
@@ -773,7 +791,9 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::host_view_project_identity_for"
         );
-        self.0.host().host_view_project_identity_for(canonical)
+        self.0.request_view().project_identity_for(canonical, || {
+            self.0.host().host_view_project_identity_for(canonical)
+        })
     }
     fn semantic_compiler_options_for(
         &self,
@@ -782,7 +802,11 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::semantic_compiler_options_for"
         );
-        self.0.host().semantic_compiler_options_for(canonical)
+        self.0
+            .request_view()
+            .project_compiler_options_for(canonical, || {
+                self.0.host().semantic_compiler_options_for(canonical)
+            })
     }
     fn resolve_project_for_canonical(
         &self,
@@ -793,11 +817,13 @@ where
         );
         self.0.host().resolve_project_for_canonical(canonical)
     }
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        verter_type_engine::count_resolver_context_call!(
-            "IndexedInputs::declaration_sequence_rank"
-        );
-        self.0.host().declaration_sequence_rank(canonical)
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder> {
+        verter_type_engine::count_resolver_context_call!("IndexedInputs::program_file_order");
+        self.0.host().program_file_order(anchor, ordered)
     }
 
     fn engine_policy(&self) -> verter_type_engine::project_semantic_dispatch::EnginePolicy {
@@ -822,7 +848,10 @@ where
     }
 
     #[inline]
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>> {
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::prepared_decl_bundle");
         self.0
             .prepared_decl_bundle(self, canonical_id)
@@ -970,6 +999,19 @@ impl<L: RequestBoundLifecycle> RouteLookup for RequestBoundAdapter<L>
 where
     Self: sealed::Sealed + sealed::RequestBoundSealed,
 {
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    > {
+        verter_type_engine::count_resolver_context_call!("RouteLookup::module_export_table");
+        self.0
+            .host()
+            .module_export_table_with_context(self, self.0.request_view(), canonical)
+    }
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String> {
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::reverse_dependency_canonicals"
@@ -1007,7 +1049,7 @@ where
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::resolve_imported_type_root_with_facts"
@@ -1130,10 +1172,7 @@ where
         symbol: &str,
     ) -> Option<AmbientSymbolHit> {
         verter_type_engine::count_resolver_context_call!("RouteLookup::lookup_ambient_symbol");
-        self.0
-            .host()
-            .workspace()
-            .lookup_ambient_symbol(consumer_project, symbol)
+        crate::VerterHost::program_ambient_symbol(self.0.host(), consumer_project, symbol)
     }
 
     #[inline]
@@ -1331,6 +1370,10 @@ impl<L: RequestBoundLifecycle>
 }
 
 impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
+    fn publication_input_fingerprint(&self) -> Option<u64> {
+        self.0.request_view().publication_input_fingerprint()
+    }
+
     fn current_external_supersession_fingerprint(&self) -> u64 {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::current_external_supersession_fingerprint"
@@ -1351,10 +1394,10 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
     fn complete_graph_signature(
         &self,
         roots: &[(
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: &[FactVersionRef],
+        facts: Vec<FactVersionRef>,
     ) -> Result<
         verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
         verter_audit::NonAdmissionReason,
@@ -1362,7 +1405,7 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         verter_type_engine::count_resolver_context_call!(
             "FactValidation::complete_graph_signature"
         );
-        verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
+        verter_type_engine::semantic_query_memo::semantic_graph_carrier(
             self.0.request_view(),
             roots,
             facts,
@@ -1515,6 +1558,18 @@ impl<L: RequestBoundLifecycle> FactValidation for RequestBoundAdapter<L> {
         self.0
             .request_view()
             .validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+    }
+    fn validates_retained_signature_with_self_roots(
+        &self,
+        sig: &Arc<[FactVersionRef]>,
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        verter_type_engine::count_resolver_context_call!(
+            "FactValidation::validates_retained_signature_with_self_roots"
+        );
+        self.0
+            .request_view()
+            .validates_retained_signature(sig, self_root_canonicals)
     }
     fn promote_route_completion(
         &self,

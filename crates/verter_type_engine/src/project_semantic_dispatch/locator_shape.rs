@@ -56,6 +56,7 @@
 //!   identity — so one reusable body-shape family exists per locator/env.
 
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use rustc_hash::FxHashMap;
 use verter_type_expr::locators::AuthoredBodyLocator;
@@ -87,8 +88,16 @@ use crate::semantic_query::{
 /// the anchor file's own context, exactly as the augmentation stitch
 /// prepares it).
 enum AnchorPreparedDecl {
-    Type(Arc<verter_session_query::type_solver::PreparedTypeDecl>),
-    Value(Arc<verter_session_query::type_solver::PreparedValueDecl>),
+    Type(
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    ),
+    Value(
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    ),
     Augmentation(Box<verter_session_query::type_solver::PreparedTypeDecl>),
 }
 
@@ -186,7 +195,7 @@ fn register_locator_object_member_alias(
 }
 
 impl AnchorPreparedDecl {
-    fn name_resolution(&self) -> &FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> {
+    fn name_resolution(&self) -> &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> {
         match self {
             Self::Type(prepared) => &prepared.name_resolution,
             Self::Value(prepared) => &prepared.name_resolution,
@@ -332,7 +341,7 @@ pub(super) enum BinderIdentityMode<'a> {
     /// symbol name + the parameter's declared ordinal.
     DeclHeader {
         /// The declaring symbol's stable merged name.
-        owner_symbol: &'a Arc<str>,
+        owner_symbol: &'a verter_type_expr::OwnedStr,
     },
     /// A free authored `TypeParameter` occurrence: binder identity = the
     /// display name at ordinal 0.
@@ -353,7 +362,7 @@ pub(super) enum BinderIdentityMode<'a> {
         /// position names one — it qualifies the binder identity so two
         /// same-name parameters of DIFFERENT declared functions in one
         /// file never share a binder node.
-        anchor_symbol: Option<&'a Arc<str>>,
+        anchor_symbol: Option<&'a verter_type_expr::OwnedStr>,
     },
 }
 
@@ -409,7 +418,7 @@ pub struct LocatorShapeCtx<'a> {
     /// namespace-sibling aware) — the SAME fast path the reducing entry
     /// consults first. `None` when no prepared declaration exists for the
     /// anchor (the in-scope resolver below is then the whole authority).
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     /// The anchor scope's declaration-scope payload (scope-local names +
     /// import bindings), threaded to the shared in-scope resolver.
     scope_payload: Option<&'a DeclarationScopePayload>,
@@ -425,7 +434,7 @@ impl<'a> LocatorShapeCtx<'a> {
     pub fn new(
         scope: &'a NodeScopeId,
         binders: &'a [LocatorBinderFrame],
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self::on(
@@ -440,7 +449,7 @@ impl<'a> LocatorShapeCtx<'a> {
     fn on(
         scope: &'a NodeScopeId,
         binders: BinderStack<'a>,
-        name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+        name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
         scope_payload: Option<&'a DeclarationScopePayload>,
     ) -> Self {
         Self {
@@ -468,7 +477,7 @@ impl<'a> LocatorShapeCtx<'a> {
 struct ShapeLowerCtx<'a> {
     scope: &'a NodeScopeId,
     binders: BinderStack<'a>,
-    name_resolution: Option<&'a FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity>>,
+    name_resolution: Option<&'a FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
     scope_payload: Option<&'a DeclarationScopePayload>,
     infer_binders: &'a crate::semantic_query::InferBinderFactory,
     infer_source: Option<&'a AuthoredBodyLocator>,
@@ -746,33 +755,35 @@ enum LocatorRefPlan {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// The carrier-only locator-shape lowering entry: intern the FIXED
-    /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
-    ///
-    /// See the module docs for the full contract: deferred operator
-    /// carriers, identity-only reference resolution, `TypeParam` shells,
-    /// role-free member stamps. This entry never dispatches a
-    /// `SemanticQueryKey` and never accepts a reducing context.
-    pub fn lower_type_expr_for_locator_shape(
-        &self,
-        expr: &TypeExpr,
-        ctx: &LocatorShapeCtx<'_>,
-    ) -> SemanticNodeId {
-        let infer_binders = match ctx.infer_source {
-            Some(source) => crate::semantic_query::InferBinderFactory::for_authored_locator(
-                ctx.scope, expr, source,
-            ),
-            None => crate::semantic_query::InferBinderFactory::new(ctx.scope, expr),
-        };
-        let work = ShapeLowerCtx {
-            scope: ctx.scope,
-            binders: ctx.binders,
-            name_resolution: ctx.name_resolution,
-            scope_payload: ctx.scope_payload,
-            infer_binders: &infer_binders,
-            infer_source: ctx.infer_source,
-        };
-        self.lower_locator_shape_node(expr, &work)
+    construction_ordinal_seam! {
+        /// The carrier-only locator-shape lowering entry: intern the FIXED
+        /// authored shape of `expr` under the sealed [`LocatorShapeCtx`].
+        ///
+        /// See the module docs for the full contract: deferred operator
+        /// carriers, identity-only reference resolution, `TypeParam` shells,
+        /// role-free member stamps. This entry never dispatches a
+        /// `SemanticQueryKey` and never accepts a reducing context.
+        fn lower_type_expr_for_locator_shape(
+            &self,
+            expr: &TypeExpr,
+            ctx: &LocatorShapeCtx<'_>,
+        ) -> SemanticNodeId {
+            let infer_binders = match ctx.infer_source {
+                Some(source) => crate::semantic_query::InferBinderFactory::for_authored_locator(
+                    ctx.scope, expr, source,
+                ),
+                None => crate::semantic_query::InferBinderFactory::new(ctx.scope, expr),
+            };
+            let work = ShapeLowerCtx {
+                scope: ctx.scope,
+                binders: ctx.binders,
+                name_resolution: ctx.name_resolution,
+                scope_payload: ctx.scope_payload,
+                infer_binders: &infer_binders,
+                infer_source: ctx.infer_source,
+            };
+            self.lower_locator_shape_node(expr, &work)
+        }
     }
 
     /// Lower one node of the fixed authored shape; every node either
@@ -1151,7 +1162,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 LocatorFunctionAwait::Param => {
                     let param = &function.func.parameters[function.params.len()];
                     function.params.push(FunctionParam {
-                        name: param.name.as_deref().map(Arc::<str>::from),
+                        name: param.name.as_deref().map(OwnedStr::from),
                         ty: value,
                         optional: param.optional,
                         rest: param.rest,
@@ -1222,7 +1233,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } => {
                 let element = &elements[lowered.len()];
                 lowered.push(TupleElement {
-                    label: element.label.as_deref().map(Arc::<str>::from),
+                    label: element.label.as_deref().map(OwnedStr::from),
                     value,
                     optional: element.optional,
                     rest: element.rest,
@@ -1266,9 +1277,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             LocatorFrame::IndexedObject { index, binders } => {
                 let key = match index {
-                    TypeExpr::Literal(LiteralValue::String(s)) => {
-                        Some(IndexKey::String(Arc::from(s.as_str())))
-                    }
+                    TypeExpr::Literal(LiteralValue::String(s)) => Some(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(s.as_str()),
+                    )),
                     TypeExpr::Literal(LiteralValue::Number(n)) => {
                         crate::semantic_query::index_key::integer_convention_index_key(*n)
                             .map(IndexKey::Number)
@@ -1477,7 +1488,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     });
                     let declaration = graph.intern_node_with_scope(
                         SemanticNodeData::Infer {
-                            name: Arc::clone(&site.name),
+                            name: OwnedStr::from(&site.name),
                             binder: binder.clone(),
                             constraint,
                         },
@@ -1509,7 +1520,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     for (name, binder) in declarations {
                         let reference = graph.intern_node_with_scope(
                             SemanticNodeData::InferRef {
-                                name: Arc::clone(&name),
+                                name: OwnedStr::from(&name),
                                 binder,
                             },
                             scope.clone(),
@@ -1576,7 +1587,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().intern_node_with_scope(
             SemanticNodeData::Tuple {
-                elements: Arc::from(lowered.into_boxed_slice()),
+                elements: crate::semantic_query::PayloadArray::from(lowered.into_boxed_slice()),
                 readonly,
             },
             scope.clone(),
@@ -1590,11 +1601,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expressions: Vec<SemanticNodeId>,
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
-        let quasis: Arc<[Arc<str>]> = quasis.iter().map(|q| Arc::from(q.as_str())).collect();
+        let quasis: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = quasis
+            .iter()
+            .map(|q| verter_type_expr::OwnedStr::from(q.as_str()))
+            .collect();
         self.graph().intern_node_with_scope(
             SemanticNodeData::TemplateLiteral {
                 quasis,
-                expressions: Arc::from(expressions.into_boxed_slice()),
+                expressions: crate::semantic_query::PayloadArray::from(
+                    expressions.into_boxed_slice(),
+                ),
             },
             scope.clone(),
         )
@@ -1642,7 +1658,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             unreachable!("a mapped type's parameter")
         };
         let graph = self.graph();
-        let mapper_display_name: Arc<str> = Arc::from(parameter.as_str());
+        let mapper_display_name = OwnedStr::from(parameter.as_str());
         let mapper_decl = DeclIdentity::from_scope(
             scope,
             crate::mapper_binder_registry::mapper_binder_decl_name_in(
@@ -1717,7 +1733,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     );
                     let base_infer = match graph.node_data(inner_id).as_deref() {
                         Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                            Some((Arc::clone(name), binder.clone()))
+                            Some((Arc::<str>::from(name), binder.clone()))
                         }
                         _ => None,
                     };
@@ -1735,7 +1751,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if let Some((base_infer_name, binder)) = base_infer {
                     let reference = graph.intern_node_with_scope(
                         SemanticNodeData::InferRef {
-                            name: Arc::clone(&base_infer_name),
+                            name: OwnedStr::from(&base_infer_name),
                             binder,
                         },
                         scope.clone(),
@@ -1900,7 +1916,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(declaration) => declaration,
                 _ => graph.intern_node_with_scope(
                     SemanticNodeData::Infer {
-                        name: Arc::from(name.as_str()),
+                        name: OwnedStr::from(name.as_str()),
                         binder: ctx.infer_binders.binder_for_expr(expr),
                         constraint: None,
                     },
@@ -1930,7 +1946,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         owner,
                         ..
                     } => ScopeId {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
                         owner: *owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(*owner),
@@ -1939,16 +1955,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: Arc::from(root.as_str()),
+                    name: verter_type_expr::OwnedStr::from(root.as_str()),
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
                 let is_instance_field_value = rest.is_empty()
                     && type_args.is_empty()
                     && root.split(':').nth(1) == Some("field");
-                let canonical = Arc::clone(&value_root.scope.canonical_id);
+                let canonical = value_root.scope.canonical_id.clone();
                 let carrier = graph.intern_node_with_scope(
-                    SemanticNodeData::new_typeof(value_root, path, type_args),
+                    SemanticNodeData::new_typeof(
+                        value_root,
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+                        type_args,
+                    ),
                     scope.clone(),
                 );
                 if is_instance_field_value && ctx.binders.innermost_first().next().is_some() {
@@ -1968,7 +1988,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph.intern_node_with_scope(
                     SemanticNodeData::new_import_type(
                         Arc::clone(specifier),
-                        Arc::clone(qualifier),
+                        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                            Arc::clone(qualifier),
+                        ),
                         type_args,
                         *typeof_query,
                     ),
@@ -2011,8 +2033,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                         }
                         let node = self.lower_locator_shape_node(&run_obj, ctx);
-                        let Some(SemanticNodeData::Object(surface)) =
-                            self.graph().node_data(node).as_deref().cloned()
+                        let Some(SemanticNodeData::Object(surface)) = self
+                            .graph()
+                            .node_data(node)
+                            .as_deref()
+                            .map(crate::semantic_query::SemanticNodeData::clone)
                         else {
                             return;
                         };
@@ -2041,7 +2066,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return graph.intern_node_with_scope(
                         SemanticNodeData::ObjectSpreadProgram(
                             crate::semantic_query::ObjectSpreadProgram {
-                                effects: Arc::from(effects),
+                                effects: crate::semantic_query::PayloadArray::from(effects),
                             },
                         ),
                         scope.clone(),
@@ -2104,7 +2129,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             function: verter_type_expr::facts::FlowFunctionReturnIdentity {
                 anchor: slot.anchor.clone(),
                 function_part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([member_ordinal]),
+                    member_path: verter_type_expr::OwnedSlice::from([member_ordinal]),
                 },
                 overload_ordinal: 0,
             },
@@ -2164,10 +2189,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // identity so same-name parameters of different declared functions
         // in one file never share a binder node.
         let anchor_symbol = ctx.infer_source.map(|locator| match locator {
-            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
-            AuthoredBodyLocator::AugmentationBody(body) => Arc::clone(&body.anchor.symbol),
-            AuthoredBodyLocator::JsdocTypedefBody(body) => Arc::clone(&body.anchor.symbol),
-            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+            AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
+            AuthoredBodyLocator::AugmentationBody(body) => body.anchor.symbol.clone(),
+            AuthoredBodyLocator::JsdocTypedefBody(body) => body.anchor.symbol.clone(),
+            AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.symbol.clone(),
         });
         let (own_frame, built) = self.build_type_param_binder_frame(
             &base,
@@ -2197,7 +2222,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .zip(func.type_parameters.iter())
             .map(|(binder, tp)| TypeParamDecl {
-                name: Arc::clone(&binder.name),
+                name: OwnedStr::from(&binder.name),
                 param: binder.binder,
                 constraint: binder.constraint,
                 default: binder.default,
@@ -2287,21 +2312,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         canonical: &str,
         ctx: &ShapeLowerCtx<'_>,
     ) -> SemanticNodeId {
-        let value = self.resolve_carrier_subject_node(
-            carrier,
-            crate::semantic_query::ProjectionReductionContext::published(
-                crate::semantic_query::ProjectionMode::Navigate,
-            ),
-        );
         let bind = |name: &str| match ctx.lookup_binder(name) {
             Some(BinderSlot::Usable(binder)) => Some(binder),
             _ => None,
         };
-        let rebound = self.rebind_flow_return_binders(value, canonical, bind);
-        if rebound == value {
+        let read = self.observe_read(|| {
+            let value = self.resolve_carrier_subject_node(
+                carrier,
+                crate::semantic_query::ProjectionReductionContext::published(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            );
+            let rebound = self.rebind_flow_return_binders(value, canonical, bind);
+            (value, rebound)
+        });
+        if read.value().0 == read.value().1 {
+            let _ = read.discard();
             carrier
         } else {
-            rebound
+            read.adopt(self).map_or(carrier, |(_, rebound)| rebound)
         }
     }
 
@@ -2342,26 +2371,53 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 owner,
                 ..
             } => {
-                identity.anchor.canonical_id = Arc::clone(canonical_id);
+                identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical_id);
                 identity.anchor.owner = *owner;
-                Some(Arc::clone(canonical_id))
+                Some(canonical_id.clone())
             }
             _ => None,
         };
         match scope_canonical {
             Some(scope_canonical) => {
-                let carrier = crate::semantic_query::SignatureReturnCarrier::Function(
+                let mut carrier = crate::semantic_query::SignatureReturnCarrier::Function(
                     verter_type_expr::facts::FunctionReturnSource::Flow(identity.clone()),
                 );
-                let return_type = match self.execute_function_return_source(
-                    &verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                    scope_canonical.as_ref(),
-                ) {
-                    super::flow_return::FunctionReturnNode::Flow(result) => {
+                // The structural signature owns the return SOURCE, not a
+                // demand for its value. An eager exact result is reusable;
+                // a refused/unfinished probe is declined and the carrier
+                // remains the authority when a consumer demands the return.
+                let return_type = match self
+                    .probe_signature_flow_return(&identity, scope_canonical.as_ref())
+                {
+                    super::flow_return_fact::SignatureReturnProbe::Evaluated(result) => {
                         inferred_predicate = result.inferred_predicate();
                         result.return_type()
                     }
-                    _ => graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                    super::flow_return_fact::SignatureReturnProbe::Deferred(source) => {
+                        let mut images = FxHashMap::default();
+                        for frame in inner_ctx.binders.innermost_first() {
+                            for (name, slot) in &frame.names {
+                                images.entry(Arc::clone(name)).or_insert(*slot);
+                            }
+                        }
+                        let source =
+                            source.with_bindings(images.into_iter().filter_map(|(name, slot)| {
+                                match slot {
+                                    BinderSlot::Usable(node)
+                                        if !func
+                                            .type_parameters
+                                            .iter()
+                                            .any(|tp| tp.name == name.as_ref()) =>
+                                    {
+                                        Some((name, node))
+                                    }
+                                    _ => None,
+                                }
+                            }));
+                        carrier =
+                            crate::semantic_query::SignatureReturnCarrier::DeferredFlow(source);
+                        graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss))
+                    }
                 };
                 // An enclosing parameter the body reads rebinds to
                 // this lowering's binder for it, so the receiver's
@@ -2429,21 +2485,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
             .or(inferred_predicate);
         self.graph().intern_node_with_scope(
-            SemanticNodeData::Signature {
-                kind,
-                params: Arc::from(params.into_boxed_slice()),
-                return_type,
-                type_parameters: Arc::from(type_parameters.into_boxed_slice()),
-                // The `LowerLocator` producer patches the ROOT signature's
-                // occurrence from the key's locator; nested function nodes
-                // carry none.
-                occurrence: None,
-                return_carrier,
-                signature_span: func.spans.signature,
-                return_type_span: func.spans.return_type,
-                predicate,
-                is_abstract: func.is_abstract,
-            },
+            crate::semantic_query::DeferredCallable::seal_signature_header(
+                SemanticNodeData::Signature {
+                    kind,
+                    params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
+                    return_type,
+                    type_parameters: crate::semantic_query::PayloadArray::from(
+                        type_parameters.into_boxed_slice(),
+                    ),
+                    // The `LowerLocator` producer patches the ROOT signature's
+                    // occurrence from the key's locator; nested function nodes
+                    // carry none.
+                    occurrence: None,
+                    return_carrier,
+                    signature_span: func.spans.signature,
+                    return_type_span: func.spans.return_type,
+                    predicate,
+                    is_abstract: func.is_abstract,
+                },
+            ),
             entry.scope.clone(),
         )
     }
@@ -2586,10 +2646,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
-                canonical_id: Arc::clone(&ri.canonical_id),
+                canonical_id: ri.canonical_id.clone(),
                 owner: ri.owner,
                 whole_hash,
-                decl_name: Arc::clone(&ri.symbol_name),
+                decl_name: ri.symbol_name.clone(),
             };
             return LocatorRefPlan::Carrier(RefHeadResolution::Resolved(identity));
         }
@@ -2602,10 +2662,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .is_some()
         {
             return LocatorRefPlan::Carrier(RefHeadResolution::Builtin(DeclIdentity {
-                canonical_id: Arc::from("__builtin__"),
+                canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::clone(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             }));
         }
 
@@ -2614,52 +2674,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)
     }
 
-    /// The session-private locator-shape provider: lower the fixed authored
-    /// shape of the body `locator` names, memoized under the first-class
-    /// [`SemanticQueryKey::LowerLocator`] query on the shared
-    /// multi-candidate read-set-validated substrate.
-    ///
-    /// The env-bearing slot is derived FROM the locator anchor (so the
-    /// key's anchor-match gate holds by construction) with the anchor
-    /// canonical's LIVE `parse_env_hash` / `resolve_env_hash` dimensions.
-    /// Strictly unsubstituted: substituted demands route through
-    /// `Instantiate { args }`, never through this provider.
-    ///
-    /// This is the production body source:
-    /// `lower_located_body_with_provenance` demands every declaration body
-    /// through this provider (never a prepared-body read), then owns
-    /// args-substitution and the post-substitution view projection.
-    pub fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
-        let anchor = match &locator {
-            AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
-            AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
-            AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
-        };
-        let slot = self
-            .type_slot_for(
-                Arc::clone(&anchor.canonical_id),
-                anchor.owner,
-                Arc::clone(&anchor.symbol),
-            )
-            .with_symbol_space(semantic_space_for_locator_space(anchor.space));
-        let env = self
-            .ctx
-            .host_view_env_hashes_for(anchor.canonical_id.as_ref());
-        let key = match LocatorLoweringKey::new_unsubstituted(
-            slot,
-            locator,
-            ParseEnvHash::from_env_hash(env.parse_env_hash),
-            ResolveEnvHash::from_env_hash(env.resolve_env_hash),
-        ) {
-            Ok(key) => key,
-            // Unreachable by construction — the slot is derived from the
-            // locator anchor — but a malformed identity must fail closed,
-            // never lower under the wrong slot.
-            Err(_) => return QueryResult::Error(QueryError::Miss),
-        };
-        let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
-        crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        read.value
+    construction_ordinal_seam! {
+        /// The session-private locator-shape provider: lower the fixed authored
+        /// shape of the body `locator` names, memoized under the first-class
+        /// [`SemanticQueryKey::LowerLocator`] query on the shared
+        /// multi-candidate read-set-validated substrate.
+        ///
+        /// The env-bearing slot is derived FROM the locator anchor (so the
+        /// key's anchor-match gate holds by construction) with the anchor
+        /// canonical's LIVE `parse_env_hash` / `resolve_env_hash` dimensions.
+        /// Strictly unsubstituted: substituted demands route through
+        /// `Instantiate { args }`, never through this provider.
+        ///
+        /// This is the production body source:
+        /// `lower_located_body_with_provenance` demands every declaration body
+        /// through this provider (never a prepared-body read), then owns
+        /// args-substitution and the post-substitution view projection.
+        fn lower_locator(&self, locator: AuthoredBodyLocator) -> QueryResult<SemanticNodeId> {
+            let anchor = match &locator {
+                AuthoredBodyLocator::DeclBody(slot) => &slot.anchor,
+                AuthoredBodyLocator::AugmentationBody(aug) => &aug.anchor,
+                AuthoredBodyLocator::JsdocTypedefBody(typedef) => &typedef.anchor,
+                AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
+            };
+            let env = self
+                .ctx
+                .host_view_env_hashes_for(anchor.canonical_id.as_ref());
+            let slot = self
+                .finalize_slot_seed_in_env(
+                    crate::semantic_query::DeclarationSlotSeed::new(
+                        anchor.canonical_id.clone(),
+                        anchor.owner,
+                        anchor.symbol.clone(),
+                        crate::semantic_query::SemanticSymbolSpace::Type,
+                    ),
+                    &env,
+                )
+                .with_symbol_space(semantic_space_for_locator_space(anchor.space));
+            let key = match LocatorLoweringKey::new_unsubstituted(
+                slot,
+                locator,
+                ParseEnvHash::from_env_hash(env.parse_env_hash),
+                ResolveEnvHash::from_env_hash(env.resolve_env_hash),
+            ) {
+                Ok(key) => key,
+                // Unreachable by construction — the slot is derived from the
+                // locator anchor — but a malformed identity must fail closed,
+                // never lower under the wrong slot.
+                Err(_) => return QueryResult::Error(QueryError::Miss),
+            };
+            let read = self.execute_read(SemanticQueryKey::LowerLocator { key });
+            crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
+            read.value
+        }
     }
 }

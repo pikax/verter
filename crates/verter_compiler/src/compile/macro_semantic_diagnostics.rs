@@ -115,7 +115,12 @@ pub(super) fn collect_macro_semantic_diagnostics(
         };
 
         if target.needs_runtime_macro_semantics()
-            && !validate_runtime_entry(semantics.runtime(), &slot, &mut diagnostics)
+            && !validate_runtime_entry(
+                semantics.runtime(),
+                &slot,
+                target.needs_script(),
+                &mut diagnostics,
+            )
         {
             runtime_valid = false;
         }
@@ -239,6 +244,7 @@ fn validate_no_runtime_slots(
 fn validate_runtime_entry(
     bundle: Option<&MacroRuntimeBundle>,
     slot: &RuntimeSlot<'_>,
+    requires_shape: bool,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let Some(bundle) = bundle else {
@@ -270,6 +276,21 @@ fn validate_runtime_entry(
             "macro-identity-mismatch",
         );
         return false;
+    }
+
+    // IDE checking preserves the authored macro argument independently of
+    // runtime shape availability. Missing names use the existing instance
+    // fallback; only Complete shapes may register prop bindings. Identity and
+    // invalid-macro checks still apply, and runtime codegen requires the shape.
+    if !requires_shape
+        && matches!(
+            entry.outcome,
+            MacroRuntimeOutcome::Partial(_)
+                | MacroRuntimeOutcome::Unresolved(_)
+                | MacroRuntimeOutcome::Unsupported(_)
+        )
+    {
+        return true;
     }
 
     let shape = match &entry.outcome {

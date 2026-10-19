@@ -103,7 +103,7 @@ fn advance_semantic_imports(host: &VerterHost) {
     assert!(
         host.project_type_store().resolved_import_facts().admit(
             key,
-            Arc::new(ResolvedImportFacts::new()),
+            crate::resolver_core::CachedValue::new(ResolvedImportFacts::new()),
             witness
         ),
         "fixture invariant: the admission must succeed, or no domain moved"
@@ -162,6 +162,44 @@ fn a_scope_with_a_basis_and_no_domain_advance_still_admits() {
         "no domain moved, so the scope must admit normally — a movement check that refuses a \
          quiescent scope would disable compaction entirely. Got {finalise:?}"
     );
+}
+
+/// A deferred evaluator close consumes a real request-bound tracer outcome.
+/// Declining that probe's semantic quality cannot decline the execution abort
+/// caused by a live workspace generation moving during its read.
+#[test]
+fn a_declined_deferred_close_cannot_hide_a_live_domain_advance() {
+    for moved in [false, true] {
+        let host = host_with_a_file();
+        with_bare_host_ctx_for_test(&host, |ctx| {
+            let (_, finalise) = install_fact_tracer(&FactTracerBasisSource::from_ctx(ctx), || {
+                assert_scope_has_a_basis(&host);
+                let before = host.project_type_store().project_generation();
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    FactVersionRef::ProjectGeneration { generation: before },
+                );
+                if moved {
+                    advance_workspace_shape(&host);
+                    verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                        FactVersionRef::ProjectGeneration {
+                            generation: host.project_type_store().project_generation(),
+                        },
+                    );
+                }
+            });
+            assert_eq!(
+                matches!(finalise, FactReadSetFinalise::MutationUnstable),
+                moved,
+                "the fixture must detect the actual domain advance, and only that advance"
+            );
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let _builder = dispatch.enter_construction_scope();
+            verter_type_engine::project_semantic_dispatch::evaluate::forwarding_tests::assert_deferred_close_preserves_execution_validity(
+                &dispatch, finalise, moved,
+            );
+        });
+    }
 }
 
 /// A scope with NO basis is unaffected by the same mutation.

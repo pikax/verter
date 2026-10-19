@@ -61,7 +61,7 @@ fn upsert_vue(host: &VerterHost, canonical: &str, source: &str) {
 fn node_data(
     host: &VerterHost,
     node: verter_type_engine::semantic_query::SemanticNodeId,
-) -> Arc<SemanticNodeData> {
+) -> verter_type_engine::semantic_query_memo::NodeData {
     host.project_type_store()
         .semantic_graph()
         .node_data(node)
@@ -96,7 +96,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
         let node = host
             .resolve_named_symbol("/p.ts", "A", Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
-        let data = node_data(&host, node);
+        let data = node_data(&host, node.id());
         match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
                 assert_eq!(
@@ -113,7 +113,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
         }
         // Raised carrier projects back to the bare `Ref { name: "B" }`.
         let raised = host
-            .project_node_to_type_expr_for_test(node)
+            .project_node_to_type_expr_for_test(node.id())
             .expect("carrier must project");
         assert!(
             matches!(&raised, verter_type_expr::TypeExpr::Ref { name, type_arguments }
@@ -130,7 +130,7 @@ fn alias_decl_body_lowers_to_a_declref_carrier_not_a_resolved_object() {
         .expect("A must resolve Expanded");
     assert!(
         matches!(
-            node_data(&host, expanded).as_ref(),
+            node_data(&host, expanded.id()).as_ref(),
             SemanticNodeData::Object(_)
         ),
         "Expanded must reach the resolved Object body (proving the carrier is a stop, not a miss)"
@@ -198,7 +198,7 @@ fn imported_alias_decl_body_lowers_to_an_import_carrier_reference() {
         let node = host
             .resolve_named_symbol("/p.ts", "A", Some(mode))
             .unwrap_or_else(|| panic!("A must resolve in {mode:?}"));
-        match node_data(&host, node).as_ref() {
+        match node_data(&host, node.id()).as_ref() {
             SemanticNodeData::DeclRef { identity } => {
                 assert_eq!(
                     identity.decl_name.as_ref(),
@@ -242,7 +242,7 @@ fn merged_interface_decl_lowers_to_the_distinct_merged_carrier_not_intersection(
         let node = host
             .resolve_named_symbol("/m.ts", "I", Some(mode))
             .unwrap_or_else(|| panic!("I must resolve in {mode:?}"));
-        match node_data(&host, node).as_ref() {
+        match node_data(&host, node.id()).as_ref() {
             SemanticNodeData::MergedDecl { contributors } => {
                 assert_eq!(
                     contributors.len(),
@@ -396,7 +396,7 @@ fn barrel_imported_alias_materializes_at_the_final_defining_canonical() {
     let node = host
         .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the barrel");
-    let SemanticNodeData::Object(surface) = node_data(&host, node).as_ref().clone() else {
+    let SemanticNodeData::Object(surface) = node_data(&host, node.id()).copy_for_tests() else {
         panic!("A must materialise to Node's Object body through the barrel");
     };
     let label = surface
@@ -435,7 +435,7 @@ fn namespace_sibling_type_reference_resolves_through_dispatch() {
         .resolve_named_symbol("/nst.ts", "M.Outer", Some(ProjectionMode::Expanded))
         .expect("M.Outer must resolve the namespace sibling Inner");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("M.Outer must project");
     match &projected {
         verter_type_expr::TypeExpr::Object(shape) => {
@@ -639,7 +639,7 @@ fn script_setup_generic_resolves_as_type_parameter_in_an_ordinary_decl_body() {
             // Identity + ordinal at the NODE level: the `<script-setup>`
             // sentinel decl and the 0-based clause position, with BOTH
             // declaration-site bound edges interned.
-            match graph.node_data(node).as_deref() {
+            match graph.node_data(node.id()).as_deref() {
                 Some(SemanticNodeData::TypeParam {
                     decl,
                     param_index,
@@ -682,7 +682,7 @@ fn script_setup_generic_resolves_as_type_parameter_in_an_ordinary_decl_body() {
                 ),
             }
             let projected = host
-                .project_node_to_type_expr_for_test(node)
+                .project_node_to_type_expr_for_test(node.id())
                 .unwrap_or_else(|| panic!("A must project in {mode:?} ({read} read)"));
             match &projected {
                 verter_type_expr::TypeExpr::TypeParameter(param) => {

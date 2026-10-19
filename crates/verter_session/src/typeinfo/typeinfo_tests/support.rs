@@ -96,20 +96,27 @@ pub(crate) fn make_host_with_footprint() -> Arc<VerterHost> {
 }
 
 pub(crate) fn make_host_with_workspace_files_footprint(files: &[(&str, &str)]) -> Arc<VerterHost> {
+    make_host_with_workspace_files_config(
+        files,
+        HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        },
+    )
+}
+
+pub(crate) fn make_host_with_workspace_files_config(
+    files: &[(&str, &str)],
+    config: HostConfig,
+) -> Arc<VerterHost> {
     let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
         verter_workspace::MemoryOptions::default(),
     ));
     for (path, source) in files {
         workspace.inject_file((*path).to_string(), Arc::from(*source));
     }
-    Arc::new(VerterHost::new(
-        HostConfig {
-            audit_enabled: true,
-            footprint_capture: true,
-            ..HostConfig::default()
-        },
-        workspace,
-    ))
+    Arc::new(VerterHost::new(config, workspace))
 }
 
 pub(crate) fn upsert_ts(host: &VerterHost, canonical_id: &str, source: &str) {
@@ -140,7 +147,9 @@ pub(crate) fn resolve_expr(
         .into_parts();
     let node = outcome.ok().flatten();
     let expr = host
-        .project_node_to_type_expr_for_test(node.unwrap_or_else(|| panic!("{name} must resolve")))
+        .project_node_to_type_expr_for_test(
+            node.unwrap_or_else(|| panic!("{name} must resolve")).id(),
+        )
         .unwrap_or_else(|| panic!("{name} resolved node must project to TypeExpr"));
     (expr, record)
 }
@@ -176,14 +185,14 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
     // keeps that carrier intact.
     let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })) {
         verter_type_engine::semantic_query::QueryResult::Value(
             verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
@@ -193,7 +202,7 @@ pub(crate) fn shallow_surface_expr(host: &VerterHost, canonical_id: &str, name: 
 
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     }) {
         verter_type_engine::semantic_query::QueryResult::Value(
@@ -224,7 +233,8 @@ pub(crate) fn evaluate_expr(
     let node = outcome.ok().flatten();
     let expr = host
         .project_node_to_type_expr_for_test(
-            node.unwrap_or_else(|| panic!("{expression} must resolve")),
+            node.unwrap_or_else(|| panic!("{expression} must resolve"))
+                .id(),
         )
         .unwrap_or_else(|| panic!("{expression} resolved node must project to TypeExpr"));
     (expr, record)
@@ -614,12 +624,11 @@ pub(crate) fn template_literal_reduce_read_with_work_limit(
         dispatch.set_connected_limits_for_tests(work_limit, 24);
     }
     let read = dispatch.execute_read(SemanticQueryKey::TemplateLiteralReduce {
-        pattern: Arc::from(
+        pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
             quasis
                 .iter()
-                .map(|quasi| Arc::from(*quasi))
-                .collect::<Vec<Arc<str>>>()
-                .into_boxed_slice(),
+                .map(|quasi| verter_type_expr::OwnedStr::from(*quasi))
+                .collect::<Vec<_>>(),
         ),
         args: Arc::from(args.into_boxed_slice()),
         context: dispatch.template_literal_reduce_context(),

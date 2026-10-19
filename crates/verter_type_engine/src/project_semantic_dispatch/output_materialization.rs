@@ -104,11 +104,37 @@ mod carrier {
             /// The engine that produced this payload; every unwrap checks it
             /// against the authority.
             engine: EngineIdentity,
+            /// The tree and its sidecar: one self-charged allocation every
+            /// clone of the carrier shares, so a retaining cache and every
+            /// reader of its value keep one charge, released by the last.
+            tree: verter_session_query::retention::heap_size::OwnedTree<PayloadTree>,
+        }
+
+        #[derive(verter_session_query::retention::heap_size::HeapSize)]
+        pub(super) struct PayloadTree {
             type_expr: TypeExpr,
             degraded_leaves: Vec<DegradedLeaf>,
         }
 
+        impl verter_session_query::retention::heap_size::HeapSize for OutputPayload {
+            /// The shared tree, charged by its own cell; the engine handle
+            /// is a weak pointer into storage the engine charges.
+            fn heap_size<'t>(
+                &'t self,
+                meter: &mut verter_session_query::retention::heap_size::HeapMeter<'_, 't>,
+            ) -> usize {
+                self.tree.heap_size(meter)
+            }
+        }
+
         impl OutputPayload {
+            pub(super) fn root_nodes(
+                &self,
+                node: Option<super::SemanticNodeId>,
+            ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+                self.engine.root_nodes(node)
+            }
+
             /// Seal a [`MaterializedTypeExpr`] (tree + sidecar) into the
             /// vault. `pub(super)` — only the parent `carrier` module's
             /// carrier constructors reach it.
@@ -116,25 +142,26 @@ mod carrier {
                 let (type_expr, degraded_leaves) = materialized.into_parts();
                 Self {
                     engine,
-                    type_expr,
-                    degraded_leaves,
+                    tree: verter_session_query::retention::heap_size::owned_tree(PayloadTree {
+                        type_expr,
+                        degraded_leaves,
+                    }),
                 }
             }
 
             /// `true` when the payload carries any degradation leaf.
             pub(super) fn has_degradation(&self) -> bool {
-                !self.degraded_leaves.is_empty()
+                !self.tree.degraded_leaves.is_empty()
             }
 
-            /// Structurally clone the payload (clones BOTH the inner
-            /// [`TypeExpr`] and the degradation sidecar). NOT an unwrap — no
+            /// Structurally clone the payload: the clone shares the one
+            /// tree allocation and its charge. NOT an unwrap — no
             /// [`TypeExpr`] escapes the vault, no capability required; used
             /// by the carrier's [`Clone`] impl.
             pub(super) fn clone_payload(&self) -> Self {
                 Self {
                     engine: self.engine.clone(),
-                    type_expr: self.type_expr.clone(),
-                    degraded_leaves: self.degraded_leaves.clone(),
+                    tree: self.tree.clone(),
                 }
             }
 
@@ -147,16 +174,27 @@ mod carrier {
             /// never warm-admitted as complete, and the observation never
             /// faults the enclosing compute's completeness (a contained
             /// member-level degradation stays entry-local).
+            ///
+            /// The tree leaves its self-charged cell here. When this carrier is
+            /// the cell's only holder the tree moves out and the cell's charge
+            /// is released with it; when a cache or another carrier still
+            /// shares the cell, the caller gets an unshared deep copy, so no
+            /// raw allocation the cell's charge covers outlives that charge in
+            /// the caller's hands.
             pub(super) fn into_type_expr(self, authority: &OutputAuthority) -> TypeExpr {
+                use verter_session_query::retention::unshared::Unshared;
                 // The payload opens only for the authority of the engine that
                 // produced it.
                 authority.verify_carrier(&self.engine);
-                if !self.degraded_leaves.is_empty() {
+                if !self.tree.degraded_leaves.is_empty() {
                     crate::fact_tracing::note_non_cacheable_read_fan_out(
                         verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
                     );
                 }
-                self.type_expr
+                match verter_session_query::retention::owned::Owned::try_unwrap(self.tree) {
+                    Ok(tree) => tree.into_inner().type_expr,
+                    Err(shared) => shared.type_expr.unshared(),
+                }
             }
 
             /// Test-only borrow of the inner [`TypeExpr`] (no capability). The
@@ -166,7 +204,7 @@ mod carrier {
             /// COMPILE-ABSENT from production builds.
             #[cfg(any(test, feature = "test-support"))]
             pub(super) fn type_expr_for_test(&self) -> &TypeExpr {
-                &self.type_expr
+                &self.tree.type_expr
             }
         }
     }
@@ -180,6 +218,7 @@ mod carrier {
     /// — so code holding only query access cannot unwrap it (it can neither
     /// construct nor recover the authority, and the inner `TypeExpr` is not
     /// even a reachable field outside the vault).
+    #[derive(verter_session_query::retention::heap_size::HeapSize)]
     pub struct OutputTypeExpr(payload::OutputPayload);
 
     impl OutputTypeExpr {
@@ -263,7 +302,9 @@ mod carrier {
     /// `result_is_partial`) are facts-rail signatures, NOT the laundering
     /// surface, so they stay readable by the Kind-A sinks through public
     /// accessors.
+    #[derive(verter_session_query::retention::heap_size::HeapSize)]
     pub struct MaterializedOutputTypeExpr {
+        roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
         /// The producing reduced [`SemanticNodeId`] (facts-rail metadata).
         node_id: Option<SemanticNodeId>,
         /// The sealed raised payload (capability-gated unwrap).
@@ -295,6 +336,7 @@ mod carrier {
             let result_is_partial = result_is_partial || type_expr.0.has_degradation();
             Self {
                 node_id,
+                roots: type_expr.0.root_nodes(node_id),
                 type_expr,
                 dep_signature,
                 result_is_partial,
@@ -311,6 +353,18 @@ mod carrier {
         /// (The former TypeExpr helper `reduce_field_type_expr_with_mode` is deleted.)
         pub fn node_id(&self) -> Option<SemanticNodeId> {
             self.node_id
+        }
+
+        /// Borrow the producing node this output owns.
+        pub fn node(
+            &self,
+        ) -> Option<
+            Result<
+                crate::semantic_query_memo::node_roots::NodeRef<'_>,
+                crate::semantic_query::QueryError,
+            >,
+        > {
+            self.node_id.map(|node| self.roots.0.node_ref(node))
         }
 
         /// The accumulated dependency signature (facts-rail metadata — always
@@ -382,6 +436,7 @@ mod carrier {
         ) -> Self {
             Self {
                 node_id,
+                roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(node_id),
                 type_expr: OutputTypeExpr(payload::OutputPayload::new(
                     EngineIdentity::unbound(),
                     MaterializedTypeExpr::exact(type_expr),
@@ -406,7 +461,9 @@ mod carrier {
 
     impl Clone for MaterializedOutputTypeExpr {
         fn clone(&self) -> Self {
+            self.roots.0.retain_for_construction();
             Self {
+                roots: self.roots.clone(),
                 node_id: self.node_id,
                 // The sealed payload clones its private inner `TypeExpr` inside
                 // the vault; this is structural cloning of the carrier, NOT an
@@ -414,7 +471,7 @@ mod carrier {
                 // vault).
                 type_expr: OutputTypeExpr(self.type_expr.0.clone_payload()),
                 dep_signature: self.dep_signature.clone(),
-                result_is_partial: self.result_is_partial,
+                result_is_partial: self.result_is_partial(),
             }
         }
     }
@@ -448,4 +505,78 @@ pub fn wrap_degraded_output(
         authority,
         crate::project_semantic_dispatch::raise::MaterializedTypeExpr::degraded(reason),
     )
+}
+
+#[cfg(test)]
+mod unwrap_tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use verter_type_expr::TypeExpr;
+
+    use super::{wrap_output_type_expr, MaterializedOutputTypeExpr};
+    use crate::project_semantic_dispatch::engine_resources::EngineStores;
+    use crate::semantic_query::DepSignature;
+
+    fn union_list(expr: &TypeExpr) -> usize {
+        match expr {
+            TypeExpr::Union(members) => Arc::as_ptr(members).cast::<()>() as usize,
+            other => panic!("expected the authored union, got {other:?}"),
+        }
+    }
+
+    fn first_name(expr: &TypeExpr) -> usize {
+        match expr {
+            TypeExpr::Union(members) => match &members[0] {
+                TypeExpr::Ref { name, .. } => Arc::as_ptr(name).cast::<()>() as usize,
+                other => panic!("expected a reference, got {other:?}"),
+            },
+            other => panic!("expected the authored union, got {other:?}"),
+        }
+    }
+
+    /// A payload a cache still shares unwraps to an unshared copy: the
+    /// caller's `TypeExpr` reaches none of the cached tree's raw
+    /// allocations, which stay the cache cell's alone. The cell's last
+    /// holder unwraps by moving its own tree out instead.
+    #[test]
+    fn an_unwrapped_shared_payload_aliases_none_of_the_cached_tree() {
+        let (_stores, authority, _claims) = EngineStores::create(
+            None,
+            verter_session_query::retention::StoreAccount::default(),
+            &Arc::new(AtomicU64::new(0)),
+            verter_execution::tasks::TaskRegistry::default(),
+        );
+        let authored = TypeExpr::Union(Arc::from([
+            TypeExpr::Ref {
+                name: Arc::from("SharedName"),
+                type_arguments: Arc::from([]),
+            },
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ]));
+        let delivered = MaterializedOutputTypeExpr::from_parts(
+            None,
+            wrap_output_type_expr(&authority, authored.clone()),
+            DepSignature::default(),
+            false,
+        );
+        let cached = delivered.clone();
+        let (cached_list, cached_name) = (
+            union_list(cached.type_expr_for_test()),
+            first_name(cached.type_expr_for_test()),
+        );
+
+        let unwrapped = delivered.into_type_expr(&authority);
+        assert_eq!(unwrapped, authored);
+        assert_ne!(union_list(&unwrapped), cached_list, "a fresh list");
+        assert_ne!(first_name(&unwrapped), cached_name, "a fresh name");
+
+        let last = cached.into_type_expr(&authority);
+        assert_eq!(last, authored);
+        assert_eq!(
+            union_list(&last),
+            cached_list,
+            "the last holder moves its own tree out, copying nothing"
+        );
+    }
 }

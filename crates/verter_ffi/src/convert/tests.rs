@@ -296,7 +296,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
     };
     host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(selected_source),
+            selected_source: verter_type_expr::SharedTypeSource::new(selected_source),
             semantic_authority: verter_type_expr::SemanticAuthority::Resolved,
             exactness: verter_type_expr::ResolutionExactness::ExactConcrete,
             reason: Box::new(verter_type_expr::PublicationReason::ResolvedExactConcrete),
@@ -313,7 +313,7 @@ fn materialized_publication(r#type: TypeExpr) -> host::meta_resolve::Materialize
 fn type_publication_wire_keeps_outcome_and_terminal_display_separate() {
     let published = host::meta_resolve::MaterializedTypePublication::for_test(
         verter_type_expr::PublicationResult::Published {
-            selected_source: std::sync::Arc::new(
+            selected_source: verter_type_expr::SharedTypeSource::new(
                 verter_type_expr::facts::SemanticTypeSource::Closed(
                     verter_type_expr::facts::ClosedTypeFact::Leaf(
                         verter_type_expr::facts::LeafTypeFact::Primitive(PrimitiveName::String),
@@ -466,7 +466,7 @@ fn failed_publication_is_absorbing_in_all_target_ffi_lanes() {
                 sources: Vec::new(),
             }],
             events: Vec::new(),
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: cm::BranchStatus::Resolved,
         }],
     };
@@ -530,6 +530,7 @@ fn resolution_output_with(
 
 fn empty_analysis() -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -666,6 +667,7 @@ fn host_cpu_threads_forwards_to_host_config() {
 #[test]
 fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_information() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -767,6 +769,7 @@ fn component_meta_type_registry_keeps_expanded_and_pre_expansion_type_informatio
 #[test]
 fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -917,6 +920,7 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
 #[test]
 fn component_meta_ffi_exposes_root_info_summary() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: Vec::new(),
         events: Vec::new(),
         slots: Vec::new(),
@@ -1833,8 +1837,8 @@ fn virtual_file_arc_to_string() {
     let source = "a😀b";
     let response = host::VirtualFileResponse {
         id: "Comp.vue._VERTER_.script.ts".to_string(),
-        code: Arc::from("export default {}"),
-        source_map: Some(Arc::from("{\"mappings\":\"\"}")),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
+        source_map: Some(verter_type_expr::OwnedStr::from("{\"mappings\":\"\"}")),
         lang: Some("ts".to_string()),
         stale: true,
         diagnostics: host::DiagnosticsSnapshot {
@@ -1876,7 +1880,7 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
     let source = "a😀b";
     let response = host::VirtualFileResponse {
         id: "x".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,
@@ -1907,7 +1911,7 @@ fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
 fn virtual_file_no_source_map() {
     let response = host::VirtualFileResponse {
         id: "x".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,
@@ -2535,7 +2539,7 @@ fn ffi_seam_response_serialises_mode_fields() {
     // JS). The downgrade case is a cold miss (`cache_hit == false`).
     let response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
-        code: Arc::from("export default {}"),
+        code: verter_type_expr::OwnedStr::from("export default {}"),
         source_map: None,
         lang: Some("ts".to_string()),
         stale: false,
@@ -2559,7 +2563,7 @@ fn ffi_seam_response_serialises_mode_fields() {
     // slot reports session/session/None and `cache_hit == true`.
     let session_response = host::VirtualFileResponse {
         id: "Comp.vue".to_string(),
-        code: Arc::from(""),
+        code: verter_type_expr::OwnedStr::from(""),
         source_map: None,
         lang: None,
         stale: false,
@@ -2636,7 +2640,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
                 condition_text: None,
                 props: vec![prop_entry("inherited"), prop_entry("extraA")],
                 events: vec![event_entry("changed")],
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
             cm::FallthroughBranch {
@@ -2646,7 +2650,7 @@ fn component_meta_nested_lanes_zip_onto_the_correct_nested_members() {
                 // zip collapses / misroutes it).
                 props: vec![prop_entry("inherited")],
                 events: vec![event_entry("changed")],
-                root_chain: Vec::new(),
+                root_chain: Default::default(),
                 status: cm::BranchStatus::Resolved,
             },
         ],
@@ -2842,7 +2846,7 @@ fn fallthrough_branch(
         condition_text: None,
         props,
         events,
-        root_chain: Vec::new(),
+        root_chain: Default::default(),
         status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
     }
 }
@@ -3834,6 +3838,86 @@ fn ffi_component_meta_distinguishes_partial_from_exact_empty() {
     );
 }
 
+fn svelte_props_lane(source: &str) -> (i32, Vec<u32>, Vec<String>, Option<bool>) {
+    let session = host::VerterHost::new_standalone(host::HostConfig::default());
+    let canonical = "/Props.svelte";
+    let _ = session
+        .upsert(host::UpsertRequest {
+            canonical_id: Some(canonical.to_string()),
+            input_id: canonical.to_string(),
+            source: Arc::from(source),
+            file_language: host::FileLanguage::svelte(),
+            aliases: Vec::new(),
+        })
+        .expect("registered svelte carrier");
+    let meta = sidecar_less_wire_payload(&session, canonical);
+    let facts = meta.facts();
+    let names = facts
+        .props
+        .value()
+        .map(|props| props.iter().map(|prop| prop.name.clone()).collect())
+        .unwrap_or_default();
+    let props = verter_protocol::component_meta::component_meta_payload(&meta)
+        .body
+        .expect("payload body")
+        .facts
+        .expect("component facts")
+        .props
+        .expect("props fact");
+    let guarantee = props.guarantee.expect("props guarantee");
+    (
+        guarantee.kind,
+        guarantee.causes,
+        names,
+        props.value.as_ref().map(|value| value.open),
+    )
+}
+
+/// Svelte producer guarantees survive the session, the FFI facts, and protobuf.
+/// Unavailable and open domains must not publish as complete closed, and a
+/// closed destructure must stay closed with its keys.
+#[test]
+fn svelte_domain_guarantees_reach_protobuf() {
+    let (kind, causes, names, open) = svelte_props_lane(
+        "<script>\n  let { first } = $props();\n  let { second } = $props();\n</script>\n",
+    );
+    assert_eq!(
+        kind, 3,
+        "two $props() calls are unavailable, not complete closed"
+    );
+    assert!(
+        causes.contains(&104),
+        "unavailable props name cause 104, got {causes:?}"
+    );
+    assert!(open.is_none(), "an unavailable fact publishes no value");
+    assert!(names.is_empty());
+
+    let (kind, _, names, open) = svelte_props_lane(
+        "<script>\n  let { label, ...rest } = $props();\n</script>\n<p>{label}</p>\n",
+    );
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(true), "rest props are a complete open domain");
+    assert!(
+        names.is_empty(),
+        "an open rest domain does not publish enumerated keys as the member list: {names:?}"
+    );
+
+    let (kind, _, names, open) =
+        svelte_props_lane("<script>\n  let { label } = $props();\n</script>\n<p>{label}</p>\n");
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(false), "a closed destructure stays closed");
+    assert_eq!(names, vec!["label".to_string()]);
+
+    let (kind, _, names, open) =
+        svelte_props_lane("<script>\n  const label = 'ok';\n</script>\n<p>{label}</p>\n");
+    assert_eq!(kind, 1);
+    assert_eq!(open, Some(false));
+    assert!(
+        names.is_empty(),
+        "a component with no props declaration is complete closed empty"
+    );
+}
+
 /// A producer that raises the partial state without naming a class must
 /// still publish a named reason. A `Partial` with an empty reason list is
 /// indistinguishable from a complete result to any consumer that inspects
@@ -4113,4 +4197,218 @@ fn ffi_component_meta_distinguishes_unresolved_import_from_empty_surface() {
         "the unresolved-import results are still refused warm admission on \
          the second request",
     );
+}
+
+#[test]
+fn native_member_domains_preserve_producer_guarantees() {
+    use prost::Message;
+    for (source, kind, open, names) in [
+        (
+            r#"<script setup lang="ts" generic="T extends { known: string }">defineProps<T>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            1,
+            true,
+            vec!["known"],
+        ),
+        (
+            r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            3,
+            true,
+            vec![],
+        ),
+        (
+            r#"<script setup lang="ts">import type { Missing } from './absent'; defineProps<{known:string} & Missing>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            2,
+            true,
+            vec!["known"],
+        ),
+        (
+            r#"<script setup lang="ts">defineProps<string>(); defineEmits<{saved: []}>()</script><template><div/></template>"#,
+            1,
+            false,
+            vec![],
+        ),
+    ] {
+        let canonical = "/Domain.vue";
+        let project =
+            host::meta::MetaProject::new(host::VerterHost::new_standalone(Default::default()));
+        project.upsert_base(canonical, source).unwrap();
+        let session = project.open_session().unwrap();
+        let bytes = session
+            .get_component_meta_payload(canonical, |output| {
+                let ffi = super::component_meta_output_to_ffi(output);
+                let json = serde_json::to_value(&ffi).unwrap();
+                assert_eq!(
+                    json["facts"]["props"]["kind"],
+                    match kind {
+                        3 => "unavailable",
+                        2 => "approximate",
+                        _ => "complete",
+                    }
+                );
+                let prop_fact = &json["facts"]["props"];
+                if kind == 3 {
+                    assert!(prop_fact.get("value").is_none());
+                    assert!(!prop_fact["causes"].as_array().unwrap().is_empty());
+                } else {
+                    assert_eq!(prop_fact["open"], open);
+                    assert_eq!(
+                        prop_fact["value"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|entry| entry["name"].as_str().unwrap())
+                            .collect::<Vec<_>>(),
+                        names
+                    );
+                    if !names.is_empty() {
+                        assert_eq!(
+                            prop_fact["value"][0]["hasDefaultFact"],
+                            serde_json::json!({"kind":"complete", "value":false, "open":false})
+                        );
+                    }
+                }
+                assert_eq!(json["facts"]["events"]["kind"], "complete");
+                assert_eq!(json["facts"]["events"]["value"][0]["name"], "saved");
+                verter_protocol::component_meta::encode_component_meta_payload(&ffi)
+            })
+            .unwrap()
+            .unwrap();
+        let payload =
+            verter_protocol::verter::v1::ComponentMetaPayload::decode(bytes.as_slice()).unwrap();
+        let facts = payload.body.unwrap().facts.unwrap();
+        let props = facts.props.unwrap();
+        assert_eq!(props.guarantee.as_ref().unwrap().kind, kind, "{source}");
+        let entries = match props.value {
+            Some(value) => {
+                assert_eq!(value.open, open, "producer owns openness: {source}");
+                value.entries
+            }
+            None => {
+                assert_eq!(kind, 3);
+                assert!(!props.guarantee.unwrap().causes.is_empty());
+                Vec::new()
+            }
+        };
+        let strings = payload.type_graph.unwrap().strings;
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| strings[entry.name_id as usize - 1].as_str())
+                .collect::<Vec<_>>(),
+            names
+        );
+        let events = facts.events.unwrap();
+        assert_eq!(
+            events.guarantee.unwrap().kind,
+            1,
+            "unrelated event domain stays exact: {source}"
+        );
+        assert_eq!(events.value.unwrap().entries.len(), 1);
+    }
+}
+
+#[test]
+fn native_fact_refusal_replay_heals_and_invalidates() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    let canonical = "/FactBudget.vue";
+    let project =
+        host::meta::MetaProject::new(host::VerterHost::new_standalone(host::HostConfig::default()));
+    project.upsert_base(canonical, r#"<script setup lang="ts">defineProps<{one:string;two:number;three:boolean}>()</script><template><div/></template>"#).unwrap();
+    let session = project.open_session().unwrap();
+    let payload = |budget| {
+        let base = RequestContext::new(1, Arc::from(canonical), false, None);
+        let context = RequestContext::with_kind_timing_and_projection_budget(
+            1,
+            Arc::from(canonical),
+            base.kind.clone(),
+            false,
+            false,
+            None,
+            budget,
+        );
+        let _guard = RequestContextGuard::install(context);
+        session
+            .get_component_meta_payload(canonical, |output| {
+                let ffi = super::component_meta_output_to_ffi(output);
+                let json = serde_json::to_value(&ffi).unwrap();
+                let proto = verter_protocol::component_meta::component_meta_payload(&ffi);
+                assert_eq!(
+                    json["facts"]["delivery"]["kind"],
+                    if proto
+                        .body
+                        .as_ref()
+                        .unwrap()
+                        .facts
+                        .as_ref()
+                        .unwrap()
+                        .delivery
+                        .as_ref()
+                        .unwrap()
+                        .kind
+                        == 1
+                    {
+                        "complete"
+                    } else {
+                        "unavailable"
+                    }
+                );
+                assert!(
+                    json.get("origin").is_none(),
+                    "default capture contributes no origin graph"
+                );
+                verter_protocol::component_meta::encode_component_meta_payload(&ffi)
+            })
+            .unwrap()
+            .unwrap()
+    };
+    let cold = payload(1);
+    let recomputes = project
+        .host()
+        .provenance()
+        .component_meta_resolved_state_recomputes
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(recomputes > 0, "cold path executes real producers");
+    let repeat = payload(1);
+    assert_eq!(
+        project
+            .host()
+            .provenance()
+            .component_meta_resolved_state_recomputes
+            .load(std::sync::atomic::Ordering::Relaxed),
+        recomputes,
+        "same-profile refusal replays without semantic recomputation"
+    );
+    assert_eq!(
+        cold, repeat,
+        "same profile preserves the exact refusal and recovery"
+    );
+    use prost::Message;
+    let refused =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(cold.as_slice()).unwrap();
+    let refused_facts = refused.body.unwrap().facts.unwrap();
+    assert_eq!(refused_facts.delivery.as_ref().unwrap().kind, 3);
+    assert!(!refused_facts.delivery.as_ref().unwrap().causes.is_empty());
+    let healed =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(payload(20_000).as_slice())
+            .unwrap();
+    let props = healed.body.unwrap().facts.unwrap().props.unwrap();
+    assert_eq!(props.guarantee.unwrap().kind, 1);
+    assert_eq!(props.value.unwrap().entries.len(), 3);
+    session.upsert(canonical, r#"<script setup lang="ts">defineProps<{edited: string}>()</script><template><div/></template>"#.into()).unwrap();
+    let edited =
+        verter_protocol::verter::v1::ComponentMetaPayload::decode(payload(20_000).as_slice())
+            .unwrap();
+    let strings = edited.type_graph.unwrap().strings;
+    let entries = edited
+        .body
+        .unwrap()
+        .facts
+        .unwrap()
+        .props
+        .unwrap()
+        .value
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(strings[entries[0].name_id as usize - 1], "edited");
 }

@@ -52,7 +52,7 @@ fn outer_type_param(
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -115,7 +115,8 @@ fn shallow_member_names(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: SemanticNodeId,
 ) -> Vec<String> {
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: node,
         path: empty_path,
@@ -156,12 +157,14 @@ fn instantiation_ref(
         .graph()
         .intern_node(SemanticNodeData::InstantiationRef {
             base: DeclIdentity {
-                canonical_id: Arc::from(canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(canonical),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
-                decl_name: Arc::from(name),
+                decl_name: verter_type_expr::OwnedStr::from(name),
             },
-            args: Arc::from(args.to_vec().into_boxed_slice()),
+            args: verter_type_engine::semantic_query::PayloadArray::from(
+                args.to_vec().into_boxed_slice(),
+            ),
         })
 }
 
@@ -202,7 +205,7 @@ fn import_type_generic_carrier(
     dispatch.graph().intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from(specifier),
-            qualifier,
+            verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(qualifier),
             Arc::from(arg_nodes.to_vec().into_boxed_slice()),
             false,
         ),
@@ -225,6 +228,7 @@ fn closed_no_arg_bare_ref_source_enumerates_equals_eager() {
         "export type S = { a: string; b: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/s.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -292,6 +296,7 @@ fn closed_fixed_key_generic_value_position_only_t_enumerates() {
         "export interface Foo<T> { label?: string; items?: T }\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/foo.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -359,6 +364,7 @@ fn closed_fixed_key_generic_import_type_source_enumerates() {
     // carrier is interned under so the relative `./dep` specifier resolves.
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let owner_scope = file_scope(&dispatch, "/owner.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -410,6 +416,7 @@ fn literal_union_import_type_keyspace_enumerates() {
     upsert_ts(&host, "/keys.ts", "export type Keys = 'a' | 'b';\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let owner_scope = file_scope(&dispatch, "/owner.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -441,6 +448,7 @@ fn define_slots_shaped_mapped_over_closed_bare_ref_source_equals_eager() {
         "export type S = { default: string; header: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/slots.ts");
     // Value body: a closed function-ish surface (closed `any` here — the value
     // axis is not under test, the KEY domain is).
@@ -505,6 +513,7 @@ fn genuinely_open_sources_still_carrier_stop() {
         "export type Open<T> = { fixed: string } & T;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/pb.ts");
     let open_scope = file_scope(&dispatch, "/open.ts");
     let t_param = outer_type_param(&dispatch, "T");
@@ -578,6 +587,7 @@ fn miss_source_carrier_stops() {
     let host = host();
     upsert_ts(&host, "/rec.ts", "export type Rec = { self: Rec };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/rec.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -605,6 +615,7 @@ fn recursive_body_closed_key_domain_enumerates_bounded() {
     let host = host();
     upsert_ts(&host, "/rec.ts", "export type Rec = { self: Rec };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/rec.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -637,6 +648,7 @@ fn self_alias_loop_source_carrier_stops() {
             let host = host();
             upsert_ts(&host, "/loop.ts", "export type Loop = Loop;\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/loop.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -669,6 +681,7 @@ fn key_domain_undecidable_source_answers_open() {
     let host = host();
     upsert_ts(&host, "/d.ts", "export type D = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/d.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -696,24 +709,19 @@ fn key_domain_undecidable_source_answers_open() {
 // ── 6b. REAL budget exhaustion drives the `budget==0` arm → OPEN → carrier-stop
 //
 // This test ACTUALLY exhausts the openness walk's node budget
-// (`ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET = 256`, `raise.rs:3543`) — it does
-// not merely assert the undecidable-TypeParam path. Construction: fold a chain
-// of transparent `Alias` nodes around a CLOSED `Object` source. Each `Alias`
-// hop is a DISTINCT interned `SemanticNodeId` (hash-consing keys on
-// `(payload, scope)`, and each alias wraps a distinct target), so the per-node
-// memo `(node, position)` never collides; every hop calls
-// `node_openness_uncached`, which decrements `self.budget` by 1
-// (`raise.rs:4221`) and then recurses into the alias target
-// (`SemanticNodeData::Alias(target) => self.node_is_open(ctx, *target)`,
-// `raise.rs:4514`).
+// (`ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET`) — it does not merely assert the
+// undecidable-TypeParam path. Construction: fold a chain of transparent
+// `Alias` nodes around a CLOSED `Object` source. Each `Alias` hop is a
+// DISTINCT interned `SemanticNodeId` (hash-consing keys on `(payload,
+// scope)`, and each alias wraps a distinct target), so the per-node memo
+// `(node, position)` never collides; every hop decrements the walk's budget
+// by 1 and then visits the alias target on the walk's worklist.
 //
-// PROOF the `budget==0` arm is hit: the walk starts at the top alias with
-// budget 256 and decrements once per hop. After 256 hops the budget is 0; the
-// 257th `node_openness_uncached` call returns at the `if self.budget == 0` arm
-// (`raise.rs:4211`) BEFORE reaching the closed `Object` at the bottom. With
-// ALIAS_DEPTH = 320 > 256 the walk provably reaches `budget==0` while still
-// inside the alias chain, and the `KeyDomain` question's
-// `undecidable_is_open()` returns OPEN there.
+// PROOF the `budget==0` arm is hit: the walk starts at the top alias with the
+// full budget and decrements once per hop. With ALIAS_DEPTH strictly greater
+// than the budget the walk provably reaches `budget==0` while still inside
+// the alias chain, and the `KeyDomain` question's `undecidable_is_open()`
+// returns OPEN there.
 //
 // DISCRIMINATION: a SHALLOW alias chain (depth 4, well under budget) over the
 // SAME closed `Object` classifies CLOSED and enumerates `{a}` — so the deep
@@ -722,9 +730,9 @@ fn key_domain_undecidable_source_answers_open() {
 // answered CLOSED, the deep-chain assertions (a)+(b) below would BOTH FAIL.
 #[test]
 fn key_domain_budget_exhaustion_carrier_stops() {
-    // Depth strictly greater than the 256 node budget so the walk provably
+    // Depth strictly greater than the node budget so the walk provably
     // reaches `budget==0` before the closed bottom.
-    const ALIAS_DEPTH: usize = 320;
+    const ALIAS_DEPTH: usize = super::raise::ENUMERATION_DOMAIN_OPENNESS_NODE_BUDGET as usize + 64;
 
     let handle = std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
@@ -732,6 +740,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
             let host = host();
             upsert_ts(&host, "/d.ts", "export type D = { a: string };\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/d.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -743,7 +752,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                 ProjectionReductionContext::structural_transit(),
             );
 
-            // CONTROL: a SHALLOW alias chain (depth 4 ≪ 256) over the closed
+            // CONTROL: a SHALLOW alias chain (depth 4 ≪ the budget) over the closed
             // bottom enumerates `{a}` — the walk reaches the closed object well
             // within budget and classifies CLOSED.
             let mut shallow_chain = closed_bottom;
@@ -761,7 +770,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                  CLOSED and enumerate {{a}} — the budget is intact, so the bottom is reached"
             );
 
-            // DEEP chain: 320 distinct alias hops > 256 budget. The key-domain
+            // DEEP chain: more distinct alias hops than the budget. The key-domain
             // walk hits `budget==0` partway down and the KeyDomain question
             // answers OPEN.
             let mut deep_chain = closed_bottom;
@@ -781,7 +790,7 @@ fn key_domain_budget_exhaustion_carrier_stops() {
                     deep_chain,
                     &deep_mapper,
                 ),
-                "a {ALIAS_DEPTH}-deep alias chain (> the 256 node budget) over a CLOSED bottom \
+                "a {ALIAS_DEPTH}-deep alias chain (> the node budget) over a CLOSED bottom \
                  must classify the KEY domain OPEN via the `budget==0` arm — the shallow control \
                  over the identical bottom is CLOSED, so the verdict is attributable to budget \
                  exhaustion, not an open bottom"
@@ -812,6 +821,7 @@ fn literal_union_bare_ref_keyspace_enumerates() {
     let host = host();
     upsert_ts(&host, "/keys.ts", "export type Keys = 'a' | 'b';\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/keys.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
 
@@ -881,13 +891,17 @@ fn nullary_function(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         return_type,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(
             return_type,
         ),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -937,6 +951,7 @@ fn value_producing_builtin_source_over_open_generic_carrier_stops_no_leak() {
         "export type Wrapped<T> = ReturnType<() => { fixed: string } & T>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let wrap_scope = file_scope(&dispatch, "/wrap.ts");
     let t_param = outer_type_param(&dispatch, "T");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
@@ -1008,6 +1023,7 @@ fn value_producing_builtin_source_over_open_generic_carrier_stops_no_leak() {
 fn closed_builtin_source_still_enumerates_under_role_split() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
     let number_ty = primitive(&dispatch, PrimitiveKind::Number);
 
@@ -1073,6 +1089,7 @@ fn policy_model_refactor_is_behavior_preserving() {
     let host = host();
     upsert_ts(&host, "/bp.ts", "export type S = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/bp.ts");
     let string_ty = primitive(&dispatch, PrimitiveKind::String);
     let t_param = outer_type_param(&dispatch, "T");
@@ -1146,6 +1163,7 @@ fn bare_ref_decl_conditional_recursion_terminates() {
                 "export type Rec<T> = T extends Rec<T> ? { a: string } : { b: string };\n",
             );
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/rec_cond.ts");
             let string_ty = primitive(&dispatch, PrimitiveKind::String);
             let t_param = outer_type_param(&dispatch, "T");

@@ -22,6 +22,7 @@
 //!   this file).
 
 use std::sync::Arc;
+use verter_type_engine::semantic_query_memo::test_support::synthetic_operand_graph;
 
 use verter_session::{HostConfig, VerterHost};
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -49,13 +50,23 @@ fn hash16(byte: u8) -> [u8; 16] {
 fn count_for_b_after_publishing_a(a: &SemanticQueryKey, b: &SemanticQueryKey) -> usize {
     let host = host();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let node = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     graph.publish_with_carrier_dispatch_and_generation_for_tests(
         a.clone(),
         QueryResult::Value(node),
         ReadSetSignature::empty(),
         Arc::from(Vec::<Arc<str>>::new().into_boxed_slice()),
-        Arc::from(Vec::new().into_boxed_slice()),
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
         100,
     );
     graph.slot_candidate_count_for_tests(b)
@@ -85,7 +96,7 @@ fn assert_distinct_identity(a: &SemanticQueryKey, b: &SemanticQueryKey) {
 
 fn point(canonical: &str, offset: u32) -> ProgramPointId {
     ProgramPointId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         offset,
     }
 }
@@ -356,7 +367,7 @@ fn resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit() {
     let flow_empty = wrap(base_key());
     let flow_non_empty = wrap({
         let mut k = base_key();
-        k.flow = FlowNarrowingKey::new(node_set(7));
+        k.flow = FlowNarrowingKey::new(synthetic_operand_graph(), node_set(7));
         k
     });
     assert_distinct_identity(&flow_empty, &flow_non_empty);
@@ -370,8 +381,10 @@ fn resolve_call_same_expr_different_flow_or_substitution_does_not_warm_hit() {
     let subst_empty = wrap(base_key());
     let subst_non_empty = wrap({
         let mut k = base_key();
-        k.context.substitution =
-            CanonicalTypeSubstitution::new(vec![(SemanticNodeId(1), SemanticNodeId(2))]);
+        k.context.substitution = CanonicalTypeSubstitution::new(
+            synthetic_operand_graph(),
+            vec![(SemanticNodeId(1), SemanticNodeId(2))],
+        );
         k
     });
     assert_distinct_identity(&subst_empty, &subst_non_empty);
@@ -413,7 +426,21 @@ fn resolve_call_key_distinct_from_flow_narrowing_at_same_point() {
 #[test]
 fn resolve_call_non_callable_is_miss_and_never_admits() {
     let host = host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
+    // The keys name fixture ordinals: this graph holds a live node at
+    // each, so every ordinal a key names is one it owns.
+    let _scope = graph.enter_node_root_scope();
+    let _fixture_ordinals: Vec<_> = (0..128u32)
+        .map(|n| {
+            graph.intern_node(SemanticNodeData::Literal(
+                verter_type_engine::semantic_query::LiteralValue::Number(f64::from(n)),
+            ))
+        })
+        .collect();
     let key = wrap(base_key());
 
     let result =
@@ -477,7 +504,7 @@ fn resolve_call_value_domain_is_resolve_call() {
 #[test]
 fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
     let decl = TypeParamDecl {
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         param: SemanticNodeId(41),
         constraint: Some(SemanticNodeId(42)),
         default: Some(SemanticNodeId(43)),
@@ -500,7 +527,7 @@ fn type_param_decl_carries_exact_param_node_and_per_parameter_const() {
     // list carries its own value, and the two decls stay distinct.
     let non_const = TypeParamDecl {
         is_const: false,
-        ..decl.clone()
+        ..decl.copy_for_tests()
     };
     assert!(!non_const.is_const);
     assert_ne!(decl, non_const);

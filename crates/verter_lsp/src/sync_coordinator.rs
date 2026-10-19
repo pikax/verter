@@ -121,6 +121,9 @@ pub struct SyncCoordinatorHandle {
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct CoordinatorReceipts {
+    /// Pause dispatch between complete sync passes to isolate foreground work
+    /// counters from independently re-armed background revalidation.
+    pub(crate) dispatch_barrier: Arc<tokio::sync::Mutex<()>>,
     /// One notify after each coordinator select-arm, so paused-time tests
     /// wait for an exact loop tick instead of a yield-count flush.
     pub(crate) loop_tick: Arc<tokio::sync::Notify>,
@@ -184,6 +187,13 @@ struct PendingSignal {
 }
 
 impl SyncCoordinatorHandle {
+    #[cfg(test)]
+    pub(crate) async fn pause_dispatch_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.receipts.dispatch_barrier)
+            .lock_owned()
+            .await
+    }
+
     /// Signal that a file has changed and needs a debounced sync.
     ///
     /// `received_at` is when the change REACHED the server — the caller's own
@@ -1167,6 +1177,9 @@ async fn coordinator_loop(
                     None => std::future::pending::<()>().await,
                 }
             } => {
+                #[cfg(test)]
+                let _dispatch = receipts.dispatch_barrier.lock().await;
+
                 // Find files that have been quiet for >= debounce_ms. A file
                 // whose change is still in flight is NOT quiet however old its
                 // last receipt is: without this gate, receipt-time stamping
@@ -1227,14 +1240,16 @@ async fn coordinator_loop(
                 // runs inline above the arming's debounce window) is done.
                 let mut settled_edits: Vec<String> = Vec::new();
 
-                for (canonical_id, signal) in ready {
+                for (canonical_id, mut signal) in ready {
                     pending_files.remove(&canonical_id);
                     // Whatever this tick decides supersedes a held publication.
                     awaiting_dependencies.remove(&canonical_id);
-                    // The touch has done its job once its document is served; what
-                    // it said about the user's attention outlives the service.
-                    let touched = touch_tracker.lock().remove(&canonical_id);
-                    if let Some(attended) = signal.user_received_at.max(touched) {
+                    // Selection is not service: a busy lane or a held dependency
+                    // can requeue this signal. Carry its attention through that
+                    // retry, and consume the touch only at publication handoff.
+                    let touched = touch_tracker.lock().get(&canonical_id).copied();
+                    signal.user_received_at = signal.user_received_at.max(touched);
+                    if let Some(attended) = signal.user_received_at {
                         let latest = last_attention.entry(canonical_id.clone()).or_insert(attended);
                         *latest = (*latest).max(attended);
                     }
@@ -1360,7 +1375,14 @@ async fn coordinator_loop(
                     }
 
                     if publish_diagnostics {
-
+                        // A newer touch may have arrived while provider sync was
+                        // awaited. It belongs to the next service, not this one.
+                        if let Some(served_touch) = touched {
+                            let mut live_touches = touch_tracker.lock();
+                            if live_touches.get(&canonical_id) == Some(&served_touch) {
+                                live_touches.remove(&canonical_id);
+                            }
+                        }
                         if let Some(stale) = diagnostic_tasks.remove(&canonical_id) {
                             stale.abort();
                         }
@@ -1678,6 +1700,13 @@ async fn sync_file(
     let Some(project_sync) = deps.project_sync.as_ref() else {
         return SyncFileOutcome::Settled;
     };
+    // Kind None is provider-neutral even when an embedder or a test injects a
+    // provider object (feature queries still reach it). The debounced carrier
+    // delivery must not open or update that object's buffers; diagnostics are
+    // published by the caller after this returns.
+    if matches!(deps.type_provider_kind, crate::TypeProviderKind::None) {
+        return SyncFileOutcome::Settled;
+    }
     // ONE lane per open document, shared with the interactive repair and every
     // other background writer. Asked at the point of DELIVERY, so a transaction
     // that started while the document was closed and finds it open now serializes
@@ -1893,7 +1922,7 @@ async fn sync_file(
     // closed one. The receipt gates every commit. Ownership resolves from the SAME
     // published `vfs` for both engines.
     match crate::external_ts::reconcile_carrier_source(crate::external_ts::CarrierSyncRequest {
-        host: &deps.documents.host(),
+        host: deps.documents.host(),
         vfs: vfs.as_deref(),
         ownership_ready: snapshot.ownership_ready,
         resolver: &snapshot.resolver,
@@ -1917,7 +1946,7 @@ async fn sync_file(
         } => {
             // The plugin serves both store-resident companions: no buffer I/O.
             if deps.carrier_transaction_coordinator.admit_owned_fenced(
-                &deps.documents.host(),
+                deps.documents.host(),
                 &deps.provider_sync_states,
                 canonical_id,
                 committed_state,
@@ -2051,7 +2080,7 @@ async fn sync_file(
                                     crate::provider_surface_store::record_carrier_ide_surface_fenced(
                                     deps.documents.provider_surfaces(),
                                     Some(&deps.documents),
-                                    &deps.documents.host(),
+                                    deps.documents.host(),
                                     canonical_id,
                                     &ide_path,
                                     delivered,
@@ -2104,7 +2133,7 @@ async fn sync_file(
                 // the provider-surface store so a closed `{carrier}.ts` is never later
                 // vouched as current by a rename).
                 if deps.carrier_transaction_coordinator.admit_owned_fenced(
-                    &deps.documents.host(),
+                    deps.documents.host(),
                     &deps.provider_sync_states,
                     canonical_id,
                     committed_state,
@@ -2305,7 +2334,7 @@ async fn preserve_open_unresolved_carrier(
                     if !crate::provider_surface_store::record_carrier_ide_surface_fenced(
                         deps.documents.provider_surfaces(),
                         Some(&deps.documents),
-                        &deps.documents.host(),
+                        deps.documents.host(),
                         canonical_id,
                         &ide_path,
                         prepared,

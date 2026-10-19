@@ -49,10 +49,10 @@ fn hot_type_ref_is_send_sync_and_round_trips_node() {
 #[test]
 fn synthetic_binding_id_is_content_free_and_rehydrates() {
     let key = SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: From::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::Binding,
         slot_name: None,
-        binding_name: Arc::from("row"),
+        binding_name: From::from("row"),
         value_node: 99,
     };
     let id = SyntheticBindingId::from_carrier_key(&key);
@@ -89,6 +89,10 @@ fn materialize(host: &VerterHost, data: SemanticNodeData) -> TypeExpr {
 #[test]
 fn materialize_bare_ref_round_trips_to_bare_ref() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = materialize(
         &host,
         SemanticNodeData::new_bare_ref(
@@ -116,6 +120,10 @@ fn materialize_bare_ref_round_trips_type_args() {
     // dropping the carrier's `type_args` — a raise arm that ignored the field
     // would yield an empty arg list and FAIL this fixture (discriminating).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let node = graph.intern_node(SemanticNodeData::new_bare_ref(
@@ -154,21 +162,27 @@ fn materialize_typeof_round_trips_type_args() {
     // `type_args` must round-trip the instantiation args onto
     // `ValueRef.type_args` (and the root + path onto `ValueRef.path`).
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::new_typeof(
         ValueRootKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/m.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/m.ts"),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
             },
-            name: Arc::from("factory"),
+            name: verter_type_expr::OwnedStr::from("factory"),
         },
-        Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
     ));
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -199,11 +213,21 @@ fn materialize_typeof_round_trips_type_args() {
 #[test]
 fn materialize_import_type_round_trips() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let arg = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let node = graph.intern_node(SemanticNodeData::new_import_type(
         Arc::from("./module"),
-        Arc::from(vec![Arc::<str>::from("A"), Arc::<str>::from("B")].into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(
+            vec![
+                verter_type_expr::OwnedStr::from("A"),
+                verter_type_expr::OwnedStr::from("B"),
+            ]
+            .into_boxed_slice(),
+        ),
         Arc::from(vec![arg].into_boxed_slice()),
         true,
     ));
@@ -237,6 +261,10 @@ fn materialize_import_type_round_trips() {
 #[test]
 fn materialize_raw_fallback_round_trips_to_unknown() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let expr = materialize(
         &host,
         SemanticNodeData::RawFallback {
@@ -258,10 +286,14 @@ fn materialize_tuple_preserves_element_rest_flag() {
     // `rest` flag (and the operand) through the reverse boundary; it FAILS if
     // the arm drops `rest` to `false`.
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let value = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let node = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value,
@@ -301,15 +333,23 @@ fn materialize_tuple_preserves_element_rest_flag() {
 #[test]
 fn materialize_constructor_type_preserves_ctor_ness() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let ret = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Void));
     let signature = graph.intern_node(SemanticNodeData::Signature {
         kind: verter_type_engine::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::new().into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         return_type: ret,
         occurrence: None,
         return_carrier: verter_type_engine::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         signature_span: None,
         return_type_span: None,
         predicate: None,
@@ -337,6 +377,10 @@ fn materialize_constructor_type_preserves_ctor_ness() {
 #[test]
 fn materialize_synthetic_binding_round_trips_with_value_node() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     // The backing value is a node the arena holds: a carrier over a node it
     // could still allocate is a forward reference and refuses.
     let backing = host
@@ -344,10 +388,10 @@ fn materialize_synthetic_binding_round_trips_with_value_node() {
         .semantic_graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let id = SyntheticBindingId {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: verter_type_expr::OwnedStr::from("/Comp.vue"),
         surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("row"),
+        slot_name: Some(verter_type_expr::OwnedStr::from("default")),
+        binding_name: verter_type_expr::OwnedStr::from("row"),
     };
     let expr = materialize(
         &host,
@@ -376,13 +420,17 @@ fn materialize_synthetic_binding_round_trips_with_value_node() {
 #[test]
 fn materialize_recursive_ref_back_edge_round_trips() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     // `RecursiveRef` is demand-time-minted as `Opaque(QueryError::RecursiveRef)`
     // and the reverse boundary projects it to `TypeExpr::RecursiveRef`.
     let expr = materialize(
         &host,
         SemanticNodeData::Opaque(QueryError::RecursiveRef {
-            name: Arc::from("Tree"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("Tree"),
+            args: Default::default(),
         }),
     );
     match &expr {
@@ -402,6 +450,10 @@ fn materialize_recursive_ref_back_edge_round_trips() {
 #[test]
 fn hot_type_ref_harness_matches_plain_output_boundary() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
     let node = graph.intern_node(SemanticNodeData::new_bare_ref(
         Arc::from("Foo"),
@@ -480,7 +532,7 @@ fn typed_query_error_sentinels_round_trip_to_legacy_raw() {
         domain: BudgetDomain::ProjectionOperation,
         limit: 1,
         actual: 2,
-        context: "pls1-budget-sentinel".to_string(),
+        context: "pls1-budget-sentinel".into(),
     });
     assert!(
         semantic_query_error_raw(&budget).starts_with(BUDGET_EXCEEDED_SENTINEL_PREFIX),

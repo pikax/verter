@@ -89,6 +89,15 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+Unit-test hosts without explicit project authority use a tsconfig-less
+in-memory project context. Do not fabricate a tsconfig path for that context:
+configured program discovery treats its membership as authored roots and can
+eagerly consume the cold artifact flights a demand or provenance test measures.
+Tests of authored membership, import/reference closure or compiler options use
+`new_standalone_with_tsconfig_projects` or explicitly configure the workspace
+through the shared tsconfig loader. Cold-flight, footprint and parse-count
+assertions remain applicable to tsconfig-less fixtures.
+
 ### Test File Organization
 
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file. Two patterns:
@@ -112,6 +121,38 @@ mod tests;
 
 Extracted file contains module contents directly — `use super::*;`, helpers, and `#[test]` fns. No wrapping `mod tests { }` block.
 
+### Repository guard scans
+
+Repository source guards reuse immutable source inventories or indexes within
+each test process. A necessary-condition filter may avoid parsing or scanning
+content only when every possible violation still reaches the original rule;
+retain each rule's path scope, integrity checks, and discriminating fixtures.
+Nextest isolates tests in separate processes, so a once-cell alone does not
+share a scan between nextest tests: the cold scan must also be efficient.
+
+The observation-feature guard resolves each production root and dev closure
+independently for host and wasm targets. Cargo remains the activation authority;
+metadata declarations only bound which seed activations can affect those
+closures. Cache default closures within that target/configuration and fixture
+metadata within the immutable fixture. Keep package identity (including source
+and version), weak edges, dependency defaults, and dev unification controls.
+The bounded repository guards are held to the standard nextest speed gate and
+are not on its known-slow list.
+
+Generated component-meta corpus chunks retain a 10-second slow warning and a
+20-second termination deadline in both nextest profiles, including the local
+profile while its unrelated known-slow list remains. Apply policy to the whole
+chunk namespace so regenerated chunks cannot inherit a longer base watchdog.
+The compiled session policy guard probes nextest's override precedence and
+profile inheritance, with an unrelated base-policy control. The corpus
+probe uses manifest-only Cargo metadata (`--no-deps --locked --offline`) for
+workspace package selectors and an empty temporary `CARGO_HOME` for metadata
+and nextest children, so a compiled archive consumer needs no registry cache.
+The corpus layout and generator-parity guards preserve complete fixture coverage,
+authored overrides and fresh host state per logical row. Set `VERTER_CORPUS_AUDIT_TIMING=1`
+when running the chunk inventory to collect pool and row timings; report these
+as evidence without asserting machine-dependent elapsed times.
+
 ### TDD Workflow
 
 Behavioral code changes use TDD. Documentation, generated projections, formatting, and mechanical metadata changes use their owning freshness/validation evidence unless they also change executable behavior.
@@ -130,6 +171,29 @@ A comment may supplement that durable explanation with a GitHub issue only when 
 
 ### Test Economy
 
+The recursive mapped-index regressions run on every ordinary debug run as
+three separately discoverable tests over one generator and one set of
+assertions: `recursive_mapped_index_publishes_dotted_paths_across_three_modules`
+(20 entities across three modules, under the default request fuse),
+`recursive_mapped_index_publishes_dotted_paths_across_five_modules` (100
+entities across five modules, under an explicit 50,000-operation allowance)
+and `recursive_mapped_index_publishes_dotted_paths_in_small_cyclic_layouts`
+(six entities across three modules and ten across five). Each asserts the
+exact dotted-path set and the instantiation bound through the public host
+resolver. No environment variable selects a population, and no layout moves
+out of the normal lane; the large-key mapped-value benchmark keeps its
+separate 1,000/3,000/10,000-key populations.
+
+The Svelte projection profile gates run one solution build per pinned
+TypeScript engine. Every profile and corruption/publication twin remains a
+separate project with its original checking options, globals, consumer and
+declaration directory. Batch diagnostics must be attributed by project, and
+unassigned errors and missing per-project build receipts fail the gate. One
+dirty project must never make another appear dirty or mask a clean consumer.
+Engine pins and fixture populations remain authoritative. Launcher counts are
+work evidence; elapsed times are
+samples rather than portable performance thresholds.
+
 Tests are evidence, not a quota. At preflight, map each changed contract to the smallest sufficient proof before proposing new tests:
 
 - Prefer an existing test, then extending or table-driving one existing test, before creating a new test or file.
@@ -140,7 +204,34 @@ Tests are evidence, not a quota. At preflight, map each changed contract to the 
 - Incremental, cancellation, stale-publication, counter, allocation, soak, and performance evidence applies only when the change touches the corresponding authority or hot path. Otherwise record it as not applicable with a terse boundary-based rationale.
 - New features and bug fixes still require adequate regression evidence. Refactors must keep applicable existing coverage green; they do not earn new tests merely by changing structure.
 
+### Whole-module growth probes
+
+Read export-table suffixes through one `HostResolverContext` and its request
+view, as production does. The test-only `VerterHost` route adapter captures a
+fresh view per call, so using it for every suffix repeats dependency validation
+and snapshot setup. Include those suffix reads in proof-work accounting; a
+counter sampled only after the root build cannot detect that quadratic replay.
+Keep every suffix's binding/proof assertions and the final literal-value probe.
+
 ### LSP request barriers
+
+Reuse one server for read-only fixture matrices. Batch independent edit cases
+with distinct canonical paths through one workspace per provider so their real
+quiet windows overlap; settle every case's diagnostic receipt before measuring
+foreground work. The coordinator's `block_in_place` path requires a multithreaded
+runtime, which cannot use Tokio's paused clock. After proving the edit publications
+finished, its test-only dispatch barrier can hold subsequent background revalidation
+while foreground counters are sampled; already-dispatched diagnostics must finish
+before sampling. Snapshot provider drains have a test-only execution fence on
+the document registry: hold its write guard after taking the import-publication
+lanes to observe running drains finish and exclude successor passes throughout
+foreground sampling. Aborting the fixture's outbound writer does not stop those
+producers. For queued-waiter cancellation, poll the acquire future to
+`Pending`, assert participant registration, then drop the future; a zero-duration
+timeout still pays a timer turn. Concurrency regressions
+should force the relevant orders and observe lock ownership at the decision
+boundary rather than rely on repeated probabilistic races. Fixture drain tasks
+must abort on assertion failure as well as success.
 
 LSP mock foreign-target checks settle after both `ProviderDispatch` and
 `ProviderDecode` barrier waits. Capture the held target bytes before the
@@ -159,8 +250,8 @@ evaluate type-level assertions, and the package builds exclude spec files, so
 type-only contract fixtures compile nowhere unless a dedicated TypeScript
 project is run explicitly. `packages/component-meta/test/*.test-d.ts` is bound
 through `tsconfig.contract-tests.json` to
-`pnpm --filter @verter/component-meta run test:types`, which CI's *JS Build &
-Test* lane runs after `build:ts` (the fixtures assert the built `dist`
+`pnpm --filter @verter/component-meta run test:types`, which CI's _JS Build &
+Test_ lane runs after `build:ts` (the fixtures assert the built `dist`
 declarations as well as the source ones). A new `*.test-d.ts` under that
 package's `test/` is picked up by pattern; a type contract placed anywhere else
 needs its own binding.
@@ -224,8 +315,65 @@ jobs below that, always capped by available CPUs. This keeps the documented
 measured 12-job peak was 11.60 GiB and is too close to call portable there.
 Explicit positive overrides remain exact. Windows uses full nextest capacity;
 the provider-free core has no provider-specific `max-threads = 1` groups.
+Core tests and the BF2 inventory keep their normal nextest concurrency; no test
+group serialises slow rows (serialised, the three reversed-union rows alone
+outran the 30-minute core step).
 Real-provider tests run through dedicated serial libtest jobs, while compile-fail
 fixtures run through standalone Cargo binaries rather than nextest test targets.
+The local live-provider timeout override uses the structural CI ownership
+selectors for LSP and type-runtime tests. The LSP
+`mock_completion_inventory_and_effective_nextest_policy` test reads compiled
+libtest discovery and checks Core selection and serial groups with nextest
+under both profiles. The native probes reuse the running test binary through
+nextest's build-metadata inputs and one Cargo workspace metadata query; they
+never compile a synthetic workspace. One Core-filtered group listing per
+profile proves both selection and serialization. It projects every
+timeout-bearing override onto a test group in a temporary configuration so nextest's own precedence and inheritance
+expose any exemption matching a mock, including package-wide overrides. Original
+timeout values remain present for native validation, and compiled live-provider
+controls must retain their exemption. Mock child-contract completion variants
+keep Core ownership,
+their serial test group, and each profile's ordinary watchdog even when their
+names include `tsgo` or `tsserver`.
+
+The semantic gateway privacy rails remain in the core nextest inventory. They
+type-check their foreign-crate fixtures directly with rustc, preserving the
+diagnostic snapshots and checking a sanctioned gateway positive control first.
+`scripts/compile-fixture-artifacts.mjs archive` builds/lists the test binaries,
+stages compiler metadata and proc-macro libraries reported by that Cargo
+build plus the sources backing imported diagnostic excerpts, then archives the
+warm binaries and metadata. Both CI and the canonical
+gate use this builder. Metadata comes from Cargo artifact messages, never a
+glob over a potentially stale target directory.
+Cargo-reported `.rmeta` files are preferred when available; otherwise the
+reported `.rlib` supplies its embedded metadata. An unreported `.rmeta` sibling
+is never assumed or selected. Proc-macro libraries and transitive dependencies
+remain in the bundle, and a missing selected artifact is a setup failure.
+The manifest binds the bundle
+to the test binary and external metadata by SHA-256 content, and uses relative
+paths so extraction relocates it. Local consumers also compare available build
+metadata, catching metadata-only rebuilds; validation runs once per test process.
+The rail discovers every `tests/ui/fixtures/*.rs` file at runtime and requires
+its diagnostic snapshot rather than maintaining a filename inventory.
+
+For a focused local run, prepare metadata with the same package/target/feature
+options before running nextest:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs prepare -p verter_semantic --test main
+cargo nextest run -p verter_semantic --test main type_info_privacy_rails
+```
+
+To build a reusable archive directly:
+
+```bash
+node scripts/compile-fixture-artifacts.mjs archive --workspace --archive-file artifacts/rust-nextest-archive.tar.zst
+```
+
+The archive includes `compile-fixtures` under the target directory, independently
+of the Cargo profile and target triple. Missing or
+mismatched metadata fails the privacy test instead of rebuilding dependencies
+inside it. Other compile contracts continue to use their standalone lane.
 
 On Windows, `--prepare` still warm-lists every archived suite and accepts only
 an exact status 0. Proc-macro suites are real test suites, not filterable
@@ -286,6 +434,41 @@ The tsgo job installs the pinned local engine before running its serial lane wit
 `VERTER_REQUIRE_TSGO=1`. Provider runner failures are hard failures; there is no
 skip or freshness tolerance in the core gate.
 
+The serial provider runner emits advisory `PROVIDER TEST TIME` lines and saves
+`provider-timings/{tsserver,tsgo}.json` below the Cargo target directory. CI
+uploads that directory. Stable libtest rejects its advertised `--report-time`
+flag, so durations use the flushed test-name and terminal-status stdout edges;
+pipe batching can round short tests down to zero. Timing persistence never
+changes the test verdict, selectors, watchdogs, or serial lifecycle.
+
+Real-provider fixtures stage authored sources per process and materialize their
+pinned dependency closure once per staged root, only after every supplier
+succeeds. Failed initialization remains retryable. Content corpora whose claim
+does not concern root membership retain one configured-project member and
+atomically replace its bytes between cases. Each case still runs the real
+watched-file/open/close lifecycle and its complete semantic oracle; a file lease
+outlives document cleanup, including cleanup after an assertion panic.
+
+The flow corpus separates provider semantics from compiler growth. Live
+`LIVE_MATRIX_SIZES` retain all valid/broken shapes, exact diagnostics, mapped
+spans and every callback at sizes 16–128, including nested loop frames. Native
+`MATRIX_SIZES` remain 128–1024:
+`chains_and_nested_scopes_grow_linearly` counts generated bytes, transform
+operations, references, conditions, links and callbacks;
+`flat_and_nested_matrices_grow_linearly` and
+`nested_component_tags_grow_linearly` read production `FlowWork` at operation
+sites and require every callback and condition plus ≤2.2× growth per doubling.
+`restored_path_replay_fails_the_growth_oracle` retains the quadratic negative
+control. Run these native proofs alongside the live leg when changing its size
+range; a smaller provider corpus alone is not growth evidence.
+
+Provider-free LSP flow growth and semantic-suite coverage tests live in
+`crates/verter_lsp/src/flow_fixture_tests.rs`, alongside the partition builder
+shared by the live semantic tests. Keep `real_provider_tests::` reserved for
+paired live-provider variants: archive partition verification rejects tests
+there without an explicit tsserver or tsgo selector. Native guards remain on
+the provider-free core lane.
+
 **Conformance-harness preflight — real work, before Cargo.** Before the archive
 build, the core gate runs only the harness-owned
 `packages/framework-conformance-harness/bin/gate-smoke.mjs typescript`. The separate required BF2 lane
@@ -339,7 +522,7 @@ are structurally eliminated repo-wide.)
   an item that vanishes under another profile. Under this profile that is a COMPILE error in the gate rather
   than a shipped-build surprise.
 - **Selection integrity.** The guard fails closed (exit 127) if `cargo nextest run -p
-  verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
+verter_shipped_cfg_contract` selects a different number of tests than an INDEPENDENT scan of that crate's
   own source finds `#[test]` attributes — not merely "selected zero tests", which a regression that compiles
   out every behavioral test while leaving the two profile-sanity canaries intact would still satisfy.
 - **The class is discriminated, not merely asserted.** The behavioural test
@@ -379,6 +562,17 @@ Use a reversible mutation recipe only when preflight identifies a plausible crit
 Canonical in-tree examples of fully self-contained recipes (in-memory plant → expected verdict → trivial restore + GREEN control): the Vue structural-conformance discriminator `crates/verter_vue_conformance/tests/cases/conformance_discriminator.rs` (cosmetic-PASS vs behavioral-FAIL mutations on committed goldens, each plant proven applied) and the Svelte oracle discriminator in `crates/verter_compiler/tests/cases/svelte_client_emit_topology.rs`.
 
 ### Timeout Is Never a Pass
+
+When shortening a process-harness integrity test's injected deadline, arm it
+after an explicit fixture readiness check; startup scheduling must not prevent
+creation of the grandchild whose teardown the test proves. That readiness wait
+ends when the child has already exited, and the post-kill liveness check keeps
+a reap backstop long enough for a loaded host to drop the pid. Keep ordinary
+invocation deadlines unchanged. A transport read failure must kill the live driver before waiting
+for its exit, retain the harness-failure classification, and stop later probes.
+The broken-stream and wedged-child-tree tests stay on each profile's ordinary
+slow-timeout (no new per-test entry) and retain their classification and
+descendant liveness assertions.
 
 A timeout or incomplete run is never green and never presumed environmental. Rerun the timed-out test in isolation with an adequate timeout and no co-resident heavy work: if it clears → environmental (retain both artifacts); if it repeats → collect hang diagnostics; if classification stays ambiguous → HARD FAIL. The advertised slow-timeout must match the configured one — `.config/nextest.toml` advertises ~60s but configures 5s×3, killing valid tests around 15s on an 8GB host; fix that mismatch rather than tolerating false timeouts. Genuinely long tests get explicit per-test overrides.
 

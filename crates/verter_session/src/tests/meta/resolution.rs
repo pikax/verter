@@ -344,11 +344,10 @@ defineProps<Deep['ui']['header']>()
 /// single merged `final_completeness` signal (the former
 /// `resolved.synthesis_should_suppress` gate term was demoted).
 ///
-/// `synthesis_should_suppress` is the bool PROJECTION of `resolved.completeness`
-/// (`synthesis_should_suppress: self.completeness.is_partial()`,
-/// `component_meta_result_db.rs`), so it is SUBSUMED by the `resolved.completeness`
-/// operand of `final_completeness = resolved.completeness.merge(extract_scope_completeness)`.
-/// This test pins that the subsumption is load-bearing and NOT silently dropped.
+/// Resolve-phase suppression is represented in `resolved.completeness`, so
+/// the merged admission signal still refuses it. Extraction-only partiality
+/// can leave suppression false; this fixture specifically pins the resolve
+/// operand of `final_completeness`.
 ///
 /// The fixture isolates a RESOLVE-ONLY partial from the extract scope: the
 /// `synthesis_steps` recursion budget (separate from `projection_op_budget`)
@@ -1872,7 +1871,7 @@ defineProps<{
         .expect("dependency update should keep component meta available");
 
     assert!(
-        !Arc::ptr_eq(&first_cache, &second_cache),
+        !verter_retention::heap_size::OwnedValue::ptr_eq(&first_cache, &second_cache),
         "dependency change must invalidate the owner's resolved-meta cache",
     );
     assert!(

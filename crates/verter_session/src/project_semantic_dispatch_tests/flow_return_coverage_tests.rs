@@ -834,6 +834,7 @@ fn with_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -848,13 +849,13 @@ fn key_full(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             owner,
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             part,
             overload_ordinal,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -881,7 +882,7 @@ fn key_of(
 
 fn member_part(ordinal: u32) -> FunctionPartIdentity {
     FunctionPartIdentity::Member {
-        member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+        member_path: verter_type_expr::OwnedSlice::from(vec![ordinal].into_boxed_slice()),
     }
 }
 
@@ -1479,7 +1480,9 @@ fn non_empty_contextual_input_point_fails_closed() {
             ),
         );
         key.input = verter_type_engine::semantic_query::FlowInputContext {
-            contextual_parameters: Arc::from(vec![contextual].into_boxed_slice()),
+            contextual_parameters: verter_type_expr::OwnedSlice::from(
+                vec![contextual].into_boxed_slice(),
+            ),
         };
         assert_eq!(eval_key_on(&host, dispatch, key.clone()), Outcome::Miss);
         assert_eq!(
@@ -5835,8 +5838,7 @@ fn reduced_annotation_in(
             .graph()
             .node_data(node)
             .unwrap_or_else(|| panic!("{name}: the reduced node exists"))
-            .as_ref()
-            .clone();
+            .copy_for_tests();
         let raised = host
             .project_node_to_type_expr_for_test(node)
             .unwrap_or_else(|| panic!("{name}: the reduced node raises"));
@@ -6326,6 +6328,10 @@ fn a_growing_thenable_hits_the_checker_limit_in_the_lib_conditional_only() {
         CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
     };
     let host = host_with(&[(RECURSIVE_THENABLE, RECURSIVE_THENABLE_SRC)]);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let (data, raised) = {
         let _tail = super::connected_demand::TailBudgetForTests::install(200);
         reduced_annotation(&host, "libGrowThen")
@@ -6415,6 +6421,10 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
     let short = chain(8);
     let long = chain(200);
     let host = host_with(&[(SHORT, short.as_str()), (LONG, long.as_str())]);
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for file in [SHORT, LONG] {
         for name in ["awaitChain", "returnChain"] {
             assert_clean_warm(&host, file, name, promise_of(number()));
@@ -6432,16 +6442,34 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
             async_generator_of(never(), number()),
         );
     }
-    // The budget's measure: a cold chain charges 16 units per element plus
-    // 7, every tail step and the return site among them, so under a budget
-    // of 807 units a 50-element chain answers and a 51-element one does not.
+    // Measure the live cold-work boundary rather than pinning a query-layout
+    // count. A fresh 50-element demand must finish at that exact allowance,
+    // while one more element must refuse; every tail step remains charged.
+    let cold_work = |steps| {
+        let file = format!("/ws/cov/thenable_chain_{steps}.ts");
+        let source = chain(steps);
+        let host = host_with(&[(file.as_str(), source.as_str())]);
+        with_dispatch(&host, |dispatch| {
+            let key = key_of(dispatch, &file, "awaitChain");
+            let outcome = eval_key_on(&host, dispatch, key);
+            assert!(
+                matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number()))
+            );
+            dispatch.connected_demand().work_used_for_tests()
+        })
+    };
+    let allowance = cold_work(50);
+    assert!(
+        cold_work(51) > allowance,
+        "the additional tail step costs work"
+    );
     for (steps, answers) in [(50, true), (51, false)] {
         let file = format!("/ws/cov/thenable_chain_{steps}.ts");
         let source = chain(steps);
         let host = host_with(&[(file.as_str(), source.as_str())]);
         let outcome = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(
-                16 * 50 + 7,
+                allowance,
                 super::connected_demand::MAX_CONNECTED_QUERY_DEPTH,
             );
             let key = key_of(dispatch, &file, "awaitChain");
@@ -6450,10 +6478,14 @@ fn a_long_thenable_chain_awaits_to_its_value_within_the_work_budget() {
         if answers {
             assert!(
                 matches!(&outcome, Outcome::Value { ty, degradation: None, .. } if *ty == promise_of(number())),
-                "{steps} elements answer within 807 units, got {outcome:?}"
+                "{steps} elements answer within the measured allowance, got {outcome:?}"
             );
         } else {
-            assert_eq!(outcome, Outcome::Miss, "{steps} elements exceed 807 units");
+            assert_eq!(
+                outcome,
+                Outcome::Miss,
+                "{steps} elements exceed the measured allowance"
+            );
         }
     }
     // The same 200-step chain under a work budget it cannot finish within:
@@ -6518,18 +6550,27 @@ fn thenable_chain(steps: &str) -> String {
         } else {
             "number".to_owned()
         };
-        let callback = match kind {
-            't' => format!("onfulfilled: (v: {next}) => void"),
-            'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
-            'u' => format!("onfulfilled: (v: {next} | string) => void"),
-            _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
-        };
-        source.push_str(&format!(
-            "interface C{index} {{ then({callback}): void }}\n"
-        ));
+        source.push_str(&thenable_link(&format!("C{index}"), kind, &next));
     }
-    source.push_str("export function probe() { const x: Awaited<C0> = null as any; return x; }\n");
+    source.push_str(&awaited_probe("probe", "C0"));
     source
+}
+
+/// One thenable `name` whose `then` continues to `next` in the
+/// [`thenable_chain`] step shape `kind`.
+fn thenable_link(name: &str, kind: char, next: &str) -> String {
+    let callback = match kind {
+        't' => format!("onfulfilled: (v: {next}) => void"),
+        'n' => format!("onfulfilled?: ((v: {next}) => void) | null"),
+        'u' => format!("onfulfilled: (v: {next} | string) => void"),
+        _ => format!("onfulfilled?: ((v: {next} | string) => void) | null"),
+    };
+    format!("interface {name} {{ then({callback}): void }}\n")
+}
+
+/// An exported function `name` whose annotation reads `Awaited<operand>`.
+fn awaited_probe(name: &str, operand: &str) -> String {
+    format!("export function {name}() {{ const x: Awaited<{operand}> = null as any; return x; }}\n")
 }
 
 /// The lib conditional's reduction of `probe` in `source`.
@@ -6552,7 +6593,7 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
 /// value, and stop with the checker's TS2589 at Verter's tail budget —
 /// counted as the checker counts, a run entered through a callback union
 /// starting with one step counted. A far lower budget than production's
-/// stands in for it on the same path, so the chains stay short.
+/// stands in for it on the same path, so the budget's runs stay short.
 ///
 /// tsc 7.0.2 (`Awaited<C0>` through the tuple wrapper, `--strict`) over
 /// chains of distinct thenables: 999 tail steps are `number` and 1000 are
@@ -6560,32 +6601,49 @@ fn is_ts2589(data: &SemanticNodeData) -> bool {
 /// answer is `number`. A run entered through a callback union starts with
 /// one step counted: one nested step then 998 tail steps are `number`, then
 /// 999 are `any` under TS2589, where Verter's full answer is `number`.
+///
+/// Every run is a suffix of ONE 1000-step chain `C0 → … → C999 → number`
+/// in one file: entering it at `Ck` is a run of `1000 - k` tail steps, and
+/// a callback-union thenable `Nk` continuing to `Ck` is one nested step
+/// then those tail steps. Each `Awaited` reference is its own evaluation
+/// that counts every step of its run; the chain's declarations are read,
+/// not re-authored, by the runs after the first.
 #[test]
 fn lib_awaited_tail_runs_answer_past_the_checker_limit_and_stop_at_verters_budget() {
+    const CHAIN: &str = "/ws/cov/thenable_chain.ts";
+    const LINKS: usize = 1000;
     const BUDGET: usize = 120;
-    let tails = |count: usize| "t".repeat(count);
+    let link = |tail_steps: usize| format!("C{}", LINKS - tail_steps);
+    let mut source = thenable_chain(&"t".repeat(LINKS));
+    let mut probe_run = |name: &str, nested_entry: bool, tail_steps: usize| {
+        let operand = if nested_entry {
+            let entry = format!("N{}", LINKS - tail_steps);
+            source.push_str(&thenable_link(&entry, 'n', &link(tail_steps)));
+            entry
+        } else {
+            link(tail_steps)
+        };
+        source.push_str(&awaited_probe(name, &operand));
+    };
+    probe_run("nested_then_999_tails", true, LINKS - 1);
+    probe_run("tails_below_budget", false, BUDGET - 1);
+    probe_run("tails_at_budget", false, BUDGET);
+    probe_run("nested_tails_below_budget", true, BUDGET - 2);
+    probe_run("nested_tails_at_budget", true, BUDGET - 1);
+    let host = host_with(&[(CHAIN, source.as_str())]);
+    let probe = |name: &str| reduced_annotation_in(&host, CHAIN, name).0;
     let number = || SemanticNodeData::Primitive(PrimitiveKind::Number);
-    assert_eq!(lib_awaited_probe(&thenable_chain(&tails(1000))), number());
+    assert_eq!(probe("probe"), number(), "1000 tail steps");
     assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(999)))),
-        number()
+        probe("nested_then_999_tails"),
+        number(),
+        "one nested step then 999 tail steps"
     );
     let _budget = super::connected_demand::TailBudgetForTests::install(BUDGET as u32);
-    assert_eq!(
-        lib_awaited_probe(&thenable_chain(&tails(BUDGET - 1))),
-        number()
-    );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&tails(
-        BUDGET
-    )))));
-    assert_eq!(
-        lib_awaited_probe(&thenable_chain(&format!("n{}", tails(BUDGET - 2)))),
-        number()
-    );
-    assert!(is_ts2589(&lib_awaited_probe(&thenable_chain(&format!(
-        "n{}",
-        tails(BUDGET - 1)
-    )))));
+    assert_eq!(probe("tails_below_budget"), number());
+    assert!(is_ts2589(&probe("tails_at_budget")));
+    assert_eq!(probe("nested_tails_below_budget"), number());
+    assert!(is_ts2589(&probe("nested_tails_at_budget")));
 }
 
 /// The lib conditional's NESTED steps stop where the checker's instantiation
@@ -7079,7 +7137,9 @@ fn a_member_read_through_a_self_reference_walks_on_through_the_declaration() {
         };
         let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
             base: surface,
-            path: Arc::from(vec![member("next"), member("next"), member("v")].into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                vec![member("next"), member("next"), member("v")].into_boxed_slice(),
+            ),
             context: verter_type_engine::semantic_query::ProjectionReductionContext::published(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),

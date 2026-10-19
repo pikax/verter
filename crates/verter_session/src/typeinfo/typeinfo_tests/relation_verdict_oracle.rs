@@ -171,6 +171,7 @@ fn relate_family_execute_is_the_live_relation_authority() {
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("{name} must resolve"))
+            .id()
     };
     let source = resolve("__RelateSource");
     let target = resolve("__RelateTarget");
@@ -229,6 +230,7 @@ fn relate_family_execute_warm_replays_decided_payload() {
             .ok()
             .flatten()
             .unwrap_or_else(|| panic!("{name} must resolve"))
+            .id()
     };
     let source = resolve("__WarmRelateSource");
     let target = resolve("__WarmRelateTarget");
@@ -251,7 +253,7 @@ fn relate_family_execute_warm_replays_decided_payload() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_some(),
         "fixture: the admitted entry warm-serves through the payload read",
     );
@@ -300,7 +302,7 @@ fn relate_family_execute_warm_replays_decided_payload() {
     assert!(
         graph
             .get_relation_payload(host.as_ref(), &key)
-            .map(|served| served.value)
+            .map(|served| served.value().clone())
             .is_none(),
         "a project-generation bump must miss the warm relation read",
     );

@@ -20,7 +20,7 @@ fn ctx_host() -> VerterHost {
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
@@ -32,7 +32,7 @@ fn scope(canonical: &str) -> ScopeId {
 fn key(name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/wait-cycle.ts"),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
@@ -86,12 +86,12 @@ fn run_real_singleflight_cycle(task_count: usize) {
                                 panic!("every nested key already has a cold owner")
                             },
                         );
-                        saw_return_only.fetch_or(nested.cache_suppress, Ordering::SeqCst);
+                        saw_return_only.fetch_or(nested.cache_suppress(), Ordering::SeqCst);
                         let mut output: verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<
                             _,
-                        > = (nested.value, nested.dep_signature).into();
-                        output.cache_suppress = nested.cache_suppress;
-                        output.set_partial(nested.result_is_partial);
+                        > = (nested.value().clone(), nested.dep_signature().clone()).into();
+                        output.cache_suppress = nested.cache_suppress();
+                        output.merge_completeness(nested.fact_status().completeness());
                         output
                     },
                 )
@@ -102,12 +102,12 @@ fn run_real_singleflight_cycle(task_count: usize) {
     for (index, handle) in handles.into_iter().enumerate() {
         let read = join_within(handle, &format!("cycle task {index}"));
         assert!(
-            matches!(read.value, QueryResult::Recursive(_)),
+            matches!(read.value().clone(), QueryResult::Recursive(_)),
             "cycle task must receive the established recursion carrier, got {:?}",
-            read.value
+            read.value().clone()
         );
         assert!(
-            read.cache_suppress && read.result_is_partial,
+            read.cache_suppress() && read.result_is_partial(),
             "cycle task must remain ReturnOnly + partial"
         );
     }

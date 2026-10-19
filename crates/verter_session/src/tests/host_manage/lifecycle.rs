@@ -304,12 +304,12 @@ fn explicit_overlay_materialization_refusal_fails_closed_at_request_boundaries()
 
     let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("Ready"),
+            symbol: verter_type_expr::OwnedStr::from("Ready"),
             space: LocatorSymbolSpace::Type,
         },
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
     });
     let port = crate::query_host_port::SessionQueryHostPort::new(&ctx);
     let answer = port.lower_authored_body(&locator);
@@ -859,20 +859,21 @@ function fireChurn() {{
     }
 }
 
-/// A close that lands while a computation is in flight must not change any
-/// node that computation can read: the release is queued, every node of the
-/// closed document keeps its payload (the SAME payload on every read), and
-/// the release is applied the moment the last computation ends.
+/// A close never revokes a node something still holds: a reader holding the
+/// closed document's nodes keeps reading the SAME payloads through the
+/// close, and the nodes are destroyed the moment that reader lets go — no
+/// queue, no watermark, no later reclaim step.
 ///
-/// Discriminating: with the release applied inline at `evict` (the previous
-/// design), the closed document's nodes read as the released placeholder
-/// while the guard is still held — the exact switch that made a carrier
-/// normaliser, midway through two reads of one node, panic on a worker
-/// thread and stall the scheduler in the WSP6 churn lane.
+/// Discriminating: a close that destroyed the closed content's nodes (a
+/// canonical sweep) turns the held nodes into the released placeholder while
+/// the reader still holds them — the switch that made a carrier normaliser,
+/// midway through two reads of one node, panic on a worker thread; a close
+/// that only queued the release leaves the nodes live after the reader
+/// drops.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
-    let (_ws, host) = activity_gate_fixture();
+fn a_close_never_revokes_a_held_node_and_drains_when_the_holder_drops() {
+    let (_ws, host) = close_lifecycle_fixture();
     let graph = host.project_type_store().semantic_graph();
     let ids = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
     assert!(!ids.is_empty(), "fixture: icon.ts has live nodes");
@@ -881,75 +882,288 @@ fn a_close_during_a_computation_defers_the_node_release_until_it_ends() {
         .map(|id| graph.node_data(*id).expect("live node"))
         .collect();
 
-    let computation = host.semantic_activity();
+    let reader = graph
+        .root_nodes(ids.iter().copied())
+        .expect("live operands");
     host.evict("/src/types/icon.ts");
 
-    assert_eq!(
-        host.project_type_store().deferred_release_count(),
-        1,
-        "the close is queued while a computation is in flight"
-    );
     for (id, payload) in ids.iter().zip(&before) {
-        assert!(
-            graph.node_is_live(*id),
-            "node {id:?} stays live until the computation ends"
-        );
+        assert!(graph.node_is_live(*id), "node {id:?} stays live while held");
         let now = graph.node_data(*id).expect("still readable");
         assert!(
-            Arc::ptr_eq(&now, payload),
+            verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, payload),
             "node {id:?} reads the same payload it read before the close"
         );
     }
 
-    drop(computation);
+    drop(reader);
 
-    assert_eq!(
-        host.project_type_store().deferred_release_count(),
-        0,
-        "the last computation to end applies the queued release"
-    );
     assert!(
         live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty(),
-        "every node of the closed document is released once nothing is in flight"
+        "every node of the closed document is destroyed once nothing holds it"
+    );
+    assert_eq!(
+        host.retention_snapshot().closes.closes_applied,
+        1,
+        "the close was applied once, synchronously"
     );
 }
 
-/// With no computation in flight (a batch host, a test), the close applies
-/// the release inline, exactly as before.
+/// A close running on another thread while a real request is mid-flight
+/// never revokes what that request computed: every read the request makes
+/// of its resolved declaration during and after the close reads the same
+/// payload, the request keeps executing against the closed document without
+/// a panic, and the declaration is destroyed once the request ends.
+///
+/// Discriminating against a close that destroys the closed content while a
+/// request is still running (a canonical sweep or an epoch-root drop): the
+/// request's next read of the node it resolved finds the placeholder.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_close_with_nothing_in_flight_releases_inline() {
-    let (_ws, host) = activity_gate_fixture();
-    assert!(!live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
-    host.evict("/src/types/icon.ts");
-    assert_eq!(host.project_type_store().deferred_release_count(), 0);
-    assert!(live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+fn a_concurrent_close_never_revokes_an_in_flight_requests_nodes() {
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+    const ICON: &str = "/src/types/icon.ts";
+    let (_ws, host) = close_lifecycle_fixture();
+    let graph = host.project_type_store().semantic_graph();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+        scope: ScopeId {
+            canonical_id: verter_type_expr::OwnedStr::from(ICON),
+            owner,
+            local_scope: None,
+            binder_scope_id: BinderScopeId::file_scope(owner),
+        },
+        name: verter_type_expr::OwnedStr::from("IconProps"),
+    });
+    let request = ProjectSemanticDispatch::new(&host);
+    // The request composes the resolved label across operations, so it
+    // holds an explicit builder owner; the dispatcher's lane owns nothing.
+    let builder = request.enter_construction_scope();
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        request.execute_type_node(key.clone())
+    else {
+        panic!("IconProps resolves");
+    };
+    let payload = graph.node_data(node).expect("the request's node is live");
+
+    let reads = std::thread::scope(|scope| {
+        let closer = scope.spawn(|| host.evict(ICON));
+        let mut reads = 0usize;
+        loop {
+            let finished = closer.is_finished();
+            let now = graph.node_data(node).expect("still readable");
+            assert!(
+                verter_type_engine::semantic_query_memo::NodeData::ptr_eq(&now, &payload),
+                "read {reads} during the close switched payloads"
+            );
+            reads += 1;
+            if finished {
+                break;
+            }
+        }
+        closer.join().expect("the close completes");
+        reads
+    });
+    assert!(reads > 0);
+    assert_eq!(host.retention_snapshot().closes.closes_applied, 1);
+    assert!(
+        graph.node_is_live(node),
+        "the running request still owns it"
+    );
+
+    // The request keeps executing against the closed document.
+    let _ = request.execute_type_node(key);
+    assert!(verter_type_engine::semantic_query_memo::NodeData::ptr_eq(
+        &graph.node_data(node).expect("still readable"),
+        &payload
+    ));
+    drop((builder, request));
+    assert!(
+        !graph.node_is_live(node),
+        "the closed declaration is destroyed once the request ends"
+    );
 }
 
-/// The queued release takes only what the CLOSED content interned: nodes the
-/// reload interned for the same document while the release was waiting
-/// (ids at or past the watermark taken at the close) stay live, and the
-/// consumer still resolves through them.
+/// A close of a document while a real request is parked inside the cold
+/// build of one of its declarations — after that build read another of the
+/// document's declarations through the cache, before it settles and
+/// publishes — never hands out a destroyed node: the parked request returns
+/// a readable answer (or a typed refusal), and whatever its publication left
+/// in the cache is rooted, so a later request reads a live, readable answer
+/// after the parked request is gone.
 ///
-/// Discriminating: a release that re-scanned by canonical at apply time (no
-/// watermark) would also take the reloaded document's fresh nodes, leaving
-/// the live consumer pointing at released ids.
+/// The close runs on the test thread at an observed rendezvous inside the
+/// producer, never on scheduling luck. Discriminating against a close that
+/// revokes a mid-build operand, or a settlement that publishes a node the
+/// close already orphaned: the parked request's answer, or the warm answer
+/// served from its publication, reads the destroyed placeholder.
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
-fn a_deferred_release_keeps_nodes_interned_after_the_close() {
+fn a_close_during_a_parked_cold_build_never_publishes_or_returns_a_destroyed_node() {
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::semantic_query::{
+        BinderScopeId, QueryResult, ResolveDeclKey, ScopeId, SemanticQueryApi, SemanticQueryKey,
+        SemanticQueryOutput,
+    };
+    const ICON: &str = "/src/types/icon.ts";
+    let ws = Arc::new(CountingWorkspace::new());
+    ws.inject_file(
+        ICON,
+        "export interface IconProps { name: string; size: number }\n\
+         export interface IconBox { props: IconProps; label: string }\n",
+    );
+    let host = VerterHost::new(
+        HostConfig {
+            analysis_level: AnalysisLevel::Full,
+            ..HostConfig::default()
+        },
+        ws.clone(),
+    );
+    assert!(host.ensure_loaded(ICON));
+    let graph = host.project_type_store().semantic_graph();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let decl = |name: &str| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from(ICON),
+                owner,
+                local_scope: None,
+                binder_scope_id: BinderScopeId::file_scope(owner),
+            },
+            name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let parked = decl("IconBox");
+    let operand = decl("IconProps");
+
+    struct HookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for HookGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let park_once = std::sync::atomic::AtomicBool::new(true);
+    let held_key = parked.clone();
+    graph.set_produce_hook_for_tests(Some(Arc::new(move |key, nested| {
+        if key == &held_key && park_once.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            // The build reads a same-document declaration through the
+            // cache before it parks: a non-permanent operand it holds.
+            nested(operand.clone());
+            let _ = ready_tx.send(());
+            let _ = release_rx
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(10));
+        }
+    })));
+    let _hook = HookGuard(graph);
+
+    let returned_live = std::thread::scope(|threads| {
+        let producer = threads.spawn(|| {
+            let request = ProjectSemanticDispatch::new(&host);
+            let answer = request.execute_type_node(parked.clone());
+            // Read while the request still owns what it returned.
+            let readable = match &answer {
+                QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                    let live = graph.node_is_live(*node);
+                    assert!(
+                        live,
+                        "the parked request's answer is live while it holds it"
+                    );
+                    graph.node_data(*node).expect("a live node reads");
+                    true
+                }
+                // A typed refusal is an allowed outcome; a panic is not.
+                QueryResult::Error(_) | QueryResult::Recursive(_) => false,
+            };
+            drop(request);
+            readable
+        });
+        let ready = ready_rx.recv_timeout(std::time::Duration::from_secs(10));
+        if ready.is_err() {
+            let _ = release_tx.send(());
+            let _ = producer.join();
+            panic!("the request must park inside its cold build: {ready:?}");
+        }
+        host.evict(ICON);
+        assert_eq!(
+            host.retention_snapshot().closes.closes_applied,
+            1,
+            "the close ran while the build was parked"
+        );
+        let _ = release_tx.send(());
+        producer.join().expect("the parked request completes")
+    });
+    assert!(
+        returned_live,
+        "the parked request answers its declaration after the close"
+    );
+
+    // Whatever the parked build published is rooted: a later request reads
+    // a live, readable answer.
+    let request = ProjectSemanticDispatch::new(&host);
+    let QueryResult::Value(SemanticQueryOutput { value: node, .. }) =
+        request.execute_type_node(parked)
+    else {
+        panic!("IconBox resolves after the close");
+    };
+    assert!(
+        graph.node_is_live(node),
+        "the later answer is live, never the destroyed placeholder"
+    );
+    graph.node_data(node).expect("a live node reads");
+}
+
+/// With nothing holding the closed content, the close destroys it inline.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_with_no_holder_destroys_inline() {
+    let (_ws, host) = close_lifecycle_fixture();
+    assert!(!live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+    host.evict("/src/types/icon.ts");
+    assert!(live_node_ids_scoped_to(&host, "/src/types/icon.ts").is_empty());
+    assert_eq!(
+        host.retention_snapshot().pending_destroyed_nodes,
+        0,
+        "the close drained the sidecar log of what it destroyed"
+    );
+}
+
+/// A close evicts only what the CLOSED content cached: nodes the reload
+/// interned for the same document while a reader still held the closed
+/// content stay live once that reader lets go, and the consumer still
+/// resolves through them.
+///
+/// Discriminating: a release keyed by canonical at the reader's drop (a
+/// deferred sweep with no watermark) also takes the reloaded document's
+/// fresh nodes, leaving the live consumer pointing at destroyed ids.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_close_keeps_nodes_interned_after_it() {
     const CONSUMER_V2: &str = r#"<script setup lang="ts">
 import type { IconProps } from './types/icon'
 // edited after the dependency was closed
 defineProps<IconProps>()
 </script>
 <template><div /></template>"#;
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
+    let graph = host.project_type_store().semantic_graph();
     let closed = live_node_ids_scoped_to(&host, "/src/types/icon.ts");
     assert!(!closed.is_empty());
 
-    let computation = host.semantic_activity();
+    let reader = graph
+        .root_nodes(closed.iter().copied())
+        .expect("live operands");
     host.evict("/src/types/icon.ts");
-    // The reload and a consumer edit re-lower icon.ts while the release waits.
+    // The reload and a consumer edit re-lower icon.ts while the reader holds
+    // the closed content.
     assert!(host.ensure_loaded("/src/types/icon.ts"));
     upsert_vue(&host, "/src/Consumer.vue", CONSUMER_V2);
     host.set_import_dependencies(
@@ -966,22 +1180,21 @@ defineProps<IconProps>()
         .collect();
     assert!(
         !reloaded.is_empty(),
-        "fixture: the reload interned fresh icon.ts nodes while the release waited"
+        "fixture: the reload interned fresh icon.ts nodes while the reader held the closed ones"
     );
 
-    drop(computation);
+    drop(reader);
 
-    let graph = host.project_type_store().semantic_graph();
     for id in &closed {
         assert!(
             !graph.node_is_live(*id),
-            "closed-content node {id:?} is released"
+            "closed-content node {id:?} is destroyed with its last holder"
         );
     }
     for id in &reloaded {
         assert!(
             graph.node_is_live(*id),
-            "node {id:?} interned after the close survives the deferred release"
+            "node {id:?} interned after the close stays live"
         );
     }
 }
@@ -996,7 +1209,7 @@ defineProps<IconProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn edits_keep_the_content_keyed_caches_flat_and_a_close_releases_them() {
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     let edited = |edit: usize| {
         format!(
             "<script setup lang=\"ts\">
@@ -1073,7 +1286,7 @@ defineProps<IconProps>()
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     assert!(
         host.resolver_runtime()
             .component_meta_view_bookkeeping_len()
@@ -1089,7 +1302,7 @@ fn a_whole_host_reset_drops_the_component_meta_view_bookkeeping() {
         "close() forgets the view bookkeeping"
     );
 
-    let (_ws, host) = activity_gate_fixture();
+    let (_ws, host) = close_lifecycle_fixture();
     assert!(
         host.resolver_runtime()
             .component_meta_view_bookkeeping_len()

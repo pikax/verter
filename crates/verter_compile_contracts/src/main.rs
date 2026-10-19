@@ -12,6 +12,7 @@ const PASS_FIXTURES: &[&str] = &[
     "no_storedspan_good_carrier.rs",
     "recursive_self_good_recursive_carrier.rs",
     "script_fact_partial_exact_syntax.rs",
+    "public_owned_carriers_borrow_and_own.rs",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -152,6 +153,11 @@ fn main() {
                     | Some("output_authority_not_duplicable.rs")
                     | Some("output_authority_not_recoverable_from_query_access.rs")
                     | Some("output_authority_not_reminted_from_live_stores.rs")
+                    // A positive soak-support consumer: it needs the session
+                    // crate's `soak-support` forwarding, which this
+                    // feature-less runner never enables. It runs in the
+                    // dedicated session-soak compile-contract lane.
+                    | Some("flight_rendezvous_opt_in_through_soak_support.rs")
             )
         });
     }

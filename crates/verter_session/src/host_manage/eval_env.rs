@@ -546,23 +546,48 @@ impl VerterHost {
         FileAnalysisSnapshot {
             imports: script_analysis.imports,
             bindings: script_analysis.bindings,
-            module_references: Arc::new(script_analysis.module_references),
-            macros: Arc::new(script_analysis.macros),
-            macro_type_deps: Arc::new(script_analysis.macro_type_deps),
+            module_references: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.module_references,
+            ),
+            macros: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.macros,
+            ),
+            macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.macro_type_deps,
+            ),
             script_flags: script_analysis.flags.bits(),
-            styles: Arc::new(parse.style_analyses),
+            styles: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.style_analyses,
+            ),
             template: None,
-            vue_api_calls: Arc::new(script_analysis.vue_api_calls),
-            dom_query_calls: Arc::new(script_analysis.dom_query_calls),
-            css_var_manipulations: Arc::new(script_analysis.css_var_manipulations),
-            script_binding_occurrences: Arc::new(script_analysis.script_binding_occurrences),
+            vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.vue_api_calls,
+            ),
+            dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.dom_query_calls,
+            ),
+            css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.css_var_manipulations,
+            ),
+            script_binding_occurrences:
+                verter_session_query::analysis::file_analysis::SharedList::new(
+                    script_analysis.script_binding_occurrences,
+                ),
             macro_usage: script_analysis.macro_usage,
             style_vbind_roots: script_analysis.style_vbind_roots,
-            markup_class_tokens: Arc::new(parse.markup_class_tokens),
-            export_signatures: Arc::new(parse.export_signatures),
+            markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.markup_class_tokens,
+            ),
+            export_signatures: verter_session_query::analysis::file_analysis::SharedList::new(
+                parse.export_signatures,
+            ),
             options_api: script_analysis.options_api,
-            store_usages: Arc::new(script_analysis.store_usages),
-            store_definitions: Arc::new(script_analysis.store_definitions),
+            store_usages: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.store_usages,
+            ),
+            store_definitions: verter_session_query::analysis::file_analysis::SharedList::new(
+                script_analysis.store_definitions,
+            ),
             is_typescript: script_analysis.is_typescript,
             anchor_revision,
         }
@@ -1337,12 +1362,12 @@ impl VerterHost {
                                     AuthoredBodyLocator::DeclBody(
                                         verter_type_expr::locators::TypeBodySlot {
                                             anchor: verter_type_expr::locators::AuthoredAnchor {
-                                                canonical_id,
+                                                canonical_id: canonical_id.into(),
                                                 owner,
-                                                symbol,
+                                                symbol: symbol.into(),
                                                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                                             },
-                                            path: std::sync::Arc::from(
+                                            path: verter_type_expr::OwnedSlice::from(
                                                 Vec::new().into_boxed_slice(),
                                             ),
                                         },
@@ -1585,10 +1610,7 @@ impl VerterHost {
                                             let root_is_reference_carrier =
                                                 engine.dispatch.macro_type_arg_hot_ref(canonical, ctx.macro_index)
                                                 .and_then(|product| {
-                                                    verter_type_engine::project_semantic_dispatch::node_data_for(
-                                                        engine.dispatch.graph(),
-                                                        product.hot.node(),
-                                                    )
+                                                    engine.dispatch.graph().read_in_scope(product.hot.node())
                                                 })
                                                 .is_some_and(|data| {
                                                     data.bare_ref_head().is_some()
@@ -1733,15 +1755,15 @@ impl VerterHost {
                                             // `ProjectPath` demand needs (member
                                             // names only — a closed demand input,
                                             // not a node).
-                                            let dispatch_path: std::sync::Arc<[SemanticPathSegment]> =
-                                                std::sync::Arc::from(
+                                            let dispatch_path: verter_type_expr::OwnedSlice<SemanticPathSegment> =
+                                                verter_type_expr::OwnedSlice::from(
                                                     ctx.output_path
                                                         .iter()
                                                         .map(|seg| match seg {
                                                             MacroPathSegment::Member(name) => {
                                                                 SemanticPathSegment::Member(
                                                                     verter_type_expr::PropertyKey::String(
-                                                                        std::sync::Arc::clone(name),
+                                                                        verter_type_expr::OwnedStr::from(std::sync::Arc::clone(name)),
                                                                     ),
                                                                 )
                                                             }

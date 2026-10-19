@@ -108,19 +108,34 @@ impl SnapshotData for HostSourceData {
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // Fields are part of the get_analysis surface.
 pub struct AnalysisArcs {
-    pub(crate) module_references:
-        Arc<Vec<verter_session_query::analysis::types::AnalyzedModuleReference>>,
-    pub(crate) macros: Arc<Vec<verter_session_query::analysis::types::AnalyzedMacro>>,
-    pub(crate) macro_type_deps: Arc<Vec<verter_session_query::analysis::types::MacroTypeDep>>,
-    pub(crate) vue_api_calls: Arc<Vec<verter_session_query::analysis::types::VueApiCallSite>>,
-    pub(crate) dom_query_calls:
-        Arc<Vec<verter_session_query::analysis::script_snapshot::DomQueryCallSite>>,
-    pub(crate) css_var_manipulations:
-        Arc<Vec<verter_session_query::analysis::types::CssVarManipulation>>,
+    pub(crate) module_references: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::AnalyzedModuleReference,
+    >,
+    pub(crate) macros: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::AnalyzedMacro,
+    >,
+    pub(crate) macro_type_deps: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::MacroTypeDep,
+    >,
+    pub(crate) vue_api_calls: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::VueApiCallSite,
+    >,
+    pub(crate) dom_query_calls: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::script_snapshot::DomQueryCallSite,
+    >,
+    pub(crate) css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::CssVarManipulation,
+    >,
     pub(crate) script_binding_occurrences:
-        Arc<Vec<verter_session_query::analysis::types::ScriptBindingOccurrence>>,
-    pub(crate) store_usages: Arc<Vec<verter_session_query::analysis::types::StoreUsage>>,
-    pub(crate) store_definitions: Arc<Vec<verter_session_query::analysis::types::StoreDefinition>>,
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ScriptBindingOccurrence,
+        >,
+    pub(crate) store_usages: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::StoreUsage,
+    >,
+    pub(crate) store_definitions: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::types::StoreDefinition,
+    >,
 }
 
 impl AnalysisArcs {
@@ -129,15 +144,34 @@ impl AnalysisArcs {
         sa: &verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot,
     ) -> Self {
         Self {
-            module_references: Arc::new(sa.module_references.clone()),
-            macros: Arc::new(sa.macros.clone()),
-            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
-            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
-            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
-            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
-            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
-            store_usages: Arc::new(sa.store_usages.clone()),
-            store_definitions: Arc::new(sa.store_definitions.clone()),
+            module_references: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.module_references.clone(),
+            ),
+            macros: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.macros.clone(),
+            ),
+            macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.macro_type_deps.clone(),
+            ),
+            vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.vue_api_calls.clone(),
+            ),
+            dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.dom_query_calls.clone(),
+            ),
+            css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.css_var_manipulations.clone(),
+            ),
+            script_binding_occurrences:
+                verter_session_query::analysis::file_analysis::SharedList::new(
+                    sa.script_binding_occurrences.clone(),
+                ),
+            store_usages: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.store_usages.clone(),
+            ),
+            store_definitions: verter_session_query::analysis::file_analysis::SharedList::new(
+                sa.store_definitions.clone(),
+            ),
         }
     }
 }
@@ -152,9 +186,12 @@ pub struct HostAnalysisData {
     pub(crate) script_analysis:
         Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>,
     pub(crate) export_signatures: Vec<verter_session_query::analysis::types::ExportSignature>,
-    pub(crate) style_analyses: Arc<Vec<verter_session_query::analysis::style::StyleBlockAnalysis>>,
-    pub(crate) markup_class_tokens:
-        Arc<Vec<verter_session_query::analysis::template::MarkupClassToken>>,
+    pub(crate) style_analyses: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::style::StyleBlockAnalysis,
+    >,
+    pub(crate) markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList<
+        verter_session_query::analysis::template::MarkupClassToken,
+    >,
     pub(crate) arcs: AnalysisArcs,
 }
 
@@ -646,8 +683,13 @@ impl StageExecutor for HostStageExecutor {
                     // a deep copy of ~18 owned vectors.
                     script_analysis: Arc::clone(&host_data.parse.script_analysis),
                     export_signatures: host_data.parse.export_signatures.clone(),
-                    style_analyses: Arc::new(host_data.parse.style_analyses.clone()),
-                    markup_class_tokens: Arc::new(host_data.parse.markup_class_tokens.clone()),
+                    style_analyses: verter_session_query::analysis::file_analysis::SharedList::new(
+                        host_data.parse.style_analyses.clone(),
+                    ),
+                    markup_class_tokens:
+                        verter_session_query::analysis::file_analysis::SharedList::new(
+                            host_data.parse.markup_class_tokens.clone(),
+                        ),
                     arcs,
                 }),
             })

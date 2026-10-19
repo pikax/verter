@@ -18,20 +18,20 @@ use verter_session_query::facts::registry::{InternedName, SymbolSpace};
 use verter_session_query::facts::store_view::StoreView;
 use verter_session_query::facts::{FactKey, FactLane};
 
-fn read_session_src(rel: &str) -> String {
+fn read_engine_src(rel: &str) -> String {
     let p = path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
+        .join("../verter_type_engine/src")
         .join(rel);
     fs::read_to_string(&p).unwrap_or_else(|err| panic!("read {}: {err}", p.display()))
 }
 
 #[test]
 fn component_meta_signature_carries_member() {
-    let src = read_session_src("component_meta_result_db.rs");
+    let src = read_engine_src("component_meta_result_db.rs");
     let needle = "pub struct ComponentMetaResultEntry<P> {";
-    let idx = src
-        .find(needle)
-        .unwrap_or_else(|| panic!("expected `{needle}` in component_meta_result_db.rs"));
+    let idx = src.find(needle).unwrap_or_else(|| {
+        panic!("expected `{needle}` in verter_type_engine component_meta_result_db.rs")
+    });
     let end = src[idx..]
         .find("\n}")
         .expect("ComponentMetaResultEntry struct close");

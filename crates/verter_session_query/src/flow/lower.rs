@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use crate::retention::owned::OwnedStr;
 use rustc_hash::FxHashMap;
 
 use super::flow_graph::{FlowEdgeKind, FlowNodeId, FlowNodeKind, FunctionFlowGraph};
@@ -103,7 +104,7 @@ pub fn lower_slice_plan(
             for edge in graph.out_edges(hub) {
                 let (path, certainty) = match &edge.kind {
                     FlowEdgeKind::ValueDef => (
-                        Arc::from(Vec::new().into_boxed_slice()),
+                        FlowPath::default(),
                         crate::flow::skeleton::SkeletonWriteCertainty::Definite,
                     ),
                     FlowEdgeKind::PathWrite {
@@ -128,12 +129,12 @@ pub fn lower_slice_plan(
                 });
             }
             FlowSlot {
-                name: Arc::from(skeleton.name(record.name)),
+                name: From::from(skeleton.name(record.name)),
                 kind: record.kind,
                 binding: *binding,
                 span: record.span,
                 value_selected: *value_selected,
-                defs: Arc::from(defs.into_boxed_slice()),
+                defs: From::from(defs.into_boxed_slice()),
             }
         })
         .collect();
@@ -154,7 +155,7 @@ pub fn lower_slice_plan(
                                     Some(value) => lowered.push(FlowObjectEntry::Property {
                                         key: match key {
                                             SkeletonObjectKey::Static(name) => {
-                                                FlowObjectKey::Named(Arc::from(
+                                                FlowObjectKey::Named(From::from(
                                                     skeleton.name(*name),
                                                 ))
                                             }
@@ -176,7 +177,7 @@ pub fn lower_slice_plan(
                         }
                     }
                     FlowExprShape::ObjectLiteral {
-                        entries: Arc::from(lowered.into_boxed_slice()),
+                        entries: From::from(lowered.into_boxed_slice()),
                         elided_entries: elided,
                     }
                 }
@@ -190,13 +191,13 @@ pub fn lower_slice_plan(
                 SkeletonExprShape::BranchJoin { .. }
                 | SkeletonExprShape::ArrayLiteral { .. }
                 | SkeletonExprShape::Other => FlowExprShape::Opaque {
-                    reads: Arc::from(
+                    reads: From::from(
                         site.reads
                             .iter()
                             .map(|read| {
                                 let name = skeleton.name(read.name);
                                 FlowRead {
-                                    name: Arc::from(name),
+                                    name: From::from(name),
                                     slot: slot_of_name(name),
                                 }
                             })
@@ -225,7 +226,7 @@ pub fn lower_slice_plan(
                 let text = skeleton.name(name);
                 match slot_of_name(text) {
                     Some(slot) => FlowEffectTarget::Slot(slot),
-                    None => FlowEffectTarget::Named(Arc::from(text)),
+                    None => FlowEffectTarget::Named(From::from(text)),
                 }
             }
             SkeletonWriteTarget::Opaque => FlowEffectTarget::Opaque,
@@ -249,9 +250,9 @@ pub fn lower_slice_plan(
                 site: id,
                 callee: match &call.callee {
                     SkeletonCallee::Named(name) => {
-                        FlowCallee::Named(Arc::from(skeleton.name(*name)))
+                        FlowCallee::Named(From::from(skeleton.name(*name)))
                     }
-                    SkeletonCallee::Path(path) => FlowCallee::Path(Arc::from(
+                    SkeletonCallee::Path(path) => FlowCallee::Path(From::from(
                         path.iter()
                             .map(|segment| Arc::from(skeleton.name(*segment)))
                             .collect::<Vec<Arc<str>>>()
@@ -299,22 +300,22 @@ pub fn lower_slice_plan(
 
     FlowSliceIR {
         demanded_path: lower_demand_path(plan.demand_path(), skeleton),
-        slots: Arc::from(slots.into_boxed_slice()),
-        exprs: Arc::from(exprs.into_boxed_slice()),
-        effects: Arc::from(effects.into_boxed_slice()),
+        slots: From::from(slots.into_boxed_slice()),
+        exprs: From::from(exprs.into_boxed_slice()),
+        effects: From::from(effects.into_boxed_slice()),
         returns: ReturnAccumulator {
-            sites: Arc::from(returns.into_boxed_slice()),
+            sites: From::from(returns.into_boxed_slice()),
         },
-        expression_origins: Arc::from(expression_origins.into_boxed_slice()),
+        expression_origins: From::from(expression_origins.into_boxed_slice()),
     }
 }
 
 fn lower_path(path: &[SkeletonPathSegment], skeleton: &FunctionBodySkeleton) -> FlowPath {
-    Arc::from(
+    From::from(
         path.iter()
             .map(|segment| match segment {
                 SkeletonPathSegment::Static(name) => {
-                    FlowPathSegment::Named(Arc::from(skeleton.name(*name)))
+                    FlowPathSegment::Named(From::from(skeleton.name(*name)))
                 }
                 SkeletonPathSegment::Computed => FlowPathSegment::Computed,
             })
@@ -324,13 +325,13 @@ fn lower_path(path: &[SkeletonPathSegment], skeleton: &FunctionBodySkeleton) -> 
 }
 
 fn lower_demand_path(path: &[DemandSegment], skeleton: &FunctionBodySkeleton) -> FlowPath {
-    Arc::from(
+    From::from(
         path.iter()
             .map(|segment| match segment {
                 DemandSegment::Named(name) => {
-                    FlowPathSegment::Named(Arc::from(skeleton.name(*name)))
+                    FlowPathSegment::Named(From::from(skeleton.name(*name)))
                 }
-                DemandSegment::Foreign(text) => FlowPathSegment::Named(Arc::clone(text)),
+                DemandSegment::Foreign(text) => FlowPathSegment::Named(OwnedStr::from(text)),
             })
             .collect::<Vec<_>>()
             .into_boxed_slice(),

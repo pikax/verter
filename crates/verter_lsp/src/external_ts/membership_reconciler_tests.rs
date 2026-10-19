@@ -1990,7 +1990,12 @@ async fn source_churn_returns_gate_population_and_capacity_to_baseline() {
             let source = format!("/proj/src/wave{wave}/Churn{index}.vue");
             holders.push(SourceGates::join(&gates, &source).hold().await);
             let waiter = SourceGates::join(&gates, &source);
-            let _ = tokio::time::timeout(std::time::Duration::ZERO, waiter.hold()).await;
+            // Poll the acquire into the mutex queue before cancelling it. A
+            // zero-duration timeout adds a timer turn for every source.
+            let mut waiting = Box::pin(waiter.hold());
+            assert!(futures_util::poll!(&mut waiting).is_pending());
+            assert_eq!(gates.participants(&source), 2, "holder and queued waiter");
+            drop(waiting);
             assert_eq!(gates.participants(&source), 1, "the cancelled waiter left");
         }
         assert_eq!(gates.live_gates(), SOURCES);

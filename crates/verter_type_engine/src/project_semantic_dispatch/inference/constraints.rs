@@ -88,7 +88,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
                 constraint,
                 crate::semantic_query::ProjectionReductionContext::structural_transit(),
             )
-            .into_usable_node()?;
+            .into_complete_node()?;
         let graph = self.graph();
         let mut members: Vec<SemanticNodeId> = match graph.node_data(resolved).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
@@ -106,7 +106,12 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
                 _ => vec![member],
             })
             .collect();
-        let kind = |member: SemanticNodeId| graph.node_data(member).as_deref().cloned();
+        let kind = |member: SemanticNodeId| {
+            graph
+                .node_data(member)
+                .as_deref()
+                .map(crate::semantic_query::SemanticNodeData::clone)
+        };
         if members.iter().any(|member| {
             matches!(
                 kind(*member),

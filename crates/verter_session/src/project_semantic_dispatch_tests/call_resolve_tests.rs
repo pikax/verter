@@ -47,9 +47,9 @@ pub(super) fn occurrence(name: &str, ordinal: u32) -> SignatureNodeOccurrence {
     SignatureNodeOccurrence {
         function: FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from(CANONICAL),
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: verter_type_expr::OwnedStr::from(name),
                 space: LocatorSymbolSpace::Value,
             },
             function_part: FunctionPartIdentity::DeclarationBody,
@@ -93,9 +93,11 @@ fn signature_with_carrier(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            type_parameters.into_boxed_slice(),
+        ),
         occurrence: Some(occurrence(name, ordinal)),
         return_carrier,
         signature_span: None,
@@ -113,6 +115,7 @@ fn signature_with_carrier(
 fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let declared = signature(
@@ -177,6 +180,65 @@ fn relation_only_assumption_replays_but_own_return_assumption_refuses() {
         "stable root replay commits its fresh session at atomic publication"
     );
     drop(txn);
+
+    let callback = signature(
+        &dispatch,
+        "receiverCallback",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let contextual = signature(
+        &dispatch,
+        "contextualReceiver",
+        0,
+        SignatureKind::Call,
+        vec![
+            FunctionParam::synthetic(Some(Arc::from("this")), number, false, false),
+            FunctionParam::synthetic(None, callback, false, false),
+        ],
+        Vec::new(),
+        number,
+    );
+    let contextual_callee = callable(&dispatch, vec![contextual], Vec::new());
+    dispatch
+        .dispatch_txn
+        .borrow_mut()
+        .reentry_mut()
+        .push_relate(
+            relation_key.clone(),
+            InferenceOccurrence::ARGUMENT_COVARIANT,
+            0,
+        );
+    let result = dispatch.resolve_contextual_call_for_tests(call_key(
+        &dispatch,
+        contextual_callee,
+        CallKind::Call,
+        Some(number),
+        vec![CallArgKey::Eager {
+            first_pass: None,
+            ty: callback,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Literal,
+            context_sensitive: true,
+            const_view: None,
+        }],
+    ));
+    dispatch.dispatch_txn.borrow_mut().reentry_mut().pop();
+    abandon_provisional_call_members(&dispatch);
+    assert!(
+        matches!(
+            result,
+            super::call_resolve::ResolveCallStep::Degraded(
+                verter_type_engine::semantic_query::ResolveCallFailure::ContextSensitiveInference {
+                    contextual: Some(_)
+                }
+            )
+        ),
+        "a relation-only receiver assumption must reach callback typing, got {result:?}"
+    );
 
     let recursive_occurrence = occurrence("recursive", 0);
     let recursive_identity = recursive_occurrence.function.clone();
@@ -289,7 +351,7 @@ pub(super) fn call_key_at(
     } = dispatch.resolve_call_context_for(canonical);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             offset: 41,
         },
         callee,
@@ -369,6 +431,80 @@ fn selected_query(
     }
 }
 
+#[test]
+fn ordinary_nested_call_does_not_consume_a_suspended_contextual_candidate() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph();
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let callback = signature(
+        &dispatch,
+        "callback",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, number, false, false)],
+        Vec::new(),
+        number,
+    );
+    let callback_type = callable(&dispatch, vec![callback], Vec::new());
+    let outer = signature(
+        &dispatch,
+        "outer",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, callback_type, false, false)],
+        Vec::new(),
+        number,
+    );
+    let outer_type = callable(&dispatch, vec![outer], Vec::new());
+    let outer_key = call_key(
+        &dispatch,
+        outer_type,
+        CallKind::Call,
+        None,
+        vec![CallArgKey::Eager {
+            first_pass: None,
+            ty: callback_type,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Literal,
+            context_sensitive: true,
+            const_view: None,
+        }],
+    );
+    let inner = signature(
+        &dispatch,
+        "inner",
+        0,
+        SignatureKind::Call,
+        vec![FunctionParam::synthetic(None, string, false, false)],
+        Vec::new(),
+        string,
+    );
+    let inner_type = callable(&dispatch, vec![inner], Vec::new());
+    let mut inner_key = call_key(
+        &dispatch,
+        inner_type,
+        CallKind::Call,
+        None,
+        vec![eager(string)],
+    );
+    inner_key.point.offset += 1;
+    let result =
+        selected(dispatch.resolve_call_under_suspended_context_for_tests(outer_key, inner_key));
+    let ResolvedCallResult::Selected {
+        return_type,
+        recovery_diagnostic,
+        ..
+    } = result
+    else {
+        panic!("the nested call must select its own signature");
+    };
+    assert_eq!(return_type, string);
+    assert_eq!(recovery_diagnostic, None);
+}
+
 /// Declaration order is the ranking rule: the literal overload wins before
 /// the later primitive overload — for a pinned literal argument AND for a
 /// bare-literal one, because applicability relates the argument's actual
@@ -379,6 +515,7 @@ fn selected_query(
 fn first_fully_applicable_literal_overload_wins() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let literal_a = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("a".into()),
@@ -479,6 +616,7 @@ fn first_fully_applicable_literal_overload_wins() {
 fn bucket_arity_rest_and_spread_mapping_are_decisive() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -524,7 +662,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
     );
     let callee = callable(&dispatch, vec![exact, rest], vec![construct]);
     let tuple = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -601,6 +739,7 @@ fn bucket_arity_rest_and_spread_mapping_are_decisive() {
 fn authored_this_is_receiver_only() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -638,26 +777,27 @@ fn authored_this_is_receiver_only() {
 fn mixed_const_policy_is_applied_per_parameter() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let t = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("T"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let u = graph.intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("U"),
         param_index: 1,
         constraint: None,
         default: None,
-        display_name: Arc::from("U"),
+        display_name: verter_type_expr::OwnedStr::from("U"),
     });
     let string_a = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("a".into()),
     ));
     let tuple_arg = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string_a,
@@ -669,7 +809,7 @@ fn mixed_const_policy_is_applied_per_parameter() {
         readonly: false,
     });
     let ret = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
                     label: None,
@@ -699,14 +839,14 @@ fn mixed_const_policy_is_applied_per_parameter() {
         ],
         vec![
             TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: t,
                 constraint: None,
                 default: None,
                 is_const: true,
             },
             TypeParamDecl {
-                name: Arc::from("U"),
+                name: verter_type_expr::OwnedStr::from("U"),
                 param: u,
                 constraint: None,
                 default: None,
@@ -757,6 +897,7 @@ fn mixed_const_policy_is_applied_per_parameter() {
 fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -767,7 +908,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
         param_index: 0,
         constraint: Some(string),
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let bad = signature(
         &dispatch,
@@ -776,7 +917,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: Some(string),
             default: None,
@@ -849,6 +990,7 @@ fn constraint_rejection_rolls_back_and_commits_only_the_winner() {
 fn declared_return_uses_the_final_substitution() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -856,7 +998,7 @@ fn declared_return_uses_the_final_substitution() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let ret = graph.intern_node(SemanticNodeData::Array {
         element: t,
@@ -869,7 +1011,7 @@ fn declared_return_uses_the_final_substitution() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -913,6 +1055,7 @@ fn body_derived_return_uses_the_final_substitution() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -920,7 +1063,7 @@ fn body_derived_return_uses_the_final_substitution() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let identity = occurrence("body", 0).function;
     let sig = signature_with_carrier(
@@ -930,7 +1073,7 @@ fn body_derived_return_uses_the_final_substitution() {
         SignatureKind::Call,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -981,6 +1124,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
 
@@ -1055,6 +1199,7 @@ fn degraded_inline_flow_return_never_warms_the_enclosing_call() {
 fn call_resolution_budget_exceeded_admits_nothing() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     dispatch.connected_demand().set_limits_for_tests(256, 24);
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -1093,6 +1238,106 @@ fn call_resolution_budget_exceeded_admits_nothing() {
     );
 }
 
+#[test]
+fn contextual_receiver_budget_exhaustion_admits_nothing() {
+    use verter_type_engine::semantic_query::ResolveCallFailure;
+    let mut refused = false;
+    let mut suspended = false;
+    for allowance in [1, 2, 4, 8, 16, 32, 128, 1024] {
+        let host = host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
+        let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+        let graph = dispatch.graph();
+        let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let t = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("ReceiverT"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from("T"),
+        });
+        let receiver = graph.intern_node(SemanticNodeData::Tuple {
+            elements: (0..128)
+                .map(|_| TupleElement {
+                    label: None,
+                    value: number,
+                    optional: false,
+                    rest: false,
+                })
+                .collect(),
+            readonly: false,
+        });
+        let target = graph.intern_node(SemanticNodeData::Array {
+            element: t,
+            readonly: false,
+        });
+        let callback = signature(
+            &dispatch,
+            "callback",
+            0,
+            SignatureKind::Call,
+            vec![FunctionParam::synthetic(None, t, false, false)],
+            Vec::new(),
+            number,
+        );
+        let candidate = signature(
+            &dispatch,
+            "contextual",
+            0,
+            SignatureKind::Call,
+            vec![
+                FunctionParam::synthetic(Some(Arc::from("this")), target, false, false),
+                FunctionParam::synthetic(None, callback, false, false),
+            ],
+            vec![TypeParamDecl {
+                name: verter_type_expr::OwnedStr::from("T"),
+                param: t,
+                constraint: None,
+                default: None,
+                is_const: false,
+            }],
+            number,
+        );
+        let callee = callable(&dispatch, vec![candidate], Vec::new());
+        let key = call_key(
+            &dispatch,
+            callee,
+            CallKind::Call,
+            Some(receiver),
+            vec![CallArgKey::Eager {
+                first_pass: None,
+                ty: callback,
+                spread: false,
+                literal_mode: ArgumentLiteralMode::Literal,
+                context_sensitive: true,
+                const_view: None,
+            }],
+        );
+        dispatch
+            .connected_demand()
+            .set_limits_for_tests(allowance, 256);
+        let result = dispatch.resolve_contextual_call_for_tests(key.clone());
+        eprintln!("receiver work allowance {allowance}: {result:?}");
+        match result {
+            super::call_resolve::ResolveCallStep::Degraded(ResolveCallFailure::Budget) => {
+                refused = true;
+                assert!(dispatch.dispatch_txn.borrow().relation.sessions.iter()
+                    .all(|session| session.state == InferenceSessionState::Abandoned));
+                assert_eq!(graph.slot_candidate_count_for_tests(&SemanticQueryKey::ResolveCall(Box::new(key))), 0);
+            }
+            super::call_resolve::ResolveCallStep::Degraded(ResolveCallFailure::ContextSensitiveInference { contextual: Some(_) }) => suspended = true,
+            other => panic!("receiver budget {allowance} must refuse operationally or reach its callback, got {other:?}"),
+        }
+    }
+    assert!(
+        refused && suspended,
+        "exercise both receiver refusal and callback delivery: refused={refused}, suspended={suspended}"
+    );
+}
+
 /// Genuine dynamic `any` is the only no-candidate complete result; it is not
 /// an undecidable fallback. Mutation: route `any` through overload acquisition
 /// or use it for unknown callees; this exact positive case fails.
@@ -1125,9 +1370,11 @@ fn anonymous_signature(
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(params.into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(params.into_boxed_slice()),
         return_type,
-        type_parameters: Arc::from(type_parameters.into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            type_parameters.into_boxed_slice(),
+        ),
         occurrence: None,
         return_carrier: SignatureReturnCarrier::Declared(return_type),
         signature_span: None,
@@ -1147,6 +1394,7 @@ fn anonymous_signature(
 fn anonymous_candidate_pairs_with_its_own_instantiation() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let t = graph.intern_node(SemanticNodeData::TypeParam {
@@ -1154,13 +1402,13 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let sig = anonymous_signature(
         &dispatch,
         vec![FunctionParam::synthetic(None, t, false, false)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1195,6 +1443,7 @@ fn anonymous_candidate_pairs_with_its_own_instantiation() {
 fn admission_follows_the_dependency_proof_not_the_winners_origin() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let anonymous = anonymous_signature(
@@ -1276,6 +1525,7 @@ fn admission_follows_the_dependency_proof_not_the_winners_origin() {
 fn unrootable_call_is_served_but_never_admitted() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let anonymous = anonymous_signature(
@@ -1289,7 +1539,7 @@ fn unrootable_call_is_served_but_never_admitted() {
     // (1) The call site is not a servable file.
     let mut unservable = call_key(&dispatch, callee, CallKind::Call, None, vec![eager(string)]);
     unservable.point = ProgramPointId {
-        canonical_id: Arc::from("/ws/never-upserted.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/ws/never-upserted.ts"),
         offset: 0,
     };
     let result = selected_query(&dispatch, unservable.clone());
@@ -1339,6 +1589,7 @@ fn unrootable_call_is_served_but_never_admitted() {
 fn incomplete_nested_call_proof_refuses_component_admission() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let root_sig = anonymous_signature(
@@ -1408,6 +1659,7 @@ fn incomplete_nested_call_proof_refuses_component_admission() {
 fn incomplete_independent_nested_call_taints_enclosing_build() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
 
@@ -1490,6 +1742,7 @@ fn incomplete_independent_nested_call_taints_enclosing_build() {
 fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let any = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
     let literal = graph.intern_node(SemanticNodeData::Literal(
@@ -1500,7 +1753,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     // `cb: (item: T) => T`
     let callback_param = signature(
@@ -1534,7 +1787,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
             FunctionParam::synthetic(None, t, false, false),
         ],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -1633,6 +1886,7 @@ fn context_sensitive_argument_is_withheld_from_the_first_inference_pass() {
 fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1744,6 +1998,7 @@ fn receiverless_call_admits_only_a_this_that_accepts_undefined() {
 fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -1755,7 +2010,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
     });
     let tuple = |elements: Vec<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: verter_type_engine::semantic_query::PayloadArray::from(
                 elements
                     .into_iter()
                     .map(|value| TupleElement {
@@ -1778,7 +2033,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
             param_index: 0,
             constraint: Some(constraint),
             default: None,
-            display_name: Arc::from("A"),
+            display_name: verter_type_expr::OwnedStr::from("A"),
         });
         let return_type = if return_type == unknown {
             param
@@ -1797,7 +2052,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
                 true,
             )],
             vec![TypeParamDecl {
-                name: Arc::from("A"),
+                name: verter_type_expr::OwnedStr::from("A"),
                 param,
                 constraint: Some(constraint),
                 default: None,
@@ -1887,6 +2142,7 @@ fn generic_rest_infers_a_tuple_candidate_and_never_caps_arity() {
 fn excess_property_checking_is_an_argument_position_rule() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2032,7 +2288,11 @@ fn excess_property_checking_is_an_argument_position_rule() {
         verter_type_engine::semantic_query::FreshnessKey::Regular,
         "a regularized surface is no longer a fresh source"
     );
-    let Some(SemanticNodeData::Object(view)) = graph.node_data(regular).as_deref().cloned() else {
+    let Some(SemanticNodeData::Object(view)) = graph
+        .node_data(regular)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
+    else {
         panic!("the regularized peer is still an object surface");
     };
     for slot in view.positive_members() {
@@ -2087,6 +2347,7 @@ fn with_overload_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -2139,7 +2400,7 @@ fn overload_call_key(
     } = dispatch.resolve_call_context_for(OVERLOAD_CANONICAL);
     ResolveCallKey {
         point: ProgramPointId {
-            canonical_id: Arc::from(OVERLOAD_CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
             offset: 0,
         },
         callee,
@@ -2148,7 +2409,7 @@ fn overload_call_key(
         args: Arc::from(
             vec![CallArgKey::ProgramExpression {
                 point: ProgramPointId {
-                    canonical_id: Arc::from(OVERLOAD_CANONICAL),
+                    canonical_id: verter_type_expr::OwnedStr::from(OVERLOAD_CANONICAL),
                     offset,
                 },
                 spread: false,
@@ -2224,7 +2485,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the first revision's result is warm under the content-free key"
         );
@@ -2244,7 +2505,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_none(),
             "the value-side read set / self-roots REJECT the warm entry the \
              equal key would otherwise serve"
@@ -2258,7 +2519,7 @@ fn resolve_call_same_key_argument_edit_rejects_warm_and_recomputes_the_new_overl
             dispatch
                 .graph()
                 .get_resolve_call_result(dispatch.ctx, &key)
-                .map(|served| served.value)
+                .map(|served| served.value().clone())
                 .is_some(),
             "the recomputed result warms under the same key"
         );
@@ -2297,13 +2558,13 @@ fn source_flow_type(
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -2312,7 +2573,7 @@ fn source_flow_type(
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
         ..
-    }) = SemanticQueryApi::execute(&dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
+    }) = SemanticQueryApi::execute(&*dispatch, SemanticQueryKey::FlowReturn(Box::new(key)))
     else {
         panic!("{name} must produce a complete flow return");
     };
@@ -2440,6 +2701,7 @@ fn explicit_type_args_pair_the_surviving_candidate_with_its_own_raw_form() {
 fn explicit_type_args_rejected_by_every_candidate_keep_the_callee_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -2637,7 +2899,7 @@ fn tuple_of(
     values: Vec<SemanticNodeId>,
 ) -> SemanticNodeId {
     dispatch.graph().intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             values
                 .into_iter()
                 .map(|value| TupleElement {
@@ -2663,13 +2925,13 @@ fn type_param(
         param_index: index,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     })
 }
 
 fn plain_decl(param: SemanticNodeId, name: &str) -> TypeParamDecl {
     TypeParamDecl {
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
         param,
         constraint: None,
         default: None,
@@ -2687,6 +2949,7 @@ fn plain_decl(param: SemanticNodeId, name: &str) -> TypeParamDecl {
 fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2783,6 +3046,7 @@ fn tuple_argument_literal_elements_select_concrete_tuple_targets() {
 fn generic_tuple_parameter_decides_from_element_deposits() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2886,6 +3150,7 @@ fn generic_tuple_parameter_decides_from_element_deposits() {
 fn required_arity_ends_at_last_required_position() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2946,6 +3211,7 @@ fn required_arity_ends_at_last_required_position() {
 fn rest_tuple_required_elements_count_all_fixed_params() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -2956,7 +3222,7 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
         verter_type_expr::LiteralValue::String("x".into()),
     ));
     let required_rest = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -3011,7 +3277,7 @@ fn rest_tuple_required_elements_count_all_fixed_params() {
         "g(1, \"x\") selects, got {full:?}"
     );
     let optional_rest = graph.intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![TupleElement {
                 label: None,
                 value: string,
@@ -3098,7 +3364,10 @@ fn a_source_call_infers_from_every_argument_position() {
                 .resolve_named_symbol_with_audit(canonical, "R", None)
                 .into_parts();
             let node = outcome.ok().flatten().expect("R resolves to a node");
-            let data = host.project_type_store().semantic_graph().node_data(node);
+            let data = host
+                .project_type_store()
+                .semantic_graph()
+                .node_data(node.id());
             assert!(
                 matches!(
                     data.as_deref(),
@@ -3116,6 +3385,7 @@ fn a_source_call_infers_from_every_argument_position() {
 fn deposits_select_number(counts: &[usize]) {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let one = graph.intern_node(SemanticNodeData::Literal(
@@ -3169,6 +3439,7 @@ fn deposits_select_number(counts: &[usize]) {
 fn applicability_relations_have_no_call_quota() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
@@ -3308,6 +3579,7 @@ fn approximate_spread_mapping_degrades_instead_of_selecting_weaker_overload() {
 fn exact_arity_mismatch_still_selects_the_later_overload() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let first_ret = graph.intern_node(SemanticNodeData::Literal(
@@ -3393,7 +3665,7 @@ fn unresolved_argument_mapping_degrades_and_admits_nothing() {
     let callee = callable(&dispatch, vec![first, second], Vec::new());
     let unresolved = CallArgKey::ProgramExpression {
         point: ProgramPointId {
-            canonical_id: Arc::from("/ws/definitely-not-indexed.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/ws/definitely-not-indexed.ts"),
             offset: 999,
         },
         spread: false,
@@ -3459,6 +3731,7 @@ fn union_callee(
 fn union_callee_selects_every_arm_and_unions_returns() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3508,6 +3781,7 @@ fn union_callee_selects_every_arm_and_unions_returns() {
 fn union_of_identical_arms_collapses_the_return_union() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let arm_a = signature(
@@ -3553,6 +3827,7 @@ fn union_of_identical_arms_collapses_the_return_union() {
 fn union_arm_overload_order_is_per_arm_not_cross_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -3627,6 +3902,7 @@ fn union_arm_overload_order_is_per_arm_not_cross_arm() {
 fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -3687,6 +3963,7 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
 fn union_non_callable_arm_is_not_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3731,6 +4008,7 @@ fn union_non_callable_arm_is_not_callable() {
 fn incomplete_opaque_callee_is_not_classified_not_callable() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let missing = graph.intern_node(SemanticNodeData::Opaque(
         verter_type_engine::semantic_query::QueryError::Miss,
@@ -3752,7 +4030,9 @@ fn incomplete_opaque_callee_is_not_classified_not_callable() {
     );
     for incomplete in [
         verter_type_engine::semantic_query::QueryError::Cancelled,
-        verter_type_engine::semantic_query::QueryError::Other(Arc::from("unsettled")),
+        verter_type_engine::semantic_query::QueryError::Other(verter_type_expr::OwnedStr::from(
+            "unsettled",
+        )),
     ] {
         let callee = graph.intern_node(SemanticNodeData::Opaque(incomplete.clone()));
         let step = dispatch.execute_resolve_call(call_key(
@@ -3850,6 +4130,7 @@ fn union_undecidable_arm_degrades_the_whole_call() {
 fn unsettled_construct_bucket_never_degrades_a_call() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -3953,6 +4234,7 @@ fn unsettled_construct_bucket_never_degrades_a_call() {
 fn anonymous_overload_set_and_call_admit_on_their_dependency_proof() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let one = graph.intern_node(SemanticNodeData::Literal(
         verter_type_engine::semantic_query::LiteralValue::Number(1.0),
@@ -4079,7 +4361,7 @@ fn typeof_value_node(
                 Arc::from(canonical),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
         },
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -4099,7 +4381,7 @@ fn declaring_file(
 ) -> Option<Arc<str>> {
     match dispatch.graph().node_scope(node) {
         Some(verter_type_engine::semantic_query::NodeScopeId::File { canonical_id, .. }) => {
-            Some(canonical_id)
+            Some(std::sync::Arc::<str>::from(canonical_id))
         }
         _ => None,
     }
@@ -4258,6 +4540,7 @@ fn global_union_callee_call_admits_rooted_on_every_arm_file() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
 
     let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
@@ -4333,6 +4616,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
 
     let arm_a = typeof_value_node(&dispatch, INLINE_DECL_A, "inlineA");
@@ -4391,6 +4675,7 @@ fn overload_set_of_global_union_admits_rooted_on_every_arm_file() {
 fn call_utility_and_flow_consumers_read_one_signature_list() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
@@ -4518,6 +4803,7 @@ fn call_utility_and_flow_consumers_read_one_signature_list() {
 fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let data_object = graph.intern_node(SemanticNodeData::Object(
@@ -4551,7 +4837,7 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let keys_of_t = graph.intern_node(SemanticNodeData::KeyOf { base: t });
     let ret = graph.intern_node(SemanticNodeData::Array {
@@ -4566,7 +4852,7 @@ fn a_partial_closed_operator_leaves_the_enclosing_call_partial_and_cold() {
             SignatureKind::Call,
             vec![FunctionParam::synthetic(None, t, false, false)],
             vec![TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: t,
                 constraint: None,
                 default: None,
@@ -4638,6 +4924,7 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     dispatch.set_connected_limits_for_tests(
         super::connected_demand::MAX_CONNECTED_PROJECTION_WORK,
         query_depth,
@@ -4648,16 +4935,16 @@ fn binder_reach_through_an_alias_chain(query_depth: u16) -> super::call_resolve:
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let chain = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from(CANONICAL),
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-            decl_name: Arc::from("A2"),
+            decl_name: verter_type_expr::OwnedStr::from("A2"),
         },
-        args: Arc::from(vec![t].into_boxed_slice()),
+        args: verter_type_engine::semantic_query::PayloadArray::from(vec![t].into_boxed_slice()),
     });
     dispatch.deposit_at_top_level_for_tests(chain, t)
 }

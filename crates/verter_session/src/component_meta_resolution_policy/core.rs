@@ -11,8 +11,6 @@
 //! (never a materialized `TypeExpr` — materialization happens only at the
 //! sealed output sink).
 
-use std::sync::Arc;
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
@@ -174,6 +172,7 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
     ) -> Option<HotTypeRef> {
         let dispatch = self.engine.dispatch;
         dispatch
+            .owning()
             .raise_semantic_type_source_to_hot(
                 source,
                 SourceRaiseContext {
@@ -185,15 +184,16 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
                     interior_failures: None,
                 },
             )
+            .into_value_in(self.engine.builder())
             .at_optional_boundary()
     }
 
     /// Node data reader (the shared dispatch-owned arena read).
-    pub(super) fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
-        verter_type_engine::project_semantic_dispatch::node_data_for(
-            self.engine.dispatch.graph(),
-            node,
-        )
+    pub(super) fn node_data(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<verter_type_engine::semantic_query_memo::node_data_lease::NodeDataLease> {
+        self.engine.dispatch.graph().read_in_scope(node)
     }
 
     /// The node's reference HEAD: `(name, type-argument nodes)` for the
@@ -284,10 +284,10 @@ impl<'a, 'h> PolicyCtx<'a, 'h> {
             .map(|state| state.whole_hash)
             .unwrap_or_default();
         DeclIdentity {
-            canonical_id: Arc::from(canonical_source),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_source),
             owner,
             whole_hash,
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         }
     }
 

@@ -1091,7 +1091,7 @@ impl WasmVerterHost {
                     std::sync::Arc::<str>::from(canonical_id_owned.as_str()),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: std::sync::Arc::<str>::from(decl_name_owned.as_str()),
+                name: verter_type_expr::OwnedStr::from(decl_name_owned.as_str()),
             });
             let record = host
                 .resolve_type_with_audit(key, &canonical_id_owned)
@@ -1339,7 +1339,7 @@ impl WasmVerterHost {
             // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(|bytes| {
                         String::from_utf8(bytes).map_err(|e| {
                             JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))
@@ -1378,7 +1378,7 @@ impl WasmVerterHost {
             // the WASM adapter only decodes the bytes to a `String`.
             let type_expr_json = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(|bytes| {
                         String::from_utf8(bytes).map_err(|e| {
                             JsValue::from_str(&format!("type-expr utf-8 decode error: {e}"))

@@ -12,7 +12,8 @@ use verter_audit::RequestAuditRecord;
 use verter_protocol::typeinfo::graph::{TypeInfoGraphRequest, TypeInfoGraphResponse};
 use verter_protocol::typeinfo::{FfiEvaluateTypeExpressionRequest, FfiSymbolEntry};
 use verter_session::host_resolve_type_audit::TypeResolutionRequestError;
-use verter_type_engine::semantic_query::{ProjectionMode, SemanticNodeId};
+use verter_type_engine::semantic_query::ProjectionMode;
+use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_expr::TypeExpr;
 use wasm_bindgen::prelude::*;
 
@@ -33,14 +34,15 @@ pub(crate) struct WasmTypeInfoResolveResult {
     pub error: Option<String>,
 }
 
-/// Split a resolve / evaluate outcome into the resolved node (if any)
+/// Split a resolve / evaluate outcome into the resolved node's owning
+/// root (if any)
 /// and an optional dispatch-fault description. Mirrors
 /// `crate::typeinfo` on the NAPI side: a genuine dispatch fault is
 /// surfaced through the result DTO's `error` channel instead of being
 /// silently erased to a `None` node.
 pub(crate) fn split_resolve_outcome(
-    outcome: Result<Option<SemanticNodeId>, TypeResolutionRequestError>,
-) -> (Option<SemanticNodeId>, Option<String>) {
+    outcome: Result<Option<NodeRoot>, TypeResolutionRequestError>,
+) -> (Option<NodeRoot>, Option<String>) {
     match outcome {
         Ok(node) => (node, None),
         Err(fault) => (None, Some(format!("{fault:?}"))),

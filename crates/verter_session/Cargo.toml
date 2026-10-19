@@ -73,6 +73,9 @@ test-support = [
   "verter_type_engine/test-support",
   "verter_workspace/test-support",
 ]
+# Default-off forwarding of the engine's flight rendezvous to the soak/tooling
+# runner, without the rest of `test-support`. No production edge enables it.
+soak-support = ["verter_type_engine/soak-support"]
 # Exposes test-only constructors (e.g. `ProjectBinding::new_for_test`) for
 # downstream crates' tests. Enabled ONLY via a downstream `[dev-dependencies]`
 # entry — never in a production build, so it cannot weaken a witness discipline.
@@ -167,6 +170,7 @@ verter_semantic_source = { workspace = true }
 # defines the demand trait + neutral DTOs; this crate implements them in
 # `src/query_host_port.rs`. The dependency points host -> query only.
 verter_session_query = { workspace = true }
+verter_retention = { workspace = true }
 verter_type_engine = { workspace = true }
 verter_no_typeexpr = { workspace = true }
 verter_macro_dto = { workspace = true }
@@ -273,6 +277,7 @@ uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 [dev-dependencies]
 verter_session_query = { workspace = true, features = ["test-support"] }
+serde_json = { workspace = true, features = ["unbounded_depth"] }
 # The retention-account replacement seam the overlay residency tests drive.
 verter_workspace = { path = "../verter_workspace", features = ["test-support"] }
 # Oracle harness snapshot-identity hashing (test-only — the harness lives under

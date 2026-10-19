@@ -52,8 +52,8 @@ type OperandEvidenceEntry = (SemanticQueryKey, SemanticOperandEvidence);
 
 /// The canonical empty projection path — the single spelling of
 /// "expand the whole surface" on a `ProjectPath` key.
-fn empty_projection_path() -> Arc<[PathSegment]> {
-    Arc::from(Vec::<PathSegment>::new().into_boxed_slice())
+fn empty_projection_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice())
 }
 
 struct OperandEvidenceGuard<'a> {
@@ -150,7 +150,7 @@ fn union_operand_evidence(
         }
         for dep in input.dep_signatures().iter() {
             if !deps.contains(dep) {
-                deps.push(Arc::clone(dep));
+                deps.push(dep.clone());
             }
         }
     }
@@ -183,6 +183,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             forced.generation(),
             forced.node(),
             evidence,
+            forced.lease().clone(),
             SemanticOperandAuthority::mint_for_forcing_boundary(),
         ))
     }
@@ -196,6 +197,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticOperand]>,
     ) -> Result<SemanticOperand, SemanticOperandMintError> {
+        let _scope = self.graph().enter_node_root_scope();
         let anchor = authored_anchor(&locator);
         self.verify_authored_anchor(&locator, anchor)?;
         let binder = OperandBinderIdentity::for_locator(&locator);
@@ -235,6 +237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let substitution_runtime =
             (!substitution.is_empty()).then_some((store_identity, generation));
         Ok(SemanticOperand::from_authored_authority(
+            Some(self.graph()),
             locator,
             substitution,
             split_env,
@@ -463,7 +466,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             for dep in evidence.dep_signatures().iter() {
                 if !deps.contains(dep) {
-                    deps.push(Arc::clone(dep));
+                    deps.push(dep.clone());
                 }
             }
         }
@@ -563,7 +566,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 domain: BudgetDomain::ProjectionOperation,
                 limit,
                 actual,
-                context: "semantic-operand-force".to_string(),
+                context: "semantic-operand-force".into(),
             });
         }
         if reasons.contains(crate::semantic_query::PartialReasonSet::SUPERSEDED_GENERATION) {
@@ -588,7 +591,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             domain: BudgetDomain::ProjectionOperation,
             limit: budget.effective_projection_op_budget(),
             actual: budget.projection_ops_executed_count() as u64,
-            context: context.to_string(),
+            context: verter_type_expr::OwnedStr::from(context),
         }))
     }
 
@@ -605,7 +608,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let self_root_canonicals: Vec<Arc<str>> = evidence
             .self_roots()
             .iter()
-            .map(|(canonical, _)| Arc::clone(canonical))
+            .map(|(canonical, _)| Arc::<str>::from(canonical))
             .collect();
         if !evidence
             .read_set()
@@ -665,9 +668,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let anchor = authored_anchor(authored.locator());
         let (parse, resolve, type_env, lib_env, project) = authored.split_env().parts();
         let slot = DeclarationSlotSeed::new(
-            Arc::clone(&anchor.canonical_id),
+            anchor.canonical_id.clone(),
             anchor.owner,
-            Arc::clone(&anchor.symbol),
+            anchor.symbol.clone(),
             semantic_space_for_locator_space(anchor.space),
         )
         .finalize(SlotEnvIdentity::new(type_env, lib_env, project));
@@ -832,7 +835,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
             SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
                 base: root,
-                path: Arc::clone(path),
+                path: path.clone(),
                 context,
             },
             SemanticOperandForceProjection::KeyDomain => SemanticQueryKey::KeyOf {
@@ -851,7 +854,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|serve| serve.indexed)
         {
             output = output.with_observed_self_roots(vec![(
-                Arc::clone(&slot.defining_canonical),
+                slot.defining_canonical.clone(),
                 indexed.whole_hash,
             )]);
         }
@@ -1099,9 +1102,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             projection_evidence.push(index.evidence().clone());
             path.push(PathSegment::Index(IndexKey::Computed(index.node())));
         }
-        Ok(SemanticOperandForceProjection::Path(Arc::from(
-            path.into_boxed_slice(),
-        )))
+        Ok(SemanticOperandForceProjection::Path(
+            verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+        ))
     }
 
     pub(super) fn force_semantic_operand(
@@ -1109,6 +1112,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         operand: &SemanticOperand,
         request: SemanticOperandForceRequest,
     ) -> QueryResult<ForcedSemanticOperand> {
+        let _scope = self.graph().enter_node_root_scope();
         if let Err(error) = self.reject_if_cancelled() {
             return QueryResult::Error(error);
         }
@@ -1164,7 +1168,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     SemanticOperandForceProjection::Path(path) => SemanticQueryKey::ProjectPath {
                         base: node,
-                        path: Arc::clone(path),
+                        path: path.clone(),
                         context,
                     },
                 }
@@ -1248,7 +1252,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         let (read, evidence) = self.execute_read_with_operand_evidence(key);
         crate::meta_resolve::emit_dispatch_dep_signature_facts(self, &read.dep_signature);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return match read.value {
                 QueryResult::Error(error) => QueryResult::Error(error),
                 QueryResult::Recursive(node) => QueryResult::Recursive(node),
@@ -1277,13 +1281,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // drop the original producer's roots. Unioning here makes
                 // the force's OWN observable output path-independent.
                 let evidence = union_operand_evidence(&projection_evidence, evidence);
-                QueryResult::Value(ForcedSemanticOperand::minted(
-                    self.graph().operand_store_identity(),
-                    self.snapshot.current_project_generation(),
-                    node,
-                    evidence,
-                    SemanticOperandAuthority::mint_for_forcing_boundary(),
-                ))
+                QueryResult::Value(
+                    ForcedSemanticOperand::minted(
+                        self.graph().operand_store_identity(),
+                        self.snapshot.current_project_generation(),
+                        node,
+                        evidence,
+                        SemanticOperandAuthority::mint_for_forcing_boundary(),
+                    )
+                    .with_lease(read.lease),
+                )
             }
         }
     }
@@ -1316,6 +1323,7 @@ pub fn authored_instantiate_key_fixture(
         split_env_axes;
     let authority = SemanticOperandAuthority::mint_for_forcing_boundary();
     let operand = SemanticOperand::from_authored_authority(
+        None,
         locator,
         Arc::clone(&args),
         OperandSplitEnv::new(

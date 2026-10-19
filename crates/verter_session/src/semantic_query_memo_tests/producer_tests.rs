@@ -14,6 +14,324 @@ use verter_type_expr::TopLevelOwnerId;
 
 const KEYED: &str = "/producer/keyed.ts";
 
+#[test]
+fn counted_zero_retention_admission_returns_an_owned_complete_delivery() {
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::with_account(StoreAccount::new(SemanticRetentionAccount::new(
+        RetentionLimits {
+            aggregate_ceiling_bytes: 0,
+            ..RetentionLimits::defaults()
+        },
+    )));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                (
+                    QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                        LiteralValue::String("complete but uncached".into()),
+                    ))),
+                    empty_signature(),
+                )
+            },
+        )
+    });
+    assert!(matches!(read.value().clone(), QueryResult::Value(_)));
+    assert!(
+        !read.result_is_partial(),
+        "retention pressure does not change computation completeness"
+    );
+    harness.run(|store| {
+        assert_eq!(store.memo_entry_count(), 0);
+        assert_eq!(store.retention_account().snapshot().retained_bytes, 0);
+    });
+    assert_eq!(harness.live_nodes(), 1);
+    drop(read);
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
+    use verter_type_engine::project_semantic_dispatch::cost_receipt::{
+        BudgetProfile, BudgetProfileSpec, COST_MODEL_REVISION,
+    };
+    use verter_type_engine::project_semantic_dispatch::walk::{
+        QueryBuildOutput, ShallowDiagnostic,
+    };
+    use verter_type_engine::semantic_query::{LiteralValue, PartialReasonSet};
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::new();
+    harness.run(|store| {
+        let key_node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+            "refused operand".into(),
+        )));
+        let read = store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let result = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "partial result".into(),
+                )));
+                let diagnostic = store.intern_node(SemanticNodeData::Literal(
+                    LiteralValue::String("refusal diagnostic".into()),
+                ));
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(result), empty_signature()).into();
+                output.cache_suppress = true;
+                output.mark_partial_with(PartialReasonSet::PROJECTION_WORK_LIMIT);
+                // This fixture completed the literal source before refusing reuse.
+                output = output.with_positional_guarantee_for_tests();
+                output
+                    .walker_diagnostics
+                    .push(ShallowDiagnostic::OpenConditional { node: diagnostic });
+                output
+            },
+        );
+        let read = read.map_value(|result| match result {
+            QueryResult::Value(node) => QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+            _ => panic!("partial value still returns its complete carrier"),
+        });
+        let profile = BudgetProfile::intern(BudgetProfileSpec {
+            work: 1,
+            bytes: 1024,
+            query_depth: 2,
+            instantiation_depth: 2,
+            tail_steps: 2,
+            request_operations: 0,
+            relation_comparisons: 2,
+            cost_model_revision: COST_MODEL_REVISION,
+        });
+        assert!(store.seal_refusal_for_tests(
+            &host,
+            SemanticQueryKey::ClassifyTruthinessDomain { subject: key_node },
+            profile,
+            store.refusal_entry_for_tests(&host),
+            read,
+            verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from([]))
+        ));
+    });
+    assert_eq!(
+        harness.live_nodes(),
+        3,
+        "the summary owns its key and actual partial delivery"
+    );
+    harness.run(|store| {
+        assert_eq!(store.refusal_summary_count_for_tests(), 1);
+        store.invalidate_all();
+    });
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_outer_build_keeps_a_consumed_warm_read_through_cache_eviction() {
+    use verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput;
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::new();
+    harness.run(|store| {
+        drop(store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                (
+                    QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                        LiteralValue::String("warm dependency".into()),
+                    ))),
+                    empty_signature(),
+                )
+            },
+        ));
+    });
+    let mut outer_key = key();
+    if let SemanticQueryKey::ResolveDecl(ref mut key) = outer_key {
+        key.name = verter_type_expr::OwnedStr::from("Outer");
+    }
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            outer_key,
+            || panic!("no recursion"),
+            || {
+                let inner = store.execute_cooperative(
+                    &host,
+                    key(),
+                    || panic!("no recursion"),
+                    || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                        panic!("must read warm");
+                    },
+                );
+                let QueryResult::Value(node) = inner.value().clone() else {
+                    panic!("complete dependency");
+                };
+                store.invalidate_all();
+                drop(inner);
+                assert!(
+                    store.node_is_live(node),
+                    "outer construction owns the consumed dependency"
+                );
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(node), empty_signature()).into();
+                output.cache_suppress = true;
+                output
+            },
+        )
+    });
+    assert_eq!(harness.live_nodes(), 1);
+    drop(read);
+    assert_eq!(harness.live_nodes(), 0);
+}
+
+#[test]
+fn counted_cancelled_producer_releases_unaudited_intermediates() {
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::new();
+    let context = RequestContext::new(1, Arc::from(KEYED), false, None);
+    let _request = RequestContextGuard::install(Arc::clone(&context));
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let node = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "cancelled".into(),
+                )));
+                context.cancel();
+                (QueryResult::Value(node), empty_signature())
+            },
+        )
+    });
+    assert!(matches!(
+        read.value().clone(),
+        QueryResult::Error(QueryError::Cancelled)
+    ));
+    assert_eq!(harness.live_nodes(), 0);
+    harness.run(|store| assert_eq!(store.memo_entry_count(), 0));
+}
+
+#[test]
+fn counted_return_only_delivery_owns_value_and_actual_diagnostic_after_store_drop() {
+    use verter_type_engine::project_semantic_dispatch::walk::{
+        QueryBuildOutput, ShallowDiagnostic,
+    };
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::new();
+    let read = harness.run(|store| {
+        store.execute_cooperative(
+            &host,
+            key(),
+            || panic!("no recursion"),
+            || {
+                let result = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "result".into(),
+                )));
+                let diagnostic = store.intern_node(SemanticNodeData::Literal(
+                    LiteralValue::String("diagnostic".into()),
+                ));
+                let mut output: QueryBuildOutput<SemanticNodeId> =
+                    (QueryResult::Value(result), empty_signature()).into();
+                output.cache_suppress = true;
+                output
+                    .walker_diagnostics
+                    .push(ShallowDiagnostic::OpenConditional { node: diagnostic });
+                output
+            },
+        )
+    });
+    assert!(read.cache_suppress());
+    assert_eq!(read.walker_diagnostics().len(), 1);
+    assert_eq!(harness.live_nodes(), 2);
+    harness.run(|store| assert_eq!(store.memo_entry_count(), 0));
+    drop(harness);
+    assert_eq!(
+        read.lease().live_nodes_for_tests(),
+        2,
+        "delivery itself owns both nodes"
+    );
+    let cloned = read.clone();
+    drop(read);
+    assert_eq!(cloned.lease().live_nodes_for_tests(), 2);
+}
+
+#[test]
+fn counted_recursion_delivery_owns_its_returned_sentinel() {
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, _) = keyed_host();
+    let harness = GraphFixture::new();
+    let read = harness.run(|store| {
+        store.with_same_path_inflight_for_test(key(), || {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
+                || -> (QueryResult<SemanticNodeId>, DepSignature) {
+                    panic!("recursive producer must not run")
+                },
+            )
+        })
+    });
+    assert!(matches!(read.value().clone(), QueryResult::Recursive(_)));
+    assert_eq!(harness.live_nodes(), 1);
+    drop(harness);
+    assert_eq!(read.lease().live_nodes_for_tests(), 1);
+}
+
+#[test]
+fn counted_cache_and_reader_can_drop_in_either_order() {
+    use verter_type_engine::semantic_query::LiteralValue;
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    for cache_first in [true, false] {
+        let (host, _) = keyed_host();
+        let harness = GraphFixture::new();
+        let read = harness.run(|store| {
+            store.execute_cooperative(
+                &host,
+                key(),
+                || panic!("no recursion"),
+                || {
+                    (
+                        QueryResult::Value(store.intern_node(SemanticNodeData::Literal(
+                            LiteralValue::String("cached".into()),
+                        ))),
+                        empty_signature(),
+                    )
+                },
+            )
+        });
+        harness.run(|store| assert_eq!(store.memo_entry_count(), 1));
+        if cache_first {
+            harness.run(|store| {
+                store.invalidate_all();
+            });
+            assert_eq!(harness.live_nodes(), 1);
+            drop(read);
+        } else {
+            drop(read);
+            assert_eq!(harness.live_nodes(), 1);
+            harness.run(|store| {
+                store.invalidate_all();
+            });
+        }
+        assert_eq!(harness.live_nodes(), 0);
+    }
+}
+
 fn keyed_host() -> (VerterHost, [u8; 16]) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = host
@@ -37,14 +355,14 @@ fn keyed_host() -> (VerterHost, [u8; 16]) {
 fn key() -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(KEYED),
+            canonical_id: verter_type_expr::OwnedStr::from(KEYED),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("Target"),
+        name: verter_type_expr::OwnedStr::from("Target"),
     })
 }
 
@@ -54,7 +372,20 @@ fn keyed_output(
     store: &SemanticGraphStore,
     hash: [u8; 16],
 ) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
-    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    keyed_output_of(
+        store,
+        hash,
+        SemanticNodeData::Primitive(PrimitiveKind::String),
+    )
+}
+
+/// [`keyed_output`] delivering `data`.
+fn keyed_output_of(
+    store: &SemanticGraphStore,
+    hash: [u8; 16],
+    data: SemanticNodeData,
+) -> verter_type_engine::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue> {
+    let node = store.intern_node(data);
     let carrier = verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
         FactVersionRef::FileWholeHash {
             canonical_id: KEYED.to_string(),
@@ -131,9 +462,13 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
             .join()
             .expect("the producer thread completes")
     });
-    let QueryResult::Value(value) = produced.value else {
+    let QueryResult::Value(value) = produced.value().clone() else {
         panic!("the producer completes with its value");
     };
+    assert_eq!(
+        produced.fact_status().clone(),
+        verter_type_engine::semantic_query::FactStatus::Complete
+    );
 
     let mut capture = ReadCapture::default();
     match subscription.wait(
@@ -143,12 +478,13 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
         &mut capture,
     ) {
         Joined::Read(read) => {
+            assert_eq!(read.fact_status(), produced.fact_status());
             assert!(
-                matches!(read.value, QueryResult::Value(joined) if joined == value),
+                matches!(read.value().clone(), QueryResult::Value(joined) if joined == value),
                 "the subscriber reads the producer's value"
             );
             assert!(
-                read.receipt
+                read.receipt()
                     .priced()
                     .is_some_and(|delivered| Arc::ptr_eq(delivered, &receipt)),
                 "the subscriber's read carries the producer's receipt, to replay it as a warm read would"
@@ -160,6 +496,113 @@ fn a_producer_belongs_to_its_task_and_a_subscription_waits_when_its_holder_choos
     assert_eq!(store.stats_snapshot().joined_waits, 1);
     drop((first, second));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// A subscriber joined to another task's flight receives a read that owns
+/// the delivered value in its own right: after the producer's read, the
+/// cache and the construction scope are gone, the joined read still reads
+/// the value, and its drop releases it.
+#[test]
+fn a_joined_read_owns_the_value_after_the_producer_and_the_cache_are_gone() {
+    use verter_type_engine::semantic_query_memo::graph_fixture::GraphFixture;
+    let (host, hash) = keyed_host();
+    let harness = GraphFixture::new();
+    let (produced, joined) = harness.run(|store| {
+        let owner = store.task_registry_for_tests().register_task();
+        let follower = store.task_registry_for_tests().register_task();
+        let (claimed, _) = claim(store, &host, &owner);
+        let Claim::Produce(lease) = claimed else {
+            panic!("the first claim of a cold key produces it");
+        };
+        let (subscribed, mut attempt) = claim(store, &host, &follower);
+        let Claim::Subscribed(subscription) = subscribed else {
+            panic!("another task's claim subscribes to the open producer");
+        };
+        let receipt = lease.fixture_receipt();
+        let mut capture = ReadCapture::default();
+        let flags = host.request_flags();
+        let output = keyed_output_of(
+            store,
+            hash,
+            SemanticNodeData::Literal(verter_type_expr::LiteralValue::String("joined".into())),
+        );
+        let Ok(mut settled) = lease.settle(&host, flags, output, Some(receipt)) else {
+            panic!("an uncancelled producer settles");
+        };
+        settled
+            .admit(&host, flags, &mut capture)
+            .expect("an uncancelled producer is admitted");
+        let produced = settled.complete(&host, &mut capture);
+        let Joined::Read(joined) = subscription.wait(&host, flags, &mut attempt, &mut capture)
+        else {
+            panic!("a same-view subscriber reads the delivered result");
+        };
+        (produced, joined)
+    });
+    harness.run(|store| store.invalidate_all());
+    drop(produced);
+    let QueryResult::Value(SemanticQueryValue::TypeNode(node)) = joined.value().clone() else {
+        panic!("the subscriber receives the producer's node: {joined:?}");
+    };
+    assert_eq!(harness.live_nodes(), 1, "the joined read owns the value");
+    let payload = joined.node(node).unwrap().read().unwrap();
+    assert!(matches!(
+        &*payload,
+        SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(text)) if text == "joined"
+    ));
+    drop((payload, joined));
+    assert_eq!(
+        harness.live_nodes(),
+        0,
+        "the joined read's drop releases it"
+    );
+}
+
+#[test]
+fn an_unavailable_producer_broadcasts_its_fact_without_a_candidate_value() {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, QueryError};
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let owner = store.task_registry_for_tests().register_task();
+    let follower = store.task_registry_for_tests().register_task();
+    let (claimed, _) = claim(&store, &host, &owner);
+    let Claim::Produce(lease) = claimed else {
+        panic!("cold owner must produce")
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &follower);
+    let Claim::Subscribed(subscription) = subscribed else {
+        panic!("follower must subscribe")
+    };
+    let mut output = keyed_output(&store, hash);
+    output.add_partial_reasons(PartialReasonSet::MISSING_DEPENDENCY);
+    output.cache_suppress = true;
+    let receipt = lease.fixture_receipt();
+    let mut settled = lease
+        .settle(&host, host.request_flags(), output, Some(receipt))
+        .expect("valid unfinished execution settles");
+    let mut capture = ReadCapture::default();
+    settled
+        .admit(&host, host.request_flags(), &mut capture)
+        .unwrap();
+    let produced = settled.complete(&host, &mut capture);
+    let Joined::Read(joined) =
+        subscription.wait(&host, host.request_flags(), &mut attempt, &mut capture)
+    else {
+        panic!("same-view priced follower must receive the fact")
+    };
+    assert_eq!(produced.fact_status(), joined.fact_status());
+    for read in [produced, joined] {
+        assert!(matches!(read.fact_status(), FactStatus::Unavailable(_)));
+        assert!(matches!(
+            read.value().clone(),
+            QueryResult::Error(QueryError::IncompleteSemanticOperand { .. })
+        ));
+        assert!(read.result_is_partial() && read.cache_suppress());
+        assert!(read
+            .partial_reasons()
+            .contains(PartialReasonSet::MISSING_DEPENDENCY));
+    }
+    assert_eq!(store.slot_candidate_count_for_tests(&key()), 0);
 }
 
 /// A producer whose demand ran out of its allowance completes its flight
@@ -201,7 +644,7 @@ fn a_subscriber_never_takes_another_demands_unpriced_partial() {
             .admit(&host, flags, &mut capture)
             .expect("an uncancelled producer completes");
         let read = settled.complete(&host, &mut capture);
-        assert!(read.result_is_partial && read.receipt.priced().is_none());
+        assert!(read.result_is_partial() && read.receipt().priced().is_none());
     }
 
     let mut capture = ReadCapture::default();
@@ -371,5 +814,230 @@ fn a_member_flight_outliving_its_entry_is_waited_on_not_refused_as_a_cycle() {
         );
     });
     drop(flight);
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// Counts how many times the flight woke it.
+struct CountingWaker(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for CountingWaker {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A polled subscription to an open producer is pending: it holds its
+/// wait-for edge and leaves its waker on the flight without blocking. The
+/// producer settling on another thread wakes it exactly once, and the next
+/// poll reads the delivered result and releases the edge. A re-poll before
+/// the delivery registers the same waker once, not twice.
+#[test]
+fn a_polled_subscription_is_pending_until_the_producer_wakes_it() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut subscription) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    for _ in 0..2 {
+        let mut capture = ReadCapture::default();
+        assert!(
+            subscription
+                .poll(
+                    &host,
+                    host.request_flags(),
+                    &mut attempt,
+                    &mut capture,
+                    &waker
+                )
+                .is_pending(),
+            "an unsettled producer leaves the subscription pending"
+        );
+    }
+    assert_eq!(
+        store.wait_graph_counts_for_tests().1,
+        1,
+        "the pending subscriber holds one wait-for edge"
+    );
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let mut capture = ReadCapture::default();
+                let flags = host.request_flags();
+                let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None)
+                else {
+                    panic!("an uncancelled producer settles");
+                };
+                settled
+                    .admit(&host, flags, &mut capture)
+                    .expect("an uncancelled producer is admitted");
+                settled.complete(&host, &mut capture)
+            })
+            .join()
+            .expect("the producer thread completes")
+    });
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the settled producer wakes the registered waker exactly once"
+    );
+    let mut capture = ReadCapture::default();
+    match subscription.poll(
+        &host,
+        host.request_flags(),
+        &mut attempt,
+        &mut capture,
+        &waker,
+    ) {
+        std::task::Poll::Ready(Joined::Read(read)) => assert!(
+            matches!(read.value(), QueryResult::Value(_)),
+            "the woken subscriber reads the producer's value"
+        ),
+        std::task::Poll::Ready(Joined::Retry) => panic!("a same-view subscriber reuses the value"),
+        std::task::Poll::Ready(Joined::Recursive(recursion)) => {
+            panic!("no cycle of waits exists: {recursion:?}")
+        }
+        std::task::Poll::Pending => panic!("a settled producer resolves the subscription"),
+    }
+    assert_eq!(store.wait_graph_counts_for_tests().1, 0);
+    drop(subscription);
+    drop((first, second));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// Dropping a pending subscription — its execution stopped or was dropped
+/// — releases its wait-for edge and takes its waker off the flight: the
+/// producer settling afterwards wakes nobody.
+#[test]
+fn dropping_a_pending_subscription_releases_its_edge_and_waker() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut subscription) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    let mut capture = ReadCapture::default();
+    assert!(subscription
+        .poll(
+            &host,
+            host.request_flags(),
+            &mut attempt,
+            &mut capture,
+            &waker
+        )
+        .is_pending());
+    assert_eq!(store.wait_graph_counts_for_tests().1, 1);
+    drop(subscription);
+    assert_eq!(
+        store.wait_graph_counts_for_tests().1,
+        0,
+        "the dropped subscriber's wait-for edge is gone"
+    );
+    let mut capture = ReadCapture::default();
+    let flags = host.request_flags();
+    let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None) else {
+        panic!("an uncancelled producer settles");
+    };
+    settled
+        .admit(&host, flags, &mut capture)
+        .expect("an uncancelled producer is admitted");
+    let _ = settled.complete(&host, &mut capture);
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a dropped subscriber's waker is never woken"
+    );
+    drop((first, second));
+    assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
+}
+
+/// Two subscriptions polled with the same executor waker hold two
+/// registrations: dropping one withdraws only its own, so the producer
+/// settling afterwards still wakes the survivor, which reads the value.
+#[test]
+fn dropping_one_subscription_keeps_a_shared_wakers_other_registration() {
+    let (host, hash) = keyed_host();
+    let store = SemanticGraphStore::new();
+    let first = store.task_registry_for_tests().register_task();
+    let second = store.task_registry_for_tests().register_task();
+    let third = store.task_registry_for_tests().register_task();
+    let (claimed, _first_attempt) = claim(&store, &host, &first);
+    let Claim::Produce(lease) = claimed else {
+        panic!("the first claim of a cold key produces it");
+    };
+    let (subscribed, mut dropped_attempt) = claim(&store, &host, &second);
+    let Claim::Subscribed(mut dropped) = subscribed else {
+        panic!("another task's claim subscribes to the open producer");
+    };
+    let (subscribed, mut attempt) = claim(&store, &host, &third);
+    let Claim::Subscribed(mut survivor) = subscribed else {
+        panic!("a third task's claim subscribes to the open producer");
+    };
+    let counter = Arc::new(CountingWaker(Default::default()));
+    let waker = std::task::Waker::from(Arc::clone(&counter));
+    for (subscription, attempt) in [
+        (&mut dropped, &mut dropped_attempt),
+        (&mut survivor, &mut attempt),
+    ] {
+        let mut capture = ReadCapture::default();
+        assert!(subscription
+            .poll(&host, host.request_flags(), attempt, &mut capture, &waker)
+            .is_pending());
+    }
+    drop(dropped);
+    let mut capture = ReadCapture::default();
+    let flags = host.request_flags();
+    let Ok(mut settled) = lease.settle(&host, flags, keyed_output(&store, hash), None) else {
+        panic!("an uncancelled producer settles");
+    };
+    settled
+        .admit(&host, flags, &mut capture)
+        .expect("an uncancelled producer is admitted");
+    let _ = settled.complete(&host, &mut capture);
+    assert_eq!(
+        counter.0.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the surviving subscription's registration wakes its task"
+    );
+    let mut capture = ReadCapture::default();
+    match survivor.poll(
+        &host,
+        host.request_flags(),
+        &mut attempt,
+        &mut capture,
+        &waker,
+    ) {
+        std::task::Poll::Ready(Joined::Read(read)) => assert!(
+            matches!(read.value(), QueryResult::Value(_)),
+            "the woken survivor reads the producer's value"
+        ),
+        std::task::Poll::Ready(Joined::Retry) => panic!("a same-view subscriber reuses the value"),
+        std::task::Poll::Ready(Joined::Recursive(recursion)) => {
+            panic!("no cycle of waits exists: {recursion:?}")
+        }
+        std::task::Poll::Pending => panic!("a settled producer resolves the survivor"),
+    }
+    drop(survivor);
+    drop((first, second, third));
     assert_eq!(store.wait_graph_counts_for_tests(), (0, 0));
 }

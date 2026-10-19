@@ -27,6 +27,19 @@ playground E2E tests
 (publication-ready artifacts) adds the full WASM lane (bindgen + cached `wasm-opt` via
 `scripts/wasm-opt-cache.mjs`). See `CLAUDE.md` → Build.
 
+## TypeScript Project Opening Samples
+
+`cargo run --release -p verter_session --example project_open_profile` emits
+three JSON timing samples for configuration plus interleaved injection/upsert
+of 8,441 generated TypeScript files across 104 directories (about 3.3 MB),
+including a shared `lib.d.ts` root under `noLib`. Corpus generation, host
+construction, semantic answer checking and teardown are outside the timer.
+The harness checks that the shared root resolves after each opening. These
+samples are advisory; the configured-project linear snapshot-visit regression
+in `global_contributors/ac3_tests.rs` checks work growth and contributor answers.
+For comparisons, run the same harness against both implementations on the
+same worker, interleaved; keep receipts in the task report, not this document.
+
 ## Common Rebuild Sequences
 
 | What changed                          | Rebuild commands (in order)                                                                            |

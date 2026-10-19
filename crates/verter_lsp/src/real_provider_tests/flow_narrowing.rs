@@ -16,15 +16,17 @@ use std::panic::AssertUnwindSafe;
 
 use futures_util::FutureExt;
 use tower_lsp_server::ls_types::{
-    Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    FileChangeType, FileEvent, NumberOrString, TextDocumentIdentifier, Uri,
+    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, FileChangeType, FileEvent, NumberOrString,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, Uri, VersionedTextDocumentIdentifier,
 };
 use tower_lsp_server::LanguageServer;
 use verter_compiler::flow_check::fixtures::Expected;
 use verter_compiler::flow_check::ide_fixtures::{self, SfcFixture};
 use verter_compiler::flow_check::seam::Span;
 
-use crate::test_harness::{real_provider_test, RealProviderTestSession};
+use crate::flow_fixture_tests::semantic_partitions;
+use crate::test_harness::{real_provider_test, PublishedWorkspaceFile, RealProviderTestSession};
 
 const FIXTURE: &str = "flow-narrowing";
 
@@ -36,97 +38,143 @@ fn code_of(diagnostic: &Diagnostic) -> u32 {
     }
 }
 
-/// The authored byte span of a merged diagnostic.
-fn authored_span(session: &RealProviderTestSession, uri: &Uri, diagnostic: &Diagnostic) -> Span {
-    let doc = session
-        .server()
-        .test_documents()
-        .get(uri)
-        .expect("the fixture is open");
-    let start = doc
-        .line_index
-        .position_to_offset(&diagnostic.range.start)
-        .expect("a mapped diagnostic starts inside the source");
-    let end = doc
-        .line_index
-        .position_to_offset(&diagnostic.range.end)
-        .expect("a mapped diagnostic ends inside the source");
-    Span::new(start, end)
+/// `None` when a stale diagnostic still refers to a longer previous source.
+fn try_authored_span(
+    session: &RealProviderTestSession,
+    uri: &Uri,
+    diagnostic: &Diagnostic,
+) -> Option<Span> {
+    let doc = session.server().test_documents().get(uri)?;
+    let start = doc.line_index.position_to_offset(&diagnostic.range.start)?;
+    let end = doc.line_index.position_to_offset(&diagnostic.range.end)?;
+    Some(Span::new(start, end))
 }
 
-/// Publish `fixture` into the workspace, open it in the server, run `body`
-/// against the open document, then close the document BEFORE its file leaves
-/// the workspace — after a panic inside `body` as well, which resumes once
-/// the cleanup ran. A document that stays open after its file is deleted is
-/// re-checked by the provider on every later project change, against a file
-/// that no longer exists; neither a passing nor a failing fixture may leave
-/// one behind for the fixtures that follow.
-async fn with_open_fixture<T, Fut>(
-    session: &RealProviderTestSession,
-    fixture: &SfcFixture,
-    body: impl FnOnce(Uri) -> Fut,
-) -> T
-where
-    Fut: Future<Output = T>,
-{
-    let relative = format!(
-        "src/{}{}.vue",
-        fixture.name,
-        if session.is_tsgo() {
-            "Tsgo"
-        } else {
-            "Tsserver"
+/// One project member for a corpus. Each case still opens its complete source
+/// through the real watched-file and editor lifecycle. The file remains on
+/// disk until all cases close, so old missing roots cannot accumulate.
+struct OpenDocument {
+    uri: Uri,
+    version: i32,
+}
+
+struct FixtureSlot {
+    relative: String,
+    file: PublishedWorkspaceFile,
+    change: FileChangeType,
+    open: Option<OpenDocument>,
+}
+
+impl FixtureSlot {
+    fn new(session: &RealProviderTestSession) -> Self {
+        let relative = format!(
+            "src/Corpus{}.vue",
+            if session.is_tsgo() {
+                "Tsgo"
+            } else {
+                "Tsserver"
+            }
+        );
+        let file = session.publish_workspace_file(&relative, "<template />");
+        Self {
+            relative,
+            file,
+            change: FileChangeType::CREATED,
+            open: None,
         }
-    );
-    let published = session.publish_workspace_file(&relative, &fixture.source);
-    session
-        .server()
-        .did_change_watched_files(DidChangeWatchedFilesParams {
-            changes: vec![FileEvent {
-                uri: session.workspace_uri(&relative),
-                typ: FileChangeType::CREATED,
-            }],
-        })
-        .await;
-    let uri = session.open_fixture_file(&relative).await;
-    let outcome = AssertUnwindSafe(body(uri.clone())).catch_unwind().await;
-    session
-        .server()
-        .did_close(DidCloseTextDocumentParams {
-            text_document: TextDocumentIdentifier { uri },
-        })
-        .await;
-    drop(published);
-    match outcome {
-        Ok(value) => value,
-        Err(payload) => std::panic::resume_unwind(payload),
+    }
+
+    async fn close(&mut self, session: &RealProviderTestSession) {
+        if let Some(open) = self.open.take() {
+            session
+                .server()
+                .did_close(DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: open.uri },
+                })
+                .await;
+        }
+    }
+
+    async fn with_fixture<T, Fut>(
+        &mut self,
+        session: &RealProviderTestSession,
+        fixture: &SfcFixture,
+        body: impl FnOnce(Uri) -> Fut,
+    ) -> T
+    where
+        Fut: Future<Output = T>,
+    {
+        self.file.replace_contents(&fixture.source);
+        let change = self.change;
+        self.change = FileChangeType::CHANGED;
+        session
+            .server()
+            .did_change_watched_files(DidChangeWatchedFilesParams {
+                changes: vec![FileEvent {
+                    uri: session.workspace_uri(&self.relative),
+                    typ: change,
+                }],
+            })
+            .await;
+        let uri = if let Some(open) = &mut self.open {
+            open.version += 1;
+            let uri = open.uri.clone();
+            let version = open.version;
+            session
+                .server()
+                .did_change(DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier {
+                        uri: uri.clone(),
+                        version,
+                    },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: fixture.source.clone(),
+                    }],
+                })
+                .await;
+            uri
+        } else {
+            let uri = session.open_fixture_file(&self.relative).await;
+            self.open = Some(OpenDocument {
+                uri: uri.clone(),
+                version: 1,
+            });
+            uri
+        };
+        let outcome = AssertUnwindSafe(body(uri)).catch_unwind().await;
+        if outcome.is_err() {
+            // A failed case must not leave an open document whose file is
+            // about to be deleted with the slot.
+            self.close(session).await;
+        }
+        match outcome {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
     }
 }
 
-/// The mapped error diagnostics of the open `fixture` once the canary proves
-/// the provider checked it.
+/// The mapped error diagnostics of the open `fixture` once its own canary
+/// proves the provider checked this source. A previous case's TS2322 does
+/// not count: the canary span is part of this fixture.
 async fn checked_errors(
     session: &RealProviderTestSession,
     fixture: &SfcFixture,
     uri: &Uri,
 ) -> Vec<Expected> {
-    // A cold provider project answers diagnostics only once it has built the
-    // program; a completion inside the canary proves it did.
-    session
-        .wait_until_ready(uri, "flowCanary", 4, "flowCanary")
-        .await;
-    for _ in 0..30 {
-        let diagnostics = session
-            .merged_diagnostics_until(uri, |diagnostics| {
-                diagnostics.iter().any(|d| code_of(d) == 2322)
-            })
-            .await;
+    session.ensure_synced(uri).await;
+    for attempt in 0..100 {
+        let diagnostics = session.server().test_merged_diagnostics(uri).await;
         let errors: Vec<Expected> = diagnostics
             .iter()
             .filter(|d| d.severity == Some(DiagnosticSeverity::ERROR))
-            .map(|d| Expected {
-                code: code_of(d),
-                authored: authored_span(session, uri, d),
+            .filter_map(|d| {
+                Some(Expected {
+                    code: code_of(d),
+                    authored: try_authored_span(session, uri, d)?,
+                })
             })
             .collect();
         if errors.contains(&Expected {
@@ -134,6 +182,9 @@ async fn checked_errors(
             authored: fixture.canary,
         }) {
             return errors;
+        }
+        if attempt < 99 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
     panic!(
@@ -177,15 +228,16 @@ fn check_exact(fixture: &SfcFixture, reported: &[Expected]) -> Result<(), String
 }
 
 /// Open `fixture`, require its exact error set, run `after` against the still
-/// open document, and close it (see [`with_open_fixture`]).
+/// open document, and close it.
 async fn assert_fixture<Fut>(
     session: &RealProviderTestSession,
+    slot: &mut FixtureSlot,
     fixture: &SfcFixture,
     after: impl FnOnce(Uri) -> Fut,
 ) where
     Fut: Future<Output = ()>,
 {
-    with_open_fixture(session, fixture, |uri| async move {
+    slot.with_fixture(session, fixture, |uri| async move {
         let reported = checked_errors(session, fixture, &uri).await;
         if let Err(mismatch) = check_exact(fixture, &reported) {
             panic!("[{}] {mismatch}", session.provider_kind().label());
@@ -195,72 +247,190 @@ async fn assert_fixture<Fut>(
     .await;
 }
 
-real_provider_test!(
-    flow_narrowing_semantics_are_exact,
-    fixture = FIXTURE,
-    async fn run(session) {
-        for fixture in ide_fixtures::semantic_suite() {
-            let fixture = &fixture;
-            assert_fixture(session, fixture, |uri| async move {
-                for hover in &fixture.hovers {
-                    let doc_position = {
-                        let doc = session
-                            .server()
-                            .test_documents()
-                            .get(&uri)
-                            .expect("the fixture is open");
-                        doc.line_index
-                            .offset_to_position(hover.authored.start)
-                            .expect("a hovered identifier lies inside the source")
-                    };
-                    let mut text = String::new();
-                    for _ in 0..20 {
-                        if let Some(found) = session.hover_text(&uri, doc_position).await {
-                            text = found;
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                    assert!(
-                        text.contains(hover.contains),
-                        "[{}] {}: the contextually typed parameter `{}` must hover as `{}`; got {text:?}",
-                        session.provider_kind().label(),
-                        fixture.name,
-                        &fixture.source[hover.authored.start as usize..hover.authored.end as usize],
-                        hover.contains,
-                    );
+async fn assert_semantic_fixture(
+    session: &RealProviderTestSession,
+    slot: &mut FixtureSlot,
+    fixture: &SfcFixture,
+) {
+    assert_fixture(session, slot, fixture, |uri| async move {
+        for hover in &fixture.hovers {
+            let doc_position = {
+                let doc = session
+                    .server()
+                    .test_documents()
+                    .get(&uri)
+                    .expect("the fixture is open");
+                doc.line_index
+                    .offset_to_position(hover.authored.start)
+                    .expect("a hovered identifier lies inside the source")
+            };
+            let mut text = String::new();
+            for _ in 0..20 {
+                if let Some(found) = session.hover_text(&uri, doc_position).await {
+                    text = found;
+                    break;
                 }
-            })
-            .await;
-        }
-    }
-);
-
-real_provider_test!(
-    flow_narrowing_linear_matrix_checks_every_callback,
-    fixture = FIXTURE,
-    async fn run(session) {
-        for &n in &verter_compiler::flow_check::fixtures::MATRIX_SIZES {
-            for fixture in [
-                ide_fixtures::flat_matrix(n, false),
-                ide_fixtures::flat_matrix(n, true),
-                ide_fixtures::nested_matrix(n, false),
-                ide_fixtures::nested_matrix(n, true),
-                ide_fixtures::component_matrix(n, false),
-                ide_fixtures::component_matrix(n, true),
-            ] {
-                assert_fixture(session, &fixture, |_| async {}).await;
-                if fixture.name.ends_with("Broken") {
-                    // One planted error per callback (plus the canary): every
-                    // callback body was type-checked.
-                    assert_eq!(
-                        fixture.expected.len(),
-                        fixture.guarded_callbacks + 1,
-                        "{}: one planted error per callback",
-                        fixture.name
-                    );
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
+            assert!(
+                text.contains(hover.contains),
+                "[{}] {}: the contextually typed parameter `{}` must hover as `{}`; got {text:?}",
+                session.provider_kind().label(),
+                fixture.name,
+                &fixture.source[hover.authored.start as usize..hover.authored.end as usize],
+                hover.contains,
+            );
+        }
+    })
+    .await;
+}
+
+async fn run_semantic_partition(session: &RealProviderTestSession, index: usize) {
+    let partitions = semantic_partitions();
+    let fixtures = partitions
+        .get(index)
+        .unwrap_or_else(|| panic!("semantic partition {index} is missing"));
+    let mut slot = FixtureSlot::new(session);
+    for fixture in fixtures {
+        assert_semantic_fixture(session, &mut slot, fixture).await;
+    }
+    slot.close(session).await;
+}
+
+macro_rules! narrowing_partition {
+    ($name:ident, $index:literal) => {
+        real_provider_test!(
+            $name,
+            fixture = FIXTURE,
+            async fn run(session) {
+                run_semantic_partition(session, $index).await;
+            }
+        );
+    };
+}
+
+narrowing_partition!(flow_narrowing_semantics_are_exact, 0);
+narrowing_partition!(flow_narrowing_semantics_partition_1, 1);
+narrowing_partition!(flow_narrowing_semantics_partition_2, 2);
+narrowing_partition!(flow_narrowing_semantics_partition_3, 3);
+narrowing_partition!(flow_narrowing_semantics_partition_4, 4);
+narrowing_partition!(flow_narrowing_semantics_partition_5, 5);
+narrowing_partition!(flow_narrowing_semantics_partition_6, 6);
+narrowing_partition!(flow_narrowing_semantics_partition_7, 7);
+narrowing_partition!(flow_narrowing_semantics_partition_8, 8);
+narrowing_partition!(flow_narrowing_semantics_partition_9, 9);
+narrowing_partition!(flow_narrowing_semantics_partition_10, 10);
+narrowing_partition!(flow_narrowing_semantics_partition_11, 11);
+narrowing_partition!(flow_narrowing_semantics_partition_12, 12);
+narrowing_partition!(flow_narrowing_semantics_partition_13, 13);
+narrowing_partition!(flow_narrowing_semantics_partition_14, 14);
+narrowing_partition!(flow_narrowing_semantics_partition_15, 15);
+narrowing_partition!(flow_narrowing_semantics_partition_16, 16);
+narrowing_partition!(flow_narrowing_semantics_partition_17, 17);
+narrowing_partition!(flow_narrowing_semantics_partition_18, 18);
+narrowing_partition!(flow_narrowing_semantics_partition_19, 19);
+narrowing_partition!(flow_narrowing_semantics_partition_20, 20);
+narrowing_partition!(flow_narrowing_semantics_partition_21, 21);
+narrowing_partition!(flow_narrowing_semantics_partition_22, 22);
+narrowing_partition!(flow_narrowing_semantics_partition_23, 23);
+narrowing_partition!(flow_narrowing_semantics_partition_24, 24);
+narrowing_partition!(flow_narrowing_semantics_partition_25, 25);
+narrowing_partition!(flow_narrowing_semantics_partition_26, 26);
+
+async fn run_narrowing_matrix(session: &RealProviderTestSession, fixtures: Vec<SfcFixture>) {
+    let mut slot = FixtureSlot::new(session);
+    for fixture in &fixtures {
+        assert_fixture(session, &mut slot, fixture, |_| async {}).await;
+        if fixture.name.ends_with("Broken") {
+            // One planted error per callback (plus the canary): every
+            // callback body was type-checked.
+            assert_eq!(
+                fixture.expected.len(),
+                fixture.guarded_callbacks + 1,
+                "{}: one planted error per callback",
+                fixture.name
+            );
         }
     }
+    slot.close(session).await;
+}
+
+/// One provider session per matrix size. 128, 256, 512 and 1024 each publish
+/// and require exact diagnostics. A single session walking every size exceeded
+/// the debug budget. `assert_production_matrix_growth` counts linearity; it
+/// does not replace this sweep.
+macro_rules! narrowing_matrix_case {
+    ($name:ident, $build:ident, $broken:literal) => {
+        paste::paste! {
+            real_provider_test!(
+                [<$name _128>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(128, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _256>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(256, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _512>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(512, $broken)]).await;
+                }
+            );
+            real_provider_test!(
+                [<$name _1024>],
+                fixture = FIXTURE,
+                async fn run(session) {
+                    run_narrowing_matrix(session, vec![ide_fixtures::$build(1024, $broken)]).await;
+                }
+            );
+        }
+    };
+}
+
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_every_callback,
+    flat_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_every_callback_broken,
+    flat_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_callbacks,
+    nested_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_callbacks_broken,
+    nested_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_component_callbacks,
+    component_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_component_callbacks_broken,
+    component_matrix,
+    true
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_component_callbacks,
+    nested_component_matrix,
+    false
+);
+narrowing_matrix_case!(
+    flow_narrowing_linear_matrix_checks_nested_component_callbacks_broken,
+    nested_component_matrix,
+    true
 );

@@ -33,6 +33,7 @@ use verter_session_query::flow::policy::{
     ClassExpressionClause, FlowGap, FlowReturnPolicy, NullabilityPolicy,
 };
 use verter_session_query::inputs::budget::BudgetExceededFailure;
+use verter_type_expr::{OwnedSlice, OwnedStr};
 
 use std::sync::Arc;
 
@@ -89,7 +90,10 @@ pub use intersection_input::{
 pub mod fact_result;
 #[cfg(test)]
 mod fact_result_tests;
-pub use fact_result::{ExecutionAbort, FactResult, FactStatus, MemberDomain};
+pub use fact_result::{
+    root_narrowing_fact, summarize, ExecutionAbort, FactInterpretation, FactResult, FactStatus,
+    MemberDomain,
+};
 pub mod outcome;
 pub mod stable_key;
 #[cfg(test)]
@@ -104,6 +108,9 @@ mod outcome_tests;
 #[cfg(test)]
 mod semantic_context_tests;
 
+pub(crate) mod allocation_footprint;
+/// The heap a graph payload owns beyond its inline record.
+pub(crate) mod node_payload_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
 /// The result is an opaque correlated formula. Exact absence, emptiness,
@@ -203,7 +210,9 @@ pub type HashValue = Hash16;
 /// graph. The ID is handed out by the graph interner and is only meaningful
 /// inside one [`ProjectTypeStore`](crate::project_type_store::ProjectTypeStore)
 /// for one project generation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, verter_retention::heap_size::HeapSize,
+)]
 pub struct SemanticNodeId(pub u64);
 
 /// Canonical lexical identity of one conditional-`infer` declaration.
@@ -239,7 +248,6 @@ mod object_spread_program_contract_tests {
         ObjectConstructionEffect, ObjectSpreadProgram, SemanticNodeData, SemanticNodeId,
     };
     use std::hash::{DefaultHasher, Hash, Hasher};
-    use std::sync::Arc;
 
     fn hash_of(value: &SemanticNodeData) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -253,15 +261,15 @@ mod object_spread_program_contract_tests {
         let spread = SemanticNodeId(22);
         let construct = SemanticNodeId(33);
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectConstruct(construct),
             ]),
         };
-        let node = SemanticNodeData::ObjectSpreadProgram(program.clone());
+        let node = SemanticNodeData::ObjectSpreadProgram(program.share());
         let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::DirectConstruct(construct),
@@ -282,7 +290,7 @@ mod object_spread_program_contract_tests {
             (
                 verter_type_expr::MemberVisibility::Private,
                 verter_type_expr::MemberSpans::default(),
-                Some(Arc::<str>::from("/src/object.ts")),
+                Some(verter_type_expr::OwnedStr::from("/src/object.ts")),
                 MacroOwnBodyStamp::NEUTRAL,
                 MergeRoleStamp::NEUTRAL,
                 verter_type_expr::ExcessPropertyOrigin::FreshOwn,
@@ -328,13 +336,13 @@ mod object_spread_program_contract_tests {
         };
         let unique_symbol = DeclIdentity::synthetic("symbol");
         let unique_symbol_identity = verter_type_expr::facts::ValueDeclIdentityPart {
-            canonical_id: Arc::clone(&unique_symbol.canonical_id),
+            canonical_id: unique_symbol.canonical_id.clone(),
             owner: unique_symbol.owner,
-            symbol: Arc::clone(&unique_symbol.decl_name),
-            member_path: Arc::from([]),
+            symbol: unique_symbol.decl_name.clone(),
+            member_path: verter_type_expr::OwnedSlice::from([]),
         };
         let program = ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectProperty(property),
                 ObjectConstructionEffect::DirectMethod(method),
                 ObjectConstructionEffect::DirectGet(accessor(
@@ -459,7 +467,7 @@ impl InferBinderFactory {
         verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
             verter_type_expr::locators::TypeBodySlot {
                 anchor: locator.anchor.clone(),
-                path: Arc::from(path.into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
             },
         )
     }
@@ -727,7 +735,7 @@ pub struct ScopeId {
     /// Canonical file id the declaration-lookup is rooted in. Carries the
     /// version indirectly via any [`ResolveDeclKey`] whose scope points to a
     /// specific `(canonical_id, whole_hash)` artifact.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Exact authored top-level owner within `canonical_id`. Module and
     /// instance scripts are disjoint lexical scopes even when they declare the
     /// same name at the same source generation.
@@ -757,9 +765,12 @@ pub struct ScopeId {
 
 impl ScopeId {
     /// A file top-level scope rooted in an exact authored owner.
-    pub fn file(canonical_id: Arc<str>, owner: verter_type_expr::TopLevelOwnerId) -> Self {
+    pub fn file(
+        canonical_id: impl Into<OwnedStr>,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> Self {
         Self {
-            canonical_id,
+            canonical_id: canonical_id.into(),
             owner,
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(owner),
@@ -780,12 +791,12 @@ pub enum BinderScopeKind {
     /// dotted qualified name (`"NS"` / `"NS.Inner"`). Two same-name blocks
     /// in one owner are ONE scope (TS declaration merging), so they share
     /// the id by construction.
-    Namespace { qualified_name: Arc<str> },
+    Namespace { qualified_name: OwnedStr },
     /// A `declare global { … }` augmentation block.
     AugmentationGlobal,
     /// A `declare module "<specifier>" { … }` augmentation block,
     /// identified by the raw authored specifier.
-    AugmentationModule { specifier: Arc<str> },
+    AugmentationModule { specifier: OwnedStr },
 }
 
 /// Stable STRUCTURAL lexical-scope id — the query-identity projection of
@@ -851,7 +862,7 @@ impl BinderScopeId {
     #[must_use]
     pub fn namespace_scope(
         owner: verter_type_expr::TopLevelOwnerId,
-        qualified_name: Arc<str>,
+        qualified_name: OwnedStr,
     ) -> Self {
         Self {
             structural_hash: Self::derive(b'N', owner, qualified_name.as_ref()),
@@ -871,7 +882,7 @@ impl BinderScopeId {
     #[must_use]
     pub fn augmentation_module_scope(
         owner: verter_type_expr::TopLevelOwnerId,
-        specifier: Arc<str>,
+        specifier: OwnedStr,
     ) -> Self {
         Self {
             structural_hash: Self::derive(b'M', owner, specifier.as_ref()),
@@ -907,7 +918,7 @@ pub enum NodeScopeId {
     /// optionally disambiguates inner scopes (block, lambda body,
     /// type-param scope).
     File {
-        canonical_id: Arc<str>,
+        canonical_id: OwnedStr,
         /// Exact authored top-level owner within `canonical_id`.
         owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
@@ -926,10 +937,10 @@ impl NodeScopeId {
     /// of where the member's VALUE type resolves (a member whose value is an
     /// unresolved / scope-less node still has a real declaration file).
     #[must_use]
-    pub fn canonical_file(&self) -> Option<Arc<str>> {
+    pub fn canonical_file(&self) -> Option<OwnedStr> {
         match self {
             Self::Global => None,
-            Self::File { canonical_id, .. } => Some(Arc::clone(canonical_id)),
+            Self::File { canonical_id, .. } => Some(canonical_id.clone()),
         }
     }
 
@@ -1005,7 +1016,7 @@ pub enum LocalScopePayload {
         /// The enclosing namespace's dotted prefix WITHOUT the trailing dot
         /// (`"NS"` for `namespace NS { ... }`, `"NS.Inner"` for a nested
         /// `namespace NS { namespace Inner { ... } }`).
-        prefix: Arc<str>,
+        prefix: OwnedStr,
         /// Which sibling inventory the namespace's members are drawn from.
         origin: LocalScopeOrigin,
     },
@@ -1016,7 +1027,7 @@ pub enum LocalScopePayload {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolveDeclKey {
     pub scope: ScopeId,
-    pub name: Arc<str>,
+    pub name: OwnedStr,
 }
 
 /// Declaration identity for [`SemanticNodeData::TypeParam`].
@@ -1037,10 +1048,10 @@ pub struct ResolveDeclKey {
 /// `TypeParam` nodes without a real declaration context.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclIdentity {
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     pub owner: verter_type_expr::TopLevelOwnerId,
     pub whole_hash: HashValue,
-    pub decl_name: Arc<str>,
+    pub decl_name: OwnedStr,
 }
 
 impl DeclIdentity {
@@ -1050,10 +1061,11 @@ impl DeclIdentity {
     /// `whole_hash == 0`; non-global scopes carry their file identity
     /// forward.
     #[must_use]
-    pub fn from_scope(scope: &NodeScopeId, decl_name: Arc<str>) -> Self {
+    pub fn from_scope(scope: &NodeScopeId, decl_name: impl Into<OwnedStr>) -> Self {
+        let decl_name = decl_name.into();
         match scope {
             NodeScopeId::Global => Self {
-                canonical_id: Arc::from(""),
+                canonical_id: OwnedStr::from(""),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 whole_hash: HashValue::default(),
                 decl_name,
@@ -1064,7 +1076,7 @@ impl DeclIdentity {
                 whole_hash,
                 ..
             } => Self {
-                canonical_id: Arc::clone(canonical_id),
+                canonical_id: canonical_id.clone(),
                 owner: *owner,
                 whole_hash: *whole_hash,
                 decl_name,
@@ -1079,10 +1091,10 @@ impl DeclIdentity {
     #[must_use]
     pub fn synthetic(display_name: &str) -> Self {
         Self {
-            canonical_id: Arc::from("<synthetic>"),
+            canonical_id: OwnedStr::from("<synthetic>"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: HashValue::default(),
-            decl_name: Arc::from(display_name),
+            decl_name: OwnedStr::from(display_name),
         }
     }
 
@@ -1102,9 +1114,9 @@ impl DeclIdentity {
     #[must_use]
     pub fn to_type_slot_unscoped(&self) -> ResolvedDeclSlotIdentity {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::clone(&self.canonical_id),
+            self.canonical_id.clone(),
             self.owner,
-            Arc::clone(&self.decl_name),
+            self.decl_name.clone(),
         )
     }
 }
@@ -1128,7 +1140,7 @@ pub struct EnumLiteralType {
     /// (`NS.Inner`), which is how the checker prints it.
     pub enum_decl: DeclIdentity,
     /// The member's name.
-    pub member: Arc<str>,
+    pub member: OwnedStr,
     /// The value the member stands for.
     pub base: SemanticNodeId,
     /// How many members the enum declares (across every declaration of a
@@ -1166,39 +1178,41 @@ pub enum PrintedUnionArm {
     Enum(DeclIdentity),
 }
 
-/// A union's constituents as the checker prints them: a union holding
-/// every member of an enum prints the enum's name in place of them, where
-/// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
-/// `E3.A | E3.B` over a three-member `E3` prints both members).
-pub fn printed_union_arms(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    members: &[SemanticNodeId],
-) -> Vec<PrintedUnionArm> {
-    let literals: Vec<Option<EnumLiteralType>> = members
-        .iter()
-        .map(|member| match graph.node_data(*member).as_deref() {
-            Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
-            _ => None,
-        })
-        .collect();
-    let mut present: std::collections::HashMap<&DeclIdentity, u32> =
-        std::collections::HashMap::new();
-    for literal in literals.iter().flatten() {
-        *present.entry(&literal.enum_decl).or_default() += 1;
-    }
-    let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
-    let mut arms = Vec::with_capacity(members.len());
-    for (member, literal) in members.iter().zip(literals.iter()) {
-        match literal {
-            Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
-                if printed.insert(&literal.enum_decl) {
-                    arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
-                }
-            }
-            _ => arms.push(PrintedUnionArm::Node(*member)),
+construction_ordinal_seam! {
+    /// A union's constituents as the checker prints them: a union holding
+    /// every member of an enum prints the enum's name in place of them, where
+    /// its first member stands (`E.A | E.B` over a two-member `E` prints `E`;
+    /// `E3.A | E3.B` over a three-member `E3` prints both members).
+    fn printed_union_arms(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> Vec<PrintedUnionArm> {
+        let literals: Vec<Option<EnumLiteralType>> = members
+            .iter()
+            .map(|member| match graph.node_data(*member).as_deref() {
+                Some(SemanticNodeData::EnumLiteral(literal)) => Some(literal.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+            std::collections::HashMap::new();
+        for literal in literals.iter().flatten() {
+            *present.entry(&literal.enum_decl).or_default() += 1;
         }
+        let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+        let mut arms = Vec::with_capacity(members.len());
+        for (member, literal) in members.iter().zip(literals.iter()) {
+            match literal {
+                Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
+                    if printed.insert(&literal.enum_decl) {
+                        arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
+                    }
+                }
+                _ => arms.push(PrintedUnionArm::Node(*member)),
+            }
+        }
+        arms
     }
-    arms
 }
 
 /// Identity of one class EXPRESSION — the payload of
@@ -1214,7 +1228,7 @@ pub fn printed_union_arms(
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClassExpressionIdentity {
     /// The file the class expression is authored in.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// The authored top-level owner within `canonical_id`.
     pub owner: verter_type_expr::TopLevelOwnerId,
     /// The class expression's start offset in `canonical_id`.
@@ -1223,11 +1237,11 @@ pub struct ClassExpressionIdentity {
     /// (`class Foo {}`), else the name it is assigned to (`const C = class
     /// {}`, `{ C: class {} }`, `C = class {}`), else the checker's
     /// `(Anonymous class)`.
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The type-parameter clauses that enclose the class — its OUTER type
     /// parameters, outermost clause first, a class member's class clause
     /// before the member's own.
-    pub outer_clauses: Arc<[ClassExpressionClause]>,
+    pub outer_clauses: OwnedSlice<ClassExpressionClause>,
     /// How many type parameters the class declares itself; a reference
     /// prints their arguments after the name (`(Anonymous class)<string>`).
     pub own_arity: u32,
@@ -1290,21 +1304,23 @@ impl ClassExpressionIdentity {
         printed
     }
 
-    /// [`Self::printed_name`] over `store`: an argument is its clause's
-    /// parameter when it is the type parameter of that name.
-    #[must_use]
-    pub fn printed_name_in(
-        &self,
-        store: &crate::semantic_query_memo::SemanticGraphStore,
-        type_arguments: &[SemanticNodeId],
-    ) -> String {
-        self.printed_name(type_arguments, |argument, name| {
-            matches!(
-                store.node_data(argument).as_deref(),
-                Some(SemanticNodeData::TypeParam { display_name, .. })
-                    if display_name.as_ref() == name
-            )
-        })
+    construction_ordinal_seam! {
+        /// [`Self::printed_name`] over `store`: an argument is its clause's
+        /// parameter when it is the type parameter of that name.
+        #[must_use]
+        fn printed_name_in(
+            &self,
+            store: &crate::semantic_query_memo::SemanticGraphStore,
+            type_arguments: &[SemanticNodeId],
+        ) -> String {
+            self.printed_name(type_arguments, |argument, name| {
+                matches!(
+                    store.node_data(argument).as_deref(),
+                    Some(SemanticNodeData::TypeParam { display_name, .. })
+                        if display_name.as_ref() == name
+                )
+            })
+        }
     }
 
     /// The arguments a reference passes to the class's OWN type
@@ -1337,16 +1353,16 @@ impl ClassExpressionIdentity {
 /// [`SemanticNodeId`], a `value_node` ordinal, or any other content/version
 /// hash. The architecture guard `synthetic_binding_identity_is_content_free`
 /// pins it.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct SyntheticBindingId {
     /// Canonical id of the component scope the binding lives in.
-    pub scope_canonical_id: Arc<str>,
+    pub scope_canonical_id: OwnedStr,
     /// Slot-binding vs `defineSlots` binding surface discriminator.
     pub surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind,
     /// Owning slot name (`None` for a non-slot binding surface).
-    pub slot_name: Option<Arc<str>>,
+    pub slot_name: Option<OwnedStr>,
     /// The bound name.
-    pub binding_name: Arc<str>,
+    pub binding_name: OwnedStr,
 }
 
 impl SyntheticBindingId {
@@ -1356,10 +1372,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn from_carrier_key(key: &verter_type_expr::SyntheticCarrierKey) -> Self {
         Self {
-            scope_canonical_id: Arc::clone(&key.scope_canonical_id),
+            scope_canonical_id: key.scope_canonical_id.clone(),
             surface_kind: key.surface_kind,
-            slot_name: key.slot_name.clone(),
-            binding_name: Arc::clone(&key.binding_name),
+            slot_name: key.slot_name.as_ref().map(OwnedStr::from),
+            binding_name: key.binding_name.clone(),
         }
     }
 
@@ -1370,10 +1386,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn to_carrier_key(&self, value_node: u64) -> verter_type_expr::SyntheticCarrierKey {
         verter_type_expr::SyntheticCarrierKey {
-            scope_canonical_id: Arc::clone(&self.scope_canonical_id),
+            scope_canonical_id: self.scope_canonical_id.clone(),
             surface_kind: self.surface_kind,
             slot_name: self.slot_name.clone(),
-            binding_name: Arc::clone(&self.binding_name),
+            binding_name: self.binding_name.clone(),
             value_node,
         }
     }
@@ -1452,12 +1468,12 @@ pub struct ResolvedDeclSlotIdentity {
     /// Canonical id of the declaring file. NOT the consumer scope —
     /// see audit doc `.claude/skills/component-meta/SKILL.md`
     /// (a) for the `local_fence_seed` derivation rationale.
-    pub defining_canonical: Arc<str>,
+    pub defining_canonical: OwnedStr,
     /// Exact authored top-level owner inside `defining_canonical`.
     pub owner: verter_type_expr::TopLevelOwnerId,
     /// Stable merged-symbol name. Invariant under declaration
     /// reordering AND under TS declaration merging.
-    pub merged_symbol_name: Arc<str>,
+    pub merged_symbol_name: OwnedStr,
     /// Type-space vs value-space discriminator.
     pub symbol_space: SemanticSymbolSpace,
     /// The typed slot env tail: sealed `T` / `L` / `J` dimensions
@@ -1471,17 +1487,17 @@ impl ResolvedDeclSlotIdentity {
     /// Build a slot identity for a type-space declaration.
     #[must_use]
     pub fn type_slot(
-        defining_canonical: Arc<str>,
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         project_identity: u32,
         type_env_hash: HashValue,
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            merged_symbol_name,
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space: SemanticSymbolSpace::Type,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
@@ -1490,17 +1506,17 @@ impl ResolvedDeclSlotIdentity {
     /// Build a slot identity for a value-space declaration.
     #[must_use]
     pub fn value_slot(
-        defining_canonical: Arc<str>,
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         project_identity: u32,
         type_env_hash: HashValue,
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            merged_symbol_name,
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space: SemanticSymbolSpace::Value,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
@@ -1521,9 +1537,9 @@ impl ResolvedDeclSlotIdentity {
     /// the arch guard `no_production_caller_of_zero_env_slot_constructors`.
     #[must_use]
     pub fn type_slot_unscoped(
-        canonical: Arc<str>,
+        canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        name: Arc<str>,
+        name: impl Into<OwnedStr>,
     ) -> Self {
         Self::type_slot(
             canonical,
@@ -1543,9 +1559,9 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn builtin_unscoped(name: &str) -> Self {
         Self::type_slot_unscoped(
-            Arc::from("__builtin__"),
+            "__builtin__",
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            name,
         )
     }
 
@@ -1575,9 +1591,9 @@ impl ResolvedDeclSlotIdentity {
         lib_env_hash: HashValue,
     ) -> Self {
         Self {
-            defining_canonical: Arc::clone(&identity.canonical_id),
+            defining_canonical: identity.canonical_id.clone(),
             owner: identity.owner,
-            merged_symbol_name: Arc::clone(&identity.decl_name),
+            merged_symbol_name: identity.decl_name.clone(),
             symbol_space,
             env: SlotEnvIdentity::from_raw(project_identity, type_env_hash, lib_env_hash),
         }
@@ -1599,9 +1615,9 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn with_symbol_space(&self, symbol_space: SemanticSymbolSpace) -> Self {
         Self {
-            defining_canonical: Arc::clone(&self.defining_canonical),
+            defining_canonical: self.defining_canonical.clone(),
             owner: self.owner,
-            merged_symbol_name: Arc::clone(&self.merged_symbol_name),
+            merged_symbol_name: self.merged_symbol_name.clone(),
             symbol_space,
             env: self.env,
         }
@@ -1615,9 +1631,9 @@ impl ResolvedDeclSlotIdentity {
     #[must_use]
     pub fn seed(&self) -> DeclarationSlotSeed {
         DeclarationSlotSeed {
-            defining_canonical: Arc::clone(&self.defining_canonical),
+            defining_canonical: self.defining_canonical.clone(),
             owner: self.owner,
-            merged_symbol_name: Arc::clone(&self.merged_symbol_name),
+            merged_symbol_name: self.merged_symbol_name.clone(),
             symbol_space: self.symbol_space,
         }
     }
@@ -1653,9 +1669,9 @@ impl FlowFunctionSlotIdentity {
         &self,
     ) -> verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
         verter_session_query::facts::fact_cache::ProgramAnalysisFunctionRef {
-            canonical_id: Arc::clone(&self.declaration_slot.defining_canonical),
+            canonical_id: self.declaration_slot.defining_canonical.clone(),
             owner: self.declaration_slot.owner,
-            merged_symbol_name: Arc::clone(&self.declaration_slot.merged_symbol_name),
+            merged_symbol_name: self.declaration_slot.merged_symbol_name.clone(),
             symbol_space: match self.declaration_slot.symbol_space {
                 SemanticSymbolSpace::Type => verter_session_query::facts::SymbolSpace::Type,
                 SemanticSymbolSpace::Value => verter_session_query::facts::SymbolSpace::Value,
@@ -1675,22 +1691,87 @@ impl FlowFunctionSlotIdentity {
 /// definitions NEVER enter this map — only type parameters bound by the
 /// demanding instantiation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct CanonicalTypeSubstitution(Arc<[(SemanticNodeId, SemanticNodeId)]>);
+pub struct CanonicalTypeSubstitution(
+    OwnedSlice<(SemanticNodeId, SemanticNodeId)>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl CanonicalTypeSubstitution {
+    /// The heap the substitution keeps: its pair list's block and its root
+    /// attachment's owner.
+    pub(crate) fn retained_heap_bytes(&self) -> usize {
+        verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of_val::<
+            [(SemanticNodeId, SemanticNodeId)],
+        >(&self.0))
+            + self.1 .0.heap_bytes()
+    }
+
     /// The empty substitution.
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::new().into_boxed_slice()))
+        Self(
+            verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
-    /// Canonicalize `(type_parameter, bound)` pairs: sorted and
-    /// deduplicated by the parameter node (first binding wins).
+    /// Canonicalize `(type_parameter, bound)` pairs of `graph`: sorted and
+    /// deduplicated by the parameter node (first binding wins). The
+    /// substitution owns its operands in `graph`.
     #[must_use]
-    pub fn new(mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>) -> Self {
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, operands)
+        })
+    }
+
+    /// [`Self::new`] for the graph whose arena is `arena`; `None` when the
+    /// issuer is bound to no graph and so owns no graph operand.
+    pub(crate) fn new_in_arena(
+        arena: Option<&Arc<crate::semantic_query_memo::arena::NodeArenaCore>>,
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            arena.map_or_else(Default::default, |arena| {
+                crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_arena(arena, operands)
+            })
+        })
+    }
+
+    /// [`Self::new`] for bindings derived from `sources`, owned in the graph
+    /// that issued them.
+    pub(crate) fn derived_from(
+        sources: &[&Self],
+        bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+    ) -> Self {
+        Self::rooted(bindings, |operands| {
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::derived_from(
+                sources.iter().map(|source| &source.1),
+                operands,
+            )
+        })
+    }
+
+    fn rooted(
+        mut bindings: Vec<(SemanticNodeId, SemanticNodeId)>,
+        root: impl FnOnce(
+            &mut dyn Iterator<Item = SemanticNodeId>,
+        ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+    ) -> Self {
         bindings.sort_by_key(|(param, _)| param.0);
         bindings.dedup_by_key(|(param, _)| param.0);
-        Self(Arc::from(bindings.into_boxed_slice()))
+        let roots = root(
+            &mut bindings
+                .iter()
+                .flat_map(|&(parameter, value)| [parameter, value]),
+        );
+        Self(
+            verter_type_expr::OwnedSlice::from(bindings.into_boxed_slice()),
+            roots,
+        )
     }
 
     /// The canonical bindings.
@@ -1771,7 +1852,7 @@ impl ReturnProjectionDemand {
 pub struct FlowInputContext {
     /// Contextual parameter-type bindings pre-bound by the demanding
     /// call, in parameter order (empty = no contextual input).
-    pub contextual_parameters: Arc<[SemanticNodeId]>,
+    pub contextual_parameters: OwnedSlice<SemanticNodeId>,
 }
 
 impl FlowInputContext {
@@ -1803,7 +1884,7 @@ pub struct FlowReturnKey {
     pub function: FlowFunctionSlotIdentity,
     /// Normalized type arguments of the demanding instantiation
     /// (concatenation order matters).
-    pub normalized_type_args: Arc<[SemanticNodeId]>,
+    pub normalized_type_args: OwnedSlice<SemanticNodeId>,
     /// Env + substitution + policy.
     pub context: FlowReturnContext,
     /// The demanded return-projection point (whole-return is the
@@ -1980,6 +2061,8 @@ pub enum FlowReturnUnsupported {
 /// the obligation runtime's caller-return shape, never a cache value.
 #[derive(Debug, Clone)]
 pub enum FlowReturnStep {
+    /// Execution evidence is invalid. No evaluated value may escape.
+    Aborted(ExecutionAbort),
     /// Complete evaluation: the admitted result.
     #[allow(dead_code)] // the caller-return payload; consumed by the sealed helper
     Complete(FlowReturnResult),
@@ -2211,6 +2294,9 @@ pub struct SignatureNodeOccurrence {
     pub signature_ordinal: u32,
 }
 
+/// An owned flow source whose return value has not been adopted.
+pub use crate::project_semantic_dispatch::flow_return_fact::DeferredFlowReturnSource;
+
 /// Where a signature's return type comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SignatureReturnCarrier {
@@ -2218,6 +2304,57 @@ pub enum SignatureReturnCarrier {
     Declared(SemanticNodeId),
     /// A body-derived return, served by the `FlowReturn` producer.
     Function(verter_type_expr::facts::FunctionReturnSource),
+    /// An owned body source whose return value has not been demanded.
+    DeferredFlow(DeferredFlowReturnSource),
+    /// An evaluated return slot whose owned source still supplies later body recipes.
+    EvaluatedFlow(DeferredFlowReturnSource),
+}
+
+/// The existing return authority, borrowed for a value demand or body recipe.
+pub(crate) enum SignatureResultSource<'a> {
+    Declared(&'a SemanticNodeId),
+    Function(&'a verter_type_expr::facts::FunctionReturnSource),
+}
+
+impl SignatureReturnCarrier {
+    pub(crate) fn result_source(&self) -> SignatureResultSource<'_> {
+        match self {
+            Self::Declared(node) => SignatureResultSource::Declared(node),
+            Self::Function(source) => SignatureResultSource::Function(source),
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => {
+                SignatureResultSource::Function(source.source())
+            }
+        }
+    }
+
+    pub(crate) fn owned_flow_source(&self) -> Option<&DeferredFlowReturnSource> {
+        match self {
+            Self::DeferredFlow(source) | Self::EvaluatedFlow(source) => Some(source),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn map_source_images(
+        &self,
+        map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<Self> {
+        match self {
+            Self::DeferredFlow(source) => Some(Self::DeferredFlow(source.map_images(map))),
+            Self::EvaluatedFlow(source) => Some(Self::EvaluatedFlow(source.map_images(map))),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn flow_identity(
+        &self,
+    ) -> Option<&verter_type_expr::facts::FlowFunctionReturnIdentity> {
+        match self.result_source() {
+            SignatureResultSource::Function(
+                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
+            ) => Some(identity),
+            _ => None,
+        }
+    }
 }
 
 /// The admitted value of a `ResolveCall` query. Only a COMPLETE evaluation
@@ -2250,7 +2387,7 @@ pub enum ResolvedCallResult {
         /// to its base primitive, an object-member position widens every
         /// listed constituent, and a `const` initializer records them as
         /// the binding's widening membership.
-        fresh_literal_returns: std::sync::Arc<[SemanticNodeId]>,
+        fresh_literal_returns: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
         /// The diagnostic the checker reports when NO candidate applies
         /// and this is its error-recovery candidate
         /// (`getCandidateForOverloadFailure`): the call's value is then
@@ -2318,21 +2455,20 @@ pub enum ResolveCallFailure {
     NotCallable,
     /// Every visible candidate was definitely inapplicable.
     NoApplicableOverload,
+    /// A definite applicability failure with a checker diagnostic. The
+    /// diagnostic travels with the refusal; it is never a successful value.
+    Diagnosed(CheckerDiagnostic),
     /// Applicability depended on unsupported or unresolved semantic work.
     Undecidable,
     /// The call-resolution work envelope tripped.
     Budget,
-    /// A type parameter no other argument infers occurs in the return of
-    /// the contextual signature a context-sensitive function argument is
-    /// checked under: the checker infers it from what that function
-    /// returns, which applicability does not model. Undecided like
-    /// [`Self::Undecidable`], but no rail may answer the call with the
-    /// parameter's fallback instead. `contextual` names the first
-    /// context-sensitive argument (its position) and the contextual type it
-    /// is checked under, instantiated with the inferences of the arguments
-    /// before it: the caller types that argument under it and asks again —
-    /// the checker's second inference pass. `None` when the callee has
-    /// several candidates, each of which would type it differently.
+    /// A transient request to contextually type one argument, never a call
+    /// value or an admissible memo result. `contextual` names its position
+    /// and the type supplied by the candidate's current inferences. The flow
+    /// route evaluates that callback and resumes the candidate's collector;
+    /// losing candidates discard their inference deposits. `None` means the
+    /// argument cannot be continued by the requesting rail. No rail may use
+    /// an uninferred parameter's fallback as the call's answer meanwhile.
     ContextSensitiveInference {
         contextual: Option<(u32, SemanticNodeId)>,
     },
@@ -2372,12 +2508,12 @@ pub enum ResolveCallFailure {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeclarationSlotSeed {
     /// Canonical id of the declaring file.
-    pub defining_canonical: Arc<str>,
+    pub defining_canonical: OwnedStr,
     /// Exact authored top-level owner inside `defining_canonical`.
     pub owner: verter_type_expr::TopLevelOwnerId,
     /// Stable merged-symbol name (invariant under declaration
     /// reordering and TS declaration merging).
-    pub merged_symbol_name: Arc<str>,
+    pub merged_symbol_name: OwnedStr,
     /// Type-space vs value-space vs namespace discriminator.
     pub symbol_space: SemanticSymbolSpace,
 }
@@ -2385,16 +2521,16 @@ pub struct DeclarationSlotSeed {
 impl DeclarationSlotSeed {
     /// Build a seed from its four identity fields.
     #[must_use]
-    pub const fn new(
-        defining_canonical: Arc<str>,
+    pub fn new(
+        defining_canonical: impl Into<OwnedStr>,
         owner: verter_type_expr::TopLevelOwnerId,
-        merged_symbol_name: Arc<str>,
+        merged_symbol_name: impl Into<OwnedStr>,
         symbol_space: SemanticSymbolSpace,
     ) -> Self {
         Self {
-            defining_canonical,
+            defining_canonical: defining_canonical.into(),
             owner,
-            merged_symbol_name,
+            merged_symbol_name: merged_symbol_name.into(),
             symbol_space,
         }
     }
@@ -2432,8 +2568,8 @@ impl DeclarationSlotSeed {
 #[must_use]
 pub fn value_root_of(value_slot: &ResolvedDeclSlotIdentity) -> ValueRootKey {
     ValueRootKey {
-        scope: ScopeId::file(Arc::clone(&value_slot.defining_canonical), value_slot.owner),
-        name: Arc::clone(&value_slot.merged_symbol_name),
+        scope: ScopeId::file(value_slot.defining_canonical.clone(), value_slot.owner),
+        name: value_slot.merged_symbol_name.clone(),
     }
 }
 
@@ -2556,7 +2692,7 @@ pub enum SemanticRef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ValueRootKey {
     pub scope: ScopeId,
-    pub name: Arc<str>,
+    pub name: OwnedStr,
 }
 
 /// Optionality modifier for mapped-type `[K in ...]?` rewrites.
@@ -2603,72 +2739,76 @@ pub enum MapperKind {
 }
 
 impl MapperKind {
-    /// Classify `value_expr` against `source` and `mapper_param` by
-    /// checking whether it is structurally the identity projection
-    /// `source[mapper_param]`. Used by the lowering path to tag each
-    /// `MapperKey` at construction time.
-    ///
-    /// Matches two shapes after unwrapping a single `Alias`:
-    /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
-    ///   `id` resolves (possibly through one `Alias`) to a
-    ///   `TypeParam` node with the same name as `mapper_param`.
-    /// - Anything else → [`MapperKind::Computed`].
-    ///
-    /// `mapper_param_node` is the mapper's binder node id (the
-    /// `TypeParam` introduced by the enclosing `[K in ...]`
-    /// binding). Classification checks that the indexed-access
-    /// `index`'s type node equals this binder by `SemanticNodeId`,
-    /// not by `display_name` string — two binders that share a
-    /// display name but are semantically distinct must not conflate.
-    #[must_use]
-    pub fn classify_value_expr(
-        graph: &crate::semantic_query_memo::SemanticGraphStore,
-        value_expr: SemanticNodeId,
-        source: SemanticNodeId,
-        mapper_param_node: SemanticNodeId,
-    ) -> Self {
-        let mut value_id = value_expr;
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
-            value_id = *inner;
-        }
-        let (object, index) = match graph.node_data(value_id).as_deref() {
-            Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
-            _ => return MapperKind::Computed,
-        };
-        if object != source {
-            return MapperKind::Computed;
-        }
-        let mut index_id = match index {
-            IndexKey::Computed(id) => id,
-            _ => return MapperKind::Computed,
-        };
-        if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
-            index_id = *inner;
-        }
-        if index_id == mapper_param_node {
-            MapperKind::Identity
-        } else {
-            MapperKind::Computed
+    construction_ordinal_seam! {
+        /// Classify `value_expr` against `source` and `mapper_param` by
+        /// checking whether it is structurally the identity projection
+        /// `source[mapper_param]`. Used by the lowering path to tag each
+        /// `MapperKey` at construction time.
+        ///
+        /// Matches two shapes after unwrapping a single `Alias`:
+        /// - `IndexedAccess { object = source, index = TypeNode(id) }` where
+        ///   `id` resolves (possibly through one `Alias`) to a
+        ///   `TypeParam` node with the same name as `mapper_param`.
+        /// - Anything else → [`MapperKind::Computed`].
+        ///
+        /// `mapper_param_node` is the mapper's binder node id (the
+        /// `TypeParam` introduced by the enclosing `[K in ...]`
+        /// binding). Classification checks that the indexed-access
+        /// `index`'s type node equals this binder by `SemanticNodeId`,
+        /// not by `display_name` string — two binders that share a
+        /// display name but are semantically distinct must not conflate.
+        #[must_use]
+        fn classify_value_expr(
+            graph: &crate::semantic_query_memo::SemanticGraphStore,
+            value_expr: SemanticNodeId,
+            source: SemanticNodeId,
+            mapper_param_node: SemanticNodeId,
+        ) -> Self {
+            let mut value_id = value_expr;
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(value_id).as_deref() {
+                value_id = *inner;
+            }
+            let (object, index) = match graph.node_data(value_id).as_deref() {
+                Some(SemanticNodeData::IndexedAccess { object, index }) => (*object, index.clone()),
+                _ => return MapperKind::Computed,
+            };
+            if object != source {
+                return MapperKind::Computed;
+            }
+            let mut index_id = match index {
+                IndexKey::Computed(id) => id,
+                _ => return MapperKind::Computed,
+            };
+            if let Some(SemanticNodeData::Alias(inner)) = graph.node_data(index_id).as_deref() {
+                index_id = *inner;
+            }
+            if index_id == mapper_param_node {
+                MapperKind::Identity
+            } else {
+                MapperKind::Computed
+            }
         }
     }
 }
 
-/// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
-/// type parameter binder or an `infer` declaration or reference — so the
-/// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
-#[must_use]
-pub fn keyof_operand_is_type_variable(
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
-    operand: SemanticNodeId,
-) -> bool {
-    matches!(
-        graph.node_data(operand).as_deref(),
-        Some(
-            SemanticNodeData::TypeParam { .. }
-                | SemanticNodeData::Infer { .. }
-                | SemanticNodeData::InferRef { .. }
+construction_ordinal_seam! {
+    /// Whether a mapped type's lowered `keyof` operand is a TYPE VARIABLE — a
+    /// type parameter binder or an `infer` declaration or reference — so the
+    /// mapping is homomorphic over it ([`MapperKey::over_type_variable`]).
+    #[must_use]
+    fn keyof_operand_is_type_variable(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        operand: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            graph.node_data(operand).as_deref(),
+            Some(
+                SemanticNodeData::TypeParam { .. }
+                    | SemanticNodeData::Infer { .. }
+                    | SemanticNodeData::InferRef { .. }
+            )
         )
-    )
+    }
 }
 
 /// Mapper identity for mapped-type queries. Separates the key space from the
@@ -2726,7 +2866,7 @@ pub type IndexKey = AuthoredPropertyKey;
 ///   parameters". Used by the materialization cycle gate's per-hop
 ///   `Instantiate` (`ClassifyMaterializationCycleGate`).
 ///   Existing Navigate/Expanded callers see no change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ProjectionMode {
     Identity,
     Navigate,
@@ -2764,7 +2904,7 @@ impl From<ProjectionMode> for verter_audit::ProjectionModeTag {
 /// caller can substitute / inspect the operator structurally without
 /// paying for member materialisation that no published demand selects
 /// through.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum ReductionDemand {
     /// The caller will publish the result on a consumer-visible
     /// surface. Operators reduce when `mode` admits.
@@ -2821,7 +2961,17 @@ pub enum ReductionDemand {
 /// family and mapped-member context encoding. It contains no content/version
 /// state; prepared-declaration facts and file self-roots remain the sole value
 /// versioning rail (R6).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum VueHeritagePolicy {
     /// Retain the complete TypeScript heritage surface. This is the default
     /// for TSC, component-meta, slots, and every non-runtime query.
@@ -2854,7 +3004,17 @@ pub enum VueHeritagePolicy {
 /// macro-root surface and a plain structural surface of the SAME node
 /// never collide on one memo slot. It is NOT an env-hash dimension (R21)
 /// — it is a query-identity dimension, like the projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Default,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum SurfaceProvenanceContext {
     /// Plain structural lowering. Object members reached here carry
     /// `declared_in_macro_type_arg = false`. This is the default for
@@ -2894,7 +3054,17 @@ pub enum SurfaceProvenanceContext {
 /// `interface Props extends Base` arm is `Heritage` even though it is
 /// `Base`'s own-body member, because the consuming declaration's heritage-arm
 /// context flows into the carrier resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum MemberMergeRole {
     /// Reached via an authored reference / synthesized construction — an
     /// authored intersection's reference arm (`type Props = Base & { … }`'s
@@ -3025,7 +3195,7 @@ impl PartialEq<MemberMergeRole> for MergeRoleStamp {
 /// folded into `FamilyKey` for every context-bearing projection-reduction
 /// family so a macro-root surface and a structural surface of
 /// the same node cache in distinct slots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub struct ProjectionReductionContext {
     pub mode: ProjectionMode,
     pub demand: ReductionDemand,
@@ -4028,7 +4198,7 @@ pub enum HopDecision {
 /// owning surface is interned. A walker that needs the body issues
 /// [`SemanticQueryApi::execute`] with a [`SemanticQueryKey::ProjectPath`]
 /// rooted at `value`; the family memo dedups across distinct entry paths.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceMember {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -4085,7 +4255,7 @@ pub struct SurfaceMember {
     /// projection pairs the [`Self::spans`] offsets with THIS file. `None` only
     /// for genuinely synthetic / multi-origin members (union common-members,
     /// mapped-produced members) — the same members whose `spans` are absent.
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<OwnedStr>,
     /// Whether this member was explicitly declared in the macro's type
     /// argument's own body (vs reached via heritage / Omit / intersection
     /// from an external source). See
@@ -4125,6 +4295,38 @@ pub struct SurfaceMember {
 }
 
 impl SurfaceMember {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            optional: self.optional.clone(),
+            readonly: self.readonly.clone(),
+            method_kind: self.method_kind.clone(),
+            has_implementation_body: self.has_implementation_body.clone(),
+            visibility: self.visibility.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg.clone(),
+            merge_role: self.merge_role.clone(),
+            excess_origin: self.excess_origin.clone(),
+        }
+    }
+}
+
+impl SurfaceMember {
     /// Ordinary string key for publication surfaces whose external schema is
     /// string-only. Other key classes remain on the semantic member and must
     /// be rejected or handled by the caller.
@@ -4140,7 +4342,7 @@ impl SurfaceMember {
     /// The admission gate and the terminal sink both read this — never a
     /// site-local derivation.
     #[must_use]
-    pub fn published_name(&self) -> Option<Arc<str>> {
+    pub fn published_name(&self) -> Option<OwnedStr> {
         self.key.published_name()
     }
 }
@@ -4149,7 +4351,7 @@ impl SurfaceMember {
 /// on a surface. Carried as structured metadata rather than an opaque
 /// [`SemanticNodeId`] so consumers downstream of dispatch can read the
 /// declared `key_type` / `value_type` shape directly.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct IndexSignature {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
@@ -4166,14 +4368,39 @@ pub struct IndexSignature {
     /// MissingType` index signature whose value type is unresolved /
     /// scope-less still has a real declaration file. `None` only for a
     /// genuinely synthetic index signature.
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<OwnedStr>,
+}
+
+impl IndexSignature {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key_type: self.key_type.clone(),
+            value_type: self.value_type.clone(),
+            readonly: self.readonly.clone(),
+            spans: self.spans.clone(),
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
 }
 
 /// One canonical entry in a resolved declaration surface.
 ///
 /// This stream is the ordering authority. Kind-specific collections on
 /// [`SurfaceView`] are lookup indexes and must not be joined positionally.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceEntry {
     /// Named property or method member.
     Member(SurfaceMember),
@@ -4185,6 +4412,30 @@ pub enum SurfaceEntry {
     IndexSignature(IndexSignature),
 }
 
+impl SurfaceEntry {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
+}
+
 /// One-level surface view of a semantic node. The entry stream is ordered to
 /// keep declaration semantics and hashing stable.
 ///
@@ -4193,17 +4444,49 @@ pub enum SurfaceEntry {
 /// require either a [`ClosedSurfaceView`] witness or [`SurfaceKeyProjection`].
 /// The one registry publication materialisation happens at the query-engine
 /// terminal sink (`surface_view_to_registry_type_expr`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// A consumer borrows the stream and its indexes from the payload lease
+/// that owns them. The nested arrays are never handed out as shared
+/// `Arc`s and the view has no public copy, so no surface, member, entry or
+/// index signature outlives the read that owns its graph operands.
+#[derive(Debug, PartialEq, Eq)]
 pub struct SurfaceView {
     /// Canonical resolver-produced declaration stream. This is the primary
     /// stored surface; all kind-specific collections below are derived indexes.
-    pub entries: Arc<[SurfaceEntry]>,
+    pub(crate) entries: Arc<[SurfaceEntry]>,
     members: Arc<[SurfaceMember]>,
-    pub call_signatures: Arc<[SemanticNodeId]>,
-    pub construct_signatures: Arc<[SemanticNodeId]>,
-    pub index_signatures: Arc<[IndexSignature]>,
-    pub keyspace: Option<SemanticNodeId>,
+    pub(crate) call_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) construct_signatures: Arc<[SemanticNodeId]>,
+    pub(crate) index_signatures: Arc<[IndexSignature]>,
+    pub(crate) keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+}
+
+impl SurfaceView {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            members: self.members.clone(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self.index_signatures.clone(),
+            keyspace: self.keyspace.clone(),
+            has_index_signature: self.has_index_signature.clone(),
+        }
+    }
 }
 
 /// Construction-only carrier for [`SurfaceView`]. Semantic consumers receive
@@ -4266,7 +4549,7 @@ std::thread_local! {
 }
 
 /// Count one member a key lookup compared by scanning a surface.
-fn note_key_scan_comparison() {
+pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
@@ -4305,7 +4588,7 @@ fn known_key_accessor<'a>(
 /// the canonical spelling of an admissible integer is that number, so two
 /// keys collide under element access exactly when their spellings are
 /// equal.
-fn property_spelling(key: PropertyKey) -> PropertyKey {
+pub(crate) fn property_spelling(key: PropertyKey) -> PropertyKey {
     match key.element_access_equivalent() {
         Some(numeric @ verter_type_expr::PropertyKey::Number(_))
             if matches!(key, verter_type_expr::PropertyKey::String(_)) =>
@@ -4324,26 +4607,22 @@ fn property_spelling(key: PropertyKey) -> PropertyKey {
 /// with it, so relating a surface of `n` members to one of `m` costs
 /// `n + m` lookups rather than `n × m` comparisons.
 pub(crate) struct SurfaceKeyIndex<'a> {
-    members: std::collections::HashMap<PropertyKey, smallvec::SmallVec<[&'a SurfaceMember; 1]>>,
+    members: &'a [SurfaceMember],
+    ordinals: Arc<crate::semantic_query_memo::member_index::MemberOrdinalIndex>,
 }
 
 impl<'a> SurfaceKeyIndex<'a> {
     /// The members addressing `key`, in member order.
-    fn colliding(&self, key: &PropertyKey) -> &[&'a SurfaceMember] {
-        let spelled = match key {
-            verter_type_expr::PropertyKey::String(_) => key
-                .element_access_equivalent()
-                .filter(|numeric| matches!(numeric, verter_type_expr::PropertyKey::Number(_))),
-            _ => None,
-        };
-        self.members
-            .get(spelled.as_ref().unwrap_or(key))
-            .map_or(&[], |members| members.as_slice())
+    fn colliding(&self, key: &PropertyKey) -> impl Iterator<Item = &'a SurfaceMember> + '_ {
+        self.ordinals
+            .colliding(key)
+            .iter()
+            .map(|ordinal| &self.members[*ordinal as usize])
     }
 
     /// [`SurfaceView::project_known_key`] through the index.
     pub(crate) fn project_known_key(&self, key: &PropertyKey) -> SurfaceKeyProjection<'a> {
-        match self.colliding(key).first() {
+        match self.colliding(key).next() {
             Some(member) => SurfaceKeyProjection::Exact(member),
             None => SurfaceKeyProjection::AbsentProven,
         }
@@ -4356,11 +4635,37 @@ impl<'a> SurfaceKeyIndex<'a> {
     ) -> Option<KnownKeyAccessor<'a>> {
         known_key_accessor(
             self.colliding(key)
-                .iter()
-                .copied()
                 .filter(|member| member.visibility.is_public()),
         )
     }
+
+    pub(crate) fn project_known_key_overload_group(
+        &self,
+        key: &PropertyKey,
+    ) -> Option<Vec<SemanticNodeId>> {
+        visible_method_overloads(self.colliding(key))
+    }
+}
+
+fn visible_method_overloads<'a>(
+    members: impl Iterator<Item = &'a SurfaceMember>,
+) -> Option<Vec<SemanticNodeId>> {
+    let group: Vec<_> = members
+        .filter(|member| member.visibility.is_public())
+        .collect();
+    if group.len() < 2
+        || !group
+            .iter()
+            .all(|member| member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method))
+    {
+        return None;
+    }
+    Some(
+        visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
+            .into_iter()
+            .map(|ordinal| group[ordinal].value)
+            .collect(),
+    )
 }
 
 /// Key evidence available from the sole positive-member state.
@@ -4379,8 +4684,12 @@ pub(crate) struct KnownKeyAccessor<'a> {
 impl KnownKeyAccessor<'_> {
     /// The accessor as the one PROPERTY every reader sees: its read value
     /// ([`Self::read_value`]), `readonly` when there is no setter.
-    pub(crate) fn property_member(&self, graph: &impl NodeRead) -> Option<SurfaceMember> {
-        let value = self.read_value(graph)?;
+    pub(crate) fn property_member(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SurfaceMember> {
+        let value = self.read_value(graph, materialize)?;
         let declared = self.getter.or(self.setter)?;
         Some(SurfaceMember {
             value,
@@ -4395,20 +4704,24 @@ impl KnownKeyAccessor<'_> {
     /// The accessor's VALUE type as a read sees it: the getter's return,
     /// else the setter's parameter. `None` when the accessor's signature
     /// carries neither.
-    pub(crate) fn read_value(&self, graph: &impl NodeRead) -> Option<SemanticNodeId> {
+    pub(crate) fn read_value(
+        &self,
+        graph: &impl NodeRead,
+        materialize: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
         if let Some(getter) = self.getter {
-            return match graph.node_data(getter.value).as_deref() {
+            return match graph.node_data(materialize(getter.value)).as_deref() {
                 Some(SemanticNodeData::Signature { return_type, .. }) => Some(*return_type),
                 _ => None,
             };
         }
         let setter = self.setter?;
-        match graph.node_data(setter.value).as_deref() {
-            Some(SemanticNodeData::Signature { params, .. }) => {
-                split_this_receiver(params).1.first().map(|param| param.ty)
-            }
-            _ => None,
-        }
+        let data = graph.node_data(setter.value)?;
+        let header = data.callable_header(&ResolveOverloadSetConsumer::witness())?;
+        split_this_receiver(header.params)
+            .1
+            .first()
+            .map(|param| param.ty)
     }
 }
 
@@ -4427,7 +4740,7 @@ impl SurfaceView {
         // index order so `entries`-keyed hashing agrees with `from_entries`.
         let entries: Arc<[SurfaceEntry]> = members
             .iter()
-            .cloned()
+            .map(SurfaceMember::clone)
             .map(SurfaceEntry::Member)
             .chain(
                 call_signatures
@@ -4444,7 +4757,7 @@ impl SurfaceView {
             .chain(
                 index_signatures
                     .iter()
-                    .cloned()
+                    .map(IndexSignature::clone)
                     .map(SurfaceEntry::IndexSignature),
             )
             .collect();
@@ -4523,6 +4836,36 @@ impl SurfaceView {
         &self.members
     }
 
+    /// The canonical ordered declaration stream, borrowed.
+    #[must_use]
+    pub fn entries(&self) -> &[SurfaceEntry] {
+        &self.entries
+    }
+
+    /// Root call signatures, borrowed.
+    #[must_use]
+    pub fn call_signatures(&self) -> &[SemanticNodeId] {
+        &self.call_signatures
+    }
+
+    /// Root construct signatures, borrowed.
+    #[must_use]
+    pub fn construct_signatures(&self) -> &[SemanticNodeId] {
+        &self.construct_signatures
+    }
+
+    /// Index signatures, borrowed.
+    #[must_use]
+    pub fn index_signatures(&self) -> &[IndexSignature] {
+        &self.index_signatures
+    }
+
+    /// The surface's key-space node, if any.
+    #[must_use]
+    pub fn keyspace(&self) -> Option<SemanticNodeId> {
+        self.keyspace
+    }
+
     /// The complete-domain witness. Total: every surface is closed by
     /// construction, so the witness never fails.
     pub fn closed(&self) -> ClosedSurfaceView<'_> {
@@ -4570,30 +4913,13 @@ impl SurfaceView {
         &self,
         key: &PropertyKey,
     ) -> Option<Vec<SemanticNodeId>> {
-        let group: Vec<&SurfaceMember> = self
-            .members
-            .iter()
-            .filter(|member| {
-                member.visibility.is_public()
-                    && member
-                        .key
-                        .as_known()
-                        .is_some_and(|known| known.element_access_collides(&key.as_ref()))
-            })
-            .collect();
-        if group.len() < 2
-            || !group.iter().all(|member| {
-                member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
-            })
-        {
-            return None;
-        }
-        Some(
-            visible_overload_ordinals(group.iter().map(|member| member.has_implementation_body))
-                .into_iter()
-                .map(|ordinal| group[ordinal].value)
-                .collect(),
-        )
+        visible_method_overloads(self.members.iter().filter(|member| {
+            note_key_scan_comparison();
+            member
+                .key
+                .as_known()
+                .is_some_and(|known| known.element_access_collides(&key.as_ref()))
+        }))
     }
 
     /// The ACCESSOR a key names: the public `get` and / or `set` members
@@ -4622,19 +4948,21 @@ impl SurfaceView {
     /// addresses, for a caller that looks up many keys
     /// ([`SurfaceKeyIndex`]).
     pub(crate) fn key_index(&self) -> SurfaceKeyIndex<'_> {
-        let mut members: std::collections::HashMap<
-            PropertyKey,
-            smallvec::SmallVec<[&SurfaceMember; 1]>,
-        > = std::collections::HashMap::default();
-        for member in self.members.iter() {
-            if let Some(known) = member.key.cloned_known() {
-                members
-                    .entry(property_spelling(known))
-                    .or_default()
-                    .push(member);
-            }
+        self.key_index_from_ordinals(Arc::new(
+            crate::semantic_query_memo::member_index::MemberOrdinalIndex::from_members(
+                &self.members,
+            ),
+        ))
+    }
+
+    pub(crate) fn key_index_from_ordinals(
+        &self,
+        ordinals: Arc<crate::semantic_query_memo::member_index::MemberOrdinalIndex>,
+    ) -> SurfaceKeyIndex<'_> {
+        SurfaceKeyIndex {
+            members: &self.members,
+            ordinals,
         }
-        SurfaceKeyIndex { members }
     }
 
     /// Project an ordinary string key supplied by a string-only external
@@ -4761,34 +5089,14 @@ macro_rules! test_surface_view {
         keyspace: $keyspace:expr,
         has_index_signature: $has_index_signature:expr $(,)?
     ) => {{
-        let members: std::sync::Arc<[$crate::semantic_query::SurfaceMember]> = $members;
-        let calls: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $calls;
-        let constructs: std::sync::Arc<[$crate::semantic_query::SemanticNodeId]> = $constructs;
-        let indexes: std::sync::Arc<[$crate::semantic_query::IndexSignature]> = $indexes;
-        let entries = members
-            .iter()
-            .cloned()
-            .map($crate::semantic_query::SurfaceEntry::Member)
-            .chain(
-                calls
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::CallSignature),
-            )
-            .chain(
-                constructs
-                    .iter()
-                    .copied()
-                    .map($crate::semantic_query::SurfaceEntry::ConstructSignature),
-            )
-            .chain(
-                indexes
-                    .iter()
-                    .cloned()
-                    .map($crate::semantic_query::SurfaceEntry::IndexSignature),
-            )
-            .collect();
-        $crate::semantic_query::SurfaceView::from_entries(entries, $keyspace, $has_index_signature)
+        $crate::semantic_query::SurfaceView::new(
+            $members,
+            $calls,
+            $constructs,
+            $indexes,
+            $keyspace,
+            $has_index_signature,
+        )
     }};
 }
 
@@ -4818,8 +5126,168 @@ pub enum DepVersion {
     ProjectGeneration(u64),
 }
 
+/// One dependency a cached value was computed from: a file (or the
+/// project) at a version. The canonical is an owned string, so a clone of
+/// the entry shares its one charge.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct DepEntry(
+    pub verter_session_query::retention::owned::OwnedStr,
+    pub DepVersion,
+);
+
+impl DepEntry {
+    /// An entry naming `canonical` at `version`, owning a copy of the text.
+    #[must_use]
+    pub fn new(canonical: &str, version: DepVersion) -> Self {
+        Self(canonical.into(), version)
+    }
+
+    /// The dependency's canonical id.
+    #[must_use]
+    pub fn canonical(&self) -> &str {
+        &self.0
+    }
+
+    /// The version the value observed.
+    #[must_use]
+    pub fn version(&self) -> &DepVersion {
+        &self.1
+    }
+}
+
+/// A dependency signature's entries: the owned allocation a
+/// [`DepSignature`] seals.
+#[derive(Debug, PartialEq, Eq, Hash)]
+pub struct DepRail(Box<[DepEntry]>);
+
+impl verter_session_query::retention::owned::Measured for DepRail {
+    /// The entry slice and every entry's canonical, each charged by its own
+    /// cell.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        verter_session_query::retention::allocation::heap_block_bytes(std::mem::size_of_val::<
+            [DepEntry],
+        >(&self.0))
+            + self
+                .0
+                .iter()
+                .map(|entry| entry.0.offer(aliases))
+                .sum::<usize>()
+    }
+}
+
 /// Dependency signature returned alongside every reusable cache read.
-pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
+///
+/// A sealed, self-charged rail: clones share one allocation and its one
+/// charge, released with the last handle, and the entries are reachable
+/// only by borrow. Every empty signature is the one process-static empty
+/// rail, which no owner charges.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DepSignature(verter_session_query::retention::owned::Owned<DepRail>);
+
+impl DepSignature {
+    /// A signature of `entries`, in order.
+    #[must_use]
+    pub fn new(entries: impl Into<Vec<DepEntry>>) -> Self {
+        let entries: Vec<DepEntry> = entries.into();
+        if entries.is_empty() {
+            return crate::semantic_query_memo::empty_signature();
+        }
+        Self(verter_session_query::retention::owned::Owned::new(DepRail(
+            entries.into_boxed_slice(),
+        )))
+    }
+
+    /// The process-static empty rail. Only its static initialiser calls
+    /// this.
+    pub(crate) fn static_empty() -> Self {
+        Self(verter_session_query::retention::owned::Owned::new(DepRail(
+            Box::new([]),
+        )))
+    }
+
+    /// The owned allocation behind a nonempty signature; `None` for the
+    /// static empty rail.
+    pub(crate) fn owned(&self) -> Option<&verter_session_query::retention::owned::Owned<DepRail>> {
+        (!self.is_empty()).then_some(&self.0)
+    }
+
+    /// Wrap an interned rail allocation.
+    pub(crate) fn from_owned(rail: verter_session_query::retention::owned::Owned<DepRail>) -> Self {
+        Self(rail)
+    }
+
+    /// An interned rail of `entries`, whose cell block its interner's weak
+    /// entry may keep allocated past the rail: the block is charged by a
+    /// share the rail keeps and every weak view of it keeps a clone of, so
+    /// it stays charged until both have let go.
+    pub(crate) fn interned_rail(
+        entries: Vec<DepEntry>,
+        ctx: verter_session_query::retention::owned::ChargeCtx<'_>,
+    ) -> verter_session_query::retention::owned::Owned<DepRail> {
+        verter_session_query::retention::owned::Owned::new_with_shared_block(
+            DepRail(entries.into_boxed_slice()),
+            ctx,
+        )
+    }
+
+    /// Whether two signatures share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        verter_session_query::retention::owned::Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Bytes this signature's charge holds; `None` while no owner charged
+    /// it (and always for the static empty rail).
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+}
+
+impl verter_session_query::retention::heap_size::HeapSize for DepSignature {
+    /// A nonempty rail is an owned allocation, charged by its own cell; the
+    /// static empty rail is never charged.
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_session_query::retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.owned().map_or(0, |rail| rail.offer(meter.handles()))
+    }
+}
+
+impl std::ops::Deref for DepSignature {
+    type Target = [DepEntry];
+    fn deref(&self) -> &[DepEntry] {
+        &self.0 .0
+    }
+}
+
+impl std::fmt::Debug for DepSignature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl From<Vec<DepEntry>> for DepSignature {
+    fn from(entries: Vec<DepEntry>) -> Self {
+        Self::new(entries)
+    }
+}
+
+impl FromIterator<DepEntry> for DepSignature {
+    fn from_iter<I: IntoIterator<Item = DepEntry>>(entries: I) -> Self {
+        Self::new(entries.into_iter().collect::<Vec<_>>())
+    }
+}
+
+impl Default for DepSignature {
+    fn default() -> Self {
+        crate::semantic_query_memo::empty_signature()
+    }
+}
 
 /// The set of reasons a result is PARTIAL (structurally incomplete).
 ///
@@ -4830,7 +5298,9 @@ pub type DepSignature = Arc<[(Arc<str>, DepVersion)]>;
 /// finite-large terminating resolution is COMPLETE regardless of op count.
 /// Only a real budget *exhaustion early-exit* (`BUDGET_EXCEEDED`) — which
 /// arises only on a genuine armed-fuse runaway trip — counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Hash, verter_retention::heap_size::HeapSize,
+)]
 pub struct PartialReasonSet(u32);
 
 impl PartialReasonSet {
@@ -5261,12 +5731,16 @@ pub use crate::project_semantic_dispatch::cost_receipt::ReadReceipt;
 /// `QueryError`. Warm reads replay both fields transparently.
 #[derive(Debug, Clone)]
 pub struct CacheRead<T> {
-    pub value: T,
-    pub dep_signature: DepSignature,
+    /// Internal graph and signature-version ownership, independent of cache
+    /// admission. A canonical close evicts cache owners only; it never
+    /// revokes what this lease owns.
+    pub(crate) lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    pub(crate) value: T,
+    pub(crate) dep_signature: DepSignature,
     /// Walker diagnostics produced during this query's computation.
     /// Stored on the memo entry; warm reads replay transparently. Empty
     /// for queries that don't run the walker.
-    pub walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    pub(crate) walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     /// **Inner-memo non-cacheability.** `true` when THIS query's memo
     /// entry must not be admitted/shared — either because the build hit a
     /// fatal `QueryError` / pathological-input cap, OR because a perfectly
@@ -5276,58 +5750,97 @@ pub struct CacheRead<T> {
     /// queries. The memo refuses insertion when this is true; the value
     /// still flows back to the caller. This is NOT the partial-result
     /// signal — see [`Self::result_is_partial`].
-    pub cache_suppress: bool,
-    /// **Partial-result signal.** `true` when this query's value is
-    /// itself a PARTIAL — a budget exhaustion (`BudgetExceeded`),
-    /// cancellation / unstable state, same-path recursion, or a walker
-    /// pathological/fatal diagnostic produced a structurally-incomplete
-    /// result. Aggregates via OR through nested queries. Distinct from
-    /// [`Self::cache_suppress`]: a benign non-cacheable result (ReturnOnly
-    /// / overflow / unrootable self-root) sets `cache_suppress` but NOT
-    /// this. The component-meta final-result warm gate and the
-    /// shape/materialization result caches key ONLY on this flag — a
-    /// complete-but-non-cacheable result MUST still be allowed to warm the
-    /// component-meta result, while a partial MUST be refused.
-    ///
-    /// This boolean is the per-read projection of
-    /// [`ResultCompleteness`]: `false` ⇒ `Complete`, `true` ⇒ `Partial`.
-    /// The typed [`ResultCompleteness`] carrier (with the reason set) is
-    /// used at the RESULT / scope / admission level — where the
-    /// completeness drives a decision — via the per-cold-compute
-    /// completeness scope and the request-result completeness accumulator
-    /// (see [`crate::request_context`] and
-    /// [`crate::cache_runtime::refuse_result_cache_admission_if_partial`]).
-    pub result_is_partial: bool,
-    /// **The classes behind [`Self::result_is_partial`]**, carried ACROSS
-    /// the query/build boundary.
-    ///
-    /// The boolean alone forces every consumer to re-lift a partial child
-    /// under the unclassified bridge
-    /// [`PartialReasonSet::PROPAGATED`]. That is not merely lossy: a
-    /// consumer that treats ONE class as CONTAINED (the Vue macro
-    /// projection and
-    /// [`PartialReasonSet::FLOW_RETURN_UNINFERRED`]) sees the bridge bit
-    /// arrive ALONGSIDE the named class the producer already recorded, so
-    /// the containment subtracts the name and the anonymous duplicate of
-    /// the SAME cause still faults it. Carrying the classes here removes
-    /// the duplicate at its source.
-    ///
-    /// Invariant: empty whenever `result_is_partial` is `false`. When
-    /// `result_is_partial` is `true` this is the union of the classes the
-    /// producing build observed; read it through
-    /// [`Self::partial_reason_classes`], which substitutes the bridge for
-    /// a producer that genuinely could not name one.
-    pub partial_reasons: PartialReasonSet,
+    pub(crate) cache_suppress: bool,
+    /// The adopted producer fact. Compatibility summaries are projections of
+    /// this disposition; an unavailable read cannot offer its candidate value.
+    pub(crate) fact_status: FactStatus,
     /// **The value's cost receipt.** A stored, joined or freshly built
     /// result is [`ReadReceipt::Priced`] with what computing it cost: the
     /// consumer replays it into its connected demand before using the
     /// value and records it as a prerequisite. Reads that carry no
     /// computation (recursion carriers, cancellation, typed refusals) are
     /// [`ReadReceipt::Unpriced`].
-    pub receipt: ReadReceipt,
+    pub(crate) receipt: ReadReceipt,
 }
 
 impl<T> CacheRead<T> {
+    /// The delivered value, borrowed from the read that owns its operands.
+    #[must_use]
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// The delivery's graph and signature-version ownership.
+    #[must_use]
+    pub fn lease(&self) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.lease
+    }
+
+    /// Borrow a node this delivery owns: its value or a diagnostic operand.
+    /// An ordinal the delivery does not own is foreign.
+    pub fn node(
+        &self,
+        id: SemanticNodeId,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRef<'_>, QueryError> {
+        self.lease.node_ref(id)
+    }
+
+    /// The dependency facts the value was computed from: file versions,
+    /// never graph operands.
+    #[must_use]
+    pub fn dep_signature(&self) -> &DepSignature {
+        &self.dep_signature
+    }
+
+    /// The walker diagnostics, borrowed from the read that owns their
+    /// operands.
+    #[must_use]
+    pub fn walker_diagnostics(
+        &self,
+    ) -> &[crate::project_semantic_dispatch::walk::ShallowDiagnostic] {
+        &self.walker_diagnostics
+    }
+
+    /// Whether this read's memo entry must not be admitted or shared.
+    #[must_use]
+    pub fn cache_suppress(&self) -> bool {
+        self.cache_suppress
+    }
+
+    /// The adopted producer fact.
+    #[must_use]
+    pub fn fact_status(&self) -> &FactStatus {
+        &self.fact_status
+    }
+
+    /// The value's cost receipt.
+    #[must_use]
+    pub fn receipt(&self) -> &ReadReceipt {
+        &self.receipt
+    }
+
+    /// A fixture read that owns no graph operands. Test builds only.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn unleased_for_tests(
+        value: T,
+        dep_signature: DepSignature,
+        walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
+        cache_suppress: bool,
+        fact_status: FactStatus,
+        receipt: ReadReceipt,
+    ) -> Self {
+        Self {
+            lease: Default::default(),
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress,
+            fact_status,
+            receipt,
+        }
+    }
+
     /// Convert a `(value, dep_signature)` pair into a `CacheRead` with
     /// no walker diagnostics and `cache_suppress = false`. Used by
     /// build closures for queries that do not run the shallow-mode
@@ -5336,12 +5849,12 @@ impl<T> CacheRead<T> {
     #[must_use]
     pub fn from_value_and_signature(value: T, dep_signature: DepSignature) -> Self {
         Self {
+            lease: Default::default(),
             value,
             dep_signature,
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: crate::semantic_query_memo::empty_diagnostics(),
             cache_suppress: false,
-            result_is_partial: false,
-            partial_reasons: PartialReasonSet::empty(),
+            fact_status: FactStatus::Complete,
             receipt: ReadReceipt::Unpriced,
         }
     }
@@ -5352,34 +5865,33 @@ impl<T> CacheRead<T> {
     #[must_use]
     pub fn map_value<U>(self, f: impl FnOnce(T) -> U) -> CacheRead<U> {
         CacheRead {
+            lease: self.lease,
             value: f(self.value),
             dep_signature: self.dep_signature,
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
-            result_is_partial: self.result_is_partial,
-            partial_reasons: self.partial_reasons,
+            fact_status: self.fact_status,
             receipt: self.receipt,
         }
     }
 
-    /// The partial classes this read carries — the ONE read accessor.
-    ///
-    /// Empty for a complete read. For a partial read it is the producer's
-    /// own classes, or [`PartialReasonSet::PROPAGATED`] when the producer
-    /// set the boolean without naming one (the residual bridge, which no
-    /// longer duplicates a class the producer DID name).
-    #[inline]
-    #[must_use]
+    /// Whether this adopted fact is unfinished.
+    pub fn result_is_partial(&self) -> bool {
+        !self.fact_status.is_complete()
+    }
+
+    /// The compatibility causes, derived from the adopted fact.
+    pub fn partial_reasons(&self) -> PartialReasonSet {
+        self.fact_status.completeness().reasons()
+    }
+
+    /// The named causes of this read's fact.
     pub fn partial_reason_classes(&self) -> PartialReasonSet {
-        if !self.result_is_partial {
-            PartialReasonSet::empty()
-        } else if self.partial_reasons.is_empty() {
-            PartialReasonSet::PROPAGATED
-        } else {
-            self.partial_reasons
-        }
+        self.partial_reasons()
     }
 }
+
+mod retained_nodes;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
@@ -5460,13 +5972,13 @@ pub enum OriginMeta {
     /// Alias-name payload for [`OriginEdgeKind::AliasResolve`].
     /// Distinct from [`OriginMeta::ProjectedMember`] so the audit
     /// bridge translates exhaustively without a `_ =>` fallback.
-    AliasName(Arc<str>),
+    AliasName(OwnedStr),
     /// Index expression for [`OriginEdgeKind::ProjectIndex`].
     Index(IndexKey),
     /// Full path segment list for [`OriginEdgeKind::ProjectPath`].
-    Path(Arc<[PathSegment]>),
+    Path(OwnedSlice<PathSegment>),
     /// Type-parameter name for [`OriginEdgeKind::SubstituteTypeParam`].
-    SubstitutedParam(Arc<str>),
+    SubstitutedParam(OwnedStr),
 }
 
 /// One origin edge: a derivation hop from a source-set to a result. Carries
@@ -5484,7 +5996,45 @@ pub struct OriginEdge {
     /// edge was committed. Interned by [`crate::semantic_query_memo`] so
     /// builders that emit dozens of edges with identical fences share one
     /// `Arc` allocation.
-    pub edge_dep_signature: Arc<DepSignature>,
+    pub edge_dep_signature: Arc<EdgeFence>,
+}
+
+/// An origin edge's fence: the dependency rail, and the edge store's hold
+/// on it. The store retains the rail's own charge for as long as any edge
+/// shares this fence, and lets go of it with the last.
+#[derive(Debug)]
+pub struct EdgeFence {
+    signature: DepSignature,
+    _hold: Option<verter_session_query::retention::owned::OwnedHold>,
+}
+
+impl EdgeFence {
+    /// A fence no store retains: its rail is charged by its own handles.
+    #[must_use]
+    pub fn new(signature: DepSignature) -> Self {
+        Self {
+            signature,
+            _hold: None,
+        }
+    }
+
+    /// A fence the edge store retains through `hold`.
+    pub(crate) fn retained(
+        signature: DepSignature,
+        hold: Option<verter_session_query::retention::owned::OwnedHold>,
+    ) -> Self {
+        Self {
+            signature,
+            _hold: hold,
+        }
+    }
+}
+
+impl std::ops::Deref for EdgeFence {
+    type Target = DepSignature;
+    fn deref(&self) -> &DepSignature {
+        &self.signature
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -5592,13 +6142,89 @@ pub struct SemanticGraphStats {
 /// Structured query-level failure. Distinct from panics — callers decide
 /// whether an error maps to a top-level public failure or to an opaque
 /// semantic node in the result.
-#[derive(Debug, Clone)]
+/// The type arguments a recursive reference names. Every copy of the
+/// error carries them, but no public accessor hands the operands out: the
+/// node that carries the error owns them, and a reader reaches them only
+/// through that node's lease.
+#[derive(Clone, PartialEq, Eq, Hash, Default, verter_retention::heap_size::HeapSize)]
+pub struct RecursiveRefArgs(OwnedSlice<SemanticNodeId>);
+
+impl RecursiveRefArgs {
+    /// The operands, for engine-internal construction and traversal.
+    pub(crate) fn operands(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// The operand allocation, for its retained footprint.
+    pub(crate) fn operands_owned(&self) -> &OwnedSlice<SemanticNodeId> {
+        &self.0
+    }
+
+    /// The operands of a fixture error.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn nodes_for_tests(&self) -> &[SemanticNodeId] {
+        &self.0
+    }
+
+    /// How many type arguments the reference names.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether the reference names no type argument.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Debug for RecursiveRefArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Arc<[SemanticNodeId]>> for RecursiveRefArgs {
+    fn from(nodes: Arc<[SemanticNodeId]>) -> Self {
+        Self(OwnedSlice::from(&nodes[..]))
+    }
+}
+
+impl From<OwnedSlice<SemanticNodeId>> for RecursiveRefArgs {
+    fn from(nodes: OwnedSlice<SemanticNodeId>) -> Self {
+        Self(nodes)
+    }
+}
+
+impl From<Vec<SemanticNodeId>> for RecursiveRefArgs {
+    fn from(nodes: Vec<SemanticNodeId>) -> Self {
+        Self(OwnedSlice::from(nodes))
+    }
+}
+
+impl From<&[SemanticNodeId]> for RecursiveRefArgs {
+    fn from(nodes: &[SemanticNodeId]) -> Self {
+        Self(OwnedSlice::from(nodes))
+    }
+}
+
+impl<const N: usize> From<[SemanticNodeId; N]> for RecursiveRefArgs {
+    fn from(nodes: [SemanticNodeId; N]) -> Self {
+        Self(OwnedSlice::from(nodes))
+    }
+}
+
+#[derive(Debug, Clone, verter_retention::heap_size::HeapSize)]
 pub enum QueryError {
+    /// Execution validity refused delivery, independently of semantic quality.
+    ExecutionAborted(ExecutionAbort),
     /// No cache entry and no cold build succeeded.
     Miss,
     /// A declaration resolved to `= intrinsic` but the active TS SDK advertises
     /// an intrinsic the verter intrinsic registry does not implement.
-    UnsupportedIntrinsic { name: Arc<str> },
+    UnsupportedIntrinsic { name: OwnedStr },
     /// The resolver hit one of its structured safety rails.
     BudgetExceeded(BudgetExceededFailure),
     /// The request (or its aggregate scheduler job after all owners detached)
@@ -5616,7 +6242,7 @@ pub enum QueryError {
     /// The path walker re-entered an alias it had already visited on the
     /// same `build_project_path` invocation. Carries the
     /// cycle participants so diagnostics can render the chain end-to-end.
-    AliasCycle { chain: Arc<[Arc<str>]> },
+    AliasCycle { chain: OwnedSlice<OwnedStr> },
     /// Recursive back-edge sentinel emitted when dispatch detects a
     /// declaration expanding into itself (e.g., `type TreeNode = {
     /// children: TreeNode[] }`). `raise_node_to_type_expr` converts
@@ -5627,20 +6253,20 @@ pub enum QueryError {
     /// stands for (`G<[T]>` inside the body of `G<string>` records
     /// `[[string]]`); empty for a reference without type arguments.
     RecursiveRef {
-        name: Arc<str>,
-        args: Arc<[SemanticNodeId]>,
+        name: OwnedStr,
+        args: RecursiveRefArgs,
     },
     /// Catch-all for text-bearing failures surfaced to the caller.
-    Other(Arc<str>),
+    Other(OwnedStr),
     /// Declaration resolved but not yet materialized. The node
     /// carries the file scope sidecar so callers can construct the
     /// content-free `ResolvedDeclSlotIdentity` slot for `Instantiate`
     /// keys. Walk/enumerate code treats this as "expandable via
     /// Instantiate" rather than "not found."
     DeclPlaceholder {
-        canonical_id: Arc<str>,
+        canonical_id: OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
-        name: Arc<str>,
+        name: OwnedStr,
         whole_hash: HashValue,
     },
     /// A typed caller asked a query to narrow to a specific value domain
@@ -5756,6 +6382,7 @@ impl QueryError {
             QueryError::Miss
             | QueryError::UnsupportedIntrinsic { .. }
             | QueryError::BudgetExceeded(_)
+            | QueryError::ExecutionAborted(_)
             | QueryError::Cancelled
             | QueryError::UnstableState { .. }
             | QueryError::ForeignSemanticOperand
@@ -5829,6 +6456,7 @@ impl QueryError {
 impl PartialEq for QueryError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (Self::ExecutionAborted(a), Self::ExecutionAborted(b)) => a == b,
             (Self::Miss, Self::Miss) => true,
             (Self::UnsupportedIntrinsic { name: a }, Self::UnsupportedIntrinsic { name: b }) => {
                 a == b
@@ -5910,6 +6538,7 @@ impl QueryError {
     /// are stable (never renumbered): a new variant takes the next free tag.
     fn tag(&self) -> u8 {
         match self {
+            Self::ExecutionAborted(_) => 23,
             Self::Miss => 0,
             Self::UnsupportedIntrinsic { .. } => 1,
             Self::BudgetExceeded(_) => 2,
@@ -5942,6 +6571,7 @@ impl std::hash::Hash for QueryError {
         // hashes tag-only because its payload is an opaque carrier.
         self.tag().hash(state);
         match self {
+            Self::ExecutionAborted(abort) => abort.hash(state),
             Self::UnsupportedIntrinsic { name } => {
                 name.hash(state);
             }
@@ -6036,6 +6666,28 @@ pub enum QueryResult<T> {
     Error(QueryError),
 }
 
+/// Apply an execution abort without renaming a typed cancellation.
+///
+/// [`QueryError::Cancelled`] is the query protocol's cancellation. Replacing
+/// it with [`QueryError::ExecutionAborted`] changes the result callers match.
+/// Every other result yields to the abort, so a superseded or shut-down
+/// evaluation cannot be delivered as a value.
+pub(crate) fn result_under_execution_abort<T>(
+    result: QueryResult<T>,
+    abort: ExecutionAbort,
+) -> QueryResult<T> {
+    if matches!(
+        (&result, abort),
+        (
+            QueryResult::Error(QueryError::Cancelled),
+            ExecutionAbort::Cancelled
+        )
+    ) {
+        return result;
+    }
+    QueryResult::Error(QueryError::ExecutionAborted(abort))
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Value domains
 // ──────────────────────────────────────────────────────────────────────────
@@ -6092,7 +6744,7 @@ pub enum SemanticQueryValue {
     /// construct bucket (the `typeof` projection's visibility rule already
     /// hid trailing implementation signatures). The last element is the
     /// last visible overload.
-    OverloadSet(Arc<[SignatureRef]>),
+    OverloadSet(verter_session_query::retention::owned::OwnedSlice<SignatureRef>),
     /// The public outcome of a relation query — the LIVE value domain of
     /// [`SemanticQueryKey::Relate`]. `execute(Relate)` produces and admits
     /// decided binary judgements (`Assignable` / `NotAssignable`); a
@@ -6111,13 +6763,13 @@ pub enum SemanticQueryValue {
     /// defaults to `ReturnOnly` (only a non-degraded COMPLETE evaluation
     /// admits warm); every NO-VALUE outcome is a typed
     /// `FlowReturnFailure` through `ReturnOnly` and never admits.
-    FlowReturn(Arc<FlowReturnResult>),
+    FlowReturn(verter_session_query::retention::owned::Owned<FlowReturnResult>),
     /// The call / construct resolution produced by a `ResolveCall` query —
     /// only a COMPLETE evaluation reaches this domain (one fully-decided
     /// first-applicable candidate, or a genuine dynamic `any`); every
     /// uncertainty, failure, or budget trip is a typed failure through
     /// `ReturnOnly` and never admits.
-    ResolveCall(Arc<ResolvedCallResult>),
+    ResolveCall(verter_session_query::retention::owned::Owned<ResolvedCallResult>),
     /// The sealed materialization cycle-gate outcome — the LIVE value domain
     /// of [`SemanticQueryKey::ClassifyMaterializationCycleGate`], the sole
     /// authority for "does this declaration transitively reach a cycle
@@ -6148,7 +6800,7 @@ pub enum SemanticQueryValue {
 /// Content-free discriminant for [`SemanticQueryValue`]. Used by
 /// [`QueryError::ValueDomainMismatch`] to name a value's domain without a
 /// payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
 pub enum SemanticQueryValueTag {
     TypeNode,
     ObjectProjection,
@@ -6220,7 +6872,8 @@ impl BroadRuntimeKind {
 /// Stable first-occurrence-deduplicated broad runtime facts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BroadRuntimeClassification {
-    kinds: Arc<[BroadRuntimeKind]>,
+    kinds: verter_session_query::retention::owned::OwnedSlice<BroadRuntimeKind>,
+    status: FactStatus,
 }
 
 impl BroadRuntimeClassification {
@@ -6236,7 +6889,26 @@ impl BroadRuntimeClassification {
             }
         }
         Self {
-            kinds: Arc::from(ordered.into_boxed_slice()),
+            kinds: ordered.into(),
+            status: FactStatus::Complete,
+        }
+    }
+
+    /// A classifier that could not determine its demanded member's kinds.
+    pub(crate) fn unavailable(causes: surface_resolution::NonEmptyReasons) -> Self {
+        Self {
+            kinds: vec![BroadRuntimeKind::Unknown].into(),
+            status: FactStatus::Unavailable(causes),
+        }
+    }
+
+    /// The producer's member-local guarantee, independent of an ancestor's
+    /// non-admission. Unknown can itself be an exact classification.
+    pub fn into_fact(self) -> FactResult<Self> {
+        match self.status {
+            FactStatus::Complete => FactResult::complete(self),
+            FactStatus::Approximate(causes, _) => FactResult::approximate(self, causes),
+            FactStatus::Unavailable(causes) => FactResult::unavailable(causes),
         }
     }
 
@@ -6320,7 +6992,11 @@ impl MaterializationCycleGateFallbackReason {
 /// the only constructor collects into `Some` first element or returns
 /// `None`, so an empty `LegacyFallback` reason set is unrepresentable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MaterializationCycleGateFallbackReasons(Arc<[MaterializationCycleGateFallbackReason]>);
+pub struct MaterializationCycleGateFallbackReasons(pub(crate) OwnedFallbackReasons);
+
+/// The owned reason list a fallback carries.
+type OwnedFallbackReasons =
+    verter_session_query::retention::owned::OwnedSlice<MaterializationCycleGateFallbackReason>;
 
 impl MaterializationCycleGateFallbackReasons {
     /// Collect `reasons` into a deduplicated set, or `None` when empty.
@@ -6337,7 +7013,7 @@ impl MaterializationCycleGateFallbackReasons {
         if ordered.is_empty() {
             return None;
         }
-        Some(Self(Arc::from(ordered.into_boxed_slice())))
+        Some(Self(ordered.into()))
     }
 
     #[must_use]
@@ -6603,7 +7279,7 @@ pub struct ProgramAnalysisValue {
 /// (`GraphMergedDeclaration`). This shell has no live producer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclarationAnalysisValue {
-    pub contributors: Arc<[SemanticNodeId]>,
+    pub contributors: verter_session_query::retention::owned::OwnedSlice<SemanticNodeId>,
 }
 
 /// The value-domain payload of a [`SemanticQueryKey::Relate`] judgement — the
@@ -6639,7 +7315,7 @@ pub struct RelationPayload {
     /// `infer T` captures a successful assignability judgement surfaces). Empty
     /// for a pure non-binding assignability check and for a `BudgetExceeded`
     /// outcome.
-    pub bindings: Arc<[InferBinding]>,
+    pub bindings: verter_session_query::retention::owned::OwnedSlice<InferBinding>,
     /// What the relation's computation used of the checker's recursion
     /// bounds. A warm read replays the outcome only where the cold
     /// computation takes the same course.
@@ -6680,7 +7356,7 @@ pub struct RelationRecursionFootprint {
     /// most distinct instantiations of each on one path; `None` when
     /// neither side stacked one (every memo entry carries a footprint, so
     /// the rare list sits behind one pointer).
-    pub identities: Option<Arc<RecursionIdentities>>,
+    pub identities: Option<verter_session_query::retention::owned::Owned<RecursionIdentities>>,
 }
 
 /// The per-side identity lists of a [`RelationRecursionFootprint`]:
@@ -6765,15 +7441,70 @@ pub struct RecursionOrBudgetCap {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticAnalysisShell;
 
-/// A query value paired with the provenance of the work that produced it.
+/// A query value paired with the provenance of the work that produced it,
+/// and the delivery that owns the graph operands the value names.
 ///
 /// Provenance lives ONLY on the [`Value`](QueryResult::Value) arm of a
 /// [`QueryResult`]; the `Recursive` / `Error` arms are control / failure arms
 /// that never carry provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The output is the owning carrier of a dispatcher's result: the operation
+/// that produced it releases everything else when it ends, so the value's
+/// nodes stay live exactly as long as this output or a clone of it does —
+/// past the dispatcher, the cache and every construction scope. The value
+/// itself is an identity label that authorizes nothing; a read borrows a
+/// capability from the output ([`Self::node`]) that cannot outlive it. A
+/// copied label kept after the output drops names a released node.
+#[derive(Debug, Clone)]
 pub struct SemanticQueryOutput<T> {
     pub value: T,
     pub provenance: ResultProvenance,
+    delivery: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+}
+
+/// Two outputs are equal when their values and provenance are; the delivery
+/// is ownership transport, never identity.
+impl<T: PartialEq> PartialEq for SemanticQueryOutput<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value && self.provenance == other.provenance
+    }
+}
+impl<T: Eq> Eq for SemanticQueryOutput<T> {}
+
+impl<T> SemanticQueryOutput<T> {
+    /// An output owned by the delivery that roots its value's operands.
+    #[must_use]
+    pub(crate) fn delivered(
+        value: T,
+        provenance: ResultProvenance,
+        delivery: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
+        Self {
+            value,
+            provenance,
+            delivery,
+        }
+    }
+
+    /// Borrow a node this output owns. An ordinal the output does not own
+    /// is foreign: a copied label never authorizes a read.
+    pub fn node(
+        &self,
+        id: SemanticNodeId,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRef<'_>, QueryError> {
+        self.delivery.node_ref(id)
+    }
+
+    /// The same delivery carrying a value derived from this one: the owner
+    /// travels with the narrowed value.
+    #[must_use]
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> SemanticQueryOutput<U> {
+        SemanticQueryOutput {
+            value: f(self.value),
+            provenance: self.provenance,
+            delivery: self.delivery,
+        }
+    }
 }
 
 /// Provenance of a resolved value: how trustworthy the inputs that produced it
@@ -6783,6 +7514,7 @@ pub struct SemanticQueryOutput<T> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultProvenance {
     pub taint: ResultTaint,
+    pub fact_status: FactStatus,
 }
 
 impl ResultProvenance {
@@ -6791,6 +7523,7 @@ impl ResultProvenance {
     pub fn clean() -> Self {
         Self {
             taint: ResultTaint::Clean,
+            fact_status: FactStatus::Complete,
         }
     }
 }
@@ -6913,28 +7646,12 @@ pub(crate) fn narrow_output_to_type_node(
 ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
     match result {
         QueryResult::Value(out) => match out.value {
-            SemanticQueryValue::TypeNode(node) => QueryResult::Value(SemanticQueryOutput {
-                value: node,
-                provenance: out.provenance,
-            }),
+            SemanticQueryValue::TypeNode(node) => QueryResult::Value(out.map(|_| node)),
             other => QueryResult::Error(QueryError::ValueDomainMismatch {
                 expected: SemanticQueryValueTag::TypeNode,
                 actual: other.tag(),
             }),
         },
-        QueryResult::Recursive(n) => QueryResult::Recursive(n),
-        QueryResult::Error(e) => QueryResult::Error(e),
-    }
-}
-
-/// Drop provenance from a typed-node result, recovering the node-or-control
-/// [`QueryResult`] the convenience wrappers expose.
-#[must_use]
-pub(crate) fn strip_output_provenance<T>(
-    result: QueryResult<SemanticQueryOutput<T>>,
-) -> QueryResult<T> {
-    match result {
-        QueryResult::Value(out) => QueryResult::Value(out.value),
         QueryResult::Recursive(n) => QueryResult::Recursive(n),
         QueryResult::Error(e) => QueryResult::Error(e),
     }
@@ -7140,7 +7857,7 @@ pub enum ApparentDemandScope {
     /// the lookup.
     Rootless {
         /// The canonical containing the member-access/call site.
-        canonical: Arc<str>,
+        canonical: OwnedStr,
     },
 }
 
@@ -7230,7 +7947,7 @@ pub struct StructuralReduceContext {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProgramPointId {
     /// Canonical id of the file the program point lives in.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Byte offset of the program point within the file.
     pub offset: u32,
 }
@@ -7304,13 +8021,19 @@ pub struct ProgramAnalysisContext {
 /// space the call / flow-return / program-analysis keys all key on (there is
 /// one flow/narrowing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FlowNarrowingKey(Arc<[SemanticNodeId]>);
+pub struct FlowNarrowingKey(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl FlowNarrowingKey {
     /// The empty flow-narrowing demand (no narrowing in scope).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned antecedent guard / narrowing node ids.
@@ -7322,8 +8045,16 @@ impl FlowNarrowingKey {
     /// this the order-sensitive `Arc` derive would over-key equivalent flow
     /// axes.
     #[must_use]
-    pub fn new(facts: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(facts))
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        facts: Arc<[SemanticNodeId]>,
+    ) -> Self {
+        let facts = canonical_node_set(facts);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
+            facts.iter().copied(),
+        );
+        Self(facts, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -7355,13 +8086,19 @@ impl Default for FlowNarrowingKey {
 /// flow-return / program-analysis keys all key on (there is one contextual-
 /// typing axis space).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ContextualTypingKey(Arc<[SemanticNodeId]>);
+pub struct ContextualTypingKey(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl ContextualTypingKey {
     /// The empty contextual-typing demand (no contextual target in scope).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned contextual-target node ids.
@@ -7371,8 +8108,16 @@ impl ContextualTypingKey {
     /// constructions of the same set (`[a, b]` / `[b, a]`) are the SAME key
     /// (the §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(targets: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(targets))
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        targets: Arc<[SemanticNodeId]>,
+    ) -> Self {
+        let targets = canonical_node_set(targets);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
+            targets.iter().copied(),
+        );
+        Self(targets, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -7600,13 +8345,19 @@ pub enum InferencePassKind {
 /// parameters). SHAPE only: the interning substrate is the relation-inference
 /// reducer (not yet implemented).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InferableParamSetId(Arc<[SemanticNodeId]>);
+pub struct InferableParamSetId(
+    Arc<[SemanticNodeId]>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 impl InferableParamSetId {
     /// The empty inferable-parameter set (no open type parameters).
     #[must_use]
     pub fn empty() -> Self {
-        Self(Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()))
+        Self(
+            Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+            Default::default(),
+        )
     }
 
     /// Construct from a set of interned type-parameter node ids.
@@ -7616,8 +8367,16 @@ impl InferableParamSetId {
     /// constructions of the same open-parameter set are the SAME key (the
     /// §2.58 "canonicalize before key construction" contract).
     #[must_use]
-    pub fn new(params: Arc<[SemanticNodeId]>) -> Self {
-        Self(canonical_node_set(params))
+    pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        params: Arc<[SemanticNodeId]>,
+    ) -> Self {
+        let params = canonical_node_set(params);
+        let roots = crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+            graph,
+            params.iter().copied(),
+        );
+        Self(params, roots)
     }
 
     /// The canonical (sorted, deduplicated) node-id set.
@@ -7984,14 +8743,14 @@ impl RelateMemoKey {
 /// hash, span, or display text participates.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PendingSubstitutionFrame {
-    pairs: Arc<[(SemanticNodeId, SemanticNodeId)]>,
+    pairs: OwnedSlice<(SemanticNodeId, SemanticNodeId)>,
 }
 
 impl PendingSubstitutionFrame {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            pairs: Arc::from(Vec::<(SemanticNodeId, SemanticNodeId)>::new().into_boxed_slice()),
+            pairs: OwnedSlice::default(),
         }
     }
 
@@ -8013,7 +8772,7 @@ impl PendingSubstitutionFrame {
             pair.1 = arg;
         }
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 
@@ -8026,7 +8785,7 @@ impl PendingSubstitutionFrame {
         pairs.extend_from_slice(&self.pairs);
         pairs.push((param, arg));
         Self {
-            pairs: Arc::from(pairs.into_boxed_slice()),
+            pairs: OwnedSlice::from(pairs),
         }
     }
 }
@@ -8046,7 +8805,41 @@ pub struct ConditionalPendingSubstitution {
     distribution: Option<SemanticNodeId>,
 }
 
+impl verter_session_query::retention::owned::Measured for PendingSubstitutionFrame {
+    /// The pair list: an owned allocation charged by itself.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.pairs.offer(aliases)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ConditionalPendingSubstitution {
+    /// Both branch frames' pair lists; the distribution parameter is inline.
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.true_branch.heap_bytes(aliases) + self.false_branch.heap_bytes(aliases)
+    }
+}
+
 impl ConditionalPendingSubstitution {
+    /// The retained field multiset, including binders and the distribution
+    /// parameter. This is ownership topology, separate from semantic descent.
+    pub fn for_each_retained_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        for &(parameter, argument) in self
+            .true_branch
+            .pairs()
+            .iter()
+            .chain(self.false_branch.pairs())
+        {
+            visit(parameter);
+            visit(argument);
+        }
+        self.distribution.into_iter().for_each(visit);
+    }
     /// Materialized arguments retained by this frame, without applying it or
     /// evaluating either branch. Structural reachability readers include these
     /// children when inspecting the suspended carrier.
@@ -8170,7 +8963,7 @@ pub enum SemanticQueryKey {
     Instantiate(InstantiateKey),
     ProjectMember {
         base: SemanticNodeId,
-        member: Arc<str>,
+        member: OwnedStr,
         mode: ProjectionMode,
     },
     IndexedAccess {
@@ -8210,7 +9003,8 @@ pub enum SemanticQueryKey {
         /// Content-free pairing of each materialized branch handle with a
         /// pending positional substitution frame. `None` means both
         /// branches are already substituted (or never instantiated).
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     /// `typeof value_root` — resolves the TYPE of a value declaration.
     ///
@@ -8241,7 +9035,7 @@ pub enum SemanticQueryKey {
     /// poison the publication slot.
     TypeOf {
         value_root: ValueRootSlotIdentity,
-        path: Arc<[Arc<str>]>,
+        path: OwnedSlice<OwnedStr>,
         context: TypeOfContext,
     },
     /// Canonical union construction over `members` under `nullability` —
@@ -8289,7 +9083,7 @@ pub enum SemanticQueryKey {
     /// does not poison the publication slot.
     ProjectPath {
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: OwnedSlice<PathSegment>,
         context: ProjectionReductionContext,
     },
     /// Full-identity relation query between `source` and `target` semantic
@@ -8575,7 +9369,7 @@ pub enum SemanticQueryKey {
     ///
     /// [`AdmissionSpec::Singleflight`]: crate::semantic_query::query_key_spec::AdmissionSpec::Singleflight
     TemplateLiteralReduce {
-        pattern: Arc<[Arc<str>]>,
+        pattern: OwnedSlice<OwnedStr>,
         args: Arc<[SemanticNodeId]>,
         context: TemplateLiteralReduceContext,
     },
@@ -9064,9 +9858,12 @@ impl SemanticQueryKey {
     /// Checker-reduction `ReduceIntersection` over a flat operand list.
     /// Binary/unary/empty lists allocate no recipe.
     #[must_use]
-    pub fn reduce_intersection_operands(members: Arc<[SemanticNodeId]>) -> Self {
+    pub fn reduce_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: Arc<[SemanticNodeId]>,
+    ) -> Self {
         Self::ReduceIntersection {
-            input: IntersectionInputRef::from_operands(&members),
+            input: IntersectionInputRef::from_operands(graph, &members),
             purpose: IntersectionPurpose::CheckerReduction,
             context: SemanticContextId::production(),
         }
@@ -9239,7 +10036,7 @@ pub struct InferBinding {
     /// declare the same name, and substitution must never guess identity
     /// from that spelling.
     pub param: SemanticNodeId,
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     pub bound: SemanticNodeId,
 }
 
@@ -9308,6 +10105,118 @@ pub enum UndecidedReason {
     OpenAssumption,
 }
 
+/// A nested array of a graph payload: tuple elements, signature parameters
+/// and type parameters, intrinsic / instantiation / class-expression
+/// arguments, template expressions and merged contributors.
+///
+/// It is borrowed through the read that owns its payload (`Deref` to a
+/// slice) and has no public copy, and its member records have none either,
+/// so neither the array nor a member can be carried away from that owner.
+/// Construction shares the allocation inside the engine.
+pub struct PayloadArray<T>(Arc<[T]>);
+
+impl<T> PayloadArray<T> {
+    /// Share the allocation with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+
+    /// The shared allocation, for engine-internal construction.
+    pub(crate) fn as_arc(&self) -> &Arc<[T]> {
+        &self.0
+    }
+
+    /// Share the allocation with a fixture payload.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn share_for_tests(&self) -> Self {
+        self.share()
+    }
+}
+
+impl<T> std::ops::Deref for PayloadArray<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<T> AsRef<[T]> for PayloadArray<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.0
+    }
+}
+
+impl<'a, T> IntoIterator for &'a PayloadArray<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for PayloadArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T: PartialEq> PartialEq for PayloadArray<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl<T: Eq> Eq for PayloadArray<T> {}
+
+impl<T: std::hash::Hash> std::hash::Hash for PayloadArray<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
+    }
+}
+
+impl<T> Default for PayloadArray<T> {
+    fn default() -> Self {
+        Self(Arc::from(Vec::new()))
+    }
+}
+
+impl<T> From<Arc<[T]>> for PayloadArray<T> {
+    fn from(items: Arc<[T]>) -> Self {
+        Self(items)
+    }
+}
+
+impl<T> From<Vec<T>> for PayloadArray<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> From<Box<[T]>> for PayloadArray<T> {
+    fn from(items: Box<[T]>) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T, const N: usize> From<[T; N]> for PayloadArray<T> {
+    fn from(items: [T; N]) -> Self {
+        Self(Arc::from(Vec::from(items)))
+    }
+}
+
+impl<T: Copy> From<&[T]> for PayloadArray<T> {
+    fn from(items: &[T]) -> Self {
+        Self(Arc::from(items))
+    }
+}
+
+impl<T> FromIterator<T> for PayloadArray<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
 /// One element of a [`SemanticNodeData::Tuple`] shell.
 ///
 /// Preserves the declaration-site metadata the dispatcher needs to render
@@ -9316,12 +10225,31 @@ pub enum UndecidedReason {
 /// regular [`SemanticNodeId`] under the lazy-materialisation rule — the
 /// element's body is not eagerly recursed into when the owning tuple shell
 /// is interned.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TupleElement {
-    pub label: Option<Arc<str>>,
+    pub label: Option<OwnedStr>,
     pub value: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
+}
+
+impl TupleElement {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            label: self.label.clone(),
+            value: self.value,
+            optional: self.optional,
+            rest: self.rest,
+        }
+    }
 }
 
 /// Immutable semantic-node payload. Storage for this enum is owned by the
@@ -9361,7 +10289,7 @@ pub(crate) fn authored_property_key_child(key: &AuthoredPropertyKey) -> Option<S
 }
 
 /// Lossless authored property write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredPropertyEffect {
     pub key: AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -9369,14 +10297,14 @@ pub struct AuthoredPropertyEffect {
     pub readonly: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 
 /// Lossless authored method write in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredMethodEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9384,7 +10312,7 @@ pub struct AuthoredMethodEffect {
     pub has_implementation_body: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
@@ -9392,7 +10320,7 @@ pub struct AuthoredMethodEffect {
 
 /// Lossless authored getter or setter write in an object construction. The
 /// enclosing effect variant carries the accessor kind.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredAccessorEffect {
     pub key: AuthoredPropertyKey,
     pub signature: SemanticNodeId,
@@ -9400,24 +10328,24 @@ pub struct AuthoredAccessorEffect {
     pub has_implementation_body: bool,
     pub visibility: verter_type_expr::MemberVisibility,
     pub spans: verter_type_expr::MemberSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     pub declared_in_macro_type_arg: MacroOwnBodyStamp,
     pub merge_role: MergeRoleStamp,
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
 }
 
 /// Lossless authored index signature in an object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct AuthoredIndexEffect {
     pub key_type: SemanticNodeId,
     pub value_type: SemanticNodeId,
     pub readonly: bool,
     pub spans: verter_type_expr::IndexSignatureSpans,
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
 }
 
 /// One source-ordered effect in a spread-bearing object construction.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ObjectConstructionEffect {
     DirectProperty(AuthoredPropertyEffect),
     DirectMethod(AuthoredMethodEffect),
@@ -9427,6 +10355,101 @@ pub enum ObjectConstructionEffect {
     DirectCall(SemanticNodeId),
     DirectConstruct(SemanticNodeId),
     Spread(SemanticNodeId),
+}
+
+impl AuthoredPropertyEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredMethodEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredAccessorEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            signature: self.signature,
+            optional: self.optional,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            excess_origin: self.excess_origin,
+        }
+    }
+}
+
+impl AuthoredIndexEffect {
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            key_type: self.key_type,
+            value_type: self.value_type,
+            readonly: self.readonly,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+        }
+    }
+}
+
+impl ObjectConstructionEffect {
+    /// A fixture copy of a program effect.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a program the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        match self {
+            Self::DirectProperty(effect) => Self::DirectProperty(effect.copy()),
+            Self::DirectMethod(effect) => Self::DirectMethod(effect.copy()),
+            Self::DirectGet(effect) => Self::DirectGet(effect.copy()),
+            Self::DirectSet(effect) => Self::DirectSet(effect.copy()),
+            Self::DirectIndex(effect) => Self::DirectIndex(effect.copy()),
+            Self::DirectCall(node) => Self::DirectCall(*node),
+            Self::DirectConstruct(node) => Self::DirectConstruct(*node),
+            Self::Spread(node) => Self::Spread(*node),
+        }
+    }
+}
+
+impl ObjectSpreadProgram {
+    /// Share the program's effects with a payload the engine is building.
+    pub(crate) fn share(&self) -> Self {
+        Self {
+            effects: self.effects.share(),
+        }
+    }
 }
 
 impl ObjectConstructionEffect {
@@ -9462,9 +10485,9 @@ impl ObjectConstructionEffect {
 }
 
 /// Immutable source-ordered authority for a spread-bearing object.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ObjectSpreadProgram {
-    pub effects: Arc<[ObjectConstructionEffect]>,
+    pub effects: PayloadArray<ObjectConstructionEffect>,
 }
 
 impl ObjectSpreadProgram {
@@ -9489,7 +10512,7 @@ impl ObjectSpreadProgram {
             .iter()
             .map(|effect| match effect {
                 ObjectConstructionEffect::DirectProperty(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9497,7 +10520,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectProperty(effect)
                 }
                 ObjectConstructionEffect::DirectMethod(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9505,7 +10528,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectMethod(effect)
                 }
                 ObjectConstructionEffect::DirectGet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9513,7 +10536,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectGet(effect)
                 }
                 ObjectConstructionEffect::DirectSet(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     if let AuthoredPropertyKey::Computed(node) = &mut effect.key {
                         *node = map(*node);
                     }
@@ -9521,7 +10544,7 @@ impl ObjectSpreadProgram {
                     ObjectConstructionEffect::DirectSet(effect)
                 }
                 ObjectConstructionEffect::DirectIndex(effect) => {
-                    let mut effect = effect.clone();
+                    let mut effect = effect.copy();
                     effect.key_type = map(effect.key_type);
                     effect.value_type = map(effect.value_type);
                     ObjectConstructionEffect::DirectIndex(effect)
@@ -9538,12 +10561,12 @@ impl ObjectSpreadProgram {
             })
             .collect::<Vec<_>>();
         Self {
-            effects: Arc::from(effects.into_boxed_slice()),
+            effects: effects.into(),
         }
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum SemanticNodeData {
     /// A compiler-native intrinsic operation applied to its operands, kept
     /// DEFERRED because the answer depends on a binder the substitution has
@@ -9556,7 +10579,7 @@ pub enum SemanticNodeData {
     /// [`Self::InstantiationRef`] of a lib alias (a declaration application).
     IntrinsicApplication {
         op: CompilerIntrinsicTypeOp,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
     Alias(SemanticNodeId),
     Object(SurfaceView),
@@ -9612,7 +10635,7 @@ pub enum SemanticNodeData {
     /// going through a side channel. Each element's `value` is a regular
     /// [`SemanticNodeId`] under the lazy-materialisation rule.
     Tuple {
-        elements: Arc<[TupleElement]>,
+        elements: PayloadArray<TupleElement>,
         readonly: bool,
     },
     /// Template-literal shell. Carries the
@@ -9622,8 +10645,8 @@ pub enum SemanticNodeData {
     /// separate follow-up — the shell carrier itself is not
     /// deferred.
     TemplateLiteral {
-        quasis: Arc<[Arc<str>]>,
-        expressions: Arc<[SemanticNodeId]>,
+        quasis: OwnedSlice<OwnedStr>,
+        expressions: PayloadArray<SemanticNodeId>,
     },
     /// Deferred `keyof` shell used when the operand still carries open
     /// type-parameter structure and cannot be collapsed to a concrete key
@@ -9710,7 +10733,7 @@ pub enum SemanticNodeData {
         /// names intern to the same slot. In practice `display_name`
         /// is consistent with `decl + param_index`; the exclusion
         /// is defensive.
-        display_name: Arc<str>,
+        display_name: OwnedStr,
     },
     /// `infer X` placeholder inside a conditional's `extends` clause
     /// Modelled as an explicit variant rather than
@@ -9719,7 +10742,7 @@ pub enum SemanticNodeData {
     /// `true` branch will substitute the bound type into; `constraint` is
     /// the declared `infer X extends C` constraint.
     Infer {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
         constraint: Option<SemanticNodeId>,
     },
@@ -9735,7 +10758,7 @@ pub enum SemanticNodeData {
     /// same `TypeExpr::Infer { name }` as a declaration, so
     /// TypeExpr-level consumers are unaffected.
     InferRef {
-        name: Arc<str>,
+        name: OwnedStr,
         binder: InferBinderId,
     },
     // Declaration identity is carried as the env-bearing, content-free
@@ -9772,7 +10795,8 @@ pub enum SemanticNodeData {
         true_branch_ref: SemanticNodeId,
         false_branch_ref: SemanticNodeId,
         distributive: bool,
-        pending: Option<Arc<ConditionalPendingSubstitution>>,
+        pending:
+            Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
     },
     // §5.6 Signature shape — ONE variant for call AND construct signatures.
     ///
@@ -9793,9 +10817,9 @@ pub enum SemanticNodeData {
     /// [`TypeExpr::ConstructorType`](verter_type_expr::TypeExpr::ConstructorType).
     Signature {
         kind: SignatureKind,
-        params: Arc<[FunctionParam]>,
+        params: PayloadArray<FunctionParam>,
         return_type: SemanticNodeId,
-        type_parameters: Arc<[TypeParamDecl]>,
+        type_parameters: PayloadArray<TypeParamDecl>,
         /// The authored position this signature was lowered from, when the
         /// lowering carried occurrence-grade provenance (the locator-driven
         /// rails). `None` for a signature without recoverable occurrence
@@ -9868,7 +10892,7 @@ pub enum SemanticNodeData {
     /// Raises to `TypeExpr::Ref { name: base.decl_name, type_arguments: [...raised args] }`.
     InstantiationRef {
         base: DeclIdentity,
-        args: Arc<[SemanticNodeId]>,
+        args: PayloadArray<SemanticNodeId>,
     },
 
     /// The INSTANCE type of a class expression (`return class extends
@@ -9895,7 +10919,7 @@ pub enum SemanticNodeData {
         /// [`ClassExpressionIdentity::outer_clauses`] order), then one per
         /// own type parameter. Where the class is authored each is its
         /// parameter itself.
-        type_arguments: Arc<[SemanticNodeId]>,
+        type_arguments: PayloadArray<SemanticNodeId>,
         surface: SemanticNodeId,
     },
 
@@ -9908,7 +10932,7 @@ pub enum SemanticNodeData {
     /// single declaration.
     MergedDecl {
         /// Lowered contributor bodies, in source order.
-        contributors: Arc<[SemanticNodeId]>,
+        contributors: PayloadArray<SemanticNodeId>,
     },
 
     /// Unresolved bare-name reference carrier.
@@ -9987,6 +11011,163 @@ pub enum SemanticNodeData {
 }
 
 impl SemanticNodeData {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::IntrinsicApplication { op, args } => Self::IntrinsicApplication {
+                op: op.clone(),
+                args: args.share(),
+            },
+            Self::Alias(v0) => Self::Alias(v0.clone()),
+            Self::Object(v0) => Self::Object(v0.clone()),
+            Self::ObjectSpreadProgram(v0) => Self::ObjectSpreadProgram(v0.share()),
+            Self::Union(v0) => Self::Union(v0.share()),
+            Self::Intersection(v0) => Self::Intersection(v0.share()),
+            Self::Primitive(v0) => Self::Primitive(v0.clone()),
+            Self::Literal(v0) => Self::Literal(v0.clone()),
+            Self::EnumLiteral(v0) => Self::EnumLiteral(v0.clone()),
+            Self::Opaque(v0) => Self::Opaque(v0.clone()),
+            Self::Array { element, readonly } => Self::Array {
+                element: element.clone(),
+                readonly: readonly.clone(),
+            },
+            Self::Tuple { elements, readonly } => Self::Tuple {
+                elements: elements.share(),
+                readonly: readonly.clone(),
+            },
+            Self::TemplateLiteral {
+                quasis,
+                expressions,
+            } => Self::TemplateLiteral {
+                quasis: quasis.clone(),
+                expressions: expressions.share(),
+            },
+            Self::KeyOf { base } => Self::KeyOf { base: base.clone() },
+            Self::IndexedAccess { object, index } => Self::IndexedAccess {
+                object: object.clone(),
+                index: index.clone(),
+            },
+            Self::Mapped { source, mapper } => Self::Mapped {
+                source: source.clone(),
+                mapper: mapper.clone(),
+            },
+            // A carrier lends its arguments only by borrow, so its copy is
+            // rebuilt through the one carrier reconstruction channel.
+            Self::TypeOf(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
+            Self::TypeOfNominal(v0) => Self::TypeOfNominal(v0.clone()),
+            Self::TypeParam {
+                decl,
+                param_index,
+                constraint,
+                default,
+                display_name,
+            } => Self::TypeParam {
+                decl: decl.clone(),
+                param_index: param_index.clone(),
+                constraint: constraint.clone(),
+                default: default.clone(),
+                display_name: display_name.clone(),
+            },
+            Self::Infer {
+                name,
+                binder,
+                constraint,
+            } => Self::Infer {
+                name: name.clone(),
+                binder: binder.clone(),
+                constraint: constraint.clone(),
+            },
+            Self::InferRef { name, binder } => Self::InferRef {
+                name: name.clone(),
+                binder: binder.clone(),
+            },
+            Self::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                distributive,
+                pending,
+            } => Self::Conditional {
+                check: check.clone(),
+                extends: extends.clone(),
+                true_branch_ref: true_branch_ref.clone(),
+                false_branch_ref: false_branch_ref.clone(),
+                distributive: distributive.clone(),
+                pending: pending.clone(),
+            },
+            Self::Signature {
+                kind,
+                params,
+                return_type,
+                type_parameters,
+                occurrence,
+                return_carrier,
+                signature_span,
+                return_type_span,
+                predicate,
+                is_abstract,
+            } => Self::Signature {
+                kind: kind.clone(),
+                params: params.share(),
+                return_type: return_type.clone(),
+                type_parameters: type_parameters.share(),
+                occurrence: occurrence.clone(),
+                return_carrier: return_carrier.clone(),
+                signature_span: signature_span.clone(),
+                return_type_span: return_type_span.clone(),
+                predicate: predicate.clone(),
+                is_abstract: is_abstract.clone(),
+            },
+            Self::DeferredCallable(v0) => Self::DeferredCallable(v0.clone()),
+            Self::DeclRef { identity } => Self::DeclRef {
+                identity: identity.clone(),
+            },
+            Self::InstantiationRef { base, args } => Self::InstantiationRef {
+                base: base.clone(),
+                args: args.share(),
+            },
+            Self::ClassExpressionInstance {
+                identity,
+                type_arguments,
+                surface,
+            } => Self::ClassExpressionInstance {
+                identity: identity.clone(),
+                type_arguments: type_arguments.share(),
+                surface: surface.clone(),
+            },
+            Self::MergedDecl { contributors } => Self::MergedDecl {
+                contributors: contributors.share(),
+            },
+            Self::BareRef(_) | Self::ImportType(_) => self
+                .map_carrier_type_args(Arc::from(self.carrier_type_args()))
+                .expect("a carrier rebuilds with its own arguments"),
+            Self::RawFallback { value } => Self::RawFallback {
+                value: value.clone(),
+            },
+            Self::SyntheticBinding { id, value_node } => Self::SyntheticBinding {
+                id: id.clone(),
+                value_node: value_node.clone(),
+            },
+        }
+    }
+}
+
+impl SemanticNodeData {
     /// The ONE constructor for [`Self::SyntheticBinding`]: the carrier for
     /// `key`, or the typed [`QueryError::StaleSemanticOperand`] refusal when
     /// the carrier's backing value is a node the arena could still allocate
@@ -10021,7 +11202,10 @@ impl SemanticNodeData {
         op: CompilerIntrinsicTypeOp,
         args: Arc<[SemanticNodeId]>,
     ) -> Option<Self> {
-        (args.len() == op.arity()).then_some(Self::IntrinsicApplication { op, args })
+        (args.len() == op.arity()).then_some(Self::IntrinsicApplication {
+            op,
+            args: PayloadArray::from(args),
+        })
     }
 
     /// The kind-erased composite payload of a [`Self::Union`] /
@@ -10510,9 +11694,9 @@ pub enum SignatureKind {
 }
 
 /// Parameter of a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct FunctionParam {
-    pub name: Option<Arc<str>>,
+    pub name: Option<OwnedStr>,
     pub ty: SemanticNodeId,
     pub optional: bool,
     pub rest: bool,
@@ -10527,6 +11711,27 @@ pub struct FunctionParam {
     /// `HasLiteralTypes`). A declaration fact: an instantiation keeps it, so
     /// `(x: T)` instantiated at `'a'` is not literal-declared.
     pub declared_literal: bool,
+}
+
+impl FunctionParam {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            ty: self.ty,
+            optional: self.optional,
+            rest: self.rest,
+            span: self.span,
+            declared_literal: self.declared_literal,
+        }
+    }
 }
 
 /// Whether a declared parameter type is a literal type in TypeScript's
@@ -10553,7 +11758,7 @@ impl FunctionParam {
         rest: bool,
     ) -> Self {
         Self {
-            name,
+            name: name.as_deref().map(OwnedStr::from),
             ty,
             optional,
             rest,
@@ -10628,9 +11833,9 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
 }
 
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The exact interned [`SemanticNodeData::TypeParam`] node for this
     /// parameter — the identity inference binds. Per-parameter policy
     /// (const-ness, binding) keys off THIS node, never the display name.
@@ -10640,6 +11845,26 @@ pub struct TypeParamDecl {
     /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
     /// is valid) — never a session-wide flag.
     pub is_const: bool,
+}
+
+impl TypeParamDecl {
+    /// A fixture copy of a payload member record.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.copy()
+    }
+
+    /// An engine-internal copy for a payload the engine is building.
+    pub(crate) fn copy(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            param: self.param,
+            constraint: self.constraint,
+            default: self.default,
+            is_const: self.is_const,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -10666,11 +11891,11 @@ pub trait TypeNavigator {
     fn choose_next_hop(&self, path: &[PathSegment], at: SemanticNodeId) -> HopDecision;
 }
 
-/// Read access to the shared semantic graph. Callers that hold a
-/// [`SemanticNodeId`] use this trait to inspect the resolved node data
-/// without spawning private side channels.
-pub trait SemanticGraphRead {
-    fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData>;
+/// Read access to the shared semantic graph by construction ordinal; the
+/// missing-id fabrication fixture reads through it.
+#[cfg(test)]
+pub(crate) trait SemanticGraphRead {
+    fn node_data(&self, node: SemanticNodeId) -> crate::semantic_query_memo::NodeData;
 }
 
 /// Authoritative dispatch for every reusable semantic operation.
@@ -10710,8 +11935,11 @@ pub trait SemanticQueryApi {
         narrow_output_to_type_node(self.execute(key))
     }
 
-    fn resolve_decl(&self, key: ResolveDeclKey) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ResolveDecl(key)))
+    fn resolve_decl(
+        &self,
+        key: ResolveDeclKey,
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ResolveDecl(key))
     }
     // NOTE: there is deliberately NO `instantiate` convenience method: an
     // `Instantiate` key's context must come from the sealed
@@ -10724,36 +11952,32 @@ pub trait SemanticQueryApi {
         base: SemanticNodeId,
         member: Arc<str>,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectMember {
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ProjectMember {
             base,
-            member,
+            member: member.into(),
             mode,
-        }))
+        })
     }
     fn indexed_access(
         &self,
         base: SemanticNodeId,
         index: IndexKey,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::IndexedAccess {
-            base,
-            index,
-            mode,
-        }))
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::IndexedAccess { base, index, mode })
     }
     fn project_path(
         &self,
         base: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         mode: ProjectionMode,
-    ) -> QueryResult<SemanticNodeId> {
-        strip_output_provenance(self.execute_type_node(SemanticQueryKey::ProjectPath {
+    ) -> QueryResult<SemanticQueryOutput<SemanticNodeId>> {
+        self.execute_type_node(SemanticQueryKey::ProjectPath {
             base,
             path,
             context: ProjectionReductionContext::published(mode),
-        }))
+        })
     }
 }
 
@@ -10871,16 +12095,17 @@ mod tests {
         // ADD NEW VARIANTS HERE when extending `QueryError` (the sibling
         // classification fixture in `raise_sentinel.rs` carries the same nudge).
         let variants: Vec<QueryError> = vec![
+            QueryError::ExecutionAborted(ExecutionAbort::Cancelled),
             QueryError::Miss,
             QueryError::UnsupportedIntrinsic {
-                name: Arc::from("I"),
+                name: OwnedStr::from("I"),
             },
             QueryError::BudgetExceeded(
                 verter_session_query::inputs::budget::BudgetExceededFailure {
                     domain: verter_session_query::inputs::budget::BudgetDomain::ProjectionOperation,
                     limit: 1,
                     actual: 2,
-                    context: "hash-fixture".to_string(),
+                    context: "hash-fixture".into(),
                 },
             ),
             QueryError::Cancelled,
@@ -10891,17 +12116,19 @@ mod tests {
                 reasons: PartialReasonSet::PROPAGATED,
             },
             QueryError::AliasCycle {
-                chain: Arc::from(vec![Arc::from("A")].into_boxed_slice()),
+                chain: verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from("A")].into_boxed_slice(),
+                ),
             },
             QueryError::RecursiveRef {
-                name: Arc::from("R"),
-                args: std::sync::Arc::from([]),
+                name: OwnedStr::from("R"),
+                args: Default::default(),
             },
-            QueryError::Other(Arc::from("x")),
+            QueryError::Other(OwnedStr::from("x")),
             QueryError::DeclPlaceholder {
-                canonical_id: Arc::from("/w/p.ts"),
+                canonical_id: OwnedStr::from("/w/p.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                name: Arc::from("P"),
+                name: OwnedStr::from("P"),
                 whole_hash: [0u8; 16],
             },
             QueryError::ValueDomainMismatch {
@@ -10961,14 +12188,16 @@ mod tests {
         let type_of = SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId {
-                    canonical_id: Arc::from("/m.ts"),
+                    canonical_id: OwnedStr::from("/m.ts"),
                     owner: TopLevelOwnerId::ordinary_file(),
                     local_scope: None,
                     binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
                 },
-                name: Arc::from("factory"),
+                name: OwnedStr::from("factory"),
             },
-            Arc::from(vec![Arc::<str>::from("make")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("make")].into_boxed_slice(),
+            ),
             Arc::clone(&args),
         );
         assert_eq!(
@@ -10979,7 +12208,9 @@ mod tests {
 
         let import_type = SemanticNodeData::new_import_type(
             Arc::from("./m"),
-            Arc::from(vec![Arc::<str>::from("G")].into_boxed_slice()),
+            verter_type_expr::OwnedSlice::from(
+                vec![verter_type_expr::OwnedStr::from("G")].into_boxed_slice(),
+            ),
             Arc::clone(&args),
             false,
         );
@@ -11004,18 +12235,18 @@ mod tests {
     #[test]
     fn resolve_decl_keys_dedup_by_scope_and_name() {
         let scope = ScopeId {
-            canonical_id: Arc::from("/w/src/types.ts"),
+            canonical_id: OwnedStr::from("/w/src/types.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
         };
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope.clone(),
-            name: Arc::from("C"),
+            name: OwnedStr::from("C"),
         });
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope,
-            name: Arc::from("C"),
+            name: OwnedStr::from("C"),
         });
         assert_eq!(a, b);
     }
@@ -11026,21 +12257,21 @@ mod tests {
     fn resolve_decl_keys_disambiguate_by_scope() {
         let a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
-            name: Arc::from("Foo"),
+            name: OwnedStr::from("Foo"),
         });
         let b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: ScopeId {
-                canonical_id: Arc::from("/w/b.ts"),
+                canonical_id: OwnedStr::from("/w/b.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 local_scope: None,
                 binder_scope_id: BinderScopeId::file_scope(TopLevelOwnerId::ordinary_file()),
             },
-            name: Arc::from("Foo"),
+            name: OwnedStr::from("Foo"),
         });
         assert_ne!(a, b);
     }
@@ -11080,12 +12311,12 @@ mod tests {
         let base = SemanticNodeId(42);
         let a = SemanticQueryKey::ProjectMember {
             base,
-            member: Arc::from("foo"),
+            member: OwnedStr::from("foo"),
             mode: ProjectionMode::Navigate,
         };
         let b = SemanticQueryKey::ProjectMember {
             base,
-            member: Arc::from("foo"),
+            member: OwnedStr::from("foo"),
             mode: ProjectionMode::Expanded,
         };
         assert_ne!(a, b);
@@ -11264,6 +12495,7 @@ mod tests {
         let clean = QueryResult::Value(SemanticQueryOutput {
             value: SemanticQueryValue::TypeNode(node),
             provenance: ResultProvenance::clean(),
+            delivery: Default::default(),
         });
         match narrow_output_to_type_node(clean) {
             QueryResult::Value(out) => {
@@ -11279,8 +12511,9 @@ mod tests {
 
         // A non-TypeNode domain (an overload set) must NOT narrow to a node.
         let overloads = QueryResult::Value(SemanticQueryOutput {
-            value: SemanticQueryValue::OverloadSet(Arc::from(Vec::<SignatureRef>::new())),
+            value: SemanticQueryValue::OverloadSet(Vec::<SignatureRef>::new().into()),
             provenance: ResultProvenance::clean(),
+            delivery: Default::default(),
         });
         match narrow_output_to_type_node(overloads) {
             QueryResult::Error(QueryError::ValueDomainMismatch { expected, actual }) => {
@@ -11330,21 +12563,21 @@ mod tests {
             ),
             (
                 SemanticQueryValue::DeclarationAnalysis(DeclarationAnalysisValue {
-                    contributors: Arc::from(vec![node].into_boxed_slice()),
+                    contributors: vec![node].into(),
                 }),
                 SemanticQueryValueTag::DeclarationAnalysis,
             ),
             (
-                SemanticQueryValue::OverloadSet(Arc::from(
+                SemanticQueryValue::OverloadSet(verter_session_query::retention::owned::OwnedSlice::new(
                     vec![SignatureRef {
                         node,
                         occurrence: SignatureCandidateOrigin::Authored(
                             SignatureOccurrenceIdentity {
                             function: FlowFunctionSlotIdentity {
                                 declaration_slot: ResolvedDeclSlotIdentity::value_slot(
-                                    Arc::from("/synthetic/callee.ts"),
+                                    verter_type_expr::OwnedStr::from("/synthetic/callee.ts"),
                                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                                    Arc::from("callee"),
+                                    verter_type_expr::OwnedStr::from("callee"),
                                     0,
                                     HashValue::default(),
                                     HashValue::default(),
@@ -11364,7 +12597,7 @@ mod tests {
             (
                 SemanticQueryValue::Relation(RelationPayload {
                     outcome: RelationOutcome::Assignable,
-                    bindings: Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
+                    bindings: Vec::<InferBinding>::new().into(),
                     recursion: RelationRecursionFootprint::default(),
                 }),
                 SemanticQueryValueTag::Relation,
@@ -11384,7 +12617,7 @@ mod tests {
                 SemanticQueryValueTag::MaterializationCycleGate,
             ),
             (
-                SemanticQueryValue::FlowReturn(Arc::new(FlowReturnResult::new(
+                SemanticQueryValue::FlowReturn(verter_session_query::retention::owned::Owned::new(FlowReturnResult::new(
                     &crate::semantic_query_memo::SemanticGraphStore::new(),
                     node,
                     verter_session_query::flow::completion::NormalCompletion::minted_for_fixture(
@@ -11395,7 +12628,7 @@ mod tests {
                 SemanticQueryValueTag::FlowReturn,
             ),
             (
-                SemanticQueryValue::ResolveCall(Arc::new(ResolvedCallResult::DynamicAny {
+                SemanticQueryValue::ResolveCall(verter_session_query::retention::owned::Owned::new(ResolvedCallResult::DynamicAny {
                     return_type: node,
                 })),
                 SemanticQueryValueTag::ResolveCall,
@@ -11450,16 +12683,16 @@ mod tests {
 /// A static node reader for pure consumers. Missing IDs retain their typed
 /// absence; the capability carries no query acquisition or publication API.
 pub(crate) trait NodeRead {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>>;
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData>;
 }
 impl<T: NodeRead + ?Sized> NodeRead for Arc<T> {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         self.as_ref().node_data(node)
     }
 }
 
 impl<T: NodeRead + ?Sized> NodeRead for &T {
-    fn node_data(&self, node: SemanticNodeId) -> Option<Arc<SemanticNodeData>> {
+    fn node_data(&self, node: SemanticNodeId) -> Option<crate::semantic_query_memo::NodeData> {
         (**self).node_data(node)
     }
 }
@@ -11473,5 +12706,9 @@ pub fn new_nominal_typeof_for_tests(
     path: std::sync::Arc<[std::sync::Arc<str>]>,
     nominal_identity: verter_type_expr::facts::ValueDeclIdentityPart,
 ) -> SemanticNodeData {
-    SemanticNodeData::new_nominal_typeof(value_root, path, nominal_identity)
+    SemanticNodeData::new_nominal_typeof(
+        value_root,
+        verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(path),
+        nominal_identity,
+    )
 }

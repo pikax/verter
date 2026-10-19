@@ -239,10 +239,10 @@ fn build_owner_decl_identity(
         .map(|s| s.whole_hash)
         .unwrap_or_default();
     DeclIdentity {
-        canonical_id: Arc::from(owner_canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(owner_canonical),
         owner,
         whole_hash,
-        decl_name: Arc::from(SFC_SCRIPT_SETUP_DECL_NAME),
+        decl_name: verter_type_expr::OwnedStr::from(SFC_SCRIPT_SETUP_DECL_NAME),
     }
 }
 
@@ -367,23 +367,21 @@ fn accumulate_lowered_node_carrier_deps(
         if !visited.insert(current) {
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), current)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(current) else {
             continue;
         };
         match data.as_ref() {
             SemanticNodeData::DeclRef { identity } => {
                 if identity.canonical_id.as_ref() != owner_canonical {
                     carriers
-                        .entry(Arc::clone(&identity.canonical_id))
+                        .entry(std::sync::Arc::<str>::from(identity.canonical_id.as_str()))
                         .or_insert(identity.whole_hash);
                 }
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 if base.canonical_id.as_ref() != owner_canonical {
                     carriers
-                        .entry(Arc::clone(&base.canonical_id))
+                        .entry(std::sync::Arc::<str>::from(base.canonical_id.as_str()))
                         .or_insert(base.whole_hash);
                 }
                 for arg in args.iter() {
@@ -448,11 +446,17 @@ fn accumulate_lowered_node_carrier_deps(
     if carriers.is_empty() {
         return;
     }
-    let entries: Vec<(Arc<str>, DepVersion)> = carriers
+    let entries: Vec<verter_type_engine::semantic_query::DepEntry> = carriers
         .into_iter()
-        .map(|(canonical, hash)| (canonical, DepVersion::WholeHash(hash)))
+        .map(|(canonical, hash)| {
+            verter_type_engine::semantic_query::DepEntry::new(
+                &canonical,
+                DepVersion::WholeHash(hash),
+            )
+        })
         .collect();
-    let signature: DepSignature = Arc::from(entries.into_boxed_slice());
+    let signature: DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(entries.into_boxed_slice());
     emit_slot_binding_graph_dispatch_facts(dispatch, &signature);
 }
 
@@ -635,9 +639,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         }
         let macro_payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: dispatch.type_slot_for(
-                Arc::clone(&owner.canonical_id),
+                owner.canonical_id.clone(),
                 owner.owner,
-                Arc::clone(&owner.decl_name),
+                owner.decl_name.clone(),
             ),
             macro_index,
             macro_kind: AnalyzedMacroKind::DefineSlots,
@@ -649,27 +653,27 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &macro_payload_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &macro_payload_read.dep_signature);
-        if !macro_payload_read.walker_diagnostics.is_empty() {
+        emit_slot_binding_graph_dispatch_facts(dispatch, macro_payload_read.dep_signature());
+        if !macro_payload_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &macro_payload_read.walker_diagnostics,
+                macro_payload_read.walker_diagnostics(),
                 macro_index,
                 MacroExpansionKind::DefineSlots,
-                macro_payload_read.cache_suppress,
+                macro_payload_read.cache_suppress(),
             ));
         }
         // A2 signal split: the component-meta warm gate keys on the
         // PARTIAL signal, not on inner-memo non-cacheability. A benign
         // non-cacheable nested read must NOT suppress a complete result.
-        if macro_payload_read.result_is_partial {
+        if macro_payload_read.result_is_partial() {
             ledger.suppress_partial_read(
                 dispatch.host_attachment().surface_claims(),
                 macro_payload_read.partial_reason_classes(),
             );
         }
 
-        let macro_payload_node = match macro_payload_read.value {
-            QueryResult::Value(id) => id,
+        let macro_payload_node = match macro_payload_read.value() {
+            QueryResult::Value(id) => *id,
             QueryResult::Recursive(_) => {
                 diag_sink.push(macro_expansion_for_cycle(
                     macro_index,
@@ -679,9 +683,9 @@ pub(crate) fn resolve_slot_bindings_graph_native(
                 continue;
             }
             QueryResult::Error(e) => {
-                if is_fatal_query_error(&e) {
+                if is_fatal_query_error(e) {
                     ledger.suppress(
-                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -697,6 +701,7 @@ pub(crate) fn resolve_slot_bindings_graph_native(
         let bindings = compute_bindings_via_graph(
             dispatch,
             ctx.ctx,
+            ctx.builder(),
             macro_payload_node,
             SlotMacroIdentity {
                 owner: owner.clone(),
@@ -795,6 +800,8 @@ pub(crate) fn resolve_slot_bindings_graph_native(
 pub(crate) fn compute_bindings_via_graph(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+    // Owns every realized slot callable whose nodes the returned bindings name.
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     macro_payload_node: SemanticNodeId,
     owner_macro: SlotMacroIdentity,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
@@ -803,7 +810,8 @@ pub(crate) fn compute_bindings_via_graph(
     synthesis_steps_executed: &mut u32,
 ) -> Vec<ResolvedSlotBinding> {
     let mut out = Vec::new();
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::<PathSegment>::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice());
     let consume_step = |steps: &mut u32| -> bool {
         *steps = steps.saturating_add(1);
         match synthesis_step_budget {
@@ -838,24 +846,24 @@ pub(crate) fn compute_bindings_via_graph(
     });
     // Dual-emit: legacy accumulator + fact-tracer fan-out.
     verter_type_engine::request_context::observe_component_meta_read_suppress(&slot_surface_read);
-    emit_slot_binding_graph_dispatch_facts(dispatch, &slot_surface_read.dep_signature);
-    if !slot_surface_read.walker_diagnostics.is_empty() {
+    emit_slot_binding_graph_dispatch_facts(dispatch, slot_surface_read.dep_signature());
+    if !slot_surface_read.walker_diagnostics().is_empty() {
         diag_sink.push(shallow_diagnostics_to_macro_expansion(
-            &slot_surface_read.walker_diagnostics,
+            slot_surface_read.walker_diagnostics(),
             owner_macro.macro_index,
             MacroExpansionKind::DefineSlots,
-            slot_surface_read.cache_suppress,
+            slot_surface_read.cache_suppress(),
         ));
     }
     // A2 signal split: key the warm gate on the PARTIAL signal only.
-    if slot_surface_read.result_is_partial {
+    if slot_surface_read.result_is_partial() {
         ledger.suppress_partial_read(
             dispatch.host_attachment().surface_claims(),
             slot_surface_read.partial_reason_classes(),
         );
     }
-    let slot_surface = match slot_surface_read.value {
-        QueryResult::Value(id) => id,
+    let slot_surface = match slot_surface_read.value() {
+        QueryResult::Value(id) => *id,
         QueryResult::Recursive(_) => {
             diag_sink.push(macro_expansion_for_cycle(
                 owner_macro.macro_index,
@@ -865,10 +873,10 @@ pub(crate) fn compute_bindings_via_graph(
             return out;
         }
         QueryResult::Error(e) => {
-            if is_fatal_query_error(&e) {
+            if is_fatal_query_error(e) {
                 ledger.suppress(
                     verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(
-                        &e,
+                        e,
                     ),
                 );
             }
@@ -937,13 +945,14 @@ pub(crate) fn compute_bindings_via_graph(
         // and records its typed reason — the missing binding row is then
         // partial, never byte-identical to a genuinely non-callable member.
         let realized =
-            match verter_type_engine::project_semantic_dispatch::callable_view::realize_callable_member(
+            match verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
                 dispatch,
                 slot_member.value,
+            ).owning().realized_callable_root(
                 verter_type_engine::semantic_query::ProjectionReductionContext::published(
                     ProjectionMode::Shallow,
                 ),
-            ) {
+            ).into_value_in(builder) {
                 verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(id)
                 | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(id) => {
                     id.into_inner()
@@ -972,12 +981,7 @@ pub(crate) fn compute_bindings_via_graph(
         // signature is not a callable slot shape and synthesizes no
         // bindings (the realize fallback above hands back the raw member
         // value, so the kind must be re-asserted here).
-        let param0_ty = match verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            realized,
-        )
-        .as_deref()
-        {
+        let param0_ty = match dispatch.graph().read_in_scope(realized).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: verter_type_engine::semantic_query::SignatureKind::Call,
                 params,
@@ -1036,24 +1040,24 @@ pub(crate) fn compute_bindings_via_graph(
         verter_type_engine::request_context::observe_component_meta_read_suppress(
             &param_surface_read,
         );
-        emit_slot_binding_graph_dispatch_facts(dispatch, &param_surface_read.dep_signature);
-        if !param_surface_read.walker_diagnostics.is_empty() {
+        emit_slot_binding_graph_dispatch_facts(dispatch, param_surface_read.dep_signature());
+        if !param_surface_read.walker_diagnostics().is_empty() {
             diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                &param_surface_read.walker_diagnostics,
+                param_surface_read.walker_diagnostics(),
                 owner_macro.macro_index,
                 MacroExpansionKind::DefineSlots,
-                param_surface_read.cache_suppress,
+                param_surface_read.cache_suppress(),
             ));
         }
         // A2 signal split: key the warm gate on the PARTIAL signal only.
-        if param_surface_read.result_is_partial {
+        if param_surface_read.result_is_partial() {
             ledger.suppress_partial_read(
                 dispatch.host_attachment().surface_claims(),
                 param_surface_read.partial_reason_classes(),
             );
         }
-        let param_surface = match param_surface_read.value {
-            QueryResult::Value(id) => id,
+        let param_surface = match param_surface_read.value() {
+            QueryResult::Value(id) => *id,
             QueryResult::Recursive(_) => {
                 diag_sink.push(macro_expansion_for_cycle(
                     owner_macro.macro_index,
@@ -1063,9 +1067,9 @@ pub(crate) fn compute_bindings_via_graph(
                 continue;
             }
             QueryResult::Error(e) => {
-                if is_fatal_query_error(&e) {
+                if is_fatal_query_error(e) {
                     ledger.suppress(
-                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(&e),
+                        verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons::from_query_error(e),
                     );
                 }
                 diag_sink.push(macro_expansion_for_query_error(
@@ -1126,12 +1130,7 @@ pub(crate) fn compute_bindings_via_graph(
             // body; non-carrier values take no read at all, so no
             // unrelated file is ever walked. A carrier that does not
             // resolve keeps the original node (fail-closed shallow).
-            let value_node = match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                binding.value,
-            )
-            .as_deref()
-            {
+            let value_node = match dispatch.graph().read_in_scope(binding.value).as_deref() {
                 Some(SemanticNodeData::BareRef(_)) | Some(SemanticNodeData::ImportType(_)) => {
                     let value_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
                         base: binding.value,
@@ -1144,14 +1143,14 @@ pub(crate) fn compute_bindings_via_graph(
                     verter_type_engine::request_context::observe_component_meta_read_suppress(
                         &value_read,
                     );
-                    emit_slot_binding_graph_dispatch_facts(dispatch, &value_read.dep_signature);
-                    if value_read.result_is_partial {
+                    emit_slot_binding_graph_dispatch_facts(dispatch, value_read.dep_signature());
+                    if value_read.result_is_partial() {
                         ledger.suppress_partial_read(
                             dispatch.host_attachment().surface_claims(),
                             value_read.partial_reason_classes(),
                         );
                     }
-                    match value_read.value {
+                    match *value_read.value() {
                         QueryResult::Value(id) => id,
                         QueryResult::Recursive(_) | QueryResult::Error(_) => binding.value,
                     }
@@ -1281,10 +1280,7 @@ fn named_reference_carrier_source(
     let mut current = value_node;
     // Peel aliases (bounded).
     for _ in 0..16 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::DeclRef { identity } => {
@@ -1309,7 +1305,7 @@ fn named_reference_carrier_source(
                 let (name, _scope) = data.bare_ref_head()?;
                 return Some(verter_type_expr::facts::SemanticTypeSource::Closed(
                     verter_type_expr::facts::ClosedTypeFact::Leaf(
-                        verter_type_expr::facts::LeafTypeFact::Ref(name.as_ref().to_string()),
+                        verter_type_expr::facts::LeafTypeFact::Ref(name.to_string()),
                     ),
                 ));
             }
@@ -1380,16 +1376,15 @@ fn closed_leaf_object_source(
     use verter_type_expr::facts::{ResolvedLocalShape, SemanticTypeSource, SynthesizedMemberFact};
     use verter_type_expr::span_origins::{MemberSpansOrigin, SourceSynthetic};
 
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), value_node)?;
+    let data = dispatch.graph().read_in_scope(value_node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };
     // Any signature-bearing or key-space-bearing surface is richer than the
     // bounded named-member case — keep the carrier.
-    if !view.call_signatures.is_empty()
-        || !view.construct_signatures.is_empty()
-        || !view.index_signatures.is_empty()
+    if !view.call_signatures().is_empty()
+        || !view.construct_signatures().is_empty()
+        || !view.index_signatures().is_empty()
         || view.closed().has_index_signature()
     {
         return None;
@@ -1421,7 +1416,7 @@ fn closed_leaf_object_source(
         });
     }
     Some(SemanticTypeSource::Synthesized(ResolvedLocalShape::Object(
-        Arc::from(synthesized.into_boxed_slice()),
+        From::from(synthesized.into_boxed_slice()),
     )))
 }
 
@@ -1436,13 +1431,13 @@ fn closed_member_path_route_source(
     // inner-to-outer, so reverse on emit.
     let mut rev_keys: Vec<String> = Vec::new();
     let mut current = value_node;
+    // The carrier of each head resolution owns the node the walk continues
+    // from.
+    let mut held = Vec::new();
     // Bounded: an authored indexed-access chain is short; the cap only
     // guards against pathological graph shapes.
     for _ in 0..64 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => {
                 current = *inner;
@@ -1466,16 +1461,17 @@ fn closed_member_path_route_source(
                 // head re-enters the loop (a `DeclRef` mints the fact), an
                 // unresolved head fails closed below.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let resolved = dispatch.owning().resolve_carrier_subject_node(
                     current,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
-                if resolved == current {
+                if *resolved.value() == current {
                     return None;
                 }
-                current = resolved;
+                current = *resolved.value();
+                held.push(resolved);
             }
             SemanticNodeData::DeclRef { identity } if !rev_keys.is_empty() => {
                 if identity.canonical_id.as_ref() == owner_canonical
@@ -1496,14 +1492,14 @@ fn closed_member_path_route_source(
                         verter_type_expr::facts::IndexedAccessFact {
                             object: verter_type_expr::locators::TypeBodySlot {
                                 anchor: verter_type_expr::locators::AuthoredAnchor {
-                                    canonical_id: Arc::clone(&identity.canonical_id),
+                                    canonical_id: identity.canonical_id.clone(),
                                     owner: identity.owner,
-                                    symbol: Arc::clone(&identity.decl_name),
+                                    symbol: identity.decl_name.clone(),
                                     space: verter_type_expr::locators::LocatorSymbolSpace::Type,
                                 },
-                                path: Arc::from(Vec::new().into_boxed_slice()),
+                                path: verter_type_expr::OwnedSlice::default(),
                             },
-                            index_path: Arc::from(index_path.into_boxed_slice()),
+                            index_path: From::from(index_path.into_boxed_slice()),
                         },
                     ),
                 ));
@@ -1547,15 +1543,14 @@ fn owner_local_member_reaches_non_owner_ref(
     else {
         return false;
     };
-    let Some(member_node) = dispatch
-        .raise_authored_locator_to_hot(
+    let raised = dispatch
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(member.ty.clone()),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
-        )
-        .at_optional_boundary()
-    else {
+        );
+    let Some(member_node) = raised.value().clone().at_optional_boundary() else {
         return false;
     };
     node_reaches_non_owner_ref(dispatch, owner_canonical, member_node.node())
@@ -1573,10 +1568,10 @@ fn node_reaches_non_owner_ref(
     node: SemanticNodeId,
 ) -> bool {
     use verter_type_engine::graph_walk::Reach;
+    // The carrier of each head resolution owns the node it queues.
+    let mut held = Vec::new();
     verter_type_engine::graph_walk::reaches(node, |node| {
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             return Reach::Parts(Vec::new());
         };
         let hit = |hit: bool| {
@@ -1605,16 +1600,18 @@ fn node_reaches_non_owner_ref(
                 // expansion); an unresolvable name cannot be proven
                 // imported and is ignored.
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let resolved = dispatch.owning().resolve_carrier_subject_node(
                     node,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         ProjectionMode::Navigate,
                     ),
                 );
-                if resolved == node {
+                let next = *resolved.value();
+                held.push(resolved);
+                if next == node {
                     Vec::new()
                 } else {
-                    vec![resolved]
+                    vec![next]
                 }
             }
             SemanticNodeData::Alias(inner) => vec![*inner],
@@ -1647,12 +1644,12 @@ fn node_reaches_non_owner_ref(
                 .map(|member| member.value)
                 .chain(
                     surface
-                        .index_signatures
+                        .index_signatures()
                         .iter()
                         .flat_map(|signature| [signature.key_type, signature.value_type]),
                 )
-                .chain(surface.call_signatures.iter().copied())
-                .chain(surface.construct_signatures.iter().copied())
+                .chain(surface.call_signatures().iter().copied())
+                .chain(surface.construct_signatures().iter().copied())
                 .collect(),
             SemanticNodeData::Signature {
                 params,
@@ -2418,15 +2415,15 @@ pub(crate) fn publish_merged_bindings(
                     (bounded, true)
                 } else {
                     let carrier = verter_type_expr::SyntheticCarrierKey {
-                        scope_canonical_id: Arc::from(gb.owner_macro.owner.canonical_id.as_ref()),
+                        scope_canonical_id: From::from(gb.owner_macro.owner.canonical_id.as_ref()),
                         surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-                        slot_name: Some(Arc::clone(&slot_name)),
-                        binding_name: Arc::clone(&binding_name),
+                        slot_name: Some(verter_type_expr::OwnedStr::from(&slot_name)),
+                        binding_name: verter_type_expr::OwnedStr::from(&binding_name),
                         value_node: gb.value_node.0,
                     };
                     (
                         verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-                            Arc::new(carrier),
+                            From::from(carrier),
                         ),
                         true,
                     )

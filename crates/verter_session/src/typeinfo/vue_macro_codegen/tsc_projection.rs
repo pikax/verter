@@ -4,10 +4,11 @@
 //! Sibling half of the parent module `impl VerterHost` orchestrator.
 
 use super::runtime::{
-    authored_emit_anchor, authored_emit_order, macro_projection_faulted, partial_failure,
-    resolution_failure, MacroProjectionLane,
+    authored_emit_anchor, authored_emit_order, failure_from_local, observe_local,
+    resolution_failure, row_derivation_fact,
 };
 use super::*;
+use verter_type_engine::semantic_query::FactStatus;
 
 /// The ONE nameability fail-close every splice site inherits: a NOMINAL
 /// `typeof` carrier whose declaring identity is a script-setup local of
@@ -24,8 +25,12 @@ fn nameable_render_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
-) -> verter_type_engine::semantic_query::SemanticNodeId {
-    dispatch.widen_owner_local_nominal_typeofs(node, owner_canonical)
+) -> verter_type_engine::semantic_query_memo::node_roots::Constructed<
+    verter_type_engine::semantic_query::SemanticNodeId,
+> {
+    dispatch
+        .owning()
+        .widen_owner_local_nominal_typeofs(node, owner_canonical)
 }
 
 pub(super) fn render_tsc_node(
@@ -35,10 +40,13 @@ pub(super) fn render_tsc_node(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
     counters.tsc_materializations += 1;
-    let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
+    // The widened carrier owns the rendered node until the text is produced.
+    let nameable = nameable_render_node(dispatch, node, owner_canonical);
+    let node = *nameable.value();
+    let (rendered, local) =
+        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+    if local.is_partial() {
+        return Err(failure_from_local(local));
     }
     let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
         UnsupportedReason::SemanticConstruct,
@@ -94,10 +102,16 @@ pub(super) fn render_tsc_testing_node(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
     counters.tsc_materializations += 1;
-    let node = nameable_render_node(dispatch, node, owner_canonical);
-    let rendered = crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node);
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
+    // The widened carrier owns the rendered node until the text is produced.
+    let nameable = nameable_render_node(dispatch, node, owner_canonical);
+    let node = *nameable.value();
+    let (rendered, local) =
+        observe_local(|| crate::typeinfo::raise::render_node_display_with_ctx(dispatch, node));
+    if local.is_partial() {
+        return Ok((
+            TscSpliceText::new("unknown"),
+            Some(testing_degradation(local.reasons())),
+        ));
     }
     let rendered = rendered.ok_or(ProjectionFailure::Unsupported(
         UnsupportedReason::SemanticConstruct,
@@ -107,6 +121,29 @@ pub(super) fn render_tsc_testing_node(
         return Ok((TscSpliceText::new("unknown"), Some(reason)));
     }
     Ok((TscSpliceText::new(rendered.text), None))
+}
+
+fn testing_degradation(
+    reasons: verter_type_engine::semantic_query::PartialReasonSet,
+) -> TscDeclarationFailureReason {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    if reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT) {
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::DepthBudgetExceeded,
+        )
+    } else if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+        || reasons.contains(PartialReasonSet::OPERATION_BUDGET)
+        || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
+        || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
+        || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
+        || reasons.contains(PartialReasonSet::STRUCTURAL_FACT_DEMAND_LIMIT)
+    {
+        TscDeclarationFailureReason::SemanticInferenceUnavailable(
+            TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+        )
+    } else {
+        TscDeclarationFailureReason::Unsupported(UnsupportedReason::SemanticConstruct)
+    }
 }
 
 pub(super) fn tsc_scope_requirements(
@@ -259,16 +296,24 @@ pub(super) fn tsc_scope_requirements_for(
                 ))?;
             found = true;
             let (inferred_class_members, inferred_value_dependencies, declaration_failure) =
-                match inferred_class_members(
-                    top_level_owner(owner),
-                    &name,
-                    contributor_ordinal,
-                    entry.span,
-                    entry.kind == LocalDeclarationKind::TypeAndValue,
-                    inventory,
-                    dispatch,
-                    owner_canonical,
-                ) {
+                match dispatch
+                    .project_semantic_attempt(|| {
+                        inferred_class_members(
+                            top_level_owner(owner),
+                            &name,
+                            contributor_ordinal,
+                            entry.span,
+                            entry.kind == LocalDeclarationKind::TypeAndValue,
+                            inventory,
+                            dispatch,
+                            owner_canonical,
+                        )
+                    })
+                    .map_err(|abort| {
+                        let observed = ResultCompleteness::partial(abort.reason_class());
+                        verter_type_engine::request_context::fold_result_completeness(observed);
+                        failure_from_local(observed)
+                    })? {
                     Ok(inferred) => (inferred.members, inferred.value_dependencies, None),
                     Err(failure) => (
                         Vec::new(),
@@ -857,12 +902,13 @@ fn inferred_class_members(
                     UnsupportedReason::SemanticConstruct,
                 ));
             };
-            identity.anchor.canonical_id = std::sync::Arc::from(owner_canonical);
+            identity.anchor.canonical_id = verter_type_expr::OwnedStr::from(owner_canonical);
             identity.anchor.owner = owner;
-            let (type_text, typeof_paths) = match dispatch.execute_function_return_source(
+            let returned = dispatch.owning().execute_function_return_source(
                 &verter_type_expr::facts::FunctionReturnSource::Flow(*identity),
                 owner_canonical,
-            ) {
+            );
+            let (type_text, typeof_paths) = match returned.value() {
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::Flow(result) => {
                     // A DEGRADED SUCCESS never splices display text: this
                     // projection is fail-closed (every degraded shape
@@ -910,7 +956,7 @@ fn inferred_class_members(
                 verter_type_engine::project_semantic_dispatch::flow_return::FunctionReturnNode::NoValue(
                     verter_type_engine::semantic_query::FlowReturnFailure::Budget(reason),
                 ) => {
-                    return Err(ClassInferenceFailure::InferenceUnavailable(reason));
+                    return Err(ClassInferenceFailure::InferenceUnavailable(*reason));
                 }
                 // A call in the body did not resolve: the member is typed
                 // UNSUPPORTED and suppresses admission — never widened
@@ -1020,7 +1066,7 @@ fn collect_local_declaration_closure(
             .lowering
             .type_dependencies(inventory.shallow_state, declaration_owner, name)
     else {
-        return Err(resolution_failure(MacroProjectionLane::Tsc));
+        return Err(resolution_failure());
     };
     if !deps.unroutable_declaration_dependencies.is_empty() || deps.has_unroutable_value_position {
         return Err(ProjectionFailure::Unsupported(
@@ -1183,9 +1229,7 @@ pub(super) fn emit_type_is_cross_sfc_carrier(
     payload: verter_type_engine::semantic_query::SemanticNodeId,
     owner_canonical: &str,
 ) -> bool {
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), payload)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(payload) else {
         return false;
     };
     let canonical: &str = match data.as_ref() {
@@ -1218,8 +1262,7 @@ pub(super) fn cross_file_namespace_import_type(
     owner_canonical: &str,
     inventory: &TscScopeInventory<'_>,
 ) -> Option<String> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::DeclRef { identity } = data.as_ref() else {
         return None;
     };
@@ -1266,9 +1309,11 @@ pub(super) fn tsc_emit_rows(
     payload_index: usize,
     effective_index: usize,
     counters: &mut VueMacroCodegenCounters,
+    published: &mut Vec<FactStatus>,
 ) -> Result<Vec<TscEmitRow>, ProjectionFailure> {
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
     let mut rows = Vec::new();
+    let mut row_facts = Vec::new();
 
     for signature in surface.call_signatures.iter() {
         let callable = CallableNodeView::new(dispatch, signature.node);
@@ -1291,22 +1336,30 @@ pub(super) fn tsc_emit_rows(
                 None => continue,
             },
         };
-        let Some(signature) = callable.signature(context) else {
+        let Some(signature) = callable.owning().signature(context) else {
             continue;
         };
-        let parameters = render_function_parameters(
+        let parameters = match render_function_parameters(
             dispatch,
             owner_canonical,
-            &signature.raw_params()[1..],
+            &signature.raw_params().value()[1..],
             counters,
-        )?;
+        ) {
+            Ok(parameters) => parameters,
+            Err(failure) => {
+                row_facts.push(super::projection_failure_fact(&failure));
+                continue;
+            }
+        };
         for name in names {
-            push_tsc_emit(
+            if push_tsc_emit(
                 &mut rows,
                 name.as_ref(),
                 parameters.clone(),
                 authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-            );
+            ) {
+                row_facts.push(row_derivation_fact().status());
+            }
         }
     }
 
@@ -1319,28 +1372,36 @@ pub(super) fn tsc_emit_rows(
             continue;
         };
         let parameters =
-            render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)?;
-        push_tsc_emit(
+            match render_emit_payload_parameters(dispatch, owner_canonical, member.value, counters)
+            {
+                Ok(parameters) => parameters,
+                Err(failure) => {
+                    row_facts.push(super::projection_failure_fact(&failure));
+                    continue;
+                }
+            };
+        if push_tsc_emit(
             &mut rows,
             name.as_ref(),
             parameters,
             authored_emit_anchor(mac, payload_index, effective_index, name.as_ref()),
-        );
+        ) {
+            row_facts.push(row_derivation_fact().status());
+        }
     }
 
     for field in &mac.emit_fields {
-        push_tsc_emit(
+        if push_tsc_emit(
             &mut rows,
             field.name.as_str(),
             TscSpliceText::new("...args: unknown[]"),
             authored_emit_anchor(mac, payload_index, effective_index, field.name.as_str()),
-        );
+        ) {
+            row_facts.push(row_derivation_fact().status());
+        }
     }
     rows.sort_by_key(|row| authored_emit_order(row.anchor));
-
-    if macro_projection_faulted(MacroProjectionLane::Tsc) {
-        return Err(partial_failure());
-    }
+    published.extend(row_facts);
     Ok(rows)
 }
 
@@ -1349,9 +1410,9 @@ fn push_tsc_emit(
     name: &str,
     parameters: TscSpliceText,
     anchor: MacroAnchor,
-) {
+) -> bool {
     if rows.iter().any(|row| row.name == name) {
-        return;
+        return false;
     }
     rows.push(TscEmitRow {
         name: name.to_owned(),
@@ -1359,6 +1420,7 @@ fn push_tsc_emit(
         handler_parameters: parameters,
         anchor,
     });
+    true
 }
 
 fn render_emit_payload_parameters(
@@ -1370,19 +1432,15 @@ fn render_emit_payload_parameters(
     use verter_type_engine::semantic_query::SemanticNodeData;
 
     let context = ProjectionReductionContext::published(ProjectionMode::Navigate);
-    let Some(node) = dispatch
-        .normalize_node_for_structural_fact_demand(node, context)
-        .into_complete_node()
-    else {
-        return Err(if macro_projection_faulted(MacroProjectionLane::Tsc) {
-            partial_failure()
-        } else {
-            resolution_failure(MacroProjectionLane::Tsc)
-        });
+    let (normalized, local) = observe_local(|| {
+        dispatch
+            .owning()
+            .normalize_node_for_structural_fact_demand(node, context)
+    });
+    let Some(node) = normalized.value().into_complete_node() else {
+        return Err(failure_from_local(local));
     };
-    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        .as_deref()
-    {
+    match dispatch.graph().read_in_scope(node).as_deref() {
         Some(SemanticNodeData::Tuple { elements, .. }) => {
             render_tuple_parameters(dispatch, owner_canonical, elements, counters)
         }

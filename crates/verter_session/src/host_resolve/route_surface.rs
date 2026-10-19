@@ -187,10 +187,10 @@ impl VerterHost {
             .map(|s| s.whole_hash)
             .unwrap_or_default();
         Some(verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: std::sync::Arc::from(declaring_canonical.as_str()),
+            canonical_id: verter_type_expr::OwnedStr::from(declaring_canonical.as_str()),
             owner: resolved_root.owner,
             whole_hash,
-            decl_name: std::sync::Arc::from(declaring_symbol.as_str()),
+            decl_name: verter_type_expr::OwnedStr::from(declaring_symbol.as_str()),
         })
     }
 

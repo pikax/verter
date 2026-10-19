@@ -198,6 +198,42 @@
               "test": "abandonment_respects_the_commit_boundary"
             }
           ]
+        },
+        {
+          "behavior": "root reprojection keeps budget checker recovery approximate and unretained, while certified recovery stays complete and reusable",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session budget_recovery_root_reprojection_remains_approximate_and_unretained",
+          "filter": "budget_recovery_root_reprojection_remains_approximate_and_unretained",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs",
+              "test": "budget_recovery_root_reprojection_remains_approximate_and_unretained"
+            }
+          ]
+        },
+        {
+          "behavior": "carrier normalization and enclosing conditionals preserve the adopted checker-recovery interpretation and independently exact controls",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+          "filter": "carrier_normalization_preserves_recovery_interpretation_when_forwarded",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/tests.rs",
+              "test": "carrier_normalization_preserves_recovery_interpretation_when_forwarded"
+            }
+          ]
+        },
+        {
+          "behavior": "merged global declarations preserve identical usable approximation, causes and exact sibling members through each declaring anchor",
+          "crate": "verter_session",
+          "command": "cargo nextest run -p verter_session merged_global_instantiation_preserves_approximation_from_every_declaration",
+          "filter": "merged_global_instantiation_preserves_approximation_from_every_declaration",
+          "witnesses": [
+            {
+              "file": "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
+              "test": "merged_global_instantiation_preserves_approximation_from_every_declaration"
+            }
+          ]
         }
       ]
     },
@@ -446,6 +482,7 @@
           "crates/verter_session/src/component_meta_audit/mod.rs",
           "crates/verter_session/src/component_meta_cache_discipline_tests.rs",
           "crates/verter_session/src/component_meta_caches_tests.rs",
+          "crates/verter_session/src/component_meta_delivery.rs",
           "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
           "crates/verter_session/src/component_meta_host.rs",
           "crates/verter_session/src/component_meta_indexed_access_early_out_tests.rs",
@@ -454,6 +491,7 @@
           "crates/verter_session/src/component_meta_pick_omit_tests.rs",
           "crates/verter_session/src/component_meta_publication_demand_tests.rs",
           "crates/verter_session/src/component_meta_repo_first_pass_diagnosis_tests.rs",
+          "crates/verter_session/src/component_meta_result_db.rs",
           "crates/verter_session/src/component_meta_resolution_policy/core.rs",
           "crates/verter_session/src/component_meta_resolution_policy/cycle_guard.rs",
           "crates/verter_session/src/component_meta_resolution_policy/mod.rs",
@@ -467,6 +505,7 @@
           "crates/verter_session/src/flow_completion_inventory_tests.rs",
           "crates/verter_session/src/flow_gap_retraction_tests.rs",
           "crates/verter_session/src/for_tests.rs",
+          "crates/verter_session/src/global_contributors/ac3_tests.rs",
           "crates/verter_session/src/host_compile_audit.rs",
           "crates/verter_session/src/host_flow_return_audit.rs",
           "crates/verter_session/src/host_manage/component_meta_entry.rs",
@@ -511,6 +550,8 @@
           "crates/verter_session/src/meta_resolve/projectors/published_reducer.rs",
           "crates/verter_session/src/meta_resolve/projectors/published_source.rs",
           "crates/verter_session/src/meta_resolve/projectors/slots.rs",
+          "crates/verter_session/src/meta_resolve/projectors_silent_miss_tests.rs",
+          "crates/verter_session/src/meta_resolve/resolved_state.rs",
           "crates/verter_session/src/meta_resolve/scoring.rs",
           "crates/verter_session/src/meta_resolve/slot_binding_graph.rs",
           "crates/verter_session/src/meta_resolve/slot_binding_graph_carrier_tests.rs",
@@ -530,16 +571,22 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_materialize_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_reduction_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/carrier_type_param_descent_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/class_member_evidence_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/checker_probe_lane_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/module_export_table_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/class_evaluation_flow_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/homomorphic_mapped_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/const_literal_widening_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/continuation_depth_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/cost_receipt_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/cycle_gate_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/deep_input_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/differential_class_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/differential_harness_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/dispatch_txn_flow_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/equality_value_narrowing_tests.rs",
@@ -547,6 +594,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_accessor_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_class_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_construct_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/augmentation_scale_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_coverage_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_frame_seal_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/flow_return_global_tests.rs",
@@ -565,6 +613,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/heritage_signature_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/intersection_complexity_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/lib_global_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/local_declaration_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/mapped_key_domain_carrier_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/member_accessibility_relation_tests.rs",
@@ -583,6 +632,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_operand_dead_work_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_operand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/semantic_source_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/semantic_task_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_discovery_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_epoch_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/signature_predicate_inference_tests.rs",
@@ -604,6 +654,7 @@
           "crates/verter_session/src/resolver_core/component_meta_query_engine/node_materialize.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_decl.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/registry_route_scoped.rs",
+          "crates/verter_session/src/resolver_core/component_meta_query_engine/route_admission.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/shallow_preserve_depth_tests.rs",
           "crates/verter_session/src/resolver_core/component_meta_query_engine/surface.rs",
@@ -614,9 +665,11 @@
           "crates/verter_session/src/resolver_core_tests/bare_name_resolve_namespace_tests.rs",
           "crates/verter_session/src/semantic_graph_self_root_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests.rs",
+          "crates/verter_session/src/semantic_query_memo_tests/allocation_ownership_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/cancellation_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/object_spread_projection_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/producer_tests.rs",
+          "crates/verter_session/src/semantic_query_memo_tests/public_carrier_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/scc_publish_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/tasks_tests.rs",
           "crates/verter_session/src/semantic_query_memo_tests/tests.rs",
@@ -629,6 +682,7 @@
           "crates/verter_session/src/structural_carrier_producer_tests/structural_lower_tests.rs",
           "crates/verter_session/src/tests/dispatch_bridges.rs",
           "crates/verter_session/src/tests/host_manage/general.rs",
+          "crates/verter_session/src/tests/host_manage/lifecycle.rs",
           "crates/verter_session/src/tests/host_manage/workspace.rs",
           "crates/verter_session/src/tests/meta/expose.rs",
           "crates/verter_session/src/tests/meta/props.rs",
@@ -653,10 +707,12 @@
           "crates/verter_session/src/typeinfo/typeinfo_tests/flow_return_substrate.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/macro_producer_fact_replay.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/mapped_template.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/narrow_discriminated_union.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/operator_reduction.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/relation_verdict_oracle.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/support.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/surface_spans.rs",
+          "crates/verter_session/src/typeinfo/typeinfo_tests/value_inference.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_cache.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_adapter_slots.rs",
           "crates/verter_session/src/typeinfo/typeinfo_tests/vue_import_recursion.rs",
@@ -681,6 +737,17 @@
           "crates/verter_session/tests/cases/compile-fail/member_role_stamps_not_mintable_without_witness.rs",
           "crates/verter_session/tests/cases/compile-fail/object_projection_witness_not_forgeable.rs",
           "crates/verter_session/tests/cases/compile-fail/object_projection_witness_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_construction_copy_is_store_only.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_delivery_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_dispatcher_output_cannot_be_forged.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_owned_carriers_borrow_and_own.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_payload_has_no_construction_copy.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_result_and_payload_cannot_be_extracted.rs",
+          "crates/verter_session/tests/cases/compile-fail/public_surface_nested_carriers_cannot_detach.rs",
           "crates/verter_session/tests/cases/compile-fail/semantic_operand_carriers_are_sealed.rs",
           "crates/verter_session/tests/cases/compile-fail/semantic_operand_force_projection_not_importable.rs",
           "crates/verter_session/tests/cases/compile-fail/semantic_operand_no_external_mint_or_force.rs",
@@ -727,6 +794,7 @@
           "crates/verter_session/tests/cases/g_misc2/per_macro_projector_decomposition_tests.rs",
           "crates/verter_session/tests/cases/g_misc2/recursive_substitute_memo.rs",
           "crates/verter_session/tests/cases/g_misc3/slot_binding_graph_matrix_member_presence.rs",
+          "crates/verter_session/tests/cases/g_session/flight_rendezvous.rs",
           "crates/verter_session/tests/cases/g_type/flow_return_audit_contract.rs",
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_cache_reuse_across_entrypoints.rs",
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_diamond_repeated_prop.rs",
@@ -738,7 +806,8 @@
           "crates/verter_session/tests/cases/g_type/type_resolution_audit_tls_propagation.rs",
           "crates/verter_session/tests/cases/relation_nominal_authority.rs",
           "crates/verter_session/tests/cases/typeinfo_ignored_test_manifest.rs",
-          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs"
+          "crates/verter_type_engine/tests/allocation_cases/flow_literal_provenance.rs",
+          "crates/verter_type_engine/tests/allocator_canaries.rs"
         ]
       },
       "pins": [

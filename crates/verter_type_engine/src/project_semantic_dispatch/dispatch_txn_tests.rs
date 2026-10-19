@@ -19,6 +19,7 @@ fn setup(
     contextual_inference_mode: ContextualInferenceMode,
 ) -> InferenceSessionSetup {
     InferenceSessionSetup::new(
+        crate::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from(vec![InferenceInfoSetup::new(param_node, Arc::from("T"))].into_boxed_slice()),
         variance_phase,
         pass_kind,
@@ -197,13 +198,13 @@ fn relate_identity(seed: u64, occurrence: InferenceOccurrence) -> ObligationIden
 }
 
 /// A zero-env `FlowReturn` key over one served declaration-body position.
-fn flow_return_key() -> FlowReturnKey {
+pub(in crate::project_semantic_dispatch) fn flow_return_key() -> FlowReturnKey {
     FlowReturnKey {
         function: crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/ws/txn.ts"),
+                verter_type_expr::OwnedStr::from("/ws/txn.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("f"),
+                verter_type_expr::OwnedStr::from("f"),
                 0,
                 crate::semantic_query::HashValue::default(),
                 crate::semantic_query::HashValue::default(),
@@ -211,7 +212,7 @@ fn flow_return_key() -> FlowReturnKey {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
         context: crate::semantic_query::FlowReturnContext {
@@ -237,7 +238,7 @@ fn flow_return_key() -> FlowReturnKey {
 fn resolve_call_key() -> crate::semantic_query::ResolveCallKey {
     crate::semantic_query::ResolveCallKey {
         point: crate::semantic_query::ProgramPointId {
-            canonical_id: Arc::from("/ws/txn.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/ws/txn.ts"),
             offset: 11,
         },
         callee: SemanticNodeId(4),
@@ -261,6 +262,7 @@ fn resolve_call_key() -> crate::semantic_query::ResolveCallKey {
 fn repeated_infer_sites_share_one_setup_record_and_one_fixed_binding() {
     let param = SemanticNodeId(501);
     let setup = InferenceSessionSetup::new(
+        crate::semantic_query_memo::test_support::synthetic_operand_graph(),
         Arc::from(
             vec![
                 InferenceInfoSetup::new(param, Arc::from("T")),
@@ -565,7 +567,7 @@ fn binding_disabled_barrier_hides_outer_but_allows_nested_call_session() {
 fn redischarge_stability_requires_same_polarity_and_binding_snapshot() {
     let binding = |bound| InferBinding {
         param: SemanticNodeId(710),
-        name: Arc::from("T"),
+        name: verter_type_expr::OwnedStr::from("T"),
         bound: SemanticNodeId(bound),
     };
     let original = PendingVerdict::Assignable {
@@ -781,9 +783,9 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
     let flow_key = |name: &str| FlowReturnKey {
         function: crate::semantic_query::FlowFunctionSlotIdentity {
             declaration_slot: crate::semantic_query::ResolvedDeclSlotIdentity::value_slot(
-                Arc::from("/ws/txn.ts"),
+                verter_type_expr::OwnedStr::from("/ws/txn.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from(name),
+                verter_type_expr::OwnedStr::from(name),
                 0,
                 crate::semantic_query::HashValue::default(),
                 crate::semantic_query::HashValue::default(),
@@ -791,7 +793,7 @@ fn nearest_relate_walks_past_flow_frames_to_the_nearest_relation_ancestor() {
             function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
             overload_ordinal: 0,
         },
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         demand: crate::semantic_query::ReturnProjectionDemand::whole_return(),
         input: crate::semantic_query::FlowInputContext::empty(),
         context: crate::semantic_query::FlowReturnContext {
@@ -1013,4 +1015,53 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
         ReturnDomainMetadata::FlowReturn,
         ReturnDomainMetadata::FlowReturn
     ));
+}
+
+/// Finished sessions stay on the stack for the rest of the transaction, so
+/// the innermost collecting session is searched among the open ones only:
+/// a thousand sessions closed above an open one leave the search as short
+/// as one, and a collecting session suspended off the stack while others
+/// close is the active one again once it returns.
+#[test]
+fn closed_sessions_leave_the_collecting_search() {
+    let mut txn = CheckerDispatchTransaction::default();
+    let outer = txn.push_collecting_session(one_parameter_session_setup(), None);
+    // bounded-loop: a thousand sessions, each opened and closed once.
+    for _ in 0..1_000 {
+        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        assert_eq!(txn.active_session().map(|session| session.id), Some(inner));
+        txn.relation
+            .session_mut(inner)
+            .expect("pushed session")
+            .abandon();
+    }
+    assert_eq!(txn.active_session().map(|session| session.id), Some(outer));
+    assert_eq!(
+        txn.active_session_mut().map(|session| session.id),
+        Some(outer)
+    );
+    assert_eq!(txn.relation.sessions.len(), 1_001);
+    assert!(
+        txn.relation.collecting_ids.len() <= 2,
+        "{} ids searched for one open session",
+        txn.relation.collecting_ids.len()
+    );
+
+    let position = txn.relation.session_position(outer).expect("outer session");
+    let suspended = txn.relation.sessions.remove(position);
+    // bounded-loop: ten sessions, each opened and closed once.
+    for _ in 0..10 {
+        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        txn.relation
+            .session_mut(inner)
+            .expect("pushed session")
+            .abandon();
+    }
+    assert!(txn.active_session().is_none());
+    let position = txn
+        .relation
+        .sessions
+        .partition_point(|other| other.id < suspended.id);
+    txn.relation.sessions.insert(position, suspended);
+    assert_eq!(txn.active_session().map(|session| session.id), Some(outer));
 }

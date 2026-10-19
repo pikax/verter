@@ -74,11 +74,14 @@ mod carrier_publication_store_tests;
 #[cfg(test)]
 mod cold_artifact_dedup_tests;
 mod compile;
+mod component_meta_delivery;
+mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
+pub use component_meta_delivery::ComponentMetaDelivery;
 #[cfg(test)]
 mod compile_blockers_snapshot_generation_tests;
 #[cfg(test)]
@@ -154,6 +157,8 @@ mod component_meta_pick_omit_tests;
 #[cfg(test)]
 mod component_meta_publication_demand_tests;
 #[cfg(test)]
+mod component_meta_publication_fence_tests;
+#[cfg(test)]
 mod component_meta_read_once_tests;
 #[cfg(test)]
 mod component_meta_repo_first_pass_diagnosis_tests;
@@ -193,6 +198,7 @@ pub(crate) mod host_source_demand;
 mod materialized_structure_equivalence_tests;
 #[cfg(test)]
 mod mutation_stability_tests;
+mod program_order;
 #[cfg(test)]
 mod value_symbol_depth_equivalence_tests;
 // `fact_signature_helpers` is `pub(crate)`: the module's internals are
@@ -318,6 +324,7 @@ mod test_worker_pools;
 mod artifact_root_retention_tests;
 pub(crate) mod compile_output_node;
 pub(crate) mod component_meta_cached_result;
+mod component_meta_footprint;
 pub mod input_basis;
 /// Asynchronous input acquisition to committed-snapshot handoff: one
 /// immutable committed `InputBasis` per acquisition wave, typed

@@ -23,6 +23,7 @@ pub mod locator_span_recovery;
 #[cfg(test)]
 mod locator_span_recovery_tests;
 pub mod parsed_eval_program;
+pub mod per_file_map;
 pub mod rune_ambient;
 pub mod source_hash;
 pub mod source_lens;

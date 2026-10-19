@@ -20,6 +20,7 @@ as those owners land.
 | [class-flow.md](references/class-flow.md) | Prepared class surfaces | SKR-CLASS-1 |
 | [class-flow-solve.md](references/class-flow-solve.md) | Source-ordered class evaluation effects | SKR-CLASS-3 |
 | [relation-ownership.md](references/relation-ownership.md) | Semantic dispatch and relation ownership | SKR-OWN-1 |
+| [counted-node-ownership.md](references/counted-node-ownership.md) | Counted node lifetime (the sole production authority), internal delivery, sealed public carriers and node capabilities, document close and sidecar cleanup | SKR-OWN-PREP, SKR-OWN-PUBLIC, SKR-OWN-3 |
 | [snapshot-freshness.md](references/snapshot-freshness.md) | Reader-owned snapshot freshness | SKR-RET-F |
 | [declaration-headers.md](references/declaration-headers.md) | Indexed declarations and headers | SKR-P-HEADERS |
 | [inference-owner.md](references/inference-owner.md) | Reverse recovery and inference ownership | SKR-INFER-1 |

@@ -133,6 +133,21 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
             .iter()
             .map(|input| (input.param, input.candidates.covariant.clone()))
             .collect();
+        let mut dependent_candidates: FxHashMap<SemanticNodeId, Vec<&Vec<SemanticNodeId>>> =
+            FxHashMap::default();
+        for decl in type_params {
+            if let Some(constraint) = decl
+                .constraint
+                .filter(|constraint| *constraint != decl.param)
+            {
+                if let Some(candidates) = covariant_of.get(&decl.param) {
+                    dependent_candidates
+                        .entry(constraint)
+                        .or_default()
+                        .push(candidates);
+                }
+            }
+        }
         // Fixation forms PROVISIONAL bindings for ALL parameters first: an
         // INFERRED parameter takes the type its candidates infer; an
         // UNINFERRED one starts at its default — substituted through the
@@ -155,14 +170,11 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
         let clause_len = inputs.len();
         for (position, input) in inputs.into_iter().enumerate() {
             let bound = if !input.candidates.is_empty() {
-                let dependents: Vec<&Vec<SemanticNodeId>> = type_params
-                    .iter()
-                    .filter(|decl| {
-                        decl.param != input.param && decl.constraint == Some(input.param)
-                    })
-                    .filter_map(|decl| covariant_of.get(&decl.param))
-                    .collect();
-                self.signature_inferred_type(&input.candidates, &dependents, &mut accepts)?
+                let dependents = dependent_candidates
+                    .get(&input.param)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                self.signature_inferred_type(&input.candidates, dependents, &mut accepts)?
             } else {
                 uninferred_positions.push(position);
                 defaults
@@ -173,7 +185,7 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
             };
             fixed.push(crate::semantic_query::InferBinding {
                 param: input.param,
-                name: input.name,
+                name: verter_type_expr::OwnedStr::from(input.name),
                 bound,
             });
         }

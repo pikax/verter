@@ -1,0 +1,45 @@
+error[E0308]: mismatched types
+ --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:8:5
+  |
+7 | fn detach_diagnostic(diagnostic: &ShallowDiagnostic) -> ShallowDiagnostic {
+  |                                                         ----------------- expected `ShallowDiagnostic` because of return type
+8 |     diagnostic.clone()
+  |     ^^^^^^^^^^^^^^^^^^ expected `ShallowDiagnostic`, found `&ShallowDiagnostic`
+  |
+note: `ShallowDiagnostic` does not implement `Clone`, so `&ShallowDiagnostic` was cloned instead
+ --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:8:5
+  |
+8 |     diagnostic.clone()
+  |     ^^^^^^^^^^
+
+error[E0308]: mismatched types
+  --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:12:5
+   |
+11 | fn detach_error(error: &DiagnosticError) -> DiagnosticError {
+   |                                             --------------- expected `DiagnosticError` because of return type
+12 |     error.clone()
+   |     ^^^^^^^^^^^^^ expected `DiagnosticError`, found `&DiagnosticError`
+   |
+note: `DiagnosticError` does not implement `Clone`, so `&DiagnosticError` was cloned instead
+  --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:12:5
+   |
+12 |     error.clone()
+   |     ^^^^^
+
+error[E0616]: field `0` of struct `DiagnosticError` is private
+  --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:16:12
+   |
+16 |     &error.0
+   |            ^ private field
+
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/cases/compile-fail/public_diagnostic_error_cannot_detach.rs:20:5
+   |
+20 |     DiagnosticError(error)
+   |     ^^^^^^^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/walk.rs
+   |
+   | pub struct DiagnosticError(pub(crate) QueryError);
+   |                            ^^^^^^^^^^^^^^^^^^^^^ private field

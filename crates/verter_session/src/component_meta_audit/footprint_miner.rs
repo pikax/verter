@@ -63,11 +63,18 @@ use super::footprint_structural_hash::structural_hash_of;
 /// `state.truncation_counters`).
 pub fn mine_footprint(
     graph: &SemanticGraphStore,
+    construction: &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     state: AccumulatorState,
     ctx: &RequestContext,
     max_edges: usize,
     caps: &AuditCaps,
 ) -> RequestFootprintAudit {
+    // A construction reader: the scope owns every ordinal it reads.
+    assert!(
+        construction.authorizes(graph),
+        "a footprint is mined under its own graph's construction lane"
+    );
+    let _scope = construction.enter_scope();
     // ── 1. Collect unique SemanticNodeIds touched by raw edges ──────
     let mut touched: Vec<SemanticNodeId> = Vec::new();
     {
@@ -91,7 +98,7 @@ pub fn mine_footprint(
     let mut nodes: Vec<(SemanticNodeId, NodeRecord)> = touched
         .into_iter()
         .map(|id| {
-            let data = graph.node_data(id);
+            let data = graph.read_in_scope(id);
             let record = build_node_record(graph, data.as_deref());
             (id, record)
         })
@@ -551,7 +558,9 @@ fn display_label_for(data: &SemanticNodeData) -> Arc<str> {
             let (value_root, _path) = data.typeof_head().expect("TypeOf carrier head");
             Arc::from(format!("typeof {} (nominal)", value_root.name))
         }
-        SemanticNodeData::TypeParam { display_name, .. } => Arc::clone(display_name),
+        SemanticNodeData::TypeParam { display_name, .. } => {
+            std::sync::Arc::<str>::from(display_name)
+        }
         SemanticNodeData::Infer { name, .. } | SemanticNodeData::InferRef { name, .. } => {
             Arc::from(format!("infer {name}"))
         }
@@ -601,8 +610,8 @@ fn named_identity_of(data: &SemanticNodeData) -> Option<NamedIdentity> {
         SemanticNodeData::TypeParam {
             decl, display_name, ..
         } => Some(NamedIdentity {
-            canonical_id: Arc::clone(&decl.canonical_id),
-            symbol_name: Arc::clone(display_name),
+            canonical_id: std::sync::Arc::<str>::from(decl.canonical_id.as_str()),
+            symbol_name: std::sync::Arc::<str>::from(display_name),
             args_fingerprint: decl.whole_hash,
         }),
         _ => None,
@@ -743,14 +752,14 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
     match kind {
         CoreOriginEdgeKind::Instantiate => {
             let type_params = match meta {
-                OriginMeta::SubstitutedParam(name) => vec![Arc::clone(name)],
+                OriginMeta::SubstitutedParam(name) => vec![std::sync::Arc::<str>::from(name)],
                 _ => Vec::new(),
             };
             OriginEdgeMetaDto::Instantiate { type_params }
         }
         CoreOriginEdgeKind::SubstituteTypeParam => OriginEdgeMetaDto::SubstituteTypeParam {
             param_name: match meta {
-                OriginMeta::SubstitutedParam(name) => Arc::clone(name),
+                OriginMeta::SubstitutedParam(name) => std::sync::Arc::<str>::from(name.as_str()),
                 _ => Arc::from(""),
             },
             // `substituted_with` is not carried on `OriginMeta` — the
@@ -769,7 +778,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         }
         CoreOriginEdgeKind::InferBind => OriginEdgeMetaDto::InferBind {
             param_name: match meta {
-                OriginMeta::SubstitutedParam(name) => Arc::clone(name),
+                OriginMeta::SubstitutedParam(name) => std::sync::Arc::<str>::from(name.as_str()),
                 _ => Arc::from(""),
             },
             bound_to: NodeId(u32::MAX),
@@ -817,7 +826,7 @@ fn translate_meta(kind: CoreOriginEdgeKind, meta: &OriginMeta) -> OriginEdgeMeta
         // here for legacy test-scaffold emissions that pass no payload.
         CoreOriginEdgeKind::AliasResolve => OriginEdgeMetaDto::AliasResolve {
             alias_name: match meta {
-                OriginMeta::AliasName(n) => Arc::clone(n),
+                OriginMeta::AliasName(n) => std::sync::Arc::<str>::from(n.as_str()),
                 OriginMeta::None => Arc::from(""),
                 other => panic!(
                     "AliasResolve edge emitted with non-AliasName OriginMeta variant: {other:?}. \
@@ -834,7 +843,9 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
             key: translate_property_key(key),
         },
         PathSegment::Index(idx) => match idx {
-            IndexKey::String(s) => ProjectPathSegment::Index { key: Arc::clone(s) },
+            IndexKey::String(s) => ProjectPathSegment::Index {
+                key: std::sync::Arc::<str>::from(s.as_str()),
+            },
             IndexKey::Number(n) => ProjectPathSegment::Index {
                 key: Arc::from(n.to_string()),
             },
@@ -854,7 +865,7 @@ fn translate_path_segment(seg: &PathSegment) -> ProjectPathSegment {
 fn translate_property_key(key: &PropertyKey) -> verter_audit::AuditPropertyKey {
     match key {
         PropertyKey::String(value) => verter_audit::AuditPropertyKey::String {
-            value: Arc::clone(value),
+            value: std::sync::Arc::<str>::from(value.as_str()),
         },
         PropertyKey::Number(value) => verter_audit::AuditPropertyKey::Number { value: value.get() },
         PropertyKey::UniqueSymbol(identity) => {
@@ -871,10 +882,10 @@ fn translate_property_key(key: &PropertyKey) -> verter_audit::AuditPropertyKey {
             };
             verter_audit::AuditPropertyKey::UniqueSymbol {
                 identity: verter_audit::AuditUniqueSymbolIdentity {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: std::sync::Arc::<str>::from(identity.canonical_id.as_str()),
                     owner_kind,
                     owner_ordinal: identity.owner.ordinal(),
-                    symbol: Arc::clone(&identity.symbol),
+                    symbol: std::sync::Arc::<str>::from(identity.symbol.as_str()),
                     member_path: identity
                         .member_path
                         .iter()

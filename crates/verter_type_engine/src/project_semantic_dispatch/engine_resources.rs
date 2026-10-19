@@ -29,11 +29,13 @@ use crate::component_meta_caches::{
 };
 use crate::semantic_query::surface_resolution::SurfaceClaimAuthority;
 use crate::semantic_query::{ProjectionReductionContext, SemanticNodeId};
-use crate::semantic_query_memo::SemanticGraphStore;
+use crate::semantic_query_memo::{MemoFamilyBound, SemanticGraphStore};
 
 /// One engine's shared stores, freshly constructed together.
 pub struct EngineStores {
     pub graph: Arc<SemanticGraphStore>,
+    /// The construction lane of [`Self::graph`]; minted only here.
+    pub construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant,
     pub flow_slice: Arc<crate::cache_runtime::flow_slice_node::FlowSliceStores>,
     pub intrinsics: Arc<crate::intrinsic_registry::IntrinsicRegistry>,
     pub imported_registry: Arc<ImportedRegistryDb>,
@@ -61,26 +63,62 @@ impl EngineStores {
         cache_live: &Arc<AtomicU64>,
         task_registry: verter_execution::tasks::TaskRegistry,
     ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
+        Self::create_with_memo_family_bound(
+            provenance,
+            store_account,
+            cache_live,
+            task_registry,
+            MemoFamilyBound::Production,
+        )
+    }
+
+    /// [`Self::create`] with the semantic graph's family memo bounded by
+    /// `memo_family_bound` at construction.
+    #[must_use]
+    pub fn create_with_memo_family_bound(
+        provenance: Option<Arc<crate::engine_provenance::EngineProvenance>>,
+        store_account: verter_session_query::retention::StoreAccount,
+        cache_live: &Arc<AtomicU64>,
+        task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: MemoFamilyBound,
+    ) -> (Self, OutputAuthority, SurfaceClaimAuthority) {
         let retention_account = Arc::clone(store_account.get());
+        let caches = store_account.clone();
         let graph = Arc::new(
             match provenance {
                 Some(prov) => SemanticGraphStore::with_provenance(prov, store_account),
                 None => SemanticGraphStore::with_account(store_account),
             }
-            .with_task_registry(task_registry),
+            .with_task_registry(task_registry)
+            .with_memo_family_bound(memo_family_bound),
         );
         let authority = OutputAuthority {
             engine: EngineIdentity(Arc::downgrade(&graph)),
         };
         let stores = Self {
+            construction: crate::semantic_query_memo::node_roots::NodeConstructionGrant::mint(
+                &graph,
+            ),
             graph,
-            flow_slice: Arc::new(crate::cache_runtime::flow_slice_node::FlowSliceStores::new()),
+            flow_slice: Arc::new(
+                crate::cache_runtime::flow_slice_node::FlowSliceStores::new()
+                    .charged_to(caches.clone()),
+            ),
             intrinsics: Arc::new(crate::intrinsic_registry::IntrinsicRegistry::with_defaults()),
-            imported_registry: Arc::new(ImportedRegistryDb::with_counter(Arc::clone(cache_live))),
-            declarations: Arc::new(DeclarationLookupDb::with_counter(Arc::clone(cache_live))),
-            resolvability: Arc::new(ResolvabilityDb::with_counter(Arc::clone(cache_live))),
-            owner_collections: Arc::new(OwnerCollectionDb::with_counter(Arc::clone(cache_live))),
-            shapes: Arc::new(ShapeCacheDb::with_counter(Arc::clone(cache_live))),
+            imported_registry: Arc::new(
+                ImportedRegistryDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
+            declarations: Arc::new(
+                DeclarationLookupDb::with_counter(Arc::clone(cache_live))
+                    .charged_to(caches.clone()),
+            ),
+            resolvability: Arc::new(
+                ResolvabilityDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
+            owner_collections: Arc::new(
+                OwnerCollectionDb::with_counter(Arc::clone(cache_live)).charged_to(caches.clone()),
+            ),
+            shapes: Arc::new(ShapeCacheDb::with_counter(Arc::clone(cache_live)).charged_to(caches)),
             identities: Arc::new(crate::identity_interner::IdentityInterner::new(
                 retention_account,
             )),
@@ -115,6 +153,19 @@ pub struct OutputAuthority {
 pub(crate) struct EngineIdentity(Weak<SemanticGraphStore>);
 
 impl EngineIdentity {
+    pub(super) fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+        let Some(graph) = self.0.upgrade() else {
+            // Unbound fixtures have only their explicit construction scope.
+            return crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(ids);
+        };
+        // An operand the engine no longer holds owns nothing; reads through
+        // the holder then fail as stale.
+        crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(&graph, ids)
+    }
+
     /// The identity of the engine `dispatch` reads.
     pub(super) fn of<C: crate::resolver_core::ResolverCapabilities>(
         dispatch: &ProjectSemanticDispatch<'_, C>,
@@ -132,6 +183,13 @@ impl EngineIdentity {
 }
 
 impl OutputAuthority {
+    pub(crate) fn root_nodes(
+        &self,
+        ids: impl IntoIterator<Item = SemanticNodeId>,
+    ) -> crate::semantic_query_memo::node_roots::IdentityNodeRoots {
+        self.engine.root_nodes(ids)
+    }
+
     /// Assert that `dispatch` reads the engine this authority was minted for.
     /// One pointer comparison; no allocation.
     #[inline]
@@ -174,6 +232,9 @@ impl OutputAuthority {
         node: SemanticNodeId,
     ) -> Option<OutputTypeExpr> {
         self.bind(dispatch);
+        // One dispatcher operation: what the raise interns is owned until
+        // the sealed carrier holds it.
+        let _operation = dispatch.enter_operation(true);
         let raised = dispatch.output_shell_raise_sealed(node);
         if raised.is_none() {
             // The note is UNCONDITIONAL — it also fires for a genuinely-absent
@@ -198,6 +259,99 @@ impl OutputAuthority {
         context: ProjectionReductionContext,
     ) -> MaterializedOutputTypeExpr {
         self.bind(dispatch);
+        // One dispatcher operation: the reduction's intermediates are owned
+        // until the materialized carrier roots its node.
+        let _operation = dispatch.enter_operation(true);
         dispatch.raise_and_reduce_with_context(node, context)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project_semantic_dispatch::output_materialization::wrap_output_type_expr;
+    use crate::semantic_query::{
+        LiteralValue, ProjectionMode, QueryResult, SemanticNodeData, SemanticQueryValue,
+        SurfaceMember,
+    };
+    use crate::semantic_query_memo::graph_fixture::GraphFixture;
+
+    #[test]
+    fn counted_shape_holders_acquire_after_nested_scope_returns() {
+        for drop_output_first in [false, true] {
+            let graph = Arc::new(GraphFixture::new().into_graph());
+            let authority = OutputAuthority {
+                engine: EngineIdentity(Arc::downgrade(&graph)),
+            };
+            let (node, delivery) = {
+                let _scope = graph.enter_node_root_scope();
+                let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                    "retained member".into(),
+                )));
+                let delivery = graph
+                    .lease_delivery(
+                        crate::semantic_query_memo::delivery_lease::DeliveredAllocations::value(
+                            &QueryResult::Value(SemanticQueryValue::TypeNode(node)),
+                        ),
+                    )
+                    .unwrap();
+                (node, delivery)
+            };
+            assert_eq!(
+                crate::semantic_query_memo::node_roots::NodeRootScope::current_arena_identity(),
+                None
+            );
+            let output = MaterializedOutputTypeExpr::from_parts(
+                Some(node),
+                wrap_output_type_expr(
+                    &authority,
+                    verter_type_expr::TypeExpr::string_literal("retained member"),
+                ),
+                crate::semantic_query::DepSignature::default(),
+                false,
+            );
+            let member = SurfaceMember {
+                key: verter_type_expr::AuthoredPropertyKey::string("member"),
+                value: node,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                spans: Default::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg: Default::default(),
+                merge_role: Default::default(),
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            };
+            let key = crate::component_meta_caches::ShapeCacheKey::surface_member_value_whole_with_context(
+                &authority,
+                Arc::from("/member.vue"),
+                &member,
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
+            );
+            drop(delivery);
+            assert!(
+                graph.node_is_live(node),
+                "holders assembled outside the scope own the returned node"
+            );
+            assert_eq!(graph.node_ownership_counts().roots, 2);
+            if drop_output_first {
+                drop(output);
+                assert!(
+                    graph.node_is_live(node),
+                    "the shape key owns its subject independently"
+                );
+                drop(key);
+            } else {
+                drop(key);
+                assert!(
+                    graph.node_is_live(node),
+                    "the output owns its metadata node independently"
+                );
+                drop(output);
+            }
+            assert_eq!(graph.node_ownership_counts().live_nodes, 0);
+        }
     }
 }

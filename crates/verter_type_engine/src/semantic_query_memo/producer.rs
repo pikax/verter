@@ -35,7 +35,7 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::instant::Instant;
 use crate::semantic_query::demand::MaterializedSet;
 use crate::semantic_query::{
-    CacheRead, DepSignature, PartialReasonSet, QueryError, QueryResult, SemanticNodeId,
+    CacheRead, DepSignature, FactStatus, PartialReasonSet, QueryError, QueryResult, SemanticNodeId,
     SemanticQueryKey, SemanticQueryValue,
 };
 
@@ -94,6 +94,12 @@ impl<'a> ReadCapture<'a> {
             evidence: Some(slot),
             carrier: None,
         }
+    }
+
+    /// Also capture the candidate this read's cold build admits, if any.
+    pub(crate) fn and_publication(mut self, slot: &'a mut Option<PublishedMemoCandidate>) -> Self {
+        self.publication = Some(slot);
+        self
     }
 
     /// Hand the answering result's carrier to `slot` instead of bubbling it
@@ -166,6 +172,17 @@ pub struct ClaimAttempt {
 }
 
 impl ClaimAttempt {
+    /// The identity of the computation this claim names, for its cost
+    /// recording: the identity its producer records under
+    /// ([`ProducerLease::cost_identity`]).
+    pub(crate) fn cost_identity(
+        &self,
+    ) -> crate::project_semantic_dispatch::cost_receipt::CostIdentity {
+        crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
+            self.prepared.as_task_producer(),
+        )
+    }
+
     /// Compute the key on the next claim instead of reading it warm: the
     /// claimant was refused the stored result's receipt.
     pub(crate) fn recompute(&mut self) {
@@ -213,6 +230,36 @@ pub struct Subscription<'s> {
     store: &'s SemanticGraphStore,
     inflight: Arc<FlightCell>,
     waiter: TaskId,
+    /// Set once the subscriber parked: the wait-for edge it holds to the
+    /// producer's task and the waker a poll left on the flight (and, in an
+    /// observing build, when it began waiting). Dropping the subscription
+    /// releases them.
+    parked: Option<Parked>,
+}
+
+/// A parked subscriber's registrations.
+struct Parked {
+    _edge: verter_execution::tasks::WaitEdge,
+    /// When a polled subscriber began waiting, for the `waits_ms` stat.
+    /// Observation only: a default build keeps no timer across `Pending`.
+    #[cfg(feature = "semantic-observe")]
+    since: Instant,
+    /// The subscription's own waker registration on the flight.
+    waker: Option<super::inflight::WakeRegistration>,
+    /// The subscriber registration an armed rendezvous of this flight took,
+    /// retired when the wait resolves or the subscription drops.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    rendezvous: super::inflight::SubscriberRegistration,
+}
+
+impl Drop for Subscription<'_> {
+    fn drop(&mut self) {
+        // A subscriber abandoned while parked (its execution stopped or was
+        // dropped) takes its waker off the flight; the edge drops with it.
+        if let Some(registration) = self.parked.take().and_then(|parked| parked.waker) {
+            self.inflight.state.lock().withdraw_waker(registration);
+        }
+    }
 }
 
 /// How a subscription resolved.
@@ -242,20 +289,20 @@ pub struct ProducerLease<'s> {
 /// A settled producer: its result, ready for the retention decision and the
 /// delivery to subscribers.
 pub struct SettledProducer<'s> {
+    lease: super::delivery_lease::SemanticDeliveryLease,
     store: &'s SemanticGraphStore,
     prepared: PreparedKeyHandle,
     inflight: Arc<FlightCell>,
     independent: bool,
     result: QueryResult<SemanticQueryValue>,
     dep_signature: DepSignature,
-    walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]>,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
     carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
     self_root_canonicals: Arc<[Arc<str>]>,
     satisfied_projection: MaterializedSet,
     pending_prefix_backfills: Vec<crate::project_semantic_dispatch::walk::PrefixBackfill>,
     cache_suppress: bool,
-    result_is_partial: bool,
-    partial_reasons: PartialReasonSet,
+    fact_status: FactStatus,
     admissible: bool,
     admission_linearized: bool,
     /// The result entered the family memo.
@@ -271,278 +318,309 @@ impl SemanticGraphStore {
         ExecutionScope::enter(&self.task_registry)
     }
 
-    /// Whether the task installed on this thread already has `key`'s
-    /// producer open, so a claim would answer with the same-path carrier.
-    /// A read-only preflight: the claim stays the sole authority that
-    /// records and returns the carrier.
-    pub fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
+    /// The task a suspendable semantic task runs as: the task installed on
+    /// this thread, which it joins exactly as a synchronous entry would, or
+    /// a fresh one.
+    pub(crate) fn execution_task(&self) -> ExecutionTask {
         ExecutionScope::current(&self.task_registry)
-            .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+            .unwrap_or_else(|| self.task_registry.register_task())
+    }
+
+    /// Install `task` as the task this store's entries on this thread join,
+    /// for the extent of the returned scope: around each poll of the
+    /// suspendable task it runs, on whichever thread polls it.
+    pub(crate) fn install_execution(&self, task: &ExecutionTask) -> ExecutionScope {
+        ExecutionScope::install(&self.task_registry, task)
+    }
+
+    construction_ordinal_seam! {
+        /// Whether the task installed on this thread already has `key`'s
+        /// producer open, so a claim would answer with the same-path carrier.
+        /// A read-only preflight: the claim stays the sole authority that
+        /// records and returns the carrier.
+        fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
+            ExecutionScope::current(&self.task_registry)
+                .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+        }
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
-    pub(crate) fn recursion_read(recursion: Recursion, sentinel: SemanticNodeId) -> ValueRead {
+    pub(crate) fn recursion_read(
+        &self,
+        recursion: Recursion,
+        sentinel: SemanticNodeId,
+    ) -> ValueRead {
         CacheRead {
+            lease: self
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::value(
+                    &QueryResult::Recursive(sentinel),
+                ))
+                .expect("recursion sentinel is live"),
             value: QueryResult::Recursive(sentinel),
             dep_signature: empty_signature(),
-            walker_diagnostics: Arc::from([]),
+            walker_diagnostics: super::empty_diagnostics(),
             // A cross-task wait-cycle carrier is an operational escape,
             // never a warm fact; a same-path carrier is a partial the warm
             // gates already refuse.
             cache_suppress: recursion == Recursion::WaitCycle,
-            result_is_partial: true,
-            partial_reasons: PartialReasonSet::SAME_PATH_RECURSION,
+            fact_status: crate::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::SAME_PATH_RECURSION,
+            ),
             receipt: crate::semantic_query::ReadReceipt::Unpriced,
         }
     }
 
-    /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
-    /// returns a subscription — it waits each one out. With `recompute` the
-    /// claim computes the key rather than reads it warm: the claimant was
-    /// refused the stored result's receipt.
-    ///
-    /// A claim needs the synchronous entry's task: `execution` is entered
-    /// only once the warm lookup misses, so a warm read takes no task, and
-    /// the caller keeps the scope for as long as the producer it may be
-    /// handed runs, so every query nested in that build joins the task.
-    ///
-    /// unclaimed is consulted once the warm lookup misses and before the
-    /// first claim: a read it answers with ([Acquired::Served]) installs
-    /// no flight, so no other task can join one that is never produced.
-    pub fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
-        &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-        execution: &mut Option<ExecutionScope>,
-        capture: &mut ReadCapture<'_>,
-        recompute: bool,
-        unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
-    ) -> Acquired<'s> {
-        let begun = if recompute {
-            self.begin_query_recompute(flags, key)
-        } else {
-            self.begin_query_claim(ctx, flags, key, capture)
-        };
-        let mut attempt = match begun {
-            Ok(attempt) => attempt,
-            Err(read) => return Acquired::Read(read),
-        };
-        if let Some(read) = unclaimed() {
-            return Acquired::Served(read);
-        }
-        let task = execution
-            .get_or_insert_with(|| self.enter_execution())
-            .task();
-        loop {
-            match self.claim_query(ctx, flags, &mut attempt, task, capture) {
-                Claim::Read(read) => return Acquired::Read(read),
-                Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
-                Claim::Produce(lease) => return Acquired::Produce(lease),
-                Claim::Subscribed(subscription) => {
-                    match subscription.wait(ctx, flags, &mut attempt, capture) {
-                        Joined::Read(read) => return Acquired::Read(read),
-                        Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
-                        Joined::Retry => {}
+    construction_ordinal_seam! {
+        /// Lookup, claim and wait: the synchronous acquisition of `key`. Never
+        /// returns a subscription — it waits each one out. With `recompute` the
+        /// claim computes the key rather than reads it warm: the claimant was
+        /// refused the stored result's receipt.
+        ///
+        /// A claim needs the synchronous entry's task: `execution` is entered
+        /// only once the warm lookup misses, so a warm read takes no task, and
+        /// the caller keeps the scope for as long as the producer it may be
+        /// handed runs, so every query nested in that build joins the task.
+        ///
+        /// unclaimed is consulted once the warm lookup misses and before the
+        /// first claim: a read it answers with ([Acquired::Served]) installs
+        /// no flight, so no other task can join one that is never produced.
+        fn acquire_query<'s, C: crate::resolver_core::ResolverCapabilities>(
+            &'s self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+            execution: &mut Option<ExecutionScope>,
+            capture: &mut ReadCapture<'_>,
+            recompute: bool,
+            unclaimed: &mut dyn FnMut() -> Option<ValueRead>,
+        ) -> Acquired<'s> {
+            let begun = if recompute {
+                self.begin_query_recompute(flags, key)
+            } else {
+                self.begin_query_claim(ctx, flags, key, capture)
+            };
+            let mut attempt = match begun {
+                Ok(attempt) => attempt,
+                Err(read) => return Acquired::Read(read),
+            };
+            if let Some(read) = unclaimed() {
+                return Acquired::Served(read);
+            }
+            let task = execution
+                .get_or_insert_with(|| self.enter_execution())
+                .task();
+            loop {
+                match self.claim_query(ctx, flags, &mut attempt, task, capture) {
+                    Claim::Read(read) => return Acquired::Read(read),
+                    Claim::Recursive(recursion) => return Acquired::Recursive(recursion),
+                    Claim::Produce(lease) => return Acquired::Produce(lease),
+                    Claim::Subscribed(subscription) => {
+                        match subscription.wait(ctx, flags, &mut attempt, capture) {
+                            Joined::Read(read) => return Acquired::Read(read),
+                            Joined::Recursive(recursion) => return Acquired::Recursive(recursion),
+                            Joined::Retry => {}
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Begin one logical claim of `key`. `Err` answers it without a claim:
-    /// a cancelled request, or a validated warm result.
-    ///
-    /// `flags` is the request snapshot's flag handles, borrowed once at the
-    /// caller's request boundary: every cancellation observation below is a
-    /// plain field read, with no per-checkpoint port dispatch.
-    pub fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-        capture: &mut ReadCapture<'_>,
-    ) -> Result<ClaimAttempt, ValueRead> {
-        // Count every logical entry, warm and cold alike.
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+    construction_ordinal_seam! {
+        /// Begin one logical claim of `key`. `Err` answers it without a claim:
+        /// a cancelled request, or a validated warm result.
+        ///
+        /// `flags` is the request snapshot's flag handles, borrowed once at the
+        /// caller's request boundary: every cancellation observation below is a
+        /// plain field read, with no per-checkpoint port dispatch.
+        fn begin_query_claim<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+            capture: &mut ReadCapture<'_>,
+        ) -> Result<ClaimAttempt, ValueRead> {
+            // Count every logical entry, warm and cold alike.
+            self.note_lookup_entry();
 
-        // Request cancellation is a typed ReturnOnly terminal and must be
-        // observed before even a warm probe: canceled requests do not consume
-        // shared semantic work or reuse a value as if they completed normally.
-        if flags.is_cancelled() {
-            return Err(cancelled_cache_read());
-        }
-
-        // Binding relations carry transaction-local inference candidates.
-        // Their producers therefore keep the whole claim/settle/admit
-        // protocol but never serve another claimant for the same key.
-        let independent = matches!(
-            &key,
-            SemanticQueryKey::Relate {
-                inference_context: Some(_),
-                ..
+            // Request cancellation is a typed ReturnOnly terminal and must be
+            // observed before even a warm probe: canceled requests do not consume
+            // shared semantic work or reuse a value as if they completed normally.
+            if flags.is_cancelled() {
+                return Err(cancelled_cache_read());
             }
-        );
 
-        // Prepare the key ONCE per logical claim: one `family_and_slot`
-        // projection, one requested-point build, one key hash — shared
-        // (behind one `Arc`) by the warm probe, the in-flight table, the
-        // producer registration, the panic guard and the publish. See the
-        // `prepared` module for the equality contract (token equality ⟺
-        // key equality).
-        let prepared = PreparedKeyHandle::prepare(key);
+            // Binding relations carry transaction-local inference candidates.
+            // Their producers therefore keep the whole claim/settle/admit
+            // protocol but never serve another claimant for the same key.
+            let independent = matches!(
+                &key,
+                SemanticQueryKey::Relate {
+                    inference_context: Some(_),
+                    ..
+                }
+            );
 
-        // Warm lookup. One lock acquisition snapshots the slot; the
-        // candidate's carrier is validated strictly (self-roots through
-        // `validates_self_root_whole_hash`) before it is bubbled or
-        // returned, so a stale candidate misses and the claim below
-        // recomputes it.
-        if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
-            return Err(if flags.is_cancelled() {
-                cancelled_cache_read()
+            // Prepare the key ONCE per logical claim: one `family_and_slot`
+            // projection, one requested-point build, one key hash — shared
+            // (behind one `Arc`) by the warm probe, the in-flight table, the
+            // producer registration, the panic guard and the publish. See the
+            // `prepared` module for the equality contract (token equality ⟺
+            // key equality).
+            let mut prepared = self.prepare_probe_key(key);
+
+            // Warm lookup. One lock acquisition snapshots the slot; the
+            // candidate's carrier is validated strictly (self-roots through
+            // `validates_self_root_whole_hash`) before it is bubbled or
+            // returned, so a stale candidate misses and the claim below
+            // recomputes it.
+            if let Some(hit) = self.try_warm_value_hit_fast_path(ctx, &prepared, capture) {
+                return Err(if flags.is_cancelled() {
+                    cancelled_cache_read()
+                } else {
+                    hit
+                });
+            }
+
+            // The claim outlives the caller's hold on the key's operands. A
+            // key naming a destroyed or never-allocated operand can neither
+            // be answered nor cached: it is refused before it claims.
+            if let Err(error) = self.try_root_prepared_key(&mut prepared) {
+                return Err(super::refused_operand_cache_read(error));
+            }
+            // One logical miss per claim. A producer that publishes between
+            // this lookup and the claim's own warm re-read is credited as a
+            // hit there; that race is benign.
+            self.note_lookup_miss(prepared.key());
+            Ok(ClaimAttempt {
+                prepared,
+                independent,
+                miss_recorded: false,
+                retries: 0,
+                recompute: false,
+            })
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// Begin one logical claim of `key` that computes it rather than read
+        /// it warm: the claimant was refused the stored result's receipt. The
+        /// claim produces on a flight of its own and never subscribes to
+        /// another producer of the key.
+        /// `Err` is the cancellation read.
+        fn begin_query_recompute(
+            &self,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            key: SemanticQueryKey,
+        ) -> Result<ClaimAttempt, ValueRead> {
+            if flags.is_cancelled() {
+                return Err(cancelled_cache_read());
+            }
+            Ok(ClaimAttempt {
+                prepared: self.prepare_rooted_key(key),
+                independent: true,
+                miss_recorded: false,
+                retries: 0,
+                recompute: true,
+            })
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// One claim attempt of `attempt`'s key for `task`.
+        fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
+            &'s self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            flags: &crate::resolver_core::resolver_context::RequestFlags,
+            attempt: &mut ClaimAttempt,
+            task: &ExecutionTask,
+            capture: &mut ReadCapture<'_>,
+        ) -> Claim<'s> {
+            if flags.is_cancelled() {
+                return Claim::Read(cancelled_cache_read());
+            }
+            let prepared = &attempt.prepared;
+            // 1. Warm re-read: reached on the rare race where another producer
+            //    published after the lookup, or on a retry after an abort. The
+            //    read validates strictly for this claimant's view. A claimant
+            //    refused the stored result's receipt computes instead.
+            let warm = if attempt.recompute {
+                None
             } else {
-                hit
-            });
-        }
-
-        // One logical miss per claim. A producer that publishes between
-        // this lookup and the claim's own warm re-read is credited as a
-        // hit there; that race is benign.
-        crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support"))]
-        crate::project_semantic_dispatch::raise::record_dispatch_cold(prepared.key());
-        #[cfg(any(test, feature = "test-support"))]
-        crate::capture_token::with_active_capture(|t| {
-            t.record_dispatch(prepared.key(), /* hit */ false)
-        });
-        tracing::debug!(
-            target: "verter::memo::miss",
-            key = ?prepared.key(),
-            "memo_miss"
-        );
-        Ok(ClaimAttempt {
-            prepared,
-            independent,
-            miss_recorded: false,
-            retries: 0,
-            recompute: false,
-        })
-    }
-
-    /// Begin one logical claim of `key` that computes it rather than read
-    /// it warm: the claimant was refused the stored result's receipt. The
-    /// claim produces on a flight of its own and never subscribes to
-    /// another producer of the key.
-    /// `Err` is the cancellation read.
-    pub fn begin_query_recompute(
-        &self,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        key: SemanticQueryKey,
-    ) -> Result<ClaimAttempt, ValueRead> {
-        if flags.is_cancelled() {
-            return Err(cancelled_cache_read());
-        }
-        Ok(ClaimAttempt {
-            prepared: PreparedKeyHandle::prepare(key),
-            independent: true,
-            miss_recorded: false,
-            retries: 0,
-            recompute: true,
-        })
-    }
-
-    /// One claim attempt of `attempt`'s key for `task`.
-    pub fn claim_query<'s, C: crate::resolver_core::ResolverCapabilities>(
-        &'s self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        flags: &crate::resolver_core::resolver_context::RequestFlags,
-        attempt: &mut ClaimAttempt,
-        task: &ExecutionTask,
-        capture: &mut ReadCapture<'_>,
-    ) -> Claim<'s> {
-        if flags.is_cancelled() {
-            return Claim::Read(cancelled_cache_read());
-        }
-        let prepared = &attempt.prepared;
-        // 1. Warm re-read: reached on the rare race where another producer
-        //    published after the lookup, or on a retry after an abort. The
-        //    read validates strictly for this claimant's view. A claimant
-        //    refused the stored result's receipt computes instead.
-        let warm = if attempt.recompute {
-            None
-        } else {
-            self.get_validated_value_prepared(prepared, ctx, capture)
-        };
-        if let Some(hit) = warm {
-            self.stats.hits.fetch_add(1, Ordering::Relaxed);
-            if let Some(sched_ctx) = verter_execution::request_context::current_context() {
-                sched_ctx
-                    .0
-                    .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
+                self.get_validated_value_prepared(prepared, ctx, capture)
+            };
+            if let Some(hit) = warm {
+                self.stats.hits.fetch_add(1, Ordering::Relaxed);
+                if let Some(sched_ctx) = verter_execution::request_context::current_context() {
+                    sched_ctx
+                        .0
+                        .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
+                }
+                return Claim::Read(hit);
             }
-            return Claim::Read(hit);
-        }
-        if !attempt.miss_recorded {
-            // One miss per logical claim, however many attempts it takes.
-            self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_execution::request_context::current_context() {
-                ctx.0
-                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+            if !attempt.miss_recorded {
+                // One miss per logical claim, however many attempts it takes.
+                self.stats.misses.fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_execution::request_context::current_context() {
+                    ctx.0
+                        .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+                }
+                attempt.miss_recorded = true;
             }
-            attempt.miss_recorded = true;
-        }
 
-        // 2. Same-path recursion: the claiming task already produces this
-        //    key. Its producer is still open, so answering it would wait on
-        //    itself.
-        if task.produces(prepared) {
-            self.stats
-                .same_path_sentinel_returns
-                .fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_execution::request_context::current_context() {
-                ctx.0.record_cache_event(
-                    verter_execution::request_context::CacheEventKind::Sentinel,
-                );
+            // 2. Same-path recursion: the claiming task already produces this
+            //    key. Its producer is still open, so answering it would wait on
+            //    itself.
+            if task.produces(prepared) {
+                self.stats
+                    .same_path_sentinel_returns
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(ctx) = verter_execution::request_context::current_context() {
+                    ctx.0.record_cache_event(
+                        verter_execution::request_context::CacheEventKind::Sentinel,
+                    );
+                }
+                return Claim::Recursive(Recursion::SamePath);
             }
-            return Claim::Recursive(Recursion::SamePath);
-        }
 
-        // 3. Become the producer, or subscribe to the one another task owns.
-        if attempt.independent {
-            let inflight = Arc::new(FlightCell::new());
+            // 3. Become the producer, or subscribe to the one another task owns.
+            if attempt.independent {
+                let inflight = Arc::new(FlightCell::charged(self.retention_account()));
+                {
+                    let mut state = inflight.state.lock();
+                    state.claimed = true;
+                    state.owner = Some(task.id());
+                }
+                self.independent_inflight
+                    .lock()
+                    .entry(prepared.clone())
+                    .or_default()
+                    .push(Arc::clone(&inflight));
+                return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
+            }
+            let inflight = {
+                let mut table = self.inflight.lock();
+                table
+                    .entry(prepared.clone())
+                    .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
+                    .clone()
+            };
             {
                 let mut state = inflight.state.lock();
+                if state.claimed {
+                    drop(state);
+                    return Claim::Subscribed(Subscription {
+                        store: self,
+                        inflight,
+                        waiter: task.id(),
+                        parked: None,
+                    });
+                }
                 state.claimed = true;
                 state.owner = Some(task.id());
             }
-            self.independent_inflight
-                .lock()
-                .entry(prepared.clone())
-                .or_default()
-                .push(Arc::clone(&inflight));
-            return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
+            Claim::Produce(self.open_producer(prepared.clone(), inflight, false, task))
         }
-        let inflight = {
-            let mut table = self.inflight.lock();
-            table
-                .entry(prepared.clone())
-                .or_insert_with(|| Arc::new(FlightCell::new()))
-                .clone()
-        };
-        {
-            let mut state = inflight.state.lock();
-            if state.claimed {
-                drop(state);
-                return Claim::Subscribed(Subscription {
-                    store: self,
-                    inflight,
-                    waiter: task.id(),
-                });
-            }
-            state.claimed = true;
-            state.owner = Some(task.id());
-        }
-        Claim::Produce(self.open_producer(prepared.clone(), inflight, false, task))
     }
 
     fn open_producer<'s>(
@@ -589,53 +667,175 @@ impl SemanticGraphStore {
 
 impl Subscription<'_> {
     /// Wait for the producer's completion. Blocks the calling thread: only a
-    /// synchronous entry, or a drive with nothing else to run, waits.
+    /// synchronous entry waits this way.
     pub fn wait<C: crate::resolver_core::ResolverCapabilities>(
-        self,
+        mut self,
         ctx: &dyn crate::resolver_core::ResolverContext<C>,
         flags: &crate::resolver_core::resolver_context::RequestFlags,
         attempt: &mut ClaimAttempt,
         capture: &mut ReadCapture<'_>,
     ) -> Joined {
-        let Self {
-            store,
-            inflight,
-            waiter,
-        } = self;
-        let prepared = &attempt.prepared;
+        let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
-        let wait_edge = if state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
-            let producer = state.owner.unwrap_or(waiter);
-            match store.task_registry.register_wait(waiter, producer) {
-                Ok(edge) => Some(edge),
-                Err(WaitCycle) => return Joined::Recursive(Recursion::WaitCycle),
-            }
-        } else {
-            None
-        };
-        // Cooperative wait on the flight's condvar until it completes, is
-        // aborted by a canonical-invalidation sweep, or this request is
-        // cancelled. Subscribers never busy-spin.
         let wait_start = Instant::now();
-        // Test-only: record that this subscriber is about to SUSPEND on the
-        // condvar (it holds `state` and is one statement from the wait,
-        // which atomically releases `state` and parks).
-        #[cfg(any(test, feature = "test-support"))]
-        store.joiner_on_condvar_count.fetch_add(1, Ordering::SeqCst);
-        while state.completed.is_none() && !state.aborted && !flags.is_cancelled() {
-            // Timed parking is the cancellation observation rail. A canceled
-            // subscriber detaches by returning; it never marks the shared
-            // flight aborted, so it cannot disturb an uncancelled producer or
-            // sibling.
-            inflight
-                .ready
-                .wait_for(&mut state, std::time::Duration::from_millis(2));
+        if !flight_resolved(&state, flags) {
+            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
+                return Joined::Recursive(Recursion::WaitCycle);
+            }
+            // Cooperative wait on the flight's condvar until it completes,
+            // is aborted by a canonical-invalidation sweep, or this request
+            // is cancelled. Subscribers never busy-spin.
+            while !flight_resolved(&state, flags) {
+                // Timed parking is the cancellation observation rail. A
+                // canceled subscriber detaches by returning; it never marks
+                // the shared flight aborted, so it cannot disturb an
+                // uncancelled producer or sibling.
+                inflight
+                    .ready
+                    .wait_for(&mut state, std::time::Duration::from_millis(2));
+            }
         }
-        drop(wait_edge);
-        store
-            .stats
-            .waits_ms
-            .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.resolve(state, ctx, flags, attempt, capture, Some(wait_start))
+    }
+
+    /// Poll the producer's completion without blocking: `Ready` once the
+    /// flight resolved, else `Pending` with `waker` registered on the flight.
+    /// The readiness check and the registration happen under the flight's
+    /// lock, and the producer wakes every registered waker after it
+    /// resolves the flight under the same lock, so a completion between a
+    /// poll's check and its registration is never lost. A wait that would
+    /// close a cycle of waiting tasks answers at once.
+    pub fn poll<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        attempt: &mut ClaimAttempt,
+        capture: &mut ReadCapture<'_>,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Joined> {
+        let inflight = Arc::clone(&self.inflight);
+        let mut state = inflight.state.lock();
+        if flight_resolved(&state, flags) {
+            // A polled wait is timed only in an observing build, from when
+            // its subscriber parked.
+            #[cfg(feature = "semantic-observe")]
+            let wait_start = Some(
+                self.parked
+                    .as_ref()
+                    .map_or_else(Instant::now, |parked| parked.since),
+            );
+            #[cfg(not(feature = "semantic-observe"))]
+            let wait_start = None;
+            return std::task::Poll::Ready(
+                self.resolve(state, ctx, flags, attempt, capture, wait_start),
+            );
+        }
+        if self.parked.is_none() {
+            if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
+                return std::task::Poll::Ready(Joined::Recursive(Recursion::WaitCycle));
+            }
+        }
+        let parked = self
+            .parked
+            .as_mut()
+            .expect("a pending subscriber is parked");
+        let registered = parked
+            .waker
+            .is_some_and(|registration| state.holds_waker(registration, waker));
+        if !registered {
+            if let Some(previous) = parked.waker.take() {
+                state.withdraw_waker(previous);
+            }
+            parked.waker = Some(state.register_waker(waker.clone()));
+        }
+        std::task::Poll::Pending
+    }
+
+    /// Register this subscriber's wait-for edge to the flight's producer.
+    fn park(
+        &mut self,
+        state: &super::inflight::InflightState,
+        #[cfg_attr(
+            not(any(test, feature = "test-support", feature = "soak-support")),
+            allow(unused_variables)
+        )]
+        key: &crate::semantic_query::SemanticQueryKey,
+    ) -> Result<(), WaitCycle> {
+        let producer = state.owner.unwrap_or(self.waiter);
+        let edge = self
+            .store
+            .task_registry
+            .register_wait(self.waiter, producer)?;
+        // A rendezvous learns of this registered subscriber while the flight
+        // state is held: the producer's completion needs the same lock, so a
+        // flight that already completed is never counted as a subscriber's
+        // registration event — the registration happens-before the
+        // completion whenever both occur. The registration is held until
+        // the wait resolves or the subscription drops, so the rendezvous's
+        // live-participant oracle never counts a completed subscriber.
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        let rendezvous = match self.store.armed_flight_rendezvous(key) {
+            Some(rendezvous) => rendezvous.note_subscriber(key, &self.inflight),
+            None => super::inflight::SubscriberRegistration::inactive(),
+        };
+        // Test-only: record that this subscriber is about to SUSPEND (it
+        // holds `state`, and either parks on the condvar, which atomically
+        // releases `state`, or returns pending with its waker registered).
+        #[cfg(any(test, feature = "test-support"))]
+        self.store
+            .joiner_on_condvar_count
+            .fetch_add(1, Ordering::SeqCst);
+        self.parked = Some(Parked {
+            _edge: edge,
+            #[cfg(feature = "semantic-observe")]
+            since: Instant::now(),
+            waker: None,
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            rendezvous,
+        });
+        Ok(())
+    }
+
+    /// Read the resolved flight: release the wait registrations and return
+    /// the producer's result as it holds for this subscriber. `wait_start`,
+    /// when the wait is timed, feeds the `waits_ms` stat.
+    fn resolve<C: crate::resolver_core::ResolverCapabilities>(
+        &mut self,
+        mut state: parking_lot::MutexGuard<'_, super::inflight::InflightState>,
+        ctx: &dyn crate::resolver_core::ResolverContext<C>,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        attempt: &mut ClaimAttempt,
+        capture: &mut ReadCapture<'_>,
+        wait_start: Option<Instant>,
+    ) -> Joined {
+        let store = self.store;
+        let inflight = Arc::clone(&self.inflight);
+        let prepared = &attempt.prepared;
+        // The flight resolved: whatever it woke, this subscriber's waker
+        // and wait-for edge are spent.
+        if let Some(parked) = self.parked.take() {
+            let Parked {
+                waker,
+                #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+                mut rendezvous,
+                ..
+            } = parked;
+            if let Some(registration) = waker {
+                state.withdraw_waker(registration);
+            }
+            // Retire a rendezvous's subscriber registration before any
+            // further engine work on this request, with the flight unlocked
+            // — retirement only removes the token, so it needs no ordering
+            // against the flight's completion.
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            parking_lot::MutexGuard::unlocked(&mut state, || rendezvous.retire());
+        }
+        if let Some(wait_start) = wait_start {
+            store
+                .stats
+                .waits_ms
+                .fetch_add(wait_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
         // Every cooperative wait return counts; a retry may count again.
         store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
         if let Some(ctx) = verter_execution::request_context::current_context() {
@@ -645,6 +845,24 @@ impl Subscription<'_> {
         if flags.is_cancelled() {
             drop(state);
             return Joined::Read(cancelled_cache_read());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some((_, completion)) = store
+            .exhausted_join_abort
+            .lock()
+            .as_ref()
+            .filter(|(key, _)| key == prepared.key())
+        {
+            state.aborted = true;
+            attempt.retries = MAX_INFLIGHT_RETRIES;
+            if matches!(
+                completion,
+                super::test_support::ExhaustedJoinAbortForTests::OtherSentinel
+            ) {
+                state.completed = Some(QueryResult::Error(QueryError::Other(
+                    verter_type_expr::OwnedStr::from("aborted subscriber flight"),
+                )));
+            }
         }
         if state.aborted && attempt.retries < MAX_INFLIGHT_RETRIES {
             // A concurrent canonical invalidation swept the (family, slot)
@@ -659,8 +877,27 @@ impl Subscription<'_> {
             store.retire_inflight(prepared, &inflight, attempt.independent);
             return Joined::Retry;
         }
+        if state.aborted {
+            // Invalidation can preserve an earlier completion. Exhaustion
+            // ends retries, never the abort's veto over that completion.
+            drop(state);
+            store.retire_inflight(prepared, &inflight, attempt.independent);
+            return Joined::Read(CacheRead {
+                lease: Default::default(),
+                value: QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                )),
+                dep_signature: empty_signature(),
+                walker_diagnostics: super::empty_diagnostics(),
+                cache_suppress: true,
+                fact_status: crate::semantic_query::FactStatus::unavailable(
+                    PartialReasonSet::SUPERSEDED_GENERATION,
+                ),
+                receipt: crate::semantic_query::ReadReceipt::Unpriced,
+            });
+        }
         let result = state.completed.clone().unwrap_or_else(|| {
-            QueryResult::Error(QueryError::Other(Arc::from(
+            QueryResult::Error(QueryError::Other(verter_type_expr::OwnedStr::from(
                 "joiner woke without completion after retry budget exhausted",
             )))
         });
@@ -672,13 +909,14 @@ impl Subscription<'_> {
         // cannot let that build admit around a non-cacheable or partial
         // child.
         let cache_suppress = state.cache_suppress;
-        let result_is_partial = state.result_is_partial;
-        let partial_reasons = state.partial_reasons;
+        let fact_status = state.fact_status;
+        let result_is_partial = !fact_status.is_complete();
         let walker_diagnostics = state
             .walker_diagnostics
             .clone()
-            .unwrap_or_else(|| Arc::from([]));
+            .unwrap_or_else(super::empty_diagnostics);
         let cost_receipt = state.cost_receipt.clone();
+        let delivery_lease = state.lease.clone();
         // Release the flight lock before any tracer fan-out.
         drop(state);
 
@@ -690,6 +928,7 @@ impl Subscription<'_> {
         if result_is_partial
             && cost_receipt.is_none()
             && !matches!(result, QueryResult::Recursive(_))
+            && !matches!(&result, QueryResult::Error(error) if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some())
         {
             attempt.produce_alone();
             return Joined::Retry;
@@ -713,7 +952,9 @@ impl Subscription<'_> {
         //
         // A recursion carrier is an operational escape, not a view-specific
         // value: it passes around a broken wait cycle without a fork.
-        if !matches!(result, QueryResult::Recursive(_)) {
+        if !matches!(result, QueryResult::Recursive(_))
+            && !matches!(&result, QueryResult::Error(error) if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some())
+        {
             if let Some(ref carrier) = graph_carrier {
                 let view_validates = carrier.validate_with_self_roots(ctx, &producer_self_roots)
                     && !store.names_retired_kernel_epoch(&result);
@@ -751,14 +992,223 @@ impl Subscription<'_> {
                 .fetch_add(1, Ordering::Relaxed);
         }
         Joined::Read(CacheRead {
+            lease: delivery_lease,
             value: result,
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             receipt: cost_receipt.into(),
         })
+    }
+}
+
+/// Whether a subscriber stops waiting on the flight: it completed, it was
+/// aborted, or the subscriber's request was cancelled.
+fn flight_resolved(
+    state: &super::inflight::InflightState,
+    flags: &crate::resolver_core::resolver_context::RequestFlags,
+) -> bool {
+    state.completed.is_some() || state.aborted || flags.is_cancelled()
+}
+
+/// A build's output settled into the rails every read of it carries, however
+/// the build was claimed: its value with the projection shape and any
+/// execution abort applied, the carrier it broadcasts, and the retention
+/// verdict. Shared by the family memo's producer ([`ProducerLease::settle`])
+/// and a request-local completion
+/// ([`SemanticGraphStore::complete_request_local`]), so the two can never
+/// derive different rails from the same output.
+struct SettledOutput {
+    result: QueryResult<SemanticQueryValue>,
+    dep_signature: DepSignature,
+    walker_diagnostics: crate::project_semantic_dispatch::walk::WalkerDiagnostics,
+    carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
+    self_root_canonicals: Arc<[Arc<str>]>,
+    satisfied_projection: MaterializedSet,
+    pending_prefix_backfills: Vec<crate::project_semantic_dispatch::walk::PrefixBackfill>,
+    cache_suppress: bool,
+    fact_status: FactStatus,
+    /// Complete, cacheable and priced: the result may be kept and served.
+    admissible: bool,
+}
+
+fn settle_output(
+    store: &SemanticGraphStore,
+    key: &SemanticQueryKey,
+    output: BuildOutput,
+    priced: bool,
+) -> SettledOutput {
+    let BuildOutput {
+        result,
+        dep_signature,
+        walker_diagnostics,
+        cache_suppress,
+        completeness,
+        approximation,
+        taint: _, // §18 taint already consumed upstream by `admit_decision`.
+        observed_self_roots: _,
+        graph_carrier,
+        self_root_canonicals,
+        pending_prefix_backfills,
+        satisfied_projection,
+        flow_completion,
+    } = output;
+    let result_is_partial = completeness.is_partial();
+    let partial_reasons = completeness.reasons();
+    let result = prepared::enforce_projection_value_shape(key, result);
+    let result = match crate::request_context::current_execution_abort() {
+        Some(abort) => crate::semantic_query::result_under_execution_abort(result, abort),
+        None => result,
+    };
+    let aborted = match &result {
+        QueryResult::Error(error) => crate::semantic_query::ExecutionAbort::from_query_error(error),
+        _ => None,
+    };
+    let cache_suppress = cache_suppress || aborted.is_some();
+    let result_is_partial = result_is_partial || aborted.is_some();
+    let partial_reasons = match aborted {
+        Some(abort) => partial_reasons.union(abort.reason_class()),
+        None => partial_reasons,
+    };
+    let walker_diagnostics =
+        crate::project_semantic_dispatch::walk::WalkerDiagnostics::new(walker_diagnostics);
+    // The carrier is always broadcast — bubbled into the producer's outer
+    // tracers and recorded on the flight for subscribers — whether or not
+    // the result is admitted.
+    let carrier = match graph_carrier {
+        Some(boxed) => *boxed,
+        None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
+            crate::fact_signature_helpers::empty_fact_signature(),
+        ),
+    };
+    // §2 admission invariant: a partial result is never admissible, so
+    // it must already be non-cacheable (`finalise_traced_build_output`
+    // enforces `result_is_partial ⟹ cache_suppress`).
+    verter_debug_assert!(
+        !result_is_partial || cache_suppress,
+        "§1 invariant violated at memo admission: result_is_partial \
+         without cache_suppress would launder a partial into the family memo"
+    );
+    // The flow-proof gate: a `FlowReturn` result is admissible ONLY with
+    // the finalizer's proof token naming THIS key (which embeds the
+    // result contract) and THIS value. The token is the sole positive
+    // completeness authority; this gate may veto, never promote.
+    let flow_proof_ok = match key {
+        SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
+            (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
+                proof.key() == key.as_ref() && proof.value() == value.as_ref()
+            }
+            _ => false,
+        },
+        _ => true,
+    };
+    // A vetoed value is UNPROVEN, not merely unpublished: force the
+    // partial and suppression rails onto the read so the producer's
+    // returned read — and every subscriber's — carries the taint. A
+    // build that already reported partiality keeps its own classes.
+    let (cache_suppress, result_is_partial, partial_reasons) =
+        if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
+            (
+                true,
+                true,
+                partial_reasons.union(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
+            )
+        } else {
+            (cache_suppress, result_is_partial, partial_reasons)
+        };
+    let admissible = !(cache_suppress || result_is_partial || !flow_proof_ok) && priced;
+    let result = match result {
+        QueryResult::Value(SemanticQueryValue::FlowReturn(value)) if result_is_partial => {
+            QueryResult::Value(SemanticQueryValue::FlowReturn(
+                verter_session_query::retention::owned::Owned::new(
+                    (*value).clone().with_observed_completeness(
+                        crate::semantic_query::ResultCompleteness::partial(partial_reasons),
+                    ),
+                ),
+            ))
+        }
+        other => other,
+    };
+    let (result, fact_status) =
+        crate::project_semantic_dispatch::projection_fact::adopt_projection_result(
+            store,
+            key,
+            result,
+            if result_is_partial {
+                crate::semantic_query::ResultCompleteness::partial(partial_reasons)
+            } else {
+                crate::semantic_query::ResultCompleteness::Complete
+            },
+            approximation,
+        );
+    SettledOutput {
+        result,
+        dep_signature,
+        walker_diagnostics,
+        carrier,
+        self_root_canonicals,
+        satisfied_projection,
+        pending_prefix_backfills,
+        cache_suppress: cache_suppress || !fact_status.is_complete(),
+        fact_status,
+        admissible: admissible && fact_status.is_complete(),
+    }
+}
+
+impl SemanticGraphStore {
+    /// Complete a build the requesting dispatcher ran for itself after the
+    /// lookup `attempt` missed, outside the family memo's claim: the key's
+    /// computation was never registered as a flight and its result never
+    /// enters the family memo. The output
+    /// settles exactly as a producer's does ([`ProducerLease::settle`]),
+    /// its carrier is delivered through `capture`, and the read
+    /// carries the receipt its recording sealed. The returned carrier is
+    /// `Some` when the result is complete, cacheable and priced — what the
+    /// dispatcher may keep and serve again — and `None` otherwise. A
+    /// cancelled request answers with the cancellation read.
+    pub(crate) fn complete_request_local(
+        &self,
+        attempt: ClaimAttempt,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+        output: BuildOutput,
+        cost_receipt: Option<
+            Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+        >,
+        capture: &mut ReadCapture<'_>,
+    ) -> (
+        ValueRead,
+        Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+    ) {
+        if !attempt.miss_recorded {
+            // The one miss a claim of the key records.
+            self.stats.misses.fetch_add(1, Ordering::Relaxed);
+            if let Some(ctx) = verter_execution::request_context::current_context() {
+                ctx.0
+                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
+            }
+        }
+        if flags.is_cancelled() {
+            return (cancelled_cache_read(), None);
+        }
+        let settled = settle_output(self, attempt.prepared.key(), output, cost_receipt.is_some());
+        capture.deliver_carrier(&settled.carrier);
+        let read = CacheRead {
+            lease: self
+                .lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                    &settled.result,
+                    &settled.walker_diagnostics,
+                    &settled.dep_signature,
+                ))
+                .expect("settled output owns live operands"),
+            value: settled.result,
+            dep_signature: settled.dep_signature,
+            walker_diagnostics: settled.walker_diagnostics,
+            cache_suppress: settled.cache_suppress,
+            fact_status: settled.fact_status,
+            receipt: cost_receipt.into(),
+        };
+        (read, settled.admissible.then_some(settled.carrier))
     }
 }
 
@@ -771,6 +1221,24 @@ impl<'s> ProducerLease<'s> {
         crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
             self.prepared.as_task_producer(),
         )
+    }
+
+    /// The cold-build boundary of an armed [`super::FlightRendezvous`]: a
+    /// joinable producer of its key parks here, its flight claimed and its
+    /// raw computation not begun, until the rendezvous releases it or the
+    /// producer's own request is cancelled. Called with no memo or flight
+    /// lock held.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn hold_for_flight_rendezvous(
+        &self,
+        flags: &crate::resolver_core::resolver_context::RequestFlags,
+    ) {
+        if self.independent {
+            return;
+        }
+        if let Some(rendezvous) = self.store.armed_flight_rendezvous(self.prepared.key()) {
+            rendezvous.hold_producer(self.prepared.key(), &self.inflight, flags);
+        }
     }
 
     /// A receipt recording no cost for this producer's computation: a
@@ -811,38 +1279,6 @@ impl<'s> ProducerLease<'s> {
             started,
         } = self;
         let build_held_ns = started.elapsed().as_nanos() as u64;
-        let BuildOutput {
-            result,
-            dep_signature,
-            walker_diagnostics,
-            cache_suppress,
-            completeness,
-            taint: _, // §18 taint already consumed upstream by `admit_decision`.
-            observed_self_roots: _,
-            graph_carrier,
-            self_root_canonicals,
-            pending_prefix_backfills,
-            satisfied_projection,
-            flow_completion,
-        } = output;
-        let result_is_partial = completeness.is_partial();
-        let partial_reasons = completeness.reasons();
-        let result = prepared::enforce_projection_value_shape(prepared.key(), result);
-        // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
-        // …) records no path-walk hops, so its satisfied projection defaults
-        // to the single terminal point the slot's mode denotes at the key's
-        // path — exactly what a single-terminal compute produced. The point
-        // comes from `requested_path_for_key`, which carries an authored
-        // selective force's residual path, so a `Path(["wanted","leaf"])`
-        // force records that path rather than the whole surface. A modeless
-        // family yields `Demand::identity()`, a trivial pass.
-        let satisfied_projection = if satisfied_projection.is_empty() {
-            MaterializedSet::single(prepared.requested_point().clone())
-        } else {
-            satisfied_projection
-        };
-        let walker_diagnostics: Arc<[crate::project_semantic_dispatch::walk::ShallowDiagnostic]> =
-            Arc::from(walker_diagnostics.into_boxed_slice());
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(open);
@@ -860,53 +1296,47 @@ impl<'s> ProducerLease<'s> {
             return Err(cancelled_cache_read());
         }
 
-        // The carrier is always broadcast — bubbled into this producer's
-        // outer tracers and recorded on the flight for subscribers — whether
-        // or not the result is admitted.
-        let carrier = match graph_carrier {
-            Some(boxed) => *boxed,
-            None => verter_session_query::facts::fact_cache::ReadSetSignature::new(
-                crate::fact_signature_helpers::empty_fact_signature(),
-            ),
+        let SettledOutput {
+            result,
+            dep_signature,
+            walker_diagnostics,
+            carrier,
+            self_root_canonicals,
+            satisfied_projection,
+            pending_prefix_backfills,
+            cache_suppress,
+            fact_status,
+            admissible,
+        } = settle_output(store, prepared.key(), output, cost_receipt.is_some());
+        // §3.4 default: a non-path build (`Instantiate`, `KeyOf`, `TypeOf`,
+        // …) records no path-walk hops, so its satisfied projection defaults
+        // to the single terminal point the slot's mode denotes at the key's
+        // path — exactly what a single-terminal compute produced. The point
+        // comes from `requested_path_for_key`, which carries an authored
+        // selective force's residual path, so a `Path(["wanted","leaf"])`
+        // force records that path rather than the whole surface. A modeless
+        // family yields `Demand::identity()`, a trivial pass.
+        let satisfied_projection = if satisfied_projection.is_empty() {
+            MaterializedSet::single(prepared.requested_point().clone())
+        } else {
+            satisfied_projection
         };
-        // §2 admission invariant: a partial result is never admissible, so
-        // it must already be non-cacheable (`finalise_traced_build_output`
-        // enforces `result_is_partial ⟹ cache_suppress`).
-        verter_debug_assert!(
-            !result_is_partial || cache_suppress,
-            "§1 invariant violated at memo admission: result_is_partial \
-             without cache_suppress would launder a partial into the family memo"
-        );
-        // The flow-proof gate: a `FlowReturn` result is admissible ONLY with
-        // the finalizer's proof token naming THIS key (which embeds the
-        // result contract) and THIS value. The token is the sole positive
-        // completeness authority; this gate may veto, never promote.
-        let flow_proof_ok = match prepared.key() {
-            SemanticQueryKey::FlowReturn(key) => match (&flow_completion, &result) {
-                (Some(proof), QueryResult::Value(SemanticQueryValue::FlowReturn(value))) => {
-                    proof.key() == key.as_ref() && proof.value() == value.as_ref()
-                }
-                _ => false,
-            },
-            _ => true,
+        // A build that answered with a node it no longer holds cannot be
+        // delivered: its flight is retired and the caller gets the typed
+        // refusal, never the destroyed node.
+        let lease = match store.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+            &result,
+            &walker_diagnostics,
+            &dep_signature,
+        )) {
+            Ok(lease) => lease,
+            Err(error) => {
+                store.abort_inflight_for_cancellation(&prepared, &inflight, independent);
+                return Err(super::refused_operand_cache_read(error));
+            }
         };
-        // A vetoed value is UNPROVEN, not merely unpublished: force the
-        // partial and suppression rails onto the read so the producer's
-        // returned read — and every subscriber's — carries the taint. A
-        // build that already reported partiality keeps its own classes.
-        let (cache_suppress, result_is_partial, partial_reasons) =
-            if !flow_proof_ok && !result_is_partial && matches!(result, QueryResult::Value(_)) {
-                (
-                    true,
-                    true,
-                    partial_reasons.union(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
-                )
-            } else {
-                (cache_suppress, result_is_partial, partial_reasons)
-            };
-        let admissible =
-            !(cache_suppress || result_is_partial || !flow_proof_ok) && cost_receipt.is_some();
         Ok(SettledProducer {
+            lease,
             store,
             prepared,
             inflight,
@@ -919,8 +1349,7 @@ impl<'s> ProducerLease<'s> {
             satisfied_projection,
             pending_prefix_backfills,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             admissible,
             admission_linearized: false,
             published: false,
@@ -977,6 +1406,10 @@ impl SettledProducer<'_> {
                     true
                 }
                 WarmPublishOutcome::Skipped => true,
+                // The sweep withholds the warm entry and the prefix backfills.
+                // The owner's computed value is unchanged; a flow return drops
+                // that value later, in `complete`, because a superseded flow
+                // evaluation is not a deliverable result.
                 WarmPublishOutcome::Aborted => false,
             };
             if !self.admission_linearized && flags.is_cancelled() {
@@ -1085,9 +1518,9 @@ impl SettledProducer<'_> {
             carrier,
             self_root_canonicals,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             cost_receipt,
+            lease,
             ..
         } = self;
         if let Some(slot) = capture.evidence() {
@@ -1103,10 +1536,12 @@ impl SettledProducer<'_> {
 
         // Complete the flight and wake its subscribers. An abort planted by
         // an invalidation stays: subscribers that wake on it retry rather
-        // than read the stale result.
-        {
+        // than read the stale result. A superseded execution is not
+        // deliverable to its owner in any query family.
+        let flight_aborted = {
             let mut state = inflight.state.lock();
             if !state.aborted {
+                state.lease = lease.clone();
                 state.completed = Some(result.clone());
                 state.dep_signature = Some(dep_signature.clone());
                 // Subscribers bubble the same carrier this producer bubbled
@@ -1116,13 +1551,42 @@ impl SettledProducer<'_> {
                 state.graph_carrier = Some(Box::new(carrier));
                 state.self_root_canonicals = Arc::clone(&self_root_canonicals);
                 state.cache_suppress = cache_suppress;
-                state.result_is_partial = result_is_partial;
-                state.partial_reasons = partial_reasons;
-                state.walker_diagnostics = Some(Arc::clone(&walker_diagnostics));
+                state.fact_status = fact_status;
+                state.walker_diagnostics = Some(walker_diagnostics.clone());
                 state.cost_receipt = cost_receipt.clone();
+                false
+            } else {
+                true
             }
+        };
+        inflight.wake_subscribers();
+        if flight_aborted {
+            let value = match &result {
+                QueryResult::Error(error)
+                    if crate::semantic_query::ExecutionAbort::from_query_error(error).is_some() =>
+                {
+                    result
+                }
+                _ => QueryResult::Error(QueryError::ExecutionAborted(
+                    crate::semantic_query::ExecutionAbort::Superseded,
+                )),
+            };
+            store.retire_inflight(&prepared, &inflight, independent);
+            return CacheRead {
+                lease,
+                value,
+                dep_signature,
+                walker_diagnostics,
+                cache_suppress: true,
+                fact_status: FactStatus::unavailable(
+                    fact_status
+                        .completeness()
+                        .reasons()
+                        .union(PartialReasonSet::SUPERSEDED_GENERATION),
+                ),
+                receipt: crate::semantic_query::ReadReceipt::Unpriced,
+            };
         }
-        inflight.ready.notify_all();
 
         // Retire the flight whatever the admission decided: a flight left
         // behind would let a later claim — after an invalidation evicted the
@@ -1132,12 +1596,12 @@ impl SettledProducer<'_> {
         store.retire_inflight(&prepared, &inflight, independent);
 
         CacheRead {
+            lease,
             value: result,
             dep_signature,
             walker_diagnostics,
             cache_suppress,
-            result_is_partial,
-            partial_reasons,
+            fact_status,
             receipt: cost_receipt.into(),
         }
     }
@@ -1161,6 +1625,7 @@ impl SemanticGraphStore {
         O: Into<crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticNodeId>>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let _node_scope = self.enter_node_root_scope();
         super::narrow_cache_read(self.execute_cooperative_value(
             ctx,
             key,
@@ -1237,6 +1702,7 @@ impl SemanticGraphStore {
         O: Into<BuildOutput>,
         R: FnOnce() -> SemanticNodeId,
     {
+        let _node_scope = self.enter_node_root_scope();
         // Test-support entry: capture the request snapshot's flag handles
         // once here, so the claim/settle/admit protocol below reads plain
         // fields exactly as the production dispatch path does.
@@ -1246,7 +1712,7 @@ impl SemanticGraphStore {
             None
         }) {
             Acquired::Read(read) | Acquired::Served(read) => read,
-            Acquired::Recursive(recursion) => Self::recursion_read(recursion, recursion_sentinel()),
+            Acquired::Recursive(recursion) => self.recursion_read(recursion, recursion_sentinel()),
             Acquired::Produce(lease) => {
                 let receipt = lease.fixture_receipt();
                 match lease.settle(ctx, flags, build().into(), Some(receipt)) {

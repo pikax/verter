@@ -181,24 +181,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The REGULARIZED form of one node: the same surface with every
-    /// `FreshOwn` member origin restamped `NonLiteral`, recursively through
-    /// member values and aliases.
-    ///
-    /// Freshness is a property of the object-literal EXPRESSION site alone.
-    /// Once a literal becomes a binding's reaching definition, later reads
-    /// of that binding are variable materialisations — the
-    /// [`ExcessPropertyOrigin::NonLiteral`] origin — so
-    /// [`Self::freshness_for_source_node`] (the single freshness authority)
-    /// answers `Regular` for them and no excess-property prepass runs.
-    ///
-    /// A node carrying no fresh member is returned unchanged, so this never
-    /// mints a peer for an already-regular surface.
-    #[allow(dead_code)] // exercised by the call-resolution tests
-    pub fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
-        let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
-            rustc_hash::FxHashMap::default();
-        self.regularize_node(node, &mut memo)
+    construction_ordinal_seam! {
+        /// The REGULARIZED form of one node: the same surface with every
+        /// `FreshOwn` member origin restamped `NonLiteral`, recursively through
+        /// member values and aliases.
+        ///
+        /// Freshness is a property of the object-literal EXPRESSION site alone.
+        /// Once a literal becomes a binding's reaching definition, later reads
+        /// of that binding are variable materialisations — the
+        /// [`ExcessPropertyOrigin::NonLiteral`] origin — so
+        /// [`Self::freshness_for_source_node`] (the single freshness authority)
+        /// answers `Regular` for them and no excess-property prepass runs.
+        ///
+        /// A node carrying no fresh member is returned unchanged, so this never
+        /// mints a peer for an already-regular surface.
+        #[allow(dead_code)] // exercised by the call-resolution tests
+        fn regularized_source_node(&self, node: SemanticNodeId) -> SemanticNodeId {
+            let mut memo: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId> =
+                rustc_hash::FxHashMap::default();
+            self.regularize_node(node, &mut memo)
+        }
     }
 
     /// `memo` is both the shared-subgraph memo and the cycle guard: a node
@@ -280,11 +282,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match graph.node_data(key.source).as_deref() {
                 Some(SemanticNodeData::Object(view)) => {
                     let source_closed = view.closed();
-                    let source_members = source_closed.complete_members().to_vec();
+                    let source_members = source_closed
+                        .complete_members()
+                        .iter()
+                        .map(crate::semantic_query::SurfaceMember::clone)
+                        .collect::<Vec<_>>();
                     let candidates = source_members
                         .iter()
                         .filter(|member| member.excess_origin == ExcessPropertyOrigin::FreshOwn)
-                        .cloned()
+                        .map(crate::semantic_query::SurfaceMember::clone)
                         .collect();
                     (source_members, candidates)
                 }
@@ -610,7 +616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_excess_check_target(*arm, depth + 1) {
@@ -626,7 +632,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_excess_check_target(*arm, depth + 1) {
@@ -661,7 +667,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.is_empty_object_like_type(*inner, depth + 1)
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_empty_object_like_type(*arm, depth + 1) {
@@ -677,7 +683,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Intersection(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut exhausted = false;
                 for arm in arms.iter() {
                     match self.is_empty_object_like_type(*arm, depth + 1) {
@@ -936,7 +942,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             Some(composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))) => {
                 let arms = composite.composite_members().expect("composite arm");
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut any_undecidable = false;
                 for inner in arms.iter() {
                     match self.arm_knows_property(*inner, key, depth + 1) {
@@ -1037,7 +1043,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)))
             }
             Some(SemanticNodeData::Union(arms)) => {
-                let arms = arms.clone();
+                let arms = arms.share();
                 let mut values: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
                 for inner in arms.iter() {
                     values.push(self.arm_property_or_index_value(*inner, key)?);
@@ -1049,7 +1055,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Intersection(arms)) => {
                 // First declaring part wins (bounded approximation of the
                 // merged intersection property).
-                let arms = arms.clone();
+                let arms = arms.share();
                 for inner in arms.iter() {
                     let value = self.arm_property_or_index_value(*inner, key)?;
                     if !matches!(

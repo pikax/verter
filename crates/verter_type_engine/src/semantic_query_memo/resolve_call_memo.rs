@@ -20,38 +20,43 @@ impl SemanticGraphStore {
         self.begin_inline_member_flight(SemanticQueryKey::ResolveCall(Box::new(key.clone())))
     }
 
-    pub fn get_resolve_call_result<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        key: &crate::semantic_query::ResolveCallKey,
-    ) -> Option<CacheRead<crate::semantic_query::ResolvedCallResult>> {
-        let family = FamilyKey::ResolveCall {
-            key: super::family_intern::InternedResolveCallKey::intern(key.clone()),
-        };
-        // A call-resolution entry always materialises the modeless
-        // identity point, so the §3.4 gate is the modeless identity
-        // point every entry records — only carrier validation can block.
-        let requested = MaterializedPoint::new(family::point_for_slot(
-            ModeSlot::Single,
-            &ProjectionPath::empty(),
-        ));
-        // Miss-neutral probe: a miss falls through to the owning
-        // cooperative dispatch, which records the single miss (see
-        // `get_validated_value_impl`'s `record_miss` contract).
-        let hit = self.get_validated_value_impl(
-            &family,
-            ModeSlot::Single,
-            &requested,
-            ctx,
-            None,
-            None,
-            false,
-        )?;
-        Some(hit.map_value(|value| match value {
-            QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => result.as_ref().clone(),
-            other => unreachable!(
-                "ResolveCall family entries store ResolveCall payloads only; found {other:?}"
-            ),
-        }))
+    construction_ordinal_seam! {
+        fn get_resolve_call_result<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            key: &crate::semantic_query::ResolveCallKey,
+        ) -> Option<CacheRead<crate::semantic_query::ResolvedCallResult>> {
+            let family = FamilyKey::ResolveCall {
+                key: super::family_intern::InternedResolveCallKey::intern(
+                    Some(&self.arena.core),
+                    key.clone(),
+                ),
+            };
+            // A call-resolution entry always materialises the modeless
+            // identity point, so the §3.4 gate is the modeless identity
+            // point every entry records — only carrier validation can block.
+            let requested = MaterializedPoint::new(family::point_for_slot(
+                ModeSlot::Single,
+                &ProjectionPath::empty(),
+            ));
+            // Miss-neutral probe: a miss falls through to the owning
+            // cooperative dispatch, which records the single miss (see
+            // `get_validated_value_impl`'s `record_miss` contract).
+            let hit = self.get_validated_value_impl(
+                &family,
+                ModeSlot::Single,
+                &requested,
+                ctx,
+                None,
+                None,
+                false,
+            )?;
+            Some(hit.map_value(|value| match value {
+                QueryResult::Value(SemanticQueryValue::ResolveCall(result)) => result.as_ref().clone(),
+                other => unreachable!(
+                    "ResolveCall family entries store ResolveCall payloads only; found {other:?}"
+                ),
+            }))
+        }
     }
 }

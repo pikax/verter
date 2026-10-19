@@ -33,7 +33,10 @@ pub enum IntersectionPurpose {
 
 /// Owning interned recipe identity.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct IntersectionInputId(Interned<IntersectionRecipe>);
+pub struct IntersectionInputId(
+    Interned<IntersectionRecipe>,
+    crate::semantic_query_memo::node_roots::IdentityNodeRoots,
+);
 
 /// Prints the recipe's digest and its top-level shape only. A nested
 /// subgroup is named by its own digest, never expanded, so formatting a
@@ -57,14 +60,83 @@ impl std::fmt::Debug for IntersectionInputId {
 }
 
 impl IntersectionInputId {
+    fn intern(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        recipe: IntersectionRecipe,
+    ) -> Self {
+        let mut nodes = Vec::new();
+        match &recipe {
+            IntersectionRecipe::OrderedOperands(operands) => nodes.extend(operands.iter().copied()),
+            IntersectionRecipe::OrderedSteps(steps) => {
+                for step in steps.iter() {
+                    match step {
+                        IntersectionTerm::Value(node) => nodes.push(*node),
+                        // Nested recipes already own their own node operands;
+                        // the record owns their handles. Compact inputs have
+                        // no record and their direct occurrences belong here.
+                        IntersectionTerm::EvaluateSubgroup { input, .. } => match input {
+                            IntersectionInputRef::Empty | IntersectionInputRef::Recipe(_) => {}
+                            IntersectionInputRef::Unary(node) => nodes.push(*node),
+                            IntersectionInputRef::Binary(left, right) => {
+                                nodes.extend([*left, *right])
+                            }
+                        },
+                    }
+                }
+            }
+        }
+        let roots =
+            crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(graph, nodes);
+        Self(Interned::new_scoped(recipe), roots)
+    }
     /// The interned recipe.
     #[must_use]
     pub fn recipe(&self) -> &IntersectionRecipe {
         self.0.value()
     }
+
+    /// The heap this input handle owns: its root attachment. The recipe is
+    /// a self-charged record, and so is every nested subgroup recipe.
+    pub(crate) fn key_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.1 .0.owned_heap_bytes(aliases)
+    }
 }
 
 intern_domain!(IntersectionRecipe {
+    /// The operand or step list, and each nested subgroup handle's root
+    /// attachment; a subgroup's recipe is its own self-charged record.
+    fn value_heap_bytes(&self, aliases: &mut verter_session_query::retention::allocation::AliasSet) -> usize {
+        use verter_session_query::retention::allocation::arc_block_bytes;
+        match self {
+            IntersectionRecipe::OrderedOperands(operands) => {
+                arc_block_bytes(std::mem::size_of_val::<[_]>(operands))
+            }
+            IntersectionRecipe::OrderedSteps(steps) => {
+                arc_block_bytes(std::mem::size_of_val::<[_]>(steps))
+                    + steps
+                        .iter()
+                        .map(|step| match step {
+                            IntersectionTerm::Value(_)
+                            | IntersectionTerm::EvaluateSubgroup {
+                                input:
+                                    IntersectionInputRef::Empty
+                                    | IntersectionInputRef::Unary(_)
+                                    | IntersectionInputRef::Binary(..),
+                                purpose: _,
+                            } => 0,
+                            IntersectionTerm::EvaluateSubgroup {
+                                input: IntersectionInputRef::Recipe(child),
+                                purpose: _,
+                            } => child.key_heap_bytes(aliases),
+                        })
+                        .sum::<usize>()
+            }
+        }
+    }
+
     fn take_children(&mut self, out: &mut Vec<Interned<Self>>) {
         let IntersectionRecipe::OrderedSteps(steps) = self else {
             return;
@@ -72,7 +144,7 @@ intern_domain!(IntersectionRecipe {
         if let Some(steps) = Arc::get_mut(steps) {
             for step in steps.iter_mut() {
                 if let IntersectionTerm::EvaluateSubgroup { input, .. } = step {
-                    if let IntersectionInputRef::Recipe(IntersectionInputId(child)) =
+                    if let IntersectionInputRef::Recipe(IntersectionInputId(child, _roots)) =
                         std::mem::replace(input, IntersectionInputRef::Empty)
                     {
                         out.push(child);
@@ -89,7 +161,7 @@ intern_domain!(IntersectionRecipe {
         let shared = std::mem::replace(steps, Arc::from([]));
         for step in shared.iter() {
             if let IntersectionTerm::EvaluateSubgroup {
-                input: IntersectionInputRef::Recipe(IntersectionInputId(child)),
+                input: IntersectionInputRef::Recipe(IntersectionInputId(child, _roots)),
                 ..
             } = step
             {
@@ -140,30 +212,39 @@ impl IntersectionInputRef {
     }
 
     /// Normalize a flat operand list under proven rewrite laws.
-    /// A two-term list with no subgroup becomes Binary.
+    /// A two-term list with no subgroup becomes Binary. A recipe owns its
+    /// operands in `graph`, the graph that issued them.
     #[must_use]
-    pub fn from_operands(members: &[SemanticNodeId]) -> Self {
+    pub fn from_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+    ) -> Self {
         match members {
             [] => Self::Empty,
             [only] => Self::Unary(*only),
             [a, b] => Self::Binary(*a, *b),
-            rest => Self::Recipe(IntersectionInputId(Interned::new(
+            rest => Self::Recipe(IntersectionInputId::intern(
+                graph,
                 IntersectionRecipe::OrderedOperands(Arc::from(rest)),
-            ))),
+            )),
         }
     }
 
     /// Normalize an evaluation tree. A two-term list with a subgroup does
-    /// not collapse to Binary.
+    /// not collapse to Binary. A recipe owns its operands in `graph`.
     #[must_use]
-    pub fn from_steps(steps: &[IntersectionTerm]) -> Self {
+    pub fn from_steps(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        steps: &[IntersectionTerm],
+    ) -> Self {
         if steps
             .iter()
             .any(|step| matches!(step, IntersectionTerm::EvaluateSubgroup { .. }))
         {
-            return Self::Recipe(IntersectionInputId(Interned::new(
+            return Self::Recipe(IntersectionInputId::intern(
+                graph,
                 IntersectionRecipe::OrderedSteps(Arc::from(steps)),
-            )));
+            ));
         }
         let values: Vec<SemanticNodeId> = steps
             .iter()
@@ -172,7 +253,7 @@ impl IntersectionInputRef {
                 IntersectionTerm::EvaluateSubgroup { .. } => None,
             })
             .collect();
-        Self::from_operands(&values)
+        Self::from_operands(graph, &values)
     }
 
     /// Flatten Values for the n-ary kernel. Subgroups stay nested.
@@ -305,15 +386,21 @@ mod tests {
     fn a_held_parent_keeps_its_nested_recipe_valid_and_reaches_every_operand() {
         let leaf = ids(1, 5);
         let parent = {
-            let nested = IntersectionInputRef::from_operands(&leaf[1..4]);
-            IntersectionInputRef::from_steps(&[
-                IntersectionTerm::Value(leaf[0]),
-                IntersectionTerm::EvaluateSubgroup {
-                    input: nested,
-                    purpose: IntersectionPurpose::CheckerReduction,
-                },
-                IntersectionTerm::Value(leaf[4]),
-            ])
+            let nested = IntersectionInputRef::from_operands(
+                crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+                &leaf[1..4],
+            );
+            IntersectionInputRef::from_steps(
+                crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+                &[
+                    IntersectionTerm::Value(leaf[0]),
+                    IntersectionTerm::EvaluateSubgroup {
+                        input: nested,
+                        purpose: IntersectionPurpose::CheckerReduction,
+                    },
+                    IntersectionTerm::Value(leaf[4]),
+                ],
+            )
         };
         let nested_recipe = IntersectionRecipe::OrderedOperands(Arc::from(&leaf[1..4]));
         assert!(
@@ -347,13 +434,21 @@ mod tests {
     #[test]
     fn recipe_churn_leaves_no_record_after_its_owners_drain() {
         let held: Vec<IntersectionInputRef> = (0..2_000u64)
-            .map(|i| IntersectionInputRef::from_operands(&ids(0x100 + i, 3)))
+            .map(|i| {
+                IntersectionInputRef::from_operands(
+                    crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+                    &ids(0x100 + i, 3),
+                )
+            })
             .collect();
         let probes: Vec<IntersectionRecipe> = (0..2_000u64)
             .map(|i| IntersectionRecipe::OrderedOperands(Arc::from(ids(0x100 + i, 3))))
             .collect();
         assert!(probes.iter().all(resident));
-        let again = IntersectionInputRef::from_operands(&ids(0x100, 3));
+        let again = IntersectionInputRef::from_operands(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &ids(0x100, 3),
+        );
         assert_eq!(again, held[0], "content-equal recipes share one identity");
         drop((held, again));
         assert!(
@@ -376,13 +471,19 @@ mod tests {
         let depth = 20u64;
         let leaf = ids(0x7100, 3);
         let levels = ids(0x7101, depth);
-        let mut input = IntersectionInputRef::from_operands(&leaf);
+        let mut input = IntersectionInputRef::from_operands(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &leaf,
+        );
         for level in &levels {
-            input = IntersectionInputRef::from_steps(&[
-                IntersectionTerm::Value(*level),
-                subgroup(input.clone()),
-                subgroup(input),
-            ]);
+            input = IntersectionInputRef::from_steps(
+                crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+                &[
+                    IntersectionTerm::Value(*level),
+                    subgroup(input.clone()),
+                    subgroup(input),
+                ],
+            );
         }
         let mut walked = operands(&input);
         assert_eq!(
@@ -424,9 +525,9 @@ mod tests {
                         let leaf = ids(base, 3);
                         let levels = ids(base + 1, depth);
                         let mut observers = Vec::new();
-                        let mut input = IntersectionInputRef::from_operands(&leaf);
+                        let mut input = IntersectionInputRef::from_operands(crate::semantic_query_memo::test_support::synthetic_operand_graph(), &leaf);
                         for level in &levels {
-                            input = IntersectionInputRef::from_steps(&[
+                            input = IntersectionInputRef::from_steps(crate::semantic_query_memo::test_support::synthetic_operand_graph(), &[
                                 IntersectionTerm::Value(*level),
                                 subgroup(input),
                             ]);
@@ -481,23 +582,35 @@ mod tests {
 
     #[test]
     fn distinct_recipes_never_compare_equal() {
-        let a = IntersectionInputRef::from_operands(&ids(0x9000, 3));
-        let b = IntersectionInputRef::from_operands(&ids(0x9001, 3));
+        let a = IntersectionInputRef::from_operands(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &ids(0x9000, 3),
+        );
+        let b = IntersectionInputRef::from_operands(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &ids(0x9001, 3),
+        );
         assert_ne!(a, b);
-        let c = IntersectionInputRef::from_steps(&[
-            IntersectionTerm::Value(SemanticNodeId(1)),
-            IntersectionTerm::EvaluateSubgroup {
-                input: a.clone(),
-                purpose: IntersectionPurpose::CheckerReduction,
-            },
-        ]);
-        let d = IntersectionInputRef::from_steps(&[
-            IntersectionTerm::Value(SemanticNodeId(1)),
-            IntersectionTerm::EvaluateSubgroup {
-                input: b,
-                purpose: IntersectionPurpose::CheckerReduction,
-            },
-        ]);
+        let c = IntersectionInputRef::from_steps(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &[
+                IntersectionTerm::Value(SemanticNodeId(1)),
+                IntersectionTerm::EvaluateSubgroup {
+                    input: a.clone(),
+                    purpose: IntersectionPurpose::CheckerReduction,
+                },
+            ],
+        );
+        let d = IntersectionInputRef::from_steps(
+            crate::semantic_query_memo::test_support::synthetic_operand_graph(),
+            &[
+                IntersectionTerm::Value(SemanticNodeId(1)),
+                IntersectionTerm::EvaluateSubgroup {
+                    input: b,
+                    purpose: IntersectionPurpose::CheckerReduction,
+                },
+            ],
+        );
         assert_ne!(
             c, d,
             "parents differing only in a nested recipe stay distinct"

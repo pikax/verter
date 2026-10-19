@@ -104,6 +104,7 @@ pub(crate) fn mine_typeinfo_footprint(
     );
     let footprint = crate::component_meta_audit::mine_footprint(
         host.project_type_store().semantic_graph(),
+        host.project_type_store().construction_grant(),
         state,
         ctx,
         host.config.max_derivation_edges,

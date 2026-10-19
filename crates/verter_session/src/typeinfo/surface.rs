@@ -63,9 +63,9 @@ impl CanonicalSpan {
 
     /// Pair a span with a file id, when both the file and the span are present.
     /// `None` when either component is absent (a synthetic / multi-origin fact).
-    fn from_parts(file: Option<&Arc<str>>, span: Option<Span>) -> Option<Self> {
+    fn from_parts(file: Option<&verter_type_expr::OwnedStr>, span: Option<Span>) -> Option<Self> {
         match (file, span) {
-            (Some(file), Some(span)) => Some(Self::new(Arc::clone(file), span)),
+            (Some(file), Some(span)) => Some(Self::new(Arc::from(file.as_str()), span)),
             _ => None,
         }
     }
@@ -177,7 +177,7 @@ impl TypeInfoSurfaceMember {
     /// `None` for symbol / computed keys.
     #[must_use]
     pub fn published_name(&self) -> Option<Arc<str>> {
-        self.key.published_name()
+        self.key.published_name().map(Arc::from)
     }
 }
 
@@ -250,6 +250,8 @@ pub enum TypeInfoSurfaceEntry {
 /// names. `Clone` + `Send + Sync` (all fields are `Arc`-backed or `Copy`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeInfoSurface {
+    /// Membership guarantee projected from the engine fact, independent of member values.
+    pub domain_guarantee: verter_session_query::analysis::component_meta::MetadataFactGuarantee,
     /// Canonical resolver-owned declaration stream.
     pub entries: Arc<[TypeInfoSurfaceEntry]>,
     /// Named members in declaration order.
@@ -275,6 +277,10 @@ impl TypeInfoSurface {
     #[must_use]
     pub fn empty() -> Self {
         Self {
+            domain_guarantee:
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                    false,
+                ),
             entries: Arc::from([]),
             members: Arc::from(Vec::new().into_boxed_slice()),
             call_signatures: Arc::from(Vec::new().into_boxed_slice()),
@@ -290,36 +296,43 @@ impl TypeInfoSurface {
     /// THIN projection: every span comes from the graph payload that already
     /// carries it (stamped once at the OXC lowering site and interned on the
     /// node), paired with the node's canonical origin file from
-    /// [`SemanticGraphStore::node_scope`]. No source text is scanned and no
+    /// [`SemanticGraphStore::node_scope_in_scope`]. No source text is scanned and no
     /// type is re-resolved.
     #[must_use]
     pub fn build(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
         let entries = view
-            .entries
+            .entries()
             .iter()
-            .cloned()
             .map(|entry| match entry {
                 verter_type_engine::semantic_query::SurfaceEntry::Member(member) => {
-                    TypeInfoSurfaceEntry::Member(build_member(graph, &member))
+                    TypeInfoSurfaceEntry::Member(build_member(graph, member))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::CallSignature(node) => {
-                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, node))
+                    TypeInfoSurfaceEntry::CallSignature(build_signature(graph, *node))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::ConstructSignature(node) => {
-                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, node))
+                    TypeInfoSurfaceEntry::ConstructSignature(build_signature(graph, *node))
                 }
                 verter_type_engine::semantic_query::SurfaceEntry::IndexSignature(signature) => {
-                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, &signature))
+                    TypeInfoSurfaceEntry::IndexSignature(build_index_signature(graph, signature))
                 }
             })
             .collect();
-        Self::from_ordered_entries(entries, view.keyspace, view.has_known_index_signature())
+        Self::from_ordered_entries(
+            entries,
+            view.keyspace(),
+            view.has_known_index_signature(),
+            None,
+        )
     }
 
     fn from_ordered_entries(
         entries: Vec<TypeInfoSurfaceEntry>,
         keyspace: Option<SemanticNodeId>,
         has_index_signature: bool,
+        domain_guarantee: Option<
+            verter_session_query::analysis::component_meta::MetadataFactGuarantee,
+        >,
     ) -> Self {
         let mut members = Vec::new();
         let mut call_signatures = Vec::new();
@@ -340,6 +353,11 @@ impl TypeInfoSurface {
             }
         }
         Self {
+            domain_guarantee: domain_guarantee.unwrap_or_else(|| {
+                verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                    has_index_signature || keyspace.is_some(),
+                )
+            }),
             entries: Arc::from(entries.into_boxed_slice()),
             members: Arc::from(members.into_boxed_slice()),
             call_signatures: Arc::from(call_signatures.into_boxed_slice()),
@@ -378,7 +396,12 @@ impl TypeInfoSurface {
                 }
             })
             .collect();
-        Self::from_ordered_entries(entries, surface.keyspace(), surface.has_index_signature())
+        Self::from_ordered_entries(
+            entries,
+            surface.keyspace(),
+            surface.has_index_signature(),
+            None,
+        )
     }
 
     /// Enrich each member AND each call / construct signature with its
@@ -475,7 +498,12 @@ impl TypeInfoSurface {
             entries.push(enriched);
         }
 
-        Self::from_ordered_entries(entries, self.keyspace, self.has_index_signature)
+        Self::from_ordered_entries(
+            entries,
+            self.keyspace,
+            self.has_index_signature,
+            Some(self.domain_guarantee),
+        )
     }
 }
 
@@ -527,8 +555,11 @@ where
 /// The canonical origin file a node was first lowered in, when it is a
 /// single-declaration-file scope. `None` for `Global` / non-file scopes (a
 /// primitive, a structural composed node).
-fn node_origin_file(graph: &SemanticGraphStore, node: SemanticNodeId) -> Option<Arc<str>> {
-    match graph.node_scope(node) {
+fn node_origin_file(
+    graph: &SemanticGraphStore,
+    node: SemanticNodeId,
+) -> Option<verter_type_expr::OwnedStr> {
+    match graph.node_scope_in_scope(node) {
         Some(NodeScopeId::File { canonical_id, .. }) => Some(canonical_id),
         _ => None,
     }
@@ -575,7 +606,7 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
         jsdoc_description_span: None,
         jsdoc_tag_spans: Arc::from(Vec::new().into_boxed_slice()),
         origin: SurfaceMemberOrigin {
-            canonical_file: canonical,
+            canonical_file: canonical.as_ref().map(|file| Arc::from(file.as_str())),
             declaration_span,
             merge_role: member.merge_role.role(),
         },
@@ -583,8 +614,11 @@ fn build_member(graph: &SemanticGraphStore, member: &SurfaceMember) -> TypeInfoS
 }
 
 fn build_signature(graph: &SemanticGraphStore, node: SemanticNodeId) -> TypeInfoSurfaceSignature {
+    // A construction reader inside its caller's lane: the nested scope owns
+    // every ordinal it reads.
+    let _scope = graph.enter_nested_scope();
     let canonical = node_origin_file(graph, node);
-    let (signature_span, parameter_spans, return_type_span) = match graph.node_data(node) {
+    let (signature_span, parameter_spans, return_type_span) = match graph.read_in_scope(node) {
         Some(data) => match &*data {
             SemanticNodeData::Signature {
                 params,

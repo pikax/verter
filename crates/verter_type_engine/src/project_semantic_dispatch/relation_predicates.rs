@@ -31,6 +31,7 @@ pub fn is_deferred(data: &SemanticNodeData) -> bool {
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
+            | SemanticNodeData::DeferredCallable(_)
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::Mapped { .. }
             | SemanticNodeData::Conditional { .. }
@@ -226,63 +227,65 @@ pub(super) fn index_domains_overlap(
     }
 }
 
-pub fn index_signature_applies_to_property(
-    graph: &SemanticGraphStore,
-    key_type: SemanticNodeId,
-    property_key: &crate::semantic_query::PropertyKey,
-) -> bool {
-    let Some(data) = graph.node_data(key_type) else {
-        return false;
-    };
-    match &*data {
-        SemanticNodeData::Primitive(PrimitiveKind::Any) => true,
-        SemanticNodeData::Primitive(PrimitiveKind::String) => {
-            matches!(
-                property_key,
-                crate::semantic_query::PropertyKey::String(_)
-                    | crate::semantic_query::PropertyKey::Number(_)
-            )
-        }
-        SemanticNodeData::Primitive(PrimitiveKind::Symbol) => {
-            matches!(
-                property_key,
-                crate::semantic_query::PropertyKey::UniqueSymbol(_)
-            )
-        }
-        SemanticNodeData::Primitive(PrimitiveKind::Number) => match property_key {
-            crate::semantic_query::PropertyKey::Number(_) => true,
-            crate::semantic_query::PropertyKey::String(name) => is_numeric_literal_name(name),
-            crate::semantic_query::PropertyKey::UniqueSymbol(_) => false,
-        },
-        SemanticNodeData::Literal(LiteralValue::String(name)) => match property_key {
-            crate::semantic_query::PropertyKey::String(property_name) => {
-                name.as_str() == property_name.as_ref()
+construction_ordinal_seam! {
+    fn index_signature_applies_to_property(
+        graph: &SemanticGraphStore,
+        key_type: SemanticNodeId,
+        property_key: &crate::semantic_query::PropertyKey,
+    ) -> bool {
+        let Some(data) = graph.node_data(key_type) else {
+            return false;
+        };
+        match &*data {
+            SemanticNodeData::Primitive(PrimitiveKind::Any) => true,
+            SemanticNodeData::Primitive(PrimitiveKind::String) => {
+                matches!(
+                    property_key,
+                    crate::semantic_query::PropertyKey::String(_)
+                        | crate::semantic_query::PropertyKey::Number(_)
+                )
             }
-            crate::semantic_query::PropertyKey::Number(number) => {
-                name.as_str() == number.to_string()
+            SemanticNodeData::Primitive(PrimitiveKind::Symbol) => {
+                matches!(
+                    property_key,
+                    crate::semantic_query::PropertyKey::UniqueSymbol(_)
+                )
             }
-            crate::semantic_query::PropertyKey::UniqueSymbol(_) => false,
-        },
-        SemanticNodeData::Literal(LiteralValue::Number(n)) => {
-            let spelling = super::build::js_number_to_string(*n);
-            match property_key {
+            SemanticNodeData::Primitive(PrimitiveKind::Number) => match property_key {
+                crate::semantic_query::PropertyKey::Number(_) => true,
+                crate::semantic_query::PropertyKey::String(name) => is_numeric_literal_name(name),
+                crate::semantic_query::PropertyKey::UniqueSymbol(_) => false,
+            },
+            SemanticNodeData::Literal(LiteralValue::String(name)) => match property_key {
                 crate::semantic_query::PropertyKey::String(property_name) => {
-                    spelling == property_name.as_ref()
+                    name.as_str() == property_name.as_ref()
                 }
                 crate::semantic_query::PropertyKey::Number(number) => {
-                    spelling == number.to_string()
+                    name.as_str() == number.to_string()
                 }
                 crate::semantic_query::PropertyKey::UniqueSymbol(_) => false,
+            },
+            SemanticNodeData::Literal(LiteralValue::Number(n)) => {
+                let spelling = super::build::js_number_to_string(*n);
+                match property_key {
+                    crate::semantic_query::PropertyKey::String(property_name) => {
+                        spelling == property_name.as_ref()
+                    }
+                    crate::semantic_query::PropertyKey::Number(number) => {
+                        spelling == number.to_string()
+                    }
+                    crate::semantic_query::PropertyKey::UniqueSymbol(_) => false,
+                }
             }
+            SemanticNodeData::Union(members) => {
+                let members = members.members_arc();
+                drop(data);
+                members
+                    .iter()
+                    .any(|&member| index_signature_applies_to_property(graph, member, property_key))
+            }
+            _ => false,
         }
-        SemanticNodeData::Union(members) => {
-            let members = members.members_arc();
-            drop(data);
-            members
-                .iter()
-                .any(|&member| index_signature_applies_to_property(graph, member, property_key))
-        }
-        _ => false,
     }
 }
 

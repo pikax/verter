@@ -686,10 +686,10 @@ fn by_design_opaque_degradations_carry_explicit_markers() {
     // SyntheticSlotBinding / ImportType / Unknown have no wire node arm:
     // they degrade to Opaque with an interned message — never silently.
     let ty = TypeExpr::SyntheticSlotBinding(Arc::new(verter_type_expr::SyntheticCarrierKey {
-        scope_canonical_id: Arc::from("/Comp.vue"),
+        scope_canonical_id: From::from("/Comp.vue"),
         surface_kind: verter_type_expr::SyntheticCarrierSurfaceKind::SlotBinding,
-        slot_name: Some(Arc::from("default")),
-        binding_name: Arc::from("slots"),
+        slot_name: Some(From::from("default")),
+        binding_name: From::from("slots"),
         value_node: 7,
     }));
     let graph = encode(&ty);

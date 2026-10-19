@@ -390,6 +390,7 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
             assert_eq!(
                 out.provenance,
                 ResultProvenance {
+                    fact_status: verter_type_engine::semantic_query::FactStatus::Complete,
                     taint: ResultTaint::Clean
                 },
                 "boundary provenance must be clean"
@@ -409,9 +410,9 @@ fn execute_returns_typed_type_node_with_clean_provenance() {
     }
 }
 
-/// Wrapper parity: `resolve_decl` (the provenance-stripped convenience
-/// wrapper) returns the same node id that `execute_type_node` carries on
-/// its `Value` arm for the same key.
+/// Wrapper parity: `resolve_decl` (the convenience wrapper) returns the
+/// same node id that `execute_type_node` carries on its `Value` arm for the
+/// same key.
 #[test]
 fn resolve_decl_wrapper_matches_execute_type_node_node() {
     use verter_type_engine::project_semantic_dispatch::{
@@ -429,7 +430,7 @@ fn resolve_decl_wrapper_matches_execute_type_node_node() {
         "C",
     );
     let wrapper = match dispatch.resolve_decl(key.clone()) {
-        QueryResult::Value(node) => node,
+        QueryResult::Value(out) => out.value,
         other => panic!("expected wrapper Value, got {other:?}"),
     };
     let typed = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(key)) {
@@ -1253,12 +1254,12 @@ fn identity_interner_is_per_store_owned_not_process_global() {
     let a1 = store_a.identity_interner().intern("/w/shared.ts");
     let a2 = store_a.identity_interner().intern("/w/shared.ts");
     assert!(
-        Arc::ptr_eq(&a1, &a2),
+        verter_type_expr::OwnedStr::ptr_eq(&a1, &a2),
         "one store dedups content-equal identity strings"
     );
     let b1 = store_b.identity_interner().intern("/w/shared.ts");
     assert!(
-        !Arc::ptr_eq(&a1, &b1),
+        !verter_type_expr::OwnedStr::ptr_eq(&a1, &b1),
         "a second store owns an INDEPENDENT pool — no process-global sharing"
     );
     assert_eq!(a1, b1, "content equality is unaffected by pool identity");
@@ -1337,11 +1338,18 @@ fn empty_host_has_empty_project_type_store() {
 fn dep_signature_construction_is_caller_local() {
     use verter_type_engine::semantic_query::{DepSignature, DepVersion};
 
-    let entries: Vec<(Arc<str>, DepVersion)> = vec![
-        (Arc::from("/w/a.ts"), DepVersion::WholeHash([1u8; 16])),
-        (Arc::from("/w/b.ts"), DepVersion::RouteGeneration(7)),
+    let entries: Vec<verter_type_engine::semantic_query::DepEntry> = vec![
+        verter_type_engine::semantic_query::DepEntry::new(
+            "/w/a.ts",
+            DepVersion::WholeHash([1u8; 16]),
+        ),
+        verter_type_engine::semantic_query::DepEntry::new(
+            "/w/b.ts",
+            DepVersion::RouteGeneration(7),
+        ),
     ];
-    let sig: DepSignature = Arc::from(entries.into_boxed_slice());
+    let sig: DepSignature =
+        verter_type_engine::semantic_query::DepSignature::new(entries.into_boxed_slice());
     assert_eq!(sig.len(), 2);
 }
 
@@ -1531,7 +1539,7 @@ fn semantic_query_unrelated_edit_keeps_memo_warm_slice11() {
         .semantic_graph()
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(a_key.clone()))
         .expect("unrelated edit must not invalidate a.ts entry");
-    match (warm_before.value, warm_after.value) {
+    match (warm_before.value().clone(), warm_after.value().clone()) {
         (QueryResult::Value(x), QueryResult::Value(y)) => assert_eq!(x, y, "same node id"),
         other => panic!("expected two warm values, got {other:?}"),
     }
@@ -1573,12 +1581,12 @@ fn semantic_query_warm_entry_has_non_empty_dep_signature_slice11() {
         .get_unvalidated(&SemanticQueryKey::ResolveDecl(key))
         .expect("warm entry must exist");
     assert!(
-        !warm.dep_signature.is_empty(),
+        !warm.dep_signature().is_empty(),
         "warm hit must carry a non-empty dep signature"
     );
     let mut has_whole_hash = false;
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for verter_type_engine::semantic_query::DepEntry(_, dv) in warm.dep_signature().iter() {
         match dv {
             DepVersion::WholeHash(_) => has_whole_hash = true,
             DepVersion::ProjectGeneration(_) => has_project_gen = true,
@@ -1635,7 +1643,7 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         .get_unvalidated(&lookup_key)
         .expect("warm entry must exist");
     let mut has_project_gen = false;
-    for (_, dv) in warm.dep_signature.iter() {
+    for verter_type_engine::semantic_query::DepEntry(_, dv) in warm.dep_signature().iter() {
         if matches!(dv, DepVersion::ProjectGeneration(_)) {
             has_project_gen = true;
             break;
@@ -1646,5 +1654,5 @@ fn derived_semantic_query_records_project_generation_anchor_slice11() {
         "derived semantic query must anchor to the project generation"
     );
     // Sanity: the query returned a warm union (not a miss).
-    assert!(matches!(warm.value, QueryResult::Value(_)));
+    assert!(matches!(warm.value().clone(), QueryResult::Value(_)));
 }

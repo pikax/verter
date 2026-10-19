@@ -4,10 +4,9 @@
 //! public expansion boundary instead of collapsing back into an Exact/Partial
 //! compatibility contract.
 
-use std::sync::Arc;
-
 use crate::type_solver::result::{ExecutionStatus, SolverExactness};
 use verter_type_expr::facts::{NarrowTypeParam, SemanticTypeSource, SourcePosition};
+use verter_type_expr::OwnedSlice;
 use verter_type_expr::{
     AuthoredTypeEvidence, ResolutionDiagnostic, ResolutionDiagnosticKind, ResolutionProvenance,
     ResolvedTypeAuthority, TopLevelOwnerId,
@@ -26,6 +25,8 @@ pub type ExpansionExecutionStatus = ExecutionStatus;
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ExpandedObjectShape {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain_guarantee: Option<crate::analysis::component_meta::MetadataFactGuarantee>,
     pub properties: Vec<ExpandedProperty>,
     pub index_signatures: Vec<ExpandedIndexSignature>,
     pub call_signatures: Vec<ExpandedCallSignature>,
@@ -107,7 +108,7 @@ pub struct ExpandedCallSignature {
     /// A signature-scoped bound has no addressable authored slot (bounds are
     /// recovered whole-signature on demand), so `constraint`/`default`
     /// fail closed to `None` — no producer emits a bound locator here.
-    pub type_parameters: Arc<[NarrowTypeParam]>,
+    pub type_parameters: OwnedSlice<NarrowTypeParam>,
 }
 
 #[derive(
@@ -221,6 +222,7 @@ pub enum ExpansionStopReason {
 impl ExpandedObjectShape {
     pub fn empty() -> Self {
         Self {
+            domain_guarantee: None,
             properties: Vec::new(),
             index_signatures: Vec::new(),
             call_signatures: Vec::new(),
@@ -386,15 +388,14 @@ impl ExpandedField {
         declared_in_macro_type_arg: bool,
         provenance: ResolutionProvenance,
     ) -> Self {
-        let publication_diagnostics: Arc<[ResolutionDiagnostic]> = diagnostics
+        let publication_diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
             .iter()
             .map(|diagnostic| ResolutionDiagnostic {
                 kind: diagnostic.reason.into(),
-                context: Arc::from(diagnostic.context.as_str()),
-                property_name: diagnostic.property_name.as_deref().map(Arc::from),
+                context: diagnostic.context.as_str().into(),
+                property_name: diagnostic.property_name.as_deref().map(Into::into),
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect();
         let authority = ResolvedTypeAuthority::from_source_position(
             &source,
             exactness.into(),
@@ -565,14 +566,18 @@ mod tests {
         let source_params = vec![
             TypeParam {
                 name: "T".to_string(),
-                constraint: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
+                constraint: Some(std::sync::Arc::new(TypeExpr::primitive(
+                    PrimitiveName::String,
+                ))),
                 default: None,
                 is_const: false,
             },
             TypeParam {
                 name: "U".to_string(),
                 constraint: None,
-                default: Some(Arc::new(TypeExpr::primitive(PrimitiveName::String))),
+                default: Some(std::sync::Arc::new(TypeExpr::primitive(
+                    PrimitiveName::String,
+                ))),
                 is_const: false,
             },
         ];

@@ -1,5 +1,29 @@
 ## Semantic Dispatch (current authority)
 
+Closed single-property scalar object unions use a request-local property index
+inside the relation authority. Matching properties still enter the ordinary
+member relation in authored order, including the positional first attempt.
+The index proves absence from both the own surface and the project's apparent
+`Object` interface, read once per canonical context. Aligned property keys keep
+the ordinary positional path.
+Runs whose required property is absent are rejected in batches: their logical
+checker comparisons, work, construction charges and recursion footprint stay
+in the parent cost receipt, preserving TS2859 subjects and cold/warm budget
+behavior without allocating a query and obligation for each negative pair.
+At a partial batch boundary, charge the next alternative, admit its checker
+comparison and reserve its pair bytes before charging an apparent `Object`
+read. An exhausted comparison reports TS2859 without paying for that read.
+When the union's possible target and scalar-value comparisons can reach a
+checker refusal, require connected work for index preparation, source/matching
+visits and the remaining checker pairs (including the refused next alternative)
+before preparing the index or reading apparent `Object`. Tight work allowances
+retain the ordinary worklist so speculative preparation cannot mask its checker
+refusal, partiality or subsequent recovery budget outcome. Unions too small to
+reach that refusal keep their existing cold/partly warm cost accounting.
+Inference sessions, fresh sources, optional properties, signatures, index
+signatures, deferred values and unit-valued targets retain the general path;
+unit targets may need the existing discriminant-splitting proof.
+
 The request boundary is the sealed, method-free `ResolverContext` marker over
 six services. Its implementations select the captured request view privately;
 engine consumers receive owned observations and typed demands, never a host,
@@ -67,7 +91,7 @@ A `RelationPayload` is `{ outcome, bindings, recursion }` and nothing else. The 
 
 What stays REQUIRED and always on is what the algorithm consumes: the outcome and bindings, the recursion footprint that gates warm replay, and the checker transaction's assumption / discharge state (`RelationAssumptionEvidence` on the reentry stack, the SCC lowlink and session-admission ledgers, the typed `RecursionOrBudgetCap` a budget edge carries to `BudgetExceeded`). `UndecidedReason::OpenAssumption` names the sentinel state only; the assumption's identity lives on the transaction, never in a store table.
 
-A human explanation is OPTIONAL and request-owned (`project_semantic_dispatch/relation_explanation.rs`, compiled only under the default-off `semantic-observe` feature). The cold decision sites record a `RelationExplanation` (`Assignable` / `NotAssignable` / `BudgetExceeded` / `CoinductiveCycle { pair, members }`) into the dispatch's buffer, drained by `ProjectSemanticDispatch::take_relation_explanations`. Each `LeasedOperand` holds its operand's payload `Arc`, so a captured explanation — cyclic ones included — survives memo eviction and a document close until the explanation drops. A warm hit computes nothing and captures nothing; capture never manufactures history and never changes an answer or a binding. A default build has no buffer, no explanation type and no construction work. Any future proof reference contract stays capture-owned in the same way; it cannot reinstate an always-on store table.
+A human explanation is OPTIONAL and request-owned (`project_semantic_dispatch/relation_explanation.rs`, compiled only under the default-off `semantic-observe` feature). The cold decision sites record a `RelationExplanation` (`Assignable` / `NotAssignable` / `BudgetExceeded` / `CoinductiveCycle { pair, members }`) into the dispatch's buffer, drained by `ProjectSemanticDispatch::take_relation_explanations`. Each `LeasedOperand` roots its operand and reads its payload through that `NodeDataLease`, so a captured explanation — cyclic ones included — survives memo eviction and a document close as one of the operand's owners until the explanation drops. A warm hit computes nothing and captures nothing; capture never manufactures history and never changes an answer or a binding. A default build has no buffer, no explanation type and no construction work. Any future proof reference contract stays capture-owned in the same way; it cannot reinstate an always-on store table.
 
 Guards: `many_distinct_relations_under_tiny_retention_keep_operand_only_residency` (engine), `captured_cycle_explanation_leases_operands_past_eviction_and_release` (session, `--features semantic-observe`), and the field-exhaustive `RelationPayload` literal in `relate_query_value_carries_relation_proof_and_budget_state` (the guard keeps its registered name).
 
@@ -141,4 +165,3 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
-

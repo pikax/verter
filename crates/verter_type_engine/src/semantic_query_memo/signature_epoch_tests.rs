@@ -1,8 +1,6 @@
 //! The family memo's retired-kernel-epoch predicates, over real kernel
 //! handles.
 
-use std::sync::Arc;
-
 use super::*;
 use crate::semantic_query::{SemanticContextId, SignatureKind, CONTEXT_FREE_EVALUATION};
 use crate::signature_kernel::test_support::intern_one_call;
@@ -13,8 +11,9 @@ use crate::signature_kernel::{
 
 fn set_value(set: SignatureSetRef) -> QueryResult<SemanticQueryValue> {
     QueryResult::Value(SemanticQueryValue::SignatureSet(SignatureSetValue {
+        version: Default::default(),
         set,
-        nodes: Arc::from([]),
+        nodes: Default::default(),
     }))
 }
 
@@ -108,33 +107,42 @@ fn the_record_cap_replaces_the_epoch_only_past_the_cap() {
     );
 }
 
-/// Released nodes strand the kernel records reached through their tokens;
-/// the epoch is replaced once stranded tokens outnumber live ones, never
-/// before, and never for a release that names no token of the epoch.
+/// Releasing the epoch's roots on closed nodes strands the kernel records
+/// reached through their tokens; the epoch is replaced once stranded tokens
+/// outnumber live ones, never before, and never for a release that names no
+/// token of the epoch.
 #[test]
 fn releasing_most_tokenised_nodes_replaces_the_epoch() {
     let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
     let store = graph.signature_store();
-    for id in 1..=4 {
-        store.intern_type_token(SemanticNodeId(id), None).unwrap();
+    let node = |n: u32| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(f64::from(n)),
+        ))
+    };
+    let tokenised: Vec<SemanticNodeId> = (1..=4).map(node).collect();
+    let untokenised = node(40);
+    for id in &tokenised {
+        store.intern_type_token(*id, None).unwrap();
     }
     let before = store.epoch();
 
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(40)]),
+        graph.release_signature_records_naming([untokenised]),
         None,
         "a node with no token strands nothing"
     );
     assert_eq!(store.stranded_token_count(), 0);
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(1), SemanticNodeId(2)]),
+        graph.release_signature_records_naming([tokenised[0], tokenised[1]]),
         None,
         "half the tokens stranded is not a majority"
     );
     assert_eq!(store.epoch(), before);
     assert_eq!(store.stranded_token_count(), 2);
 
-    let replaced = graph.release_signature_records_naming([SemanticNodeId(3)]);
+    let replaced = graph.release_signature_records_naming([tokenised[2]]);
     assert!(replaced.is_some_and(|epoch| epoch != before));
     assert_eq!(
         store.interned_len(),
@@ -147,8 +155,48 @@ fn releasing_most_tokenised_nodes_replaces_the_epoch() {
         "the replacement epoch has stranded nothing"
     );
     assert_eq!(
-        graph.release_signature_records_naming([SemanticNodeId(4)]),
+        graph.release_signature_records_naming([tokenised[3]]),
         None,
         "a token of a retired epoch strands nothing in the current one"
+    );
+}
+
+/// A token is stranded only by a close that released its root, and only an
+/// intern that roots that stranded token again uncounts it. An intern that
+/// roots a token another thread has interned but not yet rooted is a first
+/// rooting: it leaves another token's stranded count alone.
+#[test]
+fn rooting_a_token_interned_but_never_rooted_uncounts_nothing() {
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let store = graph.signature_store();
+    let node = |n: u32| {
+        graph.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::Number(f64::from(n)),
+        ))
+    };
+    let tokenised: Vec<SemanticNodeId> = (1..=4).map(node).collect();
+    for id in &tokenised {
+        store.intern_type_token(*id, None).unwrap();
+    }
+    assert_eq!(graph.release_signature_records_naming([tokenised[0]]), None);
+    assert_eq!(store.stranded_token_count(), 1);
+
+    let racing = node(50);
+    store.intern_unrooted_type_token_for_tests(racing);
+    store.intern_type_token(racing, None).unwrap();
+    assert_eq!(
+        store.stranded_token_count(),
+        1,
+        "a first rooting is not a re-rooting"
+    );
+
+    store.intern_type_token(tokenised[0], None).unwrap();
+    assert_eq!(store.stranded_token_count(), 0, "re-rooting uncounts");
+    assert_eq!(graph.release_signature_records_naming([tokenised[0]]), None);
+    assert_eq!(
+        store.stranded_token_count(),
+        1,
+        "a re-rooted token is stranded once by the next close"
     );
 }

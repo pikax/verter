@@ -29,7 +29,7 @@ impl Default for FuseBudgets {
             imported_root_fanout: 200,
             registry_deepening_fanout: 300,
             member_surface_recursion_depth: 10,
-            projection_op_count: 2000,
+            projection_op_count: crate::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
             union_member_explosion: 100,
         }
     }
@@ -189,7 +189,10 @@ mod tests {
         assert_eq!(budgets.imported_root_fanout, 200);
         assert_eq!(budgets.registry_deepening_fanout, 300);
         assert_eq!(budgets.member_surface_recursion_depth, 10);
-        assert_eq!(budgets.projection_op_count, 2000);
+        assert_eq!(
+            budgets.projection_op_count,
+            crate::request_budget::DEFAULT_PROJECTION_OP_BUDGET
+        );
         assert_eq!(budgets.union_member_explosion, 100);
     }
 

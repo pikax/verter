@@ -65,6 +65,8 @@ fn get_meta(project: &Arc<MetaProject>, canonical_id: &str) -> ComponentMetaAnal
         .get_component_meta(canonical_id)
         .expect("get_component_meta must succeed")
         .expect("get_component_meta must return metadata")
+        .analysis()
+        .clone()
 }
 
 /// The sorted `(member-name, debug-rendered member type, optional)` triples of

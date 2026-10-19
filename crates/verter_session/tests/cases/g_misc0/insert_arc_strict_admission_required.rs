@@ -1,10 +1,10 @@
 //! Architecture guard — fact-validated caches in production source
-//! must admit through `insert_arc_with_kind` (NOT the loose
-//! `insert_arc` / `insert` paths) unless explicitly allow-listed.
+//! must admit through `insert_value_with_kind` (NOT the loose
+//! `insert_value` / `insert` paths) unless explicitly allow-listed.
 //!
 //! ## Why
 //!
-//! `ValidatedFactCache::insert_arc_with_kind(key, value, facts, kind)`
+//! `ValidatedFactCache::insert_value_with_kind(key, value, facts, kind)`
 //! is the strict admission path.
 //! It enforces R20 fact-completeness: an empty `facts` vector causes
 //! admission to be refused (the cache entry is not recorded, the
@@ -13,8 +13,8 @@
 //! audit event fires). Signature width is never refused: a signature
 //! wider than one evidence page is paged and admitted.
 //!
-//! The loose `insert_arc` and `insert` (which falls through to
-//! `insert_arc`) paths bypass this gate.
+//! The loose `insert_value` and `insert` (which falls through to
+//! `insert_value`) paths bypass this gate.
 //! The one production use is private to the fallthrough cache owner;
 //! the owner runs the complete cold compute inside its cacheability
 //! scope before that sink is reachable. Every NEW fact-validated cache
@@ -25,7 +25,7 @@
 //! Scans `crates/{verter_session,verter_type_engine}/src/**/*.rs` (excluding sibling
 //! `*_tests.rs`, `tests/`, `benches/`, `examples/`, and
 //! `#[cfg(test)]` items) for method-call expressions whose method
-//! name is `insert_arc` or `insert` AND whose receiver is a
+//! name is `insert_value` or `insert` AND whose receiver is a
 //! `ValidatedFactCache` (recognised structurally by the field name
 //! pattern). The scanner collects ALL such call sites; the
 //! production-tree assertion compares the observed
@@ -38,7 +38,7 @@
 //! ## Allow-list
 //!
 //! One call site in production source legitimately
-//! use the loose `<receiver>.insert(...)` / `<receiver>.insert_arc(...)`
+//! use the loose `<receiver>.insert(...)` / `<receiver>.insert_value(...)`
 //! admission path. It is owner-gated as documented below. Adding a new
 //! call site here requires extending the allow-list.
 //!
@@ -53,15 +53,15 @@
 //!   surface; content-unversioned empty signatures are refused.
 //!
 //! Every other production-source call site MUST go through
-//! `insert_arc_with_kind` with a `'static str` cache-kind label.
+//! `insert_value_with_kind` with a `'static str` cache-kind label.
 //!
-//! ## Production cache kinds passed to `insert_arc_with_kind`
+//! ## Production cache kinds passed to `insert_value_with_kind`
 //!
 //! The kinds enumerated below match the runtime test in
 //! `r20_admission_refuses_empty_signature.rs`. Both lists must stay
 //! in lockstep — the cache-kind parity test (below) compares the
 //! observed set of literals passed as the fourth argument to
-//! `insert_arc_with_kind` against this expected set and fails on
+//! `insert_value_with_kind` against this expected set and fails on
 //! any missing or unexpected kind.
 //!
 //! - `"prepared_decl_bundles"` (`host_manage/prepared_decl.rs`)
@@ -88,7 +88,7 @@ fn workspace_root() -> PathBuf {
 }
 
 /// Pinned `(file_suffix, enclosing_fn, expected_loose_call_count)`
-/// triples whose `<receiver>.insert(...)` / `<receiver>.insert_arc(...)`
+/// triples whose `<receiver>.insert(...)` / `<receiver>.insert_value(...)`
 /// call site is permitted to bypass strict admission. The file-suffix
 /// match is path-suffix (`ends_with`) so the entries are platform-
 /// agnostic and survive worktree path changes. See module
@@ -110,7 +110,7 @@ const EXPECTED_LOOSE_ADMISSION_COUNTS: &[(&str, &str, usize)] = &[
 /// Production-source cache kinds. Mirrors
 /// `PRODUCTION_CACHE_KINDS` in `r20_admission_refuses_empty_signature.rs`.
 /// The cache-kind parity test (below) asserts the observed set of
-/// `insert_arc_with_kind(..., "<kind>")` literals in production
+/// `insert_value_with_kind(..., "<kind>")` literals in production
 /// source is exactly equal to this list — missing kinds (a producer
 /// was deleted or renamed) AND unexpected kinds (a new producer was
 /// added without updating the list) both fail.
@@ -119,6 +119,7 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
     "component_meta.results",
     "imported_root_db.roots",
     "route_db.routes",
+    "route_db.module_exports",
 ];
 
 #[derive(Debug)]
@@ -224,17 +225,17 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
 
     fn visit_expr_method_call(&mut self, c: &'ast ExprMethodCall) {
         let method = c.method.to_string();
-        // We watch only `insert_arc` (loose admission on
-        // `ValidatedFactCache`) and `insert` (wraps `insert_arc`).
+        // We watch only `insert_value` (loose admission on
+        // `ValidatedFactCache`) and `insert` (wraps `insert_value`).
         // Receivers we recognise as `ValidatedFactCache`-shaped:
-        //   - `self.cache.insert(...)` / `self.cache.insert_arc(...)`
-        //   - `self.<fieldname>.insert(...)` / `.insert_arc(...)`
+        //   - `self.cache.insert(...)` / `self.cache.insert_value(...)`
+        //   - `self.<fieldname>.insert(...)` / `.insert_value(...)`
         //     where `<fieldname>` is one of the known fact-validated
         //     fields. We syntactically approximate by matching any
         //     `self.<ident>.<method>(...)` call where the immediate
         //     receiver chain starts with `self.<ident>` and the
         //     field name is a known `ValidatedFactCache` field.
-        if (method == "insert_arc" || method == "insert")
+        if (method == "insert_value" || method == "insert")
             && receiver_is_known_validated_fact_cache_field(&c.receiver)
         {
             self.record(&method);
@@ -245,7 +246,7 @@ impl<'ast> Visit<'ast> for Scanner<'_> {
 
 /// Walks production source and collects every string-literal
 /// passed as the fourth positional argument to
-/// `.insert_arc_with_kind(key, value, facts, "<cache_kind>")`. The
+/// `.insert_value_with_kind(key, value, facts, "<cache_kind>")`. The
 /// `cache_kind` parameter is declared as `&'static str` on the
 /// substrate; non-literal arguments are unreachable in practice
 /// and surface here as a separate violation (the kind text would
@@ -318,9 +319,9 @@ impl<'ast> Visit<'ast> for CacheKindCollector<'_> {
     }
 
     fn visit_expr_method_call(&mut self, c: &'ast ExprMethodCall) {
-        if self.cfg_test_depth == 0 && c.method == "insert_arc_with_kind" {
+        if self.cfg_test_depth == 0 && c.method == "insert_value_with_kind" {
             // The substrate signature is
-            //   insert_arc_with_kind(key, value, facts, cache_kind: &'static str)
+            //   insert_value_with_kind(key, value, facts, cache_kind: &'static str)
             // so the cache-kind is the 4th positional argument
             // (index 3). The forwarding wrapper on
             // `StableRequestState` has the same shape, so we count
@@ -340,7 +341,7 @@ impl<'ast> Visit<'ast> for CacheKindCollector<'_> {
                     }
                     Expr::Path(_) => {
                         // Internal forwarding: the substrate's own
-                        // `insert_arc_with_kind` body forwards
+                        // `insert_value_with_kind` body forwards
                         // through the parameter `cache_kind`; that
                         // is not a producer, skip silently.
                     }
@@ -384,7 +385,7 @@ const VALIDATED_FACT_CACHE_FIELDS: &[&str] = &[
 /// Match `self.<known_field>` or `<binding>.<known_field>` receivers.
 /// We do not chase deep field chains — the production call sites we
 /// guard against are uniformly `self.<field>.insert(...)` /
-/// `self.<field>.insert_arc(...)` (or, inside `StableRequestState`,
+/// `self.<field>.insert_value(...)` (or, inside `StableRequestState`,
 /// `self.cache.insert*` and the analogous `FallthroughResolverState`
 /// pattern).
 fn receiver_is_known_validated_fact_cache_field(expr: &syn::Expr) -> bool {
@@ -478,14 +479,14 @@ fn scan_file_for_cache_kinds(
     let src =
         std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
     // Necessary-condition pre-filter. `CacheKindCollector` only acts on
-    // `ExprMethodCall`s whose method is `insert_arc_with_kind`; every observed
+    // `ExprMethodCall`s whose method is `insert_value_with_kind`; every observed
     // cache-kind literal (and every non-literal-kind violation) originates from
-    // such a call. A file whose text does NOT contain the `insert_arc_with_kind`
+    // such a call. A file whose text does NOT contain the `insert_value_with_kind`
     // identifier cannot contain that method call, so it can contribute neither an
     // observed kind nor a non-literal violation — skipping its `syn::parse_file`
     // is coverage-safe and cannot hide a `missing`/`unexpected`/non-literal
     // result the unfiltered scan would have produced.
-    if !src.contains("insert_arc_with_kind") {
+    if !src.contains("insert_value_with_kind") {
         return;
     }
     let parsed =
@@ -548,7 +549,7 @@ fn format_violations(violations: &[Violation]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Fact-validated caches in `crates/{verter_session,verter_type_engine}/src/**/*.rs` admit
-/// through `insert_arc_with_kind` only, EXCEPT for the documented
+/// through `insert_value_with_kind` only, EXCEPT for the documented
 /// allow-list in `EXPECTED_LOOSE_ADMISSION_COUNTS`. The check is
 /// EXACT — the observed loose-admission call count per
 /// `(file_suffix, fn)` pair must equal the expected count. Any
@@ -584,7 +585,7 @@ fn fact_validated_caches_use_strict_admission_in_production_source() {
                 errors.push(format!(
                     "unexpected loose-admission call site at `{key_suffix}::{fn_name}` \
                      (count: {observed_count}). Either rewrite the call to \
-                     `<cache>.insert_arc_with_kind(...)` OR extend \
+                     `<cache>.insert_value_with_kind(...)` OR extend \
                      `EXPECTED_LOOSE_ADMISSION_COUNTS` with the new \
                      `(file_suffix, fn, count)` entry after recording the audit \
                      justification."
@@ -600,7 +601,7 @@ fn fact_validated_caches_use_strict_admission_in_production_source() {
             errors.push(format!(
                 "documented loose-admission call site `{}::{}` not observed in source \
                  (expected count: {}, observed: 0). Either the call site was migrated \
-                 to `insert_arc_with_kind` (drop the entry from \
+                 to `insert_value_with_kind` (drop the entry from \
                  `EXPECTED_LOOSE_ADMISSION_COUNTS`) or the function was renamed \
                  (update the list).",
                 key.0, key.1, expected_count
@@ -610,8 +611,8 @@ fn fact_validated_caches_use_strict_admission_in_production_source() {
 
     assert!(
         errors.is_empty(),
-        "fact-validated caches must admit through `insert_arc_with_kind` \
-         (not `insert` / `insert_arc`). The strict path enforces R20 \
+        "fact-validated caches must admit through `insert_value_with_kind` \
+         (not `insert` / `insert_value`). The strict path enforces R20 \
          empty-signature refusal.\n\n\
          Drift detected ({} issue(s)):\n  - {}\n\n\
          Observed loose-admission counts:\n{}\n\n\
@@ -635,7 +636,7 @@ fn format_observed(observed: &BTreeMap<(String, String), usize>) -> String {
 }
 
 /// Pin the production-source set of cache-kind literals passed to
-/// `insert_arc_with_kind(...)` to `PRODUCTION_CACHE_KINDS`. Both
+/// `insert_value_with_kind(...)` to `PRODUCTION_CACHE_KINDS`. Both
 /// directions are asserted: every expected kind must appear in
 /// source (a renamed/deleted producer fails this) AND every
 /// observed kind must be in the expected list (a new producer
@@ -730,26 +731,26 @@ fn scanner_discriminating_property_fixtures() {
         "scanner failed to flag `self.cache.insert(...)` in arbitrary fn"
     );
 
-    // Fixture B: `self.roots.insert_arc(...)` from an unrelated fn — REJECTED.
+    // Fixture B: `self.roots.insert_value(...)` from an unrelated fn — REJECTED.
     let fixture_b = r#"
         fn arbitrary_caller(this: &Foo) {
-            this.roots.insert_arc(k, v, facts);
+            this.roots.insert_value(k, v, facts);
         }
     "#;
     assert!(
         !scan_fixture_violations(fixture_b).is_empty(),
-        "scanner failed to flag `self.roots.insert_arc(...)`"
+        "scanner failed to flag `self.roots.insert_value(...)`"
     );
 
-    // Fixture C: `self.routes.insert_arc_with_kind(...)` — ACCEPTED.
+    // Fixture C: `self.routes.insert_value_with_kind(...)` — ACCEPTED.
     let fixture_c = r#"
         fn arbitrary_caller(this: &Foo) {
-            this.routes.insert_arc_with_kind(k, v, facts, "route_db.routes");
+            this.routes.insert_value_with_kind(k, v, facts, "route_db.routes");
         }
     "#;
     assert!(
         scan_fixture_violations(fixture_c).is_empty(),
-        "scanner incorrectly flagged `insert_arc_with_kind`: {:?}",
+        "scanner incorrectly flagged `insert_value_with_kind`: {:?}",
         scan_fixture_violations(fixture_c)
     );
 
@@ -850,7 +851,7 @@ fn expected_loose_admission_counts_parity_check_discriminates() {
             Violation {
                 file: PathBuf::from("/abs/some/file.rs"),
                 enclosing_fn: "fn_a".to_string(),
-                method: "insert_arc".to_string(),
+                method: "insert_value".to_string(),
             },
         ];
         let observed = group_violations_by_allow_list_key(&violations, expected);
@@ -885,7 +886,7 @@ fn expected_loose_admission_counts_parity_check_discriminates() {
     }
 
     // Case 4: a documented entry that surfaces with zero observed
-    // calls means a producer was migrated to `insert_arc_with_kind`
+    // calls means a producer was migrated to `insert_value_with_kind`
     // OR the function was renamed — both must fail the production
     // assertion. Group output for the documented key is missing,
     // and the deficit branch fires.

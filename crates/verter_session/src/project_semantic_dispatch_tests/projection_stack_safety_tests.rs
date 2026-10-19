@@ -74,12 +74,14 @@ fn build_host(source: String) -> Arc<VerterHost> {
             let dispatch = ProjectSemanticDispatch::new(setup_host.as_ref());
             let locator = AuthoredBodyLocator::DeclBody(TypeBodySlot {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::from("/deep.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/deep.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Deep"),
+                    symbol: verter_type_expr::OwnedStr::from("Deep"),
                     space: LocatorSymbolSpace::Type,
                 },
-                path: Arc::from(Vec::<TypeBodyPathStep>::new().into_boxed_slice()),
+                path: verter_type_expr::OwnedSlice::from(
+                    Vec::<TypeBodyPathStep>::new().into_boxed_slice(),
+                ),
             });
             assert!(
                 matches!(dispatch.lower_locator(locator), QueryResult::Value(_)),
@@ -103,9 +105,9 @@ fn run_deep_tuple_projection_child() {
             let dispatch = ProjectSemanticDispatch::new(worker_host.as_ref());
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                    Arc::from("/deep.ts"),
+                    verter_type_expr::OwnedStr::from("/deep.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Deep"),
+                    verter_type_expr::OwnedStr::from("Deep"),
                 ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 InstantiateContext::non_file(
@@ -115,8 +117,11 @@ fn run_deep_tuple_projection_child() {
                 ),
             )));
             (
-                read.value,
-                read.walker_diagnostics,
+                read.value().clone(),
+                read.walker_diagnostics()
+                    .iter()
+                    .map(verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 current_cold_compute_completeness(),
             )
         })
@@ -169,9 +174,9 @@ fn run_deep_conditional_projection_child() {
             let dispatch = ProjectSemanticDispatch::new(worker_host.as_ref());
             let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
                 verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-                    Arc::from("/deep.ts"),
+                    verter_type_expr::OwnedStr::from("/deep.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Deep"),
+                    verter_type_expr::OwnedStr::from("Deep"),
                 ),
                 Arc::from(Vec::new().into_boxed_slice()),
                 InstantiateContext::non_file(
@@ -181,8 +186,11 @@ fn run_deep_conditional_projection_child() {
                 ),
             )));
             (
-                read.value,
-                read.walker_diagnostics,
+                read.value().clone(),
+                read.walker_diagnostics()
+                    .iter()
+                    .map(verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 current_cold_compute_completeness(),
             )
         })
@@ -217,6 +225,8 @@ fn run_deep_conditional_projection_child() {
 fn run_deep_structural_validation_child() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let graph = host.project_type_store().semantic_graph();
+    // This thread owns the chain while the worker validates it.
+    let _scope = graph.enter_node_root_scope();
     let leaf = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mut root = leaf;
     // bounded-loop: fixed finite structural-validation fixture depth.
@@ -328,7 +338,7 @@ fn projection_inputs<'a>(
     env: &'a rustc_hash::FxHashMap<String, verter_type_engine::semantic_query::SemanticNodeId>,
     scope: &'a NodeScopeId,
     names: &'a rustc_hash::FxHashMap<
-        std::sync::Arc<str>,
+        verter_type_expr::OwnedStr,
         verter_session_query::type_solver::host::ResolvedRootIdentity,
     >,
     shadowing: &'a ScopeShadowing,
@@ -345,9 +355,91 @@ fn projection_inputs<'a>(
 }
 
 #[test]
+fn missing_projection_nodes_remain_unavailable_on_repeated_visits() {
+    use verter_type_engine::semantic_query::{SemanticNodeId, SurfaceMember, SurfaceView};
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let missing = SemanticNodeId(u64::MAX);
+    assert!(dispatch.graph().node_data(missing).is_none());
+    let number = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let uniform = dispatch.graph().intern_node(SemanticNodeData::Union(
+        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from([
+            number, missing,
+        ])),
+    ));
+    let member = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+            vec![SurfaceMember {
+                key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("missing"),
+                value: missing,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                spans: Default::default(),
+                declaration_origin: None,
+                declared_in_macro_type_arg:
+                    verter_type_engine::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: verter_type_engine::semantic_query::MergeRoleStamp::NEUTRAL,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+            }],
+            None,
+        )));
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    let env = rustc_hash::FxHashMap::default();
+    let names = rustc_hash::FxHashMap::default();
+    let scope = NodeScopeId::Global;
+    let shadowing = ScopeShadowing::empty();
+    let inputs = projection_inputs(&env, &scope, &names, &shadowing);
+    for root in [missing, uniform, member] {
+        let mut memo = ViewMemo::default();
+        for _ in 0..2 {
+            let outcome = dispatch.project_view_node_worklist(
+                root,
+                context,
+                &inputs,
+                &mut Vec::new(),
+                &mut memo,
+            );
+            assert!(
+                !outcome.has_positional_representation_for_tests(),
+                "a missing graph node has no usable source"
+            );
+            assert!(outcome
+                .completeness
+                .reasons()
+                .contains(PartialReasonSet::SEMANTIC_QUERY_FAULT));
+            assert!(
+                !memo.contains_key(&(missing, context)),
+                "missing nodes must not enter the exact memo"
+            );
+            assert!(
+                !memo.contains_key(&(root, context)),
+                "a missing child cannot certify its parent"
+            );
+        }
+    }
+    let exact = dispatch.project_view_node_worklist(
+        number,
+        context,
+        &inputs,
+        &mut Vec::new(),
+        &mut ViewMemo::default(),
+    );
+    assert_eq!(exact.completeness, ResultCompleteness::Complete);
+    assert_eq!(exact.node, number);
+}
+
+#[test]
 fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let array = graph.intern_node(SemanticNodeData::Array {
@@ -370,7 +462,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     };
     let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
-            effects: Arc::from([
+            effects: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                     verter_type_engine::semantic_query::AuthoredPropertyEffect {
                         key: verter_type_engine::semantic_query::AuthoredPropertyKey::string("a"),
@@ -416,6 +508,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
 fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing_root() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     // A leaf that is not an inert structure, so the projection walks every
     // array level above it (an array of primitives is its own projection
@@ -479,21 +572,22 @@ fn projection_work_limit_allows_last_step_and_refuses_the_next_without_memoizing
 fn active_identity_cycle_keeps_recursive_sentinel_at_exhausted_work_boundary() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     dispatch.set_connected_limits_for_tests(0, 24);
     let graph = host.project_type_store().semantic_graph();
     let recursive = graph.intern_node(SemanticNodeData::DeclRef {
         identity: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/recursive.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/recursive.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Recursive"),
+            decl_name: verter_type_expr::OwnedStr::from("Recursive"),
         },
     });
     assert!(dispatch.push_instantiate_active(
         (
-            Arc::from("/recursive.ts"),
+            verter_type_expr::OwnedStr::from("/recursive.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Recursive"),
+            verter_type_expr::OwnedStr::from("Recursive"),
         ),
         Arc::from([]),
     ));
@@ -539,9 +633,9 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
     let graph = host.project_type_store().semantic_graph();
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/deep.ts"),
+            verter_type_expr::OwnedStr::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Deep"),
+            verter_type_expr::OwnedStr::from("Deep"),
         ),
         Arc::from([]),
         InstantiateContext::non_file(
@@ -557,13 +651,13 @@ fn exact_memo_identity_cycle_precedes_both_operational_limits() {
     let after = graph.stats_snapshot();
 
     assert!(
-        matches!(read.value, QueryResult::Recursive(_)),
+        matches!(read.value().clone(), QueryResult::Recursive(_)),
         "the exact in-flight memo identity must retain the established recursion sentinel"
     );
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "an exact identity cycle must not be mislabeled as either operational limit: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     assert_eq!(
         after.same_path_sentinel_returns,
@@ -601,6 +695,10 @@ fn connected_query_depth_limit_allows_boundary_and_trips_at_plus_one() {
 #[test]
 fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusal() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _update = host
         .upsert(UpsertRequest {
             canonical_id: Some("/runaway.ts".to_string()),
@@ -627,18 +725,18 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
     // key cycle can turn it into the legitimate recursive sentinel case.
     let runaway_carrier = graph.intern_node(SemanticNodeData::InstantiationRef {
         base: verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/runaway.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/runaway.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             whole_hash: Default::default(),
-            decl_name: Arc::from("Runaway"),
+            decl_name: verter_type_expr::OwnedStr::from("Runaway"),
         },
-        args: Arc::from([string]),
+        args: verter_type_engine::semantic_query::PayloadArray::from([string]),
     });
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/w/lib.ts"),
+            verter_type_expr::OwnedStr::from("/w/lib.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("ReturnType"),
+            verter_type_expr::OwnedStr::from("ReturnType"),
         ),
         Arc::from([runaway_carrier]),
         InstantiateContext::non_file(
@@ -665,18 +763,28 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
         !first_reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT),
         "fresh-identity growth must stop on the work rail, not query depth"
     );
-    assert!(first.result_is_partial);
-    assert!(first.cache_suppress);
-    let QueryResult::Value(_carrier) = first.value else {
-        panic!("a work trip must preserve a safe typed carrier");
-    };
+    assert!(first.result_is_partial());
+    assert!(first.cache_suppress());
+    assert!(
+        matches!(
+            first.value().clone(),
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ),
+        "a stopped demand must supply no usable source: {first:?}"
+    );
+    assert!(matches!(
+        first.fact_status(),
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
     let [ShallowDiagnostic::ProjectionWorkLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics.as_ref()
+    }] = first.walker_diagnostics()
     else {
         panic!(
             "the runaway root must surface exactly one machine-typed work-limit diagnostic, got {:?}",
-            first.walker_diagnostics
+            first.walker_diagnostics()
         );
     };
 
@@ -688,7 +796,7 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             if reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics(),
         &[ShallowDiagnostic::ProjectionWorkLimit {
             root: *diagnostic_root,
         }]
@@ -710,14 +818,18 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
 #[test]
 fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     let host = build_host("export type Deep = keyof { x: string };\n".to_string());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let dispatch = ProjectSemanticDispatch::new(host.as_ref());
     dispatch.set_connected_limits_for_tests(128, 1);
     let graph = host.project_type_store().semantic_graph();
     let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/deep.ts"),
+            verter_type_expr::OwnedStr::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Deep"),
+            verter_type_expr::OwnedStr::from("Deep"),
         ),
         Arc::from([]),
         InstantiateContext::non_file(
@@ -740,16 +852,26 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
     };
     assert!(reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT));
     assert!(!reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
-    let QueryResult::Value(_carrier) = first.value else {
-        panic!("query-depth exhaustion must preserve a safe carrier");
-    };
+    assert!(
+        matches!(
+            first.value().clone(),
+            QueryResult::Error(
+                verter_type_engine::semantic_query::QueryError::IncompleteSemanticOperand { .. }
+            )
+        ),
+        "a stopped demand must supply no usable source: {first:?}"
+    );
+    assert!(matches!(
+        first.fact_status(),
+        verter_type_engine::semantic_query::FactStatus::Unavailable(_)
+    ));
     let [ShallowDiagnostic::ConnectedQueryDepthLimit {
         root: diagnostic_root,
-    }] = first.walker_diagnostics.as_ref()
+    }] = first.walker_diagnostics()
     else {
         panic!(
             "the root demand must surface exactly one query-depth diagnostic, got {:?}",
-            first.walker_diagnostics
+            first.walker_diagnostics()
         );
     };
 
@@ -762,7 +884,7 @@ fn connected_query_depth_limit_is_distinct_diagnostic_and_seals_its_refusal() {
                 && !reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
     ));
     assert_eq!(
-        second.walker_diagnostics.as_ref(),
+        second.walker_diagnostics(),
         &[ShallowDiagnostic::ConnectedQueryDepthLimit {
             root: *diagnostic_root,
         }]
@@ -788,9 +910,9 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
     let _scope = ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/deep.ts"),
+            verter_type_expr::OwnedStr::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Deep"),
+            verter_type_expr::OwnedStr::from("Deep"),
         ),
         Arc::from([]),
         InstantiateContext::non_file(
@@ -805,13 +927,13 @@ fn legitimate_recursive_type_uses_recursive_carrier_without_limit_diagnostic() {
         ResultCompleteness::Complete,
         "a semantic recursion back-edge is a complete recursive carrier, not operational partiality"
     );
-    let QueryResult::Value(value) = read.value else {
+    let QueryResult::Value(value) = read.value().clone() else {
         panic!("a legitimate recursive type must resolve to a value carrier");
     };
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "legitimate recursive types must not be diagnosed as an operational limit: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     let raised = dispatch
         .materialize_output_type_expr_for_test(value)
@@ -850,9 +972,9 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
     let _scope = ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::Instantiate(InstantiateKey::new(
         verter_type_engine::semantic_query::ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/deep.ts"),
+            verter_type_expr::OwnedStr::from("/deep.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Deep"),
+            verter_type_expr::OwnedStr::from("Deep"),
         ),
         Arc::from([]),
         InstantiateContext::non_file(
@@ -867,13 +989,13 @@ fn stable_unresolved_reference_is_complete_carrier_without_limit_diagnostic() {
         ResultCompleteness::Complete,
         "an unresolved authored reference is a stable Complete carrier"
     );
-    let QueryResult::Value(value) = read.value else {
+    let QueryResult::Value(value) = read.value().clone() else {
         panic!("a stable unresolved reference must return its value carrier");
     };
     assert!(
-        read.walker_diagnostics.is_empty(),
+        read.walker_diagnostics().is_empty(),
         "stable unresolved references must not receive budget diagnostics: {:?}",
-        read.walker_diagnostics
+        read.walker_diagnostics()
     );
     assert!(
         matches!(

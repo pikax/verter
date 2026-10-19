@@ -15,9 +15,9 @@ fn published_anchor_for_identity(
     use verter_type_expr::locators::{AuthoredAnchor, LocatorSymbolSpace};
 
     (!identity.canonical_id.is_empty()).then(|| AuthoredAnchor {
-        canonical_id: std::sync::Arc::clone(&identity.canonical_id),
+        canonical_id: identity.canonical_id.clone(),
         owner: identity.owner,
-        symbol: std::sync::Arc::clone(&identity.decl_name),
+        symbol: identity.decl_name.clone(),
         space: LocatorSymbolSpace::Type,
     })
 }
@@ -112,19 +112,16 @@ pub(super) fn published_member_source_upgrade_for_node<
             verter_type_expr::facts::ClosedTypeFact::LeafUnion(leaves),
         ));
     }
-    let identity =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-            .as_deref()
-        {
-            Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity }) => {
-                Some(identity.clone())
-            }
-            Some(verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
-                base,
-                ..
-            }) if include_lossy_instantiation => Some(base.clone()),
-            _ => None,
-        };
+    let identity = match dispatch.graph().read_in_scope(node).as_deref() {
+        Some(verter_type_engine::semantic_query::SemanticNodeData::DeclRef { identity }) => {
+            Some(identity.clone())
+        }
+        Some(verter_type_engine::semantic_query::SemanticNodeData::InstantiationRef {
+            base,
+            ..
+        }) if include_lossy_instantiation => Some(base.clone()),
+        _ => None,
+    };
     match identity {
         // Content-free: canonical + symbol only — the whole-hash is a version,
         // never part of a published source.
@@ -182,10 +179,17 @@ pub(crate) fn structural_member_value_source<
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
     member_key: &verter_type_engine::semantic_query::PropertyKey,
-    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+    member_source_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
-    let data =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+    // A replay address does not establish a value when reducing its source
+    // failed. Validate the original carrier through the shared demand before
+    // using it to construct a projected member source.
+    let normalized = dispatch.owning().normalize_node_for_structural_fact_demand(
+        node,
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(),
+    );
+    let resolved = normalized.value().into_usable_node()?;
+    let data = dispatch.graph().read_in_scope(resolved)?;
     if matches!(
         data.as_ref(),
         verter_type_engine::semantic_query::SemanticNodeData::Opaque(error)
@@ -202,11 +206,11 @@ pub(crate) fn structural_member_value_source<
     if let Some(upgraded) = published_member_source_upgrade_for_node(dispatch, Some(node), false) {
         return Some(upgraded);
     }
-    let base = type_arg_base?;
+    let base = member_source_base?;
     Some(verter_type_expr::facts::SemanticTypeSource::Projected(
         verter_type_expr::facts::ProjectedTypeFact::MemberPath {
-            base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
-            path: std::sync::Arc::from(vec![member_key.clone()].into_boxed_slice()),
+            base: base.clone(),
+            path: From::from(vec![member_key.clone()].into_boxed_slice()),
         },
     ))
 }
@@ -214,17 +218,17 @@ pub(crate) fn structural_member_value_source<
 #[cfg(test)]
 mod owner_identity_tests {
     use super::*;
-    use std::sync::Arc;
+
     use verter_type_expr::locators::LocatorSymbolSpace;
     use verter_type_expr::TopLevelOwnerId;
 
     #[test]
     fn published_anchor_preserves_decl_identity_owner() {
         let identity = verter_type_engine::semantic_query::DeclIdentity {
-            canonical_id: Arc::from("/w/Component.vue"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
             owner: TopLevelOwnerId::instance(0),
             whole_hash: [3u8; 16],
-            decl_name: Arc::from("Shared"),
+            decl_name: verter_type_expr::OwnedStr::from("Shared"),
         };
 
         let anchor = published_anchor_for_identity(&identity)

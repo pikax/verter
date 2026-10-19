@@ -9,8 +9,7 @@
 //! ([`FlowExpr::span`]) and is evaluated on demand from the retained
 //! parse snapshot at slice-evaluation time — never stored lowered here.
 
-use std::sync::Arc;
-
+use crate::retention::owned::{Owned, OwnedSlice, OwnedStr};
 use verter_no_typeexpr::NoTypeExpr;
 
 use crate::flow::{
@@ -33,7 +32,9 @@ pub use super::peeker::ReturnSlicePlan;
 /// One lowered slot of the slice — the solver-internal slot identity.
 /// An IR type only: it is never a public `TypeExpr` / `GraphTypeNode`
 /// variant, and never appears on a published type surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowSlotId(u32);
 
 impl FlowSlotId {
@@ -49,7 +50,9 @@ impl FlowSlotId {
 }
 
 /// One lowered expression record of the slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct FlowExprId(u32);
 
 impl FlowExprId {
@@ -69,23 +72,23 @@ impl FlowExprId {
 // ---------------------------------------------------------------------------
 
 /// One segment of a lowered projection path.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowPathSegment {
     /// A statically-known property key (interned text).
-    Named(Arc<str>),
+    Named(OwnedStr),
     /// A computed / unknown key.
     Computed,
 }
 
 /// A lowered projection path.
-pub type FlowPath = Arc<[FlowPathSegment]>;
+pub type FlowPath = OwnedSlice<FlowPathSegment>;
 
 // ---------------------------------------------------------------------------
 // Slots
 // ---------------------------------------------------------------------------
 
 /// One definition contributing to a slot, in source order.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowDef {
     /// The providing expression.
     pub value: FlowExprId,
@@ -98,10 +101,10 @@ pub struct FlowDef {
 /// One lowered slot: a selected binding with the selected subset of its
 /// definitions. An effect-only slot (mutated but never read by the
 /// demanded path) carries no selected definitions.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowSlot {
     /// The binding name.
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The binding kind.
     pub kind: SkeletonBindingKind,
     /// The skeleton binding this slot lowers.
@@ -116,7 +119,7 @@ pub struct FlowSlot {
     /// effect-only: mutated, never value-read by the selected path).
     pub value_selected: bool,
     /// Selected definitions in source order.
-    pub defs: Arc<[FlowDef]>,
+    pub defs: OwnedSlice<FlowDef>,
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +127,9 @@ pub struct FlowSlot {
 // ---------------------------------------------------------------------------
 
 /// Why an expression record is in the slice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub enum FlowExprRole {
     /// The expression's value contributes to the demanded projection.
     Value,
@@ -135,10 +140,10 @@ pub enum FlowExprRole {
 
 /// One identifier read of an opaque expression, resolved against the
 /// slice's slot table.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowRead {
     /// The read name.
-    pub name: Arc<str>,
+    pub name: OwnedStr,
     /// The slot the name resolves to, when exactly one selected binding
     /// carries the name (`None` = free / unselected / ambiguous — the
     /// solver resolves lexically at evaluation time).
@@ -146,10 +151,10 @@ pub struct FlowRead {
 }
 
 /// One object-literal key.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowObjectKey {
     /// A statically-known key.
-    Named(Arc<str>),
+    Named(OwnedStr),
     /// A computed key; its key expression rides as its own selected
     /// record when the plan selected it (its evaluation effects survive
     /// independently of the named value).
@@ -158,7 +163,7 @@ pub enum FlowObjectKey {
 
 /// One SELECTED object-literal entry. Unselected sibling entries are
 /// elided — counted, never lowered ([`FlowExprShape::ObjectLiteral`]).
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowObjectEntry {
     /// A property provisioning one key.
     Property {
@@ -175,7 +180,7 @@ pub enum FlowObjectEntry {
 }
 
 /// The lowered shape of one selected expression.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowExprShape {
     /// An object literal carrying ONLY the selected entries, in authored
     /// order. `elided_entries` counts the authored siblings the plan
@@ -183,7 +188,7 @@ pub enum FlowExprShape {
     /// full literal.
     ObjectLiteral {
         /// The selected entries in authored order.
-        entries: Arc<[FlowObjectEntry]>,
+        entries: OwnedSlice<FlowObjectEntry>,
         /// Authored entries the plan did not select.
         elided_entries: u32,
     },
@@ -192,12 +197,12 @@ pub enum FlowExprShape {
     /// slice-evaluation time.
     Opaque {
         /// Identifier reads attributed to this expression.
-        reads: Arc<[FlowRead]>,
+        reads: OwnedSlice<FlowRead>,
     },
 }
 
 /// One lowered expression record.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowExpr {
     /// The skeleton site this record lowers.
     pub site: SkeletonExprSiteId,
@@ -215,24 +220,24 @@ pub struct FlowExpr {
 // ---------------------------------------------------------------------------
 
 /// The target of one lowered write effect.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowEffectTarget {
     /// A selected slot.
     Slot(FlowSlotId),
     /// A named root outside the slot table (free name, unselected or
     /// shadow-ambiguous binding).
-    Named(Arc<str>),
+    Named(OwnedStr),
     /// An unresolvable target root.
     Opaque,
 }
 
 /// The callee shape of one lowered call effect.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowCallee {
     /// A bare identifier callee.
-    Named(Arc<str>),
+    Named(OwnedStr),
     /// A static member path rooted at an identifier, root first.
-    Path(Arc<[Arc<str>]>),
+    Path(OwnedSlice<OwnedStr>),
     /// Any other callee shape.
     Opaque,
 }
@@ -240,7 +245,7 @@ pub enum FlowCallee {
 /// One evaluation-effect obligation of the slice, in source order. The
 /// solver applies these (retypes, widenings, call barriers) before
 /// evaluating the value providers that read the affected slots.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub enum FlowEffect {
     /// A write into a binding performed by a selected expression.
     Write {
@@ -275,7 +280,7 @@ pub enum FlowEffect {
 // ---------------------------------------------------------------------------
 
 /// One lowered return contributor.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowReturnEntry {
     /// Source-order ordinal among the function's return sites.
     pub ordinal: u32,
@@ -289,10 +294,10 @@ pub struct FlowReturnEntry {
 }
 
 /// The ordered return contributors of the slice.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct ReturnAccumulator {
     /// The lowered return sites, in source order.
-    pub sites: Arc<[FlowReturnEntry]>,
+    pub sites: OwnedSlice<FlowReturnEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -302,22 +307,41 @@ pub struct ReturnAccumulator {
 /// The lowered form of exactly one [`ReturnSlicePlan`]: the selected
 /// slots, expressions, effect obligations, and return contributors —
 /// nothing outside the plan's reachable subgraph is lowered.
-#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr)]
+#[derive(Debug, Clone, PartialEq, Eq, NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowSliceIR {
     /// The demanded projection path this slice serves.
     pub demanded_path: FlowPath,
     /// The lowered slots, dense-indexed by [`FlowSlotId`].
-    pub slots: Arc<[FlowSlot]>,
+    pub slots: OwnedSlice<FlowSlot>,
     /// The lowered expressions, dense-indexed by [`FlowExprId`].
-    pub exprs: Arc<[FlowExpr]>,
+    pub exprs: OwnedSlice<FlowExpr>,
     /// The evaluation-effect obligations, in source order.
-    pub effects: Arc<[FlowEffect]>,
+    pub effects: OwnedSlice<FlowEffect>,
     /// The return contributors.
     pub returns: ReturnAccumulator,
     /// Expression-site demand origins, when the demand originated at
     /// expression sites rather than return sites.
-    pub expression_origins: Arc<[FlowExprId]>,
+    pub expression_origins: OwnedSlice<FlowExprId>,
 }
+
+/// A lowered slice a cache hands its readers: a self-charged cell whose
+/// value reaches no raw `Arc` — every list and name the slice keeps is an
+/// owned handle charged by its own cell, so a list a reader clones out of
+/// a borrowed slice keeps its own charge past the cell and the cache.
+pub type SharedFlowSliceIR = Owned<FlowSliceIR>;
+
+verter_retention::measured_by_heap_size!(
+    FlowExprId,
+    FlowPathSegment,
+    FlowDef,
+    FlowSlot,
+    FlowRead,
+    FlowObjectEntry,
+    FlowExpr,
+    FlowEffect,
+    FlowReturnEntry,
+    FlowSliceIR,
+);
 
 impl FlowSliceIR {
     /// The slot record for `id`.

@@ -113,6 +113,34 @@ where
     (value, finalise_compute_scope(source, read_set))
 }
 
+/// [`install_fact_tracer`] for a compute whose owner delivers the
+/// finalised read set — as a carrier holding at least those facts — to the
+/// tracers active when it completes. Observations made inside it then stop
+/// at its own scope instead of also fanning out to every enclosing one,
+/// which receive them once, deduplicated, through that delivery.
+pub(crate) fn install_delivering_fact_tracer<
+    F,
+    R,
+    W: verter_session_query::facts::clocks::WorkspaceClocks + Clone,
+>(
+    source: &FactTracerBasisSource<'_, W>,
+    f: F,
+) -> (R, FactReadSetFinalise)
+where
+    F: FnOnce() -> R,
+{
+    let (value, read_set) =
+        crate::resolver_core::resolver_context::with_delivering_fact_tracer_cell(
+            source.live_basis(),
+            |_cell| {
+                #[cfg(any(test, feature = "test-support"))]
+                force_tracer_refusal(source, None);
+                f()
+            },
+        );
+    (value, finalise_compute_scope(source, read_set))
+}
+
 /// Finalise the read set of one compute's tracer scope: re-check its basis,
 /// then finalise it.
 fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(
@@ -126,7 +154,10 @@ fn finalise_compute_scope<W: verter_session_query::facts::clocks::WorkspaceClock
 /// The fact tracer of one compute that runs in steps (a continuation
 /// frame's build): installed on the thread only while one of its steps
 /// runs, and finalised once, as [`install_fact_tracer`] finalises its
-/// scope, when the compute completes.
+/// scope, when the compute completes. Its observations stop at its own
+/// scope: the owner replays the finalised set (or a carrier holding it)
+/// into the scope that consumes the compute, as
+/// [`install_delivering_fact_tracer`] does.
 pub(crate) struct StepwiseFactTracer<'h, W> {
     source: FactTracerBasisSource<'h, W>,
     tracer: crate::resolver_core::resolver_context::OwnedFactTracer,
@@ -638,6 +669,18 @@ pub struct CacheabilityProbe<'t, W> {
 }
 
 impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> CacheabilityProbe<'_, W> {
+    /// Recheck the live basis and preserve why this scope cannot publish.
+    pub fn non_admission_reason(&self) -> Option<verter_audit::NonAdmissionReason> {
+        note_basis_recheck_on_cell(self.source, self.cell);
+        if self.cell.mutation_unstable() {
+            Some(verter_audit::NonAdmissionReason::MutationUnstable)
+        } else if self.cell.non_cacheable_read_observed() {
+            Some(verter_audit::NonAdmissionReason::UnresolvedProvenance)
+        } else {
+            None
+        }
+    }
+
     /// `true` when the enclosing scope's compute MUST NOT warm any shared
     /// cache. TWO INDEPENDENT non-admission conditions fold into it:
     ///
@@ -669,8 +712,7 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone> Cacheabili
     /// carries the refusal, not its taxonomy.
     #[inline]
     pub fn non_cacheable(&self) -> bool {
-        note_basis_recheck_on_cell(self.source, self.cell);
-        self.cell.mutation_unstable() || self.cell.non_cacheable_read_observed()
+        self.non_admission_reason().is_some()
     }
 }
 
@@ -819,7 +861,7 @@ pub fn observe_file_source_env_from_artifact_key<C: crate::resolver_core::Resolv
 ///   this arm is the defensive floor.
 pub fn dep_signature_to_fact_signature(sig: &DepSignature) -> Vec<FactVersionRef> {
     sig.iter()
-        .filter_map(|(canon, ver)| match ver {
+        .filter_map(|crate::semantic_query::DepEntry(canon, ver)| match ver {
             DepVersion::WholeHash(h) => Some(FactVersionRef::FileWholeHash {
                 canonical_id: canon.as_ref().to_string(),
                 hash: *h,
@@ -1276,11 +1318,11 @@ pub fn empty_fact_signature() -> Arc<[FactVersionRef]> {
 ///   the value is not safely cacheable; the caller must not admit it.
 #[must_use]
 pub fn fact_signature_from_fence(
-    fence: &[(Arc<str>, crate::semantic_query::DepVersion)],
+    fence: &[crate::semantic_query::DepEntry],
 ) -> Option<Arc<[FactVersionRef]>> {
     use crate::semantic_query::DepVersion;
     let mut out: Vec<FactVersionRef> = Vec::with_capacity(fence.len());
-    for (canonical, version) in fence.iter() {
+    for crate::semantic_query::DepEntry(canonical, version) in fence.iter() {
         match version {
             DepVersion::WholeHash(hash) => {
                 out.push(FactVersionRef::FileWholeHash {
@@ -1313,6 +1355,22 @@ pub fn fact_signature_from_fence(
 /// torn roots and unresolved strict-world provenance.
 pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static ROOT_FACT_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn note_root_fact_visit() {
+    #[cfg(any(test, feature = "test-support"))]
+    ROOT_FACT_VISITS.with(|count| count.set(count.get() + 1));
+}
+
+/// Fact entries visited and lookups made while compacting structural self-roots.
+#[cfg(any(test, feature = "test-support"))]
+pub fn root_fact_visits_for_tests() -> usize {
+    ROOT_FACT_VISITS.with(std::cell::Cell::get)
+}
+
 /// Finalize a structural cache carrier after every self-root, fence, prelude,
 /// and traced fact has been merged.
 ///
@@ -1325,27 +1383,150 @@ pub type StructuralCarrierReadSet = (Arc<[FactVersionRef]>, Arc<[Arc<str>]>);
 /// root's content, where a witness is bound to the one view that minted it.
 /// Every carrier, however wide, is then sealed whole (paged when wide) —
 /// width is never a refusal.
+/// The completed carrier of a sealed traced set that already holds every
+/// fact the completion would add — each fact of `fence`, and a
+/// `FileWholeHash` at its observed version for each observed self-root —
+/// shared rather than rebuilt: completing it would seal the same facts in
+/// the same order. `None` when the completion adds or rewrites anything (a
+/// missing fact, a self-root observed at two versions or traced at another,
+/// an evidence page, a set wide enough for the strict-root rewrite, or a
+/// set out of canonical order); the caller completes it in full.
+pub(crate) fn shared_completed_structural_carrier(
+    observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    traced: &Arc<[FactVersionRef]>,
+    fence: &[FactVersionRef],
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH || traced.iter().any(is_paged_entry) {
+        return None;
+    }
+    let mut index = 1;
+    while index < traced.len() {
+        if traced[index - 1] >= traced[index] {
+            return None;
+        }
+        index += 1;
+    }
+    for fact in fence {
+        if traced.binary_search(fact).is_err() {
+            return None;
+        }
+    }
+    let mut canonicals: Vec<Arc<str>> = Vec::with_capacity(observed_self_roots.len());
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        let mut named = false;
+        for fact in traced.iter() {
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if canonical_id.as_str() == canonical.as_ref() {
+                    if hash != observed {
+                        return None;
+                    }
+                    named = true;
+                }
+            }
+        }
+        if !named {
+            return None;
+        }
+        canonicals.push(Arc::from(canonical.as_str()));
+    }
+    canonicals.sort();
+    canonicals.dedup();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
+/// [`shared_completed_structural_carrier`] for a completion whose
+/// self-roots are `observed_self_roots` together with every file the traced
+/// set reads whole: each of those files is named by its own fact, so the set
+/// is its own carrier when it reads each file at one version and names every
+/// observed self-root at its observed version. The self-root canonicals are
+/// the whole-read files, in canonical order.
+pub(crate) fn shared_completed_carrier_rooting_traced_files(
+    observed_self_roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    traced: &Arc<[FactVersionRef]>,
+) -> Option<StructuralCarrierReadSet> {
+    if traced.len() > FACT_PAGE_WIDTH {
+        return None;
+    }
+    // Canonical order puts one file's whole-file facts side by side, so a
+    // file read at two versions shows as two adjacent facts of one file.
+    let mut files: Vec<(&str, &Hash16)> = Vec::new();
+    let mut index = 0;
+    while index < traced.len() {
+        let fact = &traced[index];
+        if (index > 0 && traced[index - 1] >= *fact) || is_paged_entry(fact) {
+            return None;
+        }
+        if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+            if files
+                .last()
+                .is_some_and(|(last, _)| *last == canonical_id.as_str())
+            {
+                return None;
+            }
+            files.push((canonical_id.as_str(), hash));
+        }
+        index += 1;
+    }
+    for (position, (canonical, observed)) in observed_self_roots.iter().enumerate() {
+        let mut other = 0;
+        while other < position {
+            let (earlier, earlier_hash) = &observed_self_roots[other];
+            if earlier == canonical && earlier_hash != observed {
+                return None;
+            }
+            other += 1;
+        }
+        match files.iter().find(|(file, _)| *file == canonical.as_ref()) {
+            Some((_, hash)) if *hash == observed => {}
+            _ => return None,
+        }
+    }
+    let canonicals: Vec<Arc<str>> = files.iter().map(|(file, _)| Arc::from(*file)).collect();
+    Some((Arc::clone(traced), Arc::from(canonicals)))
+}
+
 pub(crate) fn bound_completed_structural_carrier(
     view: &dyn StoreView,
     mut facts: Vec<FactVersionRef>,
     mut self_root_canonicals: Vec<Arc<str>>,
 ) -> Result<StructuralCarrierReadSet, NonAdmissionReason> {
-    facts.sort_unstable();
-    facts.dedup();
     self_root_canonicals.sort();
     self_root_canonicals.dedup();
 
+    // The seal below sorts and deduplicates; only a set that may need the
+    // wide strict-root rewrite is canonicalised first, so its width is
+    // measured on distinct facts.
+    if facts.len() > FACT_PAGE_WIDTH {
+        facts.sort_unstable();
+        facts.dedup();
+    }
     if facts.len() > FACT_PAGE_WIDTH && !self_root_canonicals.is_empty() {
+        // Index the requested roots once, including hashes held on evidence
+        // pages. Scanning from the beginning for each root is quadratic.
+        let mut root_hashes: rustc_hash::FxHashMap<&str, Option<Hash16>> = self_root_canonicals
+            .iter()
+            .map(|root| (root.as_ref(), None))
+            .collect();
+        for fact in signature_entries(&facts) {
+            note_root_fact_visit();
+            if let FactVersionRef::FileWholeHash { canonical_id, hash } = fact {
+                if let Some(observed) = root_hashes.get_mut(canonical_id.as_str()) {
+                    observed.get_or_insert(*hash);
+                }
+            }
+        }
         let mut roots: Vec<(Arc<str>, Hash16)> = Vec::with_capacity(self_root_canonicals.len());
         for canonical in &self_root_canonicals {
-            let Some(hash) = signature_entries(&facts).find_map(|fact| match fact {
-                FactVersionRef::FileWholeHash { canonical_id, hash }
-                    if canonical_id == canonical.as_ref() =>
-                {
-                    Some(*hash)
-                }
-                _ => None,
-            }) else {
+            note_root_fact_visit();
+            let Some(hash) = root_hashes[canonical.as_ref()] else {
                 return Err(NonAdmissionReason::UnresolvedProvenance);
             };
             roots.push((Arc::clone(canonical), hash));
@@ -1361,11 +1542,14 @@ pub(crate) fn bound_completed_structural_carrier(
         // The witness replaces every precise root fact, including one held
         // on an evidence page; the remaining entries are sealed (and paged)
         // again below.
-        let is_self_root = |fact: &FactVersionRef| match fact {
-            FactVersionRef::FileWholeHash { canonical_id, .. } => self_root_canonicals
-                .binary_search_by(|root| root.as_ref().cmp(canonical_id.as_str()))
-                .is_ok(),
-            _ => false,
+        let is_self_root = |fact: &FactVersionRef| {
+            note_root_fact_visit();
+            match fact {
+                FactVersionRef::FileWholeHash { canonical_id, .. } => {
+                    root_hashes.contains_key(canonical_id.as_str())
+                }
+                _ => false,
+            }
         };
         facts = if facts.iter().any(is_paged_entry) {
             signature_entries(&facts)
@@ -1458,8 +1642,12 @@ impl ReadSetSignatureExt for ReadSetSignature {
         ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
         self_root_canonicals: &[Arc<str>],
     ) -> bool {
-        let self_root_refs: Vec<&str> = self_root_canonicals.iter().map(Arc::as_ref).collect();
-        validate_fact_signature_with_self_roots(ctx, &self.facts, &self_root_refs)
+        if self.facts.is_empty() {
+            return true;
+        }
+        let self_root_refs: smallvec::SmallVec<[&str; 4]> =
+            self_root_canonicals.iter().map(Arc::as_ref).collect();
+        ctx.validates_retained_signature_with_self_roots(&self.facts, &self_root_refs)
     }
 
     /// Whether [`Self::validate_with_self_roots`] would actually
@@ -1579,16 +1767,16 @@ impl ReadSetSignatureExt for ReadSetSignature {
     /// tracer on the current TLS stack. No-op when the tracer stack
     /// is empty or `facts` is empty.
     #[inline]
-    fn bubble(&self, ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation) {
-        bubble_fact_signature(ctx, &self.facts);
+    fn bubble(&self, _ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation) {
+        self.bubble_via_tls();
     }
 
     /// Bubble via TLS only — for fast-path warm hits that don't
-    /// thread a `ResolverContext` reference. Equivalent to
-    /// `bubble_fact_signature_via_tls(&self.facts)`.
+    /// thread a `ResolverContext` reference. Retain the witness as a verified
+    /// canonical run instead of sorting its facts again in each consumer.
     #[inline]
     fn bubble_via_tls(&self) {
-        bubble_fact_signature_via_tls(&self.facts);
+        crate::fact_tracing::tracing::observe_fan_out_canonical(&self.facts);
     }
 }
 
@@ -1712,7 +1900,9 @@ pub fn engine_fact_signature_for_materialize_memo(
     });
     entries.push(FactVersionRef::Parse(observed_scope_syntactic_export_set));
 
-    for (observed_canonical, dep_version) in materialized_dep_signature.iter() {
+    for crate::semantic_query::DepEntry(observed_canonical, dep_version) in
+        materialized_dep_signature.iter()
+    {
         match dep_version {
             DepVersion::WholeHash(observed_hash) => {
                 if observed_canonical.as_ref() == scope_canonical_id {
@@ -1757,7 +1947,7 @@ pub fn engine_fact_signature_for_materialize_memo(
 }
 
 /// Merge the `dep_signature` entries from a `CacheRead` (or any
-/// `&[(Arc<str>, DepVersion)]` slice) into a per-frame `local_fence`.
+/// `&[crate::semantic_query::DepEntry]` slice) into a per-frame `local_fence`.
 ///
 /// The `dep_signature_merges` / `dep_signature_intern_hits` audit
 /// counters are NOT bumped here — they are owned by the shared dispatch
@@ -1765,8 +1955,8 @@ pub fn engine_fact_signature_for_materialize_memo(
 /// This helper is now a pure fence merge for its remaining
 /// non-dispatch-fan-in callers.
 pub fn merge_dep_signature_into_local_fence(
-    local_fence: &mut Vec<(Arc<str>, crate::semantic_query::DepVersion)>,
-    incoming: &[(Arc<str>, crate::semantic_query::DepVersion)],
+    local_fence: &mut Vec<crate::semantic_query::DepEntry>,
+    incoming: &[crate::semantic_query::DepEntry],
 ) {
     for entry in incoming {
         local_fence.push(entry.clone());

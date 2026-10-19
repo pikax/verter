@@ -57,7 +57,7 @@ fn upsert_ts(host: &VerterHost, canonical: &str, source: &str) {
 fn node_data(
     host: &VerterHost,
     node: verter_type_engine::semantic_query::SemanticNodeId,
-) -> Arc<SemanticNodeData> {
+) -> verter_type_engine::semantic_query_memo::NodeData {
     host.project_type_store()
         .semantic_graph()
         .node_data(node)
@@ -376,7 +376,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         let node = host
             .resolve_named_symbol("/types.ts", "Foo", Some(mode))
             .unwrap_or_else(|| panic!("Foo must resolve in {mode:?}"));
-        match node_data(&host, node).as_ref() {
+        match node_data(&host, node.id()).as_ref() {
             SemanticNodeData::MergedDecl { contributors } => {
                 assert_eq!(
                     contributors.len(),
@@ -398,7 +398,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         }
 
         let projected = host
-            .project_node_to_type_expr_for_test(node)
+            .project_node_to_type_expr_for_test(node.id())
             .unwrap_or_else(|| panic!("the merged `Foo` must project in {mode:?}"));
         let dispatch_surface = object_member_surface(&projected);
         assert_eq!(
@@ -425,7 +425,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
     let alias_node = host
         .resolve_named_symbol("/use.ts", "A", Some(ProjectionMode::Expanded))
         .expect("A must resolve Expanded through the imported augmented Foo");
-    match node_data(&host, alias_node).as_ref() {
+    match node_data(&host, alias_node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
             contributors.len(),
             2,
@@ -439,7 +439,7 @@ fn cross_file_module_augmentation_merge_surface_matches_oracle() {
         ),
     }
     let alias_projected = host
-        .project_node_to_type_expr_for_test(alias_node)
+        .project_node_to_type_expr_for_test(alias_node.id())
         .expect("the aliased merged surface must project");
     let alias_surface = object_member_surface(&alias_projected);
     assert_eq!(
@@ -515,7 +515,7 @@ fn warm_parent_rejects_contributor_source_env_move_with_unchanged_content() {
         || host.resolve_named_symbol("/types.ts", "Foo", Some(ProjectionMode::Expanded)),
     );
     let node = resolved.expect("augmented Foo must resolve");
-    match node_data(&host, node).as_ref() {
+    match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => {
             assert_eq!(contributors.len(), 2, "base + augmenter contributors");
         }
@@ -693,9 +693,9 @@ fn warm_parent_memo_rejects_contributor_source_env_move_end_to_end() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/types.ts"),
+                    verter_type_expr::OwnedStr::from("/types.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Foo"),
+                    verter_type_expr::OwnedStr::from("Foo"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -799,7 +799,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
     // Both augmenters genuinely CONTRIBUTED (so both were version-rooted by
     // the stitch): the merged carrier folds base + 2 augmenter bodies, and
     // the projected surface carries each contributor's member.
-    match node_data(&host, node).as_ref() {
+    match node_data(&host, node.id()).as_ref() {
         SemanticNodeData::MergedDecl { contributors } => assert_eq!(
             contributors.len(),
             3,
@@ -808,7 +808,7 @@ fn every_version_rooted_augmentation_contributor_records_source_env_identity() {
         other => panic!("the augmented Foo must be a MergedDecl carrier, got {other:?}"),
     }
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the merged Foo must project");
     let surface = object_member_surface(&projected);
     assert_eq!(
@@ -921,9 +921,9 @@ fn warm_parent_rejects_contributor_live_parse_env_move_with_unchanged_content() 
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::from("/types.ts"),
+                verter_type_expr::OwnedStr::from("/types.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("Foo"),
+                verter_type_expr::OwnedStr::from("Foo"),
             ),
             Arc::from(
                 Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
@@ -1063,9 +1063,9 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1102,13 +1102,13 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "a non-file ambient import must begin as exact typed unresolved-owner debt"
     );
     assert!(
-        !ambient_read.result_is_partial && !ambient_read.cache_suppress,
+        !ambient_read.result_is_partial() && !ambient_read.cache_suppress(),
         "the exact Cfg debt must discharge when the normal resolver reaches the live ambient \
          augmentation; got partial={}, suppress={}",
-        ambient_read.result_is_partial,
-        ambient_read.cache_suppress,
+        ambient_read.result_is_partial(),
+        ambient_read.cache_suppress(),
     );
-    let ambient_node = match ambient_read.value {
+    let ambient_node = match ambient_read.value().clone() {
         QueryResult::Value(value) => value,
         other => panic!("ambient U must resolve to a value, got {other:?}"),
     };
@@ -1140,11 +1140,11 @@ fn external_module_augmentation_discharges_exact_unresolved_owner_debt() {
         "the absent import must retain exact typed unresolved-owner debt"
     );
     assert!(
-        missing_read.result_is_partial && missing_read.cache_suppress,
+        missing_read.result_is_partial() && missing_read.cache_suppress(),
         "an undischargeable owner debt must remain Partial(MissingDependency) and ReturnOnly; \
          got partial={}, suppress={}",
-        missing_read.result_is_partial,
-        missing_read.cache_suppress,
+        missing_read.result_is_partial(),
+        missing_read.cache_suppress(),
     );
 }
 
@@ -1190,9 +1190,9 @@ fn external_module_augmentation_warm_parent_rejects_contributor_content_edit_end
         let dispatch = ProjectSemanticDispatch::new(&ctx);
         SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
             dispatch.type_slot_for(
-                Arc::from("/use.ts"),
+                verter_type_expr::OwnedStr::from("/use.ts"),
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                Arc::from("U"),
+                verter_type_expr::OwnedStr::from("U"),
             ),
             Arc::from(
                 Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new().into_boxed_slice(),
@@ -1352,9 +1352,9 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1365,7 +1365,7 @@ fn external_module_augmentation_torn_contributor_folds_cache_suppress() {
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // TORN: arm the injection, then COLD-build `/use.ts::U`. `Cfg` resolves to
@@ -1444,7 +1444,7 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
     use verter_type_engine::semantic_query::{ProjectionReductionContext, SemanticQueryKey};
 
     // Drive the `/types.ts::Foo` Instantiate under an OUTER fact tracer, returning
-    // (build.cache_suppress, build.result_is_partial, outer_tracer.non_cacheable).
+    // (build.cache_suppress, build.result_is_partial(), outer_tracer.non_cacheable).
     // `/types.ts::Foo` is a file-based interface (`!is_non_file_base`) with a REAL
     // sibling RELATIVE `declare module './types'` augmenter (`/aug.ts`) in the
     // fixture, so the relative stitch DISCOVERS the augmenter and the consumer at
@@ -1467,9 +1467,9 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
                 let key = SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
-                            Arc::from("/types.ts"),
+                            verter_type_expr::OwnedStr::from("/types.ts"),
                             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                            Arc::from("Foo"),
+                            verter_type_expr::OwnedStr::from("Foo"),
                         ),
                         Arc::from(
                             Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1489,8 +1489,8 @@ fn relative_augmentation_torn_stitch_fans_non_cacheability_to_outer_tracer() {
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
         (
-            read.cache_suppress,
-            read.result_is_partial,
+            read.cache_suppress(),
+            read.result_is_partial(),
             outer_non_cacheable,
         )
     }
@@ -1613,9 +1613,9 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
         let key =
             SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::from("/use.ts"),
+                    verter_type_expr::OwnedStr::from("/use.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("U"),
+                    verter_type_expr::OwnedStr::from("U"),
                 ),
                 Arc::from(
                     Vec::<verter_type_engine::semantic_query::SemanticNodeId>::new()
@@ -1626,7 +1626,7 @@ fn external_module_augmentation_broken_lease_contributor_folds_cache_suppress() 
                     ProjectionReductionContext::published(ProjectionMode::Expanded),
                 ),
             ));
-        dispatch.execute_read(key).cache_suppress
+        dispatch.execute_read(key).cache_suppress()
     };
 
     // BROKEN LEASE: cold-build `/use.ts::U`. The external augmentation stitch
@@ -1722,7 +1722,7 @@ fn no_augmenter_resolve_still_records_the_augmenter_set_shape_fact() {
     );
     let node = resolved.expect("the un-augmented Foo must resolve");
     let projected = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the un-augmented Foo must project");
     assert_eq!(
         object_member_surface(&projected),
@@ -1854,7 +1854,7 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
     assert_eq!(
         object_member_surface(
             &host
-                .project_node_to_type_expr_for_test(cold)
+                .project_node_to_type_expr_for_test(cold.id())
                 .expect("un-augmented Foo projects")
         ),
         vec![("base".to_string(), "Primitive(String)".to_string())],
@@ -1881,7 +1881,7 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
         .expect("the augmented Foo must resolve");
     let surface = object_member_surface(
         &host
-            .project_node_to_type_expr_for_test(warm)
+            .project_node_to_type_expr_for_test(warm.id())
             .expect("augmented Foo projects"),
     );
     assert_eq!(
@@ -1894,6 +1894,130 @@ fn augmenter_entering_the_program_after_a_warm_no_augmentation_result_invalidate
          invalidate it — serving {{base}} here is the stale surface a missing negative \
          augmenter-set observation on the empty-set arm produces; got {surface:?}"
     );
+}
+
+/// An augmenter of the same module that contributes only to another
+/// declaration leaves this declaration absent too: every instantiation shares
+/// that one read, and each warm result still carries the augmenter set, so
+/// the augmenter gaining this declaration misses all of them.
+///
+/// Discriminating: if the shared read dropped the augmenter-set fact, the
+/// second instantiation's warm result would survive the edit and keep its
+/// stale `"base"` element.
+#[test]
+fn an_augmenter_of_another_declaration_shares_the_absent_read_and_still_invalidates() {
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Box<T> { base: T }\n\
+         export interface Other { other: 1 }\n\
+         export type Keys = `${keyof Box<string>}|${keyof Box<number>}`;\n",
+    );
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Other } from './types'\n\
+         declare module './types' { interface Other { more: 2 } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+    assert_eq!(
+        live_augmenter_canonicals_for_types(&host),
+        vec!["/aug.ts".to_owned()],
+        "the module must have an augmenter that does not contribute to Box"
+    );
+    let keys = |host: &VerterHost| {
+        let node = host
+            .resolve_named_symbol("/types.ts", "Keys", Some(ProjectionMode::Expanded))
+            .expect("Keys must resolve");
+        format!(
+            "{:?}",
+            host.project_node_to_type_expr_for_test(node.id())
+                .expect("Keys projects")
+        )
+    };
+    let cold = keys(&host);
+    assert!(cold.contains("\"base|base\""), "{cold}");
+    assert!(!cold.contains("fromAug"), "{cold}");
+
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Box, Other } from './types'\n\
+         declare module './types' { interface Other { more: 2 } interface Box<T> { fromAug: T[] } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+    let warm = keys(&host);
+    for both in [
+        "\"fromAug|base\"",
+        "\"base|fromAug\"",
+        "\"fromAug|fromAug\"",
+    ] {
+        assert!(
+            warm.contains(both),
+            "both instantiations must see the contribution the augmenter gained: \
+             {both} is missing from {warm}"
+        );
+    }
+}
+
+/// One request instantiating a declaration several times reads its absent
+/// augmentation once and replays that read into every later instantiation.
+/// Each instantiation's own warm result must still carry the read: when an
+/// augmenter enters the program, every one of them misses.
+///
+/// Discriminating: if a replayed absence dropped the augmenter-set fact, the
+/// second instantiation's warm result would validate after the edit and the
+/// re-resolved tuple would keep its stale `"base"` element.
+#[test]
+fn every_instantiation_sharing_an_absent_augmentation_read_invalidates_when_an_augmenter_enters() {
+    let host = make_host();
+    upsert_ts(
+        host.as_ref(),
+        "/types.ts",
+        "export interface Box<T> { base: T }\n\
+         export type Keys = `${keyof Box<string>}|${keyof Box<number>}`;\n",
+    );
+    assert!(
+        live_augmenter_canonicals_for_types(&host).is_empty(),
+        "the absent-augmentation read must be the shared one"
+    );
+    let keys = |host: &VerterHost| {
+        let node = host
+            .resolve_named_symbol("/types.ts", "Keys", Some(ProjectionMode::Expanded))
+            .expect("Keys must resolve");
+        format!(
+            "{:?}",
+            host.project_node_to_type_expr_for_test(node.id())
+                .expect("Keys projects")
+        )
+    };
+    let cold = keys(&host);
+    assert!(cold.contains("\"base|base\""), "{cold}");
+    assert!(!cold.contains("fromAug"), "{cold}");
+
+    upsert_ts(
+        host.as_ref(),
+        "/aug.ts",
+        "import type { Box } from './types'\n\
+         declare module './types' { interface Box<T> { fromAug: T[] } }\n",
+    );
+    host.ensure_indexed_ready("/aug.ts")
+        .expect("the augmenter must index");
+    let warm = keys(&host);
+    for both in [
+        "\"fromAug|base\"",
+        "\"base|fromAug\"",
+        "\"fromAug|fromAug\"",
+    ] {
+        assert!(
+            warm.contains(both),
+            "both instantiations must see the augmenter that entered after them: \
+             {both} is missing from {warm}"
+        );
+    }
 }
 
 /// BEHAVIOURAL half of the NON-CONTRIBUTING arm: an augmenter set that is
@@ -1946,7 +2070,7 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
     assert_eq!(
         object_member_surface(
             &host
-                .project_node_to_type_expr_for_test(cold)
+                .project_node_to_type_expr_for_test(cold.id())
                 .expect("Bar projects")
         ),
         vec![("b".to_string(), "Primitive(String)".to_string())],
@@ -1971,7 +2095,7 @@ fn augmenter_gaining_a_declaration_invalidates_the_warm_non_contributing_result(
         .expect("the augmented Bar must resolve");
     let surface = object_member_surface(
         &host
-            .project_node_to_type_expr_for_test(warm)
+            .project_node_to_type_expr_for_test(warm.id())
             .expect("augmented Bar projects"),
     );
     assert_eq!(

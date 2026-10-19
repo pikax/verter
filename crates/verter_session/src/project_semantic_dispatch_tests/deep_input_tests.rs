@@ -102,12 +102,6 @@ const PLAN_BUDGET: u32 = 256;
 /// 200 levels, 861,701 at 400).
 const WORK_BUDGET: usize = 100_000;
 
-/// The connected-demand work budget a mapped-type nest is read under: the
-/// nest's work grows by four units a level (813 at 200, 1,613 at 400,
-/// 4,013 at 1,000), so [`BUDGET_DEPTH`] levels charge past this, where a
-/// nest a quarter as deep answers.
-const MAPPED_WORK_BUDGET: usize = 1_000;
-
 /// The depth a form that lowers inside a type alias, or is walked at index
 /// time — on a worker's 8 MiB — is checked at.
 const WORKER_DEPTH: usize = 10_000;
@@ -266,9 +260,9 @@ fn connected_work_of(source: &str, function: &str, checker: &str) -> usize {
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -445,6 +439,87 @@ fn objects_nested_deep_answer_on_a_small_stack() {
 #[test]
 fn blocks_nested_deep_answer_on_a_small_stack() {
     answers_on(test_path!(), SMALL_STACK, blocks(DEPTH), RETURN, "number");
+}
+
+#[test]
+fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
+        FactStatus, InstantiateKey, PrimitiveKind, ProjectionMode, ProjectionReductionContext,
+        QueryResult, ScopeId, SemanticNodeData, SemanticQueryKey, ValueRootKey,
+    };
+    let host = default_probe_host();
+    let source = blocks(DEPTH);
+    let refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let public = flow_return_audited_on_host(&host, &source, "pf");
+    assert!(matches!(
+        public.as_result().unwrap().fact(),
+        verter_type_engine::semantic_query::FactResult::Approximate { .. }
+    ));
+    let view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let dispatch = super::ProjectSemanticDispatch::new(&ctx);
+    let _builder = dispatch.enter_construction_scope();
+    let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+    // Keep the callee as a source carrier: ReturnType itself must demand
+    // the signature and body, rather than receive an eagerly settled header.
+    let callee = dispatch.graph().intern_node(SemanticNodeData::new_typeof(
+        ValueRootKey {
+            scope: ScopeId::file(
+                Arc::from(PROBE_FILE),
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            ),
+            name: verter_type_expr::OwnedStr::from("pf"),
+        },
+        verter_type_expr::OwnedSlice::from([]),
+        Arc::from([]),
+    ));
+    let observations = &host.flow_fault_injection.refused_preparations;
+    *observations.lock().unwrap() = Some(Vec::new());
+    struct ObservationGuard<'a>(
+        &'a std::sync::Mutex<Option<Vec<verter_type_engine::semantic_query::FlowReturnKey>>>,
+    );
+    impl Drop for ObservationGuard<'_> {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        }
+    }
+    let _observations = ObservationGuard(observations);
+    let key = SemanticQueryKey::Instantiate(InstantiateKey::new(
+        dispatch.builtin_type_slot("ReturnType"),
+        Arc::from([callee]),
+        dispatch.instantiate_context_for("__builtin__", context),
+    ));
+    let read = dispatch.execute_read(key.clone());
+    assert!(
+        observations
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|key| key.function.declaration_slot.merged_symbol_name.as_ref() == "pf"),
+        "ReturnType actually demanded pf while its preparation refused proof"
+    );
+    assert_eq!(
+        read.fact_status().clone(),
+        FactStatus::Complete,
+        "an independently proven return source cannot inherit its refused flow proof: {read:?}"
+    );
+    let QueryResult::Value(node) = read.value().clone() else {
+        panic!("ReturnType has a value")
+    };
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+    ));
+    drop(refusal);
+    let control = dispatch.execute_read(key);
+    assert_eq!(control.fact_status().clone(), FactStatus::Complete);
+    assert!(matches!(control.value().clone(), QueryResult::Value(control) if control == node));
 }
 
 /// Conditionals, object literals and blocks nested past the plan budget
@@ -1114,24 +1189,39 @@ fn mapped_types(depth: usize) -> String {
     format!("type D = {};\n", wrap(depth, "{ [K in \"a\"]: ", " }"))
 }
 
-/// Mapped types nested deep lower as frames of the locator lowering's
-/// stack (their binder frames a shared chain) and are judged open by a
-/// walk whose levels carry only the arm they take. Past the
-/// connected-demand work budget ([`MAPPED_WORK_BUDGET`]: the nest's work
-/// grows by four units a level) the probe returns the budget's typed
-/// failure, the plan budget at its production default — read on
-/// [`MAPPED_STACK`], as reading `keyof D` over the nest needs.
+/// The connected work reading `keyof D` over a mapped-type nest charges: it
+/// reads only the nest's key domain, never an unrequested mapped value, so
+/// the charge does not grow with the nest's depth.
+const MAPPED_KEY_DOMAIN_WORK: usize = 16;
+
+/// Reading `keyof D` over a mapped-type nest answers under
+/// [`MAPPED_KEY_DOMAIN_WORK`] at a quarter of [`BUDGET_DEPTH`] as at the
+/// full depth, and one unit less returns the budget's typed failure, the
+/// plan budget at its production default — read on [`MAPPED_STACK`], as
+/// reading `keyof D` over the nest needs.
 #[test]
 fn mapped_types_nested_past_the_work_budget_return() {
     in_a_fresh_process(test_path!(), || {
-        assert_returns_past_a_work_budget(
-            format!(
+        for depth in [BUDGET_DEPTH / 4, BUDGET_DEPTH] {
+            let source = format!(
                 "{}export function pf() {{ const p: keyof D = null as any; return p; }}\n",
-                mapped_types(BUDGET_DEPTH)
-            ),
-            MAPPED_WORK_BUDGET,
-            MAPPED_STACK,
-        );
+                mapped_types(depth)
+            );
+            let answered = {
+                let source = source.clone();
+                on_a_stack(MAPPED_STACK, move || {
+                    let _work = super::connected_demand::WorkBudgetForTests::install(
+                        MAPPED_KEY_DOMAIN_WORK,
+                    );
+                    audited_return_on(&footprint_host(), &source).0
+                })
+            };
+            assert_eq!(
+                answered, RETURNS_ITS_VALUE,
+                "a {depth}-level nest answers within the key domain's work"
+            );
+            assert_returns_past_a_work_budget(source, MAPPED_KEY_DOMAIN_WORK - 1, MAPPED_STACK);
+        }
     });
 }
 

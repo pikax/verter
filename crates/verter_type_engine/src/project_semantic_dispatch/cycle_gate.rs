@@ -128,12 +128,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             crate::semantic_query::PartialReasonSet::empty()
         });
         CacheRead {
+            lease: read.lease,
             value,
             dep_signature: read.dep_signature,
             walker_diagnostics: read.walker_diagnostics,
             cache_suppress: read.cache_suppress || is_fallback || defensive,
-            result_is_partial: read.result_is_partial || defensive,
-            partial_reasons,
+            fact_status: if defensive {
+                crate::semantic_query::FactStatus::unavailable(partial_reasons)
+            } else {
+                read.fact_status
+            },
             receipt: read.receipt,
         }
     }
@@ -150,9 +154,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .host_view_env_hashes_for(identity.canonical_id.as_ref());
         SemanticQueryKey::ClassifyMaterializationCycleGate(MaterializationCycleGateKey {
             root: self.type_slot_for(
-                Arc::clone(&identity.canonical_id),
+                identity.canonical_id.clone(),
                 identity.owner,
-                Arc::clone(&identity.decl_name),
+                identity.decl_name.clone(),
             ),
             parse_env_hash: env.parse_env_hash,
             resolve_env_hash: env.resolve_env_hash,
@@ -186,7 +190,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         key: &MaterializationCycleGateKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
         use crate::semantic_query::{
-            DeclIdentity, DepVersion, ProjectionMode, ProjectionReductionContext, SemanticNodeId,
+            DeclIdentity, ProjectionMode, ProjectionReductionContext, SemanticNodeId,
         };
         use rustc_hash::FxHashSet;
         use std::collections::VecDeque;
@@ -219,13 +223,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|serve| serve.indexed.whole_hash)
             .unwrap_or_default();
         let root_identity = DeclIdentity {
-            canonical_id: Arc::clone(&root.defining_canonical),
+            canonical_id: root.defining_canonical.clone(),
             owner: root.owner,
             whole_hash: root_whole_hash,
-            decl_name: Arc::clone(&root.merged_symbol_name),
+            decl_name: root.merged_symbol_name.clone(),
         };
 
-        let mut dep_facts: Vec<(Arc<str>, DepVersion)> = self
+        let mut dep_facts: Vec<crate::semantic_query::DepEntry> = self
             .project_generation_signature()
             .iter()
             .cloned()
@@ -243,7 +247,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 if canonical.is_empty() || canonical == "__builtin__" {
                     return;
                 }
-                roots.push((Arc::clone(&identity.canonical_id), identity.whole_hash));
+                roots.push((identity.canonical_id.clone(), identity.whole_hash));
             };
 
         let graph = self.graph();
@@ -274,9 +278,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let hop_key =
                 SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
-                        Arc::clone(&current.canonical_id),
+                        current.canonical_id.clone(),
                         current.owner,
-                        Arc::clone(&current.decl_name),
+                        current.decl_name.clone(),
                     ),
                     Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
                     // Skeleton mode preserves open generics so body lowering
@@ -298,7 +302,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 &mut dep_facts,
                 &read.dep_signature,
             );
-            if read.result_is_partial {
+            if read.result_is_partial() {
                 record_reason(
                     &mut reasons,
                     MaterializationCycleGateFallbackReason::NestedIncompleteObservation,
@@ -395,7 +399,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             QueryResult::Value(SemanticQueryValue::MaterializationCycleGate(
                 outcome.clone(),
             )),
-            Arc::from(dep_facts.into_boxed_slice()),
+            crate::semantic_query::DepSignature::new(dep_facts),
         )
             .into();
         output.observed_self_roots = observed_self_roots;
@@ -483,7 +487,7 @@ fn cycle_gate_has_complex_surface(
 fn cycle_gate_body_contains_recursive_ref(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
-    target_name: &Arc<str>,
+    target_name: &str,
     depth: u32,
     reasons: &mut Vec<MaterializationCycleGateFallbackReason>,
 ) -> bool {
@@ -787,7 +791,7 @@ pub fn cycle_gate_collect_ref_identities_for_test(
 pub fn cycle_gate_body_contains_recursive_ref_for_test(
     graph: &crate::semantic_query_memo::SemanticGraphStore,
     node: crate::semantic_query::SemanticNodeId,
-    target_name: &Arc<str>,
+    target_name: &str,
     depth: u32,
     reasons: &mut Vec<MaterializationCycleGateFallbackReason>,
 ) -> bool {

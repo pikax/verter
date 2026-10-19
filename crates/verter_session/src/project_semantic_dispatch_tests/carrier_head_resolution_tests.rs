@@ -96,7 +96,7 @@ fn file_scope_in_owner(
         .shallow_file_state(canonical)
         .expect("file must be indexed in the hermetic host");
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner,
         whole_hash: shallow.whole_hash,
         local_scope: None,
@@ -154,7 +154,7 @@ pub(super) fn import_type_carrier(
     graph.intern_node_with_scope(
         SemanticNodeData::new_import_type(
             Arc::from(specifier),
-            qualifier,
+            verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(qualifier),
             Arc::from(arg_nodes.into_boxed_slice()),
             typeof_query,
         ),
@@ -169,7 +169,8 @@ fn resolve_subject(
     carrier: SemanticNodeId,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
-    let empty_path: Arc<[PathSegment]> = Arc::from(Vec::new().into_boxed_slice());
+    let empty_path: verter_type_expr::OwnedSlice<PathSegment> =
+        verter_type_expr::OwnedSlice::default();
     match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: carrier,
         path: empty_path,
@@ -196,7 +197,7 @@ fn eager_lower_subject(
 ) -> SemanticNodeId {
     let scope = file_scope(dispatch, canonical);
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle(canonical).map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -318,6 +319,7 @@ fn bare_ref_head_resolves_workspace_owned_name() {
     let host = host();
     upsert_ts(&host, "/m.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/m.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Foo", scope, &[]);
@@ -352,6 +354,7 @@ fn bare_ref_head_resolves_and_instantiates_args() {
     let host = host();
     upsert_ts(&host, "/box.ts", "export type Box<T> = { v: T };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/box.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Box", scope, &[PrimitiveKind::String]);
@@ -385,6 +388,7 @@ fn import_type_head_resolves_type_position() {
     upsert_ts(&host, "/dep.ts", "export type G<T> = { g: T };\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     // `import("./dep").G` — bare (no args).
@@ -406,6 +410,7 @@ fn import_type_head_resolves_and_instantiates_args() {
     upsert_ts(&host, "/dep.ts", "export type G<T> = { g: T };\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     let carrier = import_type_carrier(
@@ -435,6 +440,7 @@ fn import_type_head_resolves_typeof_query() {
     upsert_ts(&host, "/vals.ts", "export const k = 7;\n");
     upsert_ts(&host, "/owner.ts", "export const x = 1;\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/owner.ts");
 
     // `typeof import("./vals")` — the module's value-export namespace.
@@ -483,6 +489,7 @@ fn bare_ref_head_resolves_external_module_augmentation() {
         "import type { Cfg } from \"ext-pkg\";\nexport type U = Cfg;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/use.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Cfg", scope, &[]);
@@ -541,6 +548,7 @@ fn carrier_head_barrel_reexport_walks_to_final_file_eager_stops_at_barrel() {
         "import type { X } from \"./barrel\";\nexport type Use = X;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "X", scope, &[]);
@@ -618,6 +626,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         "export namespace NS {\n  export type Sib = { s: string };\n  export type Member = Sib;\n}\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/ns.ts");
 
     // A bare `BareRef("Sib")` against the FILE scope — the carrier path has no
@@ -648,10 +657,7 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
         dispatch.graph().node_data(via_carrier).as_deref()
     );
     match dispatch.graph().node_data(via_carrier).as_deref() {
-        Some(data)
-            if data
-                .bare_ref_head()
-                .is_some_and(|(n, _)| n.as_ref() == "Sib") => {}
+        Some(data) if data.bare_ref_head().is_some_and(|(n, _)| n == "Sib") => {}
         other => panic!(
             "the preserved divergent terminal must still be the `BareRef(\"Sib\")` \
              carrier; got {other:?}"
@@ -673,10 +679,10 @@ fn carrier_head_namespace_sibling_bare_name_diverges_recorded_for_producer_flip(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             )
         });
-        let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+        let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
             FxHashMap::default();
         name_resolution.insert(
-            std::sync::Arc::from("Sib"),
+            verter_type_expr::OwnedStr::from("Sib"),
             ResolvedRootIdentity::new("/ns.ts", "NS.Sib"),
         );
         let shadowing = ScopeShadowing::from_scope_payload(scope_payload.as_ref());
@@ -729,6 +735,7 @@ fn bare_ref_head_projects_enum_member() {
         "export enum Color { Red = \"red\", Blue = \"blue\" }\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/enum.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Color.Red", scope, &[]);
@@ -767,6 +774,7 @@ fn bare_ref_head_userland_shadow_wins_over_builtin() {
     let host = host();
     upsert_ts(&host, "/shadow.ts", "export type Partial<T> = { p: T };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/shadow.ts");
 
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::Boolean]);
@@ -810,15 +818,16 @@ fn bare_ref_head_recursive_ref_terminates_bounded() {
                 "export type Tree = { children: Tree };\n",
             );
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/tree.ts");
 
             // Push the `(canonical, name)` identity active to simulate being
             // INSIDE `build_instantiate`'s push/pop window for `Tree`.
             let pushed = dispatch.push_instantiate_active(
                 (
-                    Arc::from("/tree.ts"),
+                    verter_type_expr::OwnedStr::from("/tree.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("Tree"),
+                    verter_type_expr::OwnedStr::from("Tree"),
                 ),
                 Arc::from([]),
             );
@@ -866,6 +875,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
             let host = host();
             upsert_ts(&host, "/grow.ts", "export type G<T> = { v: T };\n");
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             let scope = file_scope(&dispatch, "/grow.ts");
             let string = dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::Primitive(PrimitiveKind::String),
@@ -873,9 +883,9 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
             );
             let pushed = dispatch.push_instantiate_active(
                 (
-                    Arc::from("/grow.ts"),
+                    verter_type_expr::OwnedStr::from("/grow.ts"),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    Arc::from("G"),
+                    verter_type_expr::OwnedStr::from("G"),
                 ),
                 Arc::from(vec![string].into_boxed_slice()),
             );
@@ -887,7 +897,7 @@ fn generic_head_of_an_active_declaration_keeps_its_back_edge_where_its_position_
                 Some(SemanticNodeData::Opaque(
                     verter_type_engine::semantic_query::QueryError::RecursiveRef { name, args },
                 )) => {
-                    assert_eq!(name.as_ref(), "G");
+                    assert_eq!(name, "G");
                     assert_eq!(args.len(), 1, "the back-edge records its own arguments");
                 }
                 other => panic!(
@@ -917,6 +927,7 @@ fn nested_bare_ref_carrier_in_intersection_resolves() {
         "export type A = { a: string };\nexport type B = { b: number };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/n.ts");
 
@@ -973,6 +984,7 @@ fn carrier_head_resolution_is_path_independent_with_eager_lowering() {
         "export type Foo = { a: string };\nexport type Box<T> = { v: T };\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/eq.ts");
 
     // B1 shape: bare `Foo`.
@@ -1035,6 +1047,7 @@ fn carrier_head_rehydrates_name_resolution_for_import_binding() {
         "import type { Lib } from \"./lib\";\nexport type C = Lib;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     // `BareRef("Lib")` in /consumer.ts — `Lib` is an import binding (the eager
@@ -1089,7 +1102,7 @@ fn eager_resolved_with_name_resolution(
     });
     // Build the populated name_resolution from the consumer's import binding so
     // the FAST-PATH fires (mirrors the prepared-decl map's import entry).
-    let mut name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let mut name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     if let Some(bundle) = dispatch.ctx.prepared_decl_bundle(canonical) {
         if let Some(owner_scope) =
@@ -1104,7 +1117,8 @@ fn eager_resolved_with_name_resolution(
                     )
                     .0
                 {
-                    name_resolution.insert(std::sync::Arc::from(local.as_str()), identity);
+                    name_resolution
+                        .insert(verter_type_expr::OwnedStr::from(local.as_str()), identity);
                 }
             }
         }
@@ -1144,6 +1158,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     let host = host();
     upsert_ts(&host, "/aw.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/aw.ts");
 
@@ -1156,7 +1171,7 @@ fn normal_path_walker_reenters_carrier_normalization_behind_alias() {
     // Project `.a` over the alias-wrapped carrier in Navigate.
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
@@ -1200,6 +1215,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
     let host = host();
     upsert_ts(&host, "/aw2.ts", "export type Real = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = dispatch.graph();
     let scope = file_scope(&dispatch, "/aw2.ts");
 
@@ -1209,7 +1225,7 @@ fn normal_path_walker_unresolvable_carrier_behind_alias_misses() {
 
     let projected = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: alias,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![PathSegment::Member(
                 verter_type_engine::semantic_query::PropertyKey::identifier("a"),
             )]
@@ -1239,10 +1255,11 @@ fn carrier_resolver_context_drives_shared_head_resolver() {
     let host = host();
     upsert_ts(&host, "/ctx.ts", "export type Widget = { w: number };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/ctx.ts");
 
     let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
-    let name_resolution: FxHashMap<std::sync::Arc<str>, ResolvedRootIdentity> =
+    let name_resolution: FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity> =
         FxHashMap::default();
     let scope_payload = dispatch.ctx.prepared_decl_bundle("/ctx.ts").map(|bundle| {
         verter_type_engine::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
@@ -1300,6 +1317,7 @@ fn eager_ref_path_has_no_drift_after_shared_helper() {
     let host = host();
     upsert_ts(&host, "/drift.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     // Eager `Ref { Foo }` lowering through `shallow_lower_type_expr_with_context`
     // (the production lowering arm, now calling the shared helper) resolves to a
@@ -1374,6 +1392,7 @@ fn carrier_head_imported_builtin_name_resolves_import_not_builtin() {
         "import type { Partial } from \"./alias\";\nexport type C = Partial<number>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/consumer.ts");
 
     // `BareRef("Partial", [number])` in /consumer.ts. `Partial` is an import
@@ -1440,6 +1459,7 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
     let host = host();
     upsert_ts(&host, "/ls.ts", "export type Foo = { a: string };\n");
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let shallow = dispatch
         .ctx
         .shallow_file_state("/ls.ts")
@@ -1448,7 +1468,7 @@ fn carrier_head_preserves_local_scope_in_rehydrated_scope() {
     // A carrier scope carrying a NON-None `local_scope`.
     let local: u32 = 0xABCD;
     let scope_with_local = NodeScopeId::File {
-        canonical_id: Arc::from("/ls.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/ls.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: shallow.whole_hash,
         local_scope: Some(local),
@@ -1572,6 +1592,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
         "import type { ArgT } from \"./argfile\";\nexport type Unused = ArgT;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let expr = TypeExpr::Ref {
         name: Arc::from("Unknown"),
@@ -1594,7 +1615,7 @@ fn navigate_unresolvable_ref_head_preserves_bare_ref_carrier_with_args() {
     let (name, scope) = data
         .bare_ref_head()
         .expect("Navigate transit must preserve the unresolved head as a BareRef carrier");
-    assert_eq!(name.as_ref(), "Unknown", "the authored head name survives");
+    assert_eq!(name, "Unknown", "the authored head name survives");
     match scope {
         NodeScopeId::File { canonical_id, .. } => assert_eq!(
             canonical_id.as_ref(),
@@ -1638,6 +1659,7 @@ fn eager_resolvable_ref_head_still_lowers_and_applies_args() {
         "import type { ArgT } from \"./argfile2\";\nexport type Box<T> = { v: T };\nexport type Unused = Box<ArgT>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let expr = TypeExpr::Ref {
         name: Arc::from("Box"),
@@ -1745,6 +1767,7 @@ defineProps<Copy<ImportedProps>>()
         .as_ref()
         .expect("fixture must publish script analysis")
         .macros[macro_index];
+    let _builder = host.project_type_store().construction_grant().enter_scope();
     let product =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
             .macro_type_arg_hot_ref(canonical, macro_index)
@@ -1762,7 +1785,7 @@ defineProps<Copy<ImportedProps>>()
             .node_data(resolved)
             .expect("resolved carrier node must remain addressable");
         let (base, args) = match resolved_data.as_ref() {
-        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::clone(args)),
+        SemanticNodeData::InstantiationRef { base, args } => (base.clone(), Arc::<[_]>::from(&args[..])),
         other => panic!(
             "setup `Copy<Source>` must resolve to an exact InstantiationRef before projection; got {other:?}"
         ),
@@ -1800,20 +1823,20 @@ defineProps<Copy<ImportedProps>>()
         let read = dispatch.execute_read(SemanticQueryKey::Instantiate(
             verter_type_engine::semantic_query::InstantiateKey::new(
                 dispatch.type_slot_for(
-                    Arc::clone(&base.canonical_id),
+                    base.canonical_id.clone(),
                     base.owner,
-                    Arc::clone(&base.decl_name),
+                    base.decl_name.clone(),
                 ),
                 args,
                 instantiate_context,
             ),
         ));
         assert!(
-            !read.result_is_partial,
+            !read.result_is_partial(),
             "exact mapped body must be complete"
         );
-        assert!(!read.cache_suppress, "exact mapped body must be reusable");
-        let body = match read.value {
+        assert!(!read.cache_suppress(), "exact mapped body must be reusable");
+        let body = match read.value().clone() {
             QueryResult::Value(body) => body,
             other => panic!("exact mapped Instantiate must produce a node: {other:?}"),
         };
@@ -1834,14 +1857,14 @@ defineProps<Copy<ImportedProps>>()
 
         let navigate_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: product.hot.node(),
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: ProjectionReductionContext::structural_transit_with_mode(
                 ProjectionMode::Navigate,
             ),
         });
-        assert!(!navigate_read.result_is_partial);
-        assert!(!navigate_read.cache_suppress);
-        let navigate_node = match navigate_read.value {
+        assert!(!navigate_read.result_is_partial());
+        assert!(!navigate_read.cache_suppress());
+        let navigate_node = match navigate_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("Navigate carrier projection must resolve identity: {other:?}"),
         };
@@ -1858,29 +1881,29 @@ defineProps<Copy<ImportedProps>>()
             crate::meta_resolve::projectors::build_owner_decl_identity(&host, canonical, mac.owner);
         let payload_read = dispatch.execute_read(SemanticQueryKey::ResolveMacroPayload {
             owner: dispatch.type_slot_for(
-                Arc::clone(&owner.canonical_id),
+                owner.canonical_id.clone(),
                 owner.owner,
-                Arc::clone(&owner.decl_name),
+                owner.decl_name.clone(),
             ),
             macro_index,
             macro_kind: mac.kind,
             type_args: Arc::from(vec![product.hot.node()].into_boxed_slice()),
             context: dispatch.macro_payload_context_for(canonical, ProjectionMode::Navigate),
         });
-        assert!(!payload_read.result_is_partial);
-        assert!(!payload_read.cache_suppress);
-        let payload = match payload_read.value {
+        assert!(!payload_read.result_is_partial());
+        assert!(!payload_read.cache_suppress());
+        let payload = match payload_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("macro payload must preserve the hot carrier: {other:?}"),
         };
         let payload_surface_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
             base: payload,
-            path: Arc::from([]),
+            path: verter_type_expr::OwnedSlice::from([]),
             context: runtime_context,
         });
-        assert!(!payload_surface_read.result_is_partial);
-        assert!(!payload_surface_read.cache_suppress);
-        let payload_surface = match payload_surface_read.value {
+        assert!(!payload_surface_read.result_is_partial());
+        assert!(!payload_surface_read.cache_suppress());
+        let payload_surface = match payload_surface_read.value().clone() {
             QueryResult::Value(node) => node,
             other => panic!("resolved macro payload must materialize: {other:?}"),
         };
@@ -1918,6 +1941,7 @@ defineProps<{ setupOnly: string }>()
 </script>"#,
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let setup_scope = file_scope_in_owner(
         &dispatch,
         canonical,
@@ -1941,14 +1965,14 @@ defineProps<{ setupOnly: string }>()
     );
     let parent_read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: parent_carrier,
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context,
     });
     assert!(
-        !parent_read.result_is_partial && !parent_read.cache_suppress,
+        !parent_read.result_is_partial() && !parent_read.cache_suppress(),
         "the validated Instance-to-Module lexical parent remains a complete fallback"
     );
-    let parent_surface = match parent_read.value {
+    let parent_surface = match parent_read.value().clone() {
         QueryResult::Value(node) => dispatch
             .graph()
             .node_data(node)
@@ -1966,16 +1990,16 @@ defineProps<{ setupOnly: string }>()
     let _completeness = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let read = dispatch.execute_read(SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from([]),
+        path: verter_type_expr::OwnedSlice::from([]),
         context,
     });
 
     assert!(
-        read.result_is_partial,
+        read.result_is_partial(),
         "an unresolved exact head is partial"
     );
     assert!(
-        read.cache_suppress,
+        read.cache_suppress(),
         "an unresolved exact head is ReturnOnly"
     );
     assert!(
@@ -2030,6 +2054,7 @@ fn imported_builtin_named_awaited_resolves_userland_and_never_the_awaited_relati
         );
         upsert_ts(&host, "/consumer.ts", consumer);
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let scope = file_scope(&dispatch, "/consumer.ts");
         let carrier = bare_ref_carrier(&dispatch, local, scope, &[PrimitiveKind::String]);
 
@@ -2108,6 +2133,7 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
     );
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/p.ts");
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
     let counter = Arc::new(ScopePayloadReadCounter::default());
@@ -2157,6 +2183,7 @@ fn a_budget_trip_after_resolution_never_answers_complete() {
 ",
         );
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let graph = dispatch.graph();
         let literal = |text: &str| {
             graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text.into())))

@@ -22,12 +22,22 @@ pub use class_index::{
 /// the owner discriminates script-block owners, the name is the registered
 /// merged-symbol name — namespaces qualify `Ns.Name` exactly like the eval
 /// env registration).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FunctionDeclarationRef {
     /// Lexical top-level owner of the contributing statement.
     pub owner: verter_type_expr::TopLevelOwnerId,
     /// Registered merged-symbol name.
-    pub name: Arc<str>,
+    pub name: verter_type_expr::OwnedStr,
     /// Type-space vs value-space discriminator (functions are value-space;
     /// the discriminator keeps the ref shape aligned with slot identity).
     pub space: SymbolSpace,
@@ -238,7 +248,17 @@ impl Drop for FunctionDescent {
 }
 
 /// The full program identity of one served function position.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub struct FunctionProgramKey {
     /// The owning declaration.
     pub declaration: FunctionDeclarationRef,
@@ -269,7 +289,16 @@ pub struct FunctionParamRecord {
 }
 
 /// The kind of one local binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
+)]
 pub enum FunctionBindingKind {
     /// A formal parameter.
     Param,
@@ -529,17 +558,20 @@ pub struct FunctionCallSiteRecord {
 pub enum ProgramExpressionSource {
     /// A call-free value expression, lowered lazily from the retained AST.
     Value,
+    /// A declarator literal evaluated under its authored contextual type.
+    VariableInitializer(ProgramInitializerSource),
     /// A direct semantic call/construct record.
     SemanticCall {
         kind: ProgramExpressionCallKind,
         site: FunctionCallSiteRecord,
+        /// A declarator expression body that supplies this call's value.
+        /// The call and callback records remain available to indexed readers.
+        initializer: Option<ProgramInitializerSource>,
     },
     /// An indexed callback/function value's exact return carrier.
     FunctionReturn(FunctionReturnSource),
-    /// A class field's initializer served as its own position
-    /// ([`FunctionNode::Initializer`]): the field's value is the
-    /// position's body-derived return, its fresh literals widened unless
-    /// the field is `readonly`.
+    /// A class field's initializer served as its own expression-body
+    /// position. Fresh literals are widened unless the field is readonly.
     FieldInitializer {
         source: FunctionReturnSource,
         readonly: bool,
@@ -572,10 +604,10 @@ pub struct ProgramExpressionRecord {
 /// per-capture-list ordinal) can distinguish. NEVER a node id, a type, a
 /// content hash, or a span — capture types rehydrate from indexed binding /
 /// reaching-definition facts under the final type substitution.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct FlowBindingIdentity {
     /// The binding name.
-    pub name: Arc<str>,
+    pub name: verter_type_expr::OwnedStr,
     /// The binding kind in the DEFINING frame.
     pub kind: FunctionBindingKind,
     /// The frame whose binding inventory declares this binding.
@@ -656,6 +688,13 @@ pub enum FunctionWriteTarget {
     Unsupported {
         span: verter_span::Span,
     },
+}
+
+/// The served expression-body position of a contextual-call declarator.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProgramInitializerSource {
+    pub function: verter_type_expr::facts::FlowFunctionReturnIdentity,
+    pub preserve_literals: bool,
 }
 
 /// A captured value dependency, retaining its exact root and static path.
@@ -1421,7 +1460,7 @@ impl FunctionProgramIndex {
             by_key.entry(entry.key.clone()).or_insert(ordinal);
             if entry.key.declaration.space == SymbolSpace::Value {
                 value_functions
-                    .entry(Arc::clone(&entry.key.declaration.name))
+                    .entry(entry.key.declaration.name.clone())
                     .or_default()
                     .entry((
                         entry.key.declaration.owner,
@@ -1458,7 +1497,7 @@ impl FunctionProgramIndex {
 }
 
 pub type ValueFunctionLookup = rustc_hash::FxHashMap<
-    Arc<str>,
+    verter_type_expr::OwnedStr,
     rustc_hash::FxHashMap<(verter_type_expr::TopLevelOwnerId, FunctionPartIdentity, u32), usize>,
 >;
 

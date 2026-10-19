@@ -25,7 +25,11 @@ pub trait ImportedRuntimeValueResolver {
     fn prepared_value_decl(
         &self,
         _source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    > {
         None
     }
 
@@ -249,8 +253,12 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         dep_envs: FxHashMap<String, Arc<EvalEnv>>,
-        prepared_values:
-            FxHashMap<ValueDeclIdentity, Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        prepared_values: FxHashMap<
+            ValueDeclIdentity,
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         lookup_counts: RefCell<FxHashMap<String, usize>>,
         value_export_targets: FxHashMap<ValueDeclIdentity, ValueDeclIdentity>,
     }
@@ -284,7 +292,11 @@ mod tests {
         fn prepared_value_decl(
             &self,
             source: &ValueDeclIdentity,
-        ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+        ) -> Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        > {
             self.prepared_values.get(source).cloned()
         }
 
@@ -387,7 +399,7 @@ mod tests {
                 );
                 decl.exported_name = Some("theme".to_string());
                 decl.type_annotation = string_literal_annotation("dark");
-                Arc::new(decl)
+                crate::resolver_core::CachedValue::new(decl)
             },
         );
 
@@ -692,10 +704,12 @@ mod tests {
                 is_unique_symbol: false,
                 unique_symbol_members: Arc::from([]),
                 typeof_alias_target: Some(verter_type_expr::facts::ValueDeclIdentityPart {
-                    canonical_id: Arc::from("/src/theme.ts"),
+                    canonical_id: verter_type_expr::OwnedStr::from("/src/theme.ts"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("theme"),
-                    member_path: Arc::from(Vec::<String>::new().into_boxed_slice()),
+                    symbol: verter_type_expr::OwnedStr::from("theme"),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        Vec::<String>::new().into_boxed_slice(),
+                    ),
                 }),
                 classification: ValueAnnotationClass::TypeOfAlias,
                 annotation: None,

@@ -8,6 +8,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readSessionRecord } from "./session-record.mjs";
 
 import {
   ARMS,
@@ -180,7 +181,9 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
   --help
 
 Every tier also runs the session workloads (scripts/benchmark/semantic-perf/sessions.mjs): INCREMENTAL
-edits, an EDITOR SESSION over an InputMenu-equivalent Vue component and CONCURRENT demands, each one live
+edits, an EDITOR SESSION over an InputMenu-equivalent Vue component, CONCURRENT demands and (from the
+standard tier) AUGMENTATION GROWTH (each merged-interface reproduction answered at 500 contributors, then
+at 2,000 after edits, beside a 2,000-only baseline, with a retention proof), each one live
 process per invocation in the verter, verter-observe and tsc-api arms (tsc incremental: API snapshot reuse).
 The verter-observe arm is the probe built with semantic-observe (capture compiled in) in its own target
 directory; the production probe has it physically compiled out. --no-demand skips them with the demand
@@ -536,12 +539,12 @@ export function sameArchitecture(rustArch, nodeArch) {
   return (map[rustArch] ?? rustArch) === nodeArch;
 }
 
-function materialize(outDir, scenario, setting, opts, libText) {
+export function materialize(outDir, scenario, setting, opts, libText) {
   const dir = join(outDir, "scenarios", scenario.id, setting.id);
   mkdirSync(dir, { recursive: true });
   const tsconfig = tsconfigText(setting, scenario);
   writeFileSync(join(dir, "lib.bench.d.ts"), libText);
-  const companions = writeCompanions(dir, scenario);
+  writeCompanions(dir, scenario);
   writeFileSync(join(dir, "scenario.ts"), scenario.source);
   writeFileSync(join(dir, "tsconfig.json"), tsconfig);
   const cliDir = join(dir, "cli");
@@ -566,10 +569,15 @@ function materialize(outDir, scenario, setting, opts, libText) {
     dir,
     inputs: {
       "lib.bench.d.ts": sha256Text(libText),
-      ...companions,
       "scenario.ts": sha256Text(scenario.source),
       "tsconfig.json": sha256Text(tsconfig),
       "cli/scenario.ts": sha256Text(cliSource(scenario)),
+      ...Object.fromEntries(
+        Object.entries(scenario.files ?? {}).flatMap(([file, text]) => [
+          [file, sha256Text(text)],
+          [`cli/${file}`, sha256Text(text)],
+        ]),
+      ),
     },
     baseJob,
   };
@@ -1212,7 +1220,7 @@ export async function runSessions(
     let record = null;
     let sessionReadError = null;
     try {
-      record = JSON.parse(readFileSync(sessionOut, "utf8"));
+      record = readSessionRecord(sessionOut);
     } catch (err) {
       sessionReadError = String(err.message ?? err);
     }

@@ -19,6 +19,8 @@ use super::ProjectSemanticDispatch;
 
 #[path = "call_resolve_context.rs"]
 mod context;
+#[path = "call_resolve_contextual.rs"]
+mod contextual;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
@@ -27,6 +29,39 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
+pub(super) use contextual::ContextualCallState;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static ARGUMENT_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static BINDING_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Argument acquisition/copy positions, arity and contextual parameter visits.
+#[cfg(any(test, feature = "test-support"))]
+pub fn argument_work_for_tests() -> usize {
+    ARGUMENT_WORK.with(std::cell::Cell::get)
+}
+
+/// Binding entries inspected while indexing or looking up final call bindings.
+#[cfg(any(test, feature = "test-support"))]
+pub fn binding_work_for_tests() -> usize {
+    BINDING_WORK.with(std::cell::Cell::get)
+}
+
+fn record_binding_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    BINDING_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
+}
+
+pub(in crate::project_semantic_dispatch) fn record_argument_work(count: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    ARGUMENT_WORK.with(|work| work.set(work.get() + count));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = count;
+}
 
 /// Whether a fresh-literal deposit's binder occurs at the top level of a
 /// binder-bearing structure ([`ProjectSemanticDispatch::deposit_binder_reach`]).
@@ -62,6 +97,7 @@ enum AliasExpansion {
 fn error_leaves_expansion_unknown(error: &QueryError) -> bool {
     match error {
         QueryError::BudgetExceeded(_)
+        | QueryError::ExecutionAborted(_)
         | QueryError::Cancelled
         | QueryError::UnstableState { .. }
         | QueryError::ForeignSemanticOperand
@@ -93,6 +129,25 @@ pub enum ResolveCallStep {
     Degraded(ResolveCallFailure),
 }
 
+/// A result supplied by a completed declared result recipe.
+/// This is independent of the enclosing component's runtime capture proof.
+#[derive(Debug, Clone)]
+pub(super) struct DeclaredCallResult {
+    key: ResolveCallKey,
+    signature: SemanticNodeId,
+    node: SemanticNodeId,
+    roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+}
+
+impl DeclaredCallResult {
+    pub(super) fn result(&self, key: &ResolveCallKey) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        (&self.key == key).then_some((self.signature, self.node))
+    }
+    pub(super) fn roots(&self) -> &[crate::semantic_query_memo::ObservedGraphSelfRoot] {
+        &self.roots
+    }
+}
+
 enum ResolveCallRootClose {
     /// A complete selected value plus its SCC-unioned self-roots and
     /// whether the component's dependency proof is complete (root AND
@@ -107,6 +162,14 @@ enum ResolveCallRootClose {
     /// cache-suppressed — never queued, never warm.
     CompleteReturnOnly(ResolvedCallResult),
     Degraded(ResolveCallFailure),
+}
+
+/// What one step of a call resolution's frame did.
+pub(super) enum CallWalkStep {
+    /// The walk stopped; its frame holds it.
+    Suspended(Box<CallSuspension>),
+    /// The build's output.
+    Done(Box<QueryBuildOutput<SemanticQueryValue>>),
 }
 
 enum ResolveCallFramePop {
@@ -144,7 +207,7 @@ impl<'l> CallResolutionBudget<'l> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct CallArgument {
     node: SemanticNodeId,
     freshness_origin: SemanticNodeId,
@@ -166,6 +229,69 @@ enum CandidateVerdict {
     Selected(ResolveCallPendingState),
     Mismatch,
     Degraded(ResolveCallFailure),
+    /// The walk stopped before an argument relation whose operands need
+    /// demands its frame has no answer for; the frame holds the walk, its
+    /// collector included, until they are delivered.
+    Suspended(Box<CallSuspension>),
+}
+
+/// The candidates and arguments one call resolution walks, acquired once:
+/// a walk resumed on its frame reads them again from here instead of
+/// rediscovering its callee's signatures and re-acquiring its arguments.
+pub(super) struct CallPlan {
+    callee: SemanticNodeId,
+    visible: verter_session_query::retention::owned::OwnedSlice<SignatureRef>,
+    raw: verter_session_query::retention::owned::OwnedSlice<SignatureRef>,
+    arguments: Vec<CallArgument>,
+}
+
+/// A call's candidate walk suspended on its frame
+/// ([`ProjectSemanticDispatch::drain_call`]): where the walk stands, and
+/// the candidate's open inference — its collecting session, taken out of
+/// the transaction while the frame waits, so nothing that runs meanwhile
+/// can deposit into it.
+pub(super) struct CallSuspension {
+    /// Set by the walk around the candidate.
+    walk: Option<SuspendedWalk>,
+    candidate: SuspendedCandidate,
+}
+
+struct SuspendedWalk {
+    plan: Arc<CallPlan>,
+    applicability: crate::semantic_query::RelationKind,
+    candidate: SemanticNodeId,
+    /// The transaction's session count when the walk began.
+    session_watermark: usize,
+}
+
+struct SuspendedCandidate {
+    session: super::inference::session::InferenceSession,
+    checkpoint: SessionCheckpoint,
+    /// The first-pass argument the candidate relates next.
+    next_argument: usize,
+    failure: Option<crate::semantic_query::CheckerDiagnosticCode>,
+    deferred_for_relation_scc: bool,
+    /// The generic function arguments the first pass skipped so far: the
+    /// argument's position, its one generic signature and its parameter.
+    generic_function_arguments: Vec<(usize, SemanticNodeId, SemanticNodeId)>,
+}
+
+impl CallSuspension {
+    /// The collecting session the suspended candidate holds.
+    pub(super) fn session_id(&self) -> SessionId {
+        self.candidate.session.id
+    }
+
+    /// Give the held collector back to the transaction it was taken from.
+    pub(super) fn into_session(self) -> super::inference::session::InferenceSession {
+        self.candidate.session
+    }
+
+    /// The deposits the held collector has accepted so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn collected_candidates(&self) -> usize {
+        self.candidate.session.collected_candidates_for_tests()
+    }
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -179,9 +305,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         receiver.map_or(value, |receiver| self.bind_callee_receiver(value, receiver))
     }
 
-    /// The typed call-resolution authority: reentry hold, validated warm
-    /// result, then root-family or inline mixed-obligation execution.
-    pub fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+    construction_ordinal_seam! {
+        /// The typed call-resolution authority: reentry hold, validated warm
+        /// result, then root-family or inline mixed-obligation execution.
+        fn execute_resolve_call(&self, key: ResolveCallKey) -> ResolveCallStep {
+            self.execute_resolve_call_with_declared_result(key).0
+        }
+    }
+
+    pub(super) fn execute_resolve_call_with_declared_result(
+        &self,
+        key: ResolveCallKey,
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         // Per-request dispatch-mask trace, mirroring the cold-build choke point:
         // an INLINE call resolution (one running under an open flow or relation
         // obligation) never funnels through `execute_via_cold_build_helper`, so
@@ -200,25 +335,86 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             if let Some(idx) = txn.reentry().find(&identity) {
                 txn.obligations.record_assumption(idx);
-                return ResolveCallStep::Hold(Box::new(key));
+                return (ResolveCallStep::Hold(Box::new(key)), None);
             }
             if let Some(result) = super::dispatch_txn::provisional_resolve_call_result(
                 txn.obligations.substitution(),
                 &key,
             ) {
-                return ResolveCallStep::Complete(result.clone());
+                return (ResolveCallStep::Complete(result.clone()), None);
             }
         }
         if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
             if self.admits_served(&served.receipt) {
-                return ResolveCallStep::Complete(served.value);
+                self.fold_cache_read_rails(
+                    served.result_is_partial(),
+                    served.cache_suppress,
+                    served.partial_reasons(),
+                );
+                let proof = if served.fact_status.is_complete() {
+                    let roots = self.observed_self_roots_from_nodes([
+                        key.callee,
+                        super::return_equation::resolved_call_return_type(&served.value),
+                    ]);
+                    self.declared_call_result(&key, &served.value, roots)
+                } else {
+                    None
+                };
+                return (ResolveCallStep::Complete(served.value), proof);
             }
         }
         if self.dispatch_txn.borrow().obligations.decides_root() {
-            self.execute_resolve_call_root(key)
+            (self.execute_resolve_call_root(key), None)
         } else {
-            self.execute_resolve_call_inline(key)
+            self.execute_resolve_call_inline_with_declared_result(key)
         }
+    }
+
+    /// Whether a call evaluated in a frame's step resolves as a frame of its
+    /// own: a machinery-root call, as [`Self::execute_resolve_call`] would
+    /// resolve it through its family memo, outside every open obligation.
+    pub(super) fn call_resumes_on_the_runtime(&self, key: &ResolveCallKey) -> bool {
+        let txn = self.dispatch_txn.borrow();
+        txn.obligations.decides_root()
+            && super::dispatch_txn::provisional_resolve_call_result(
+                txn.obligations.substitution(),
+                key,
+            )
+            .is_none()
+    }
+
+    fn declared_call_result(
+        &self,
+        key: &ResolveCallKey,
+        result: &ResolvedCallResult,
+        roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    ) -> Option<DeclaredCallResult> {
+        let ResolvedCallResult::Selected {
+            selected_signature,
+            return_type,
+            recovery_diagnostic: None,
+            ..
+        } = result
+        else {
+            return None;
+        };
+        let graph = self.graph();
+        let Some(SemanticNodeData::Signature {
+            return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+            ..
+        }) = graph
+            .node_data(*selected_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
+        else {
+            return None;
+        };
+        Some(DeclaredCallResult {
+            key: key.clone(),
+            signature: *selected_signature,
+            node: *return_type,
+            roots,
+        })
     }
 
     /// Open the transparent executor frame before any call-owned inference
@@ -282,14 +478,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    fn execute_resolve_call_inline(&self, key: ResolveCallKey) -> ResolveCallStep {
+    fn execute_resolve_call_inline_with_declared_result(
+        &self,
+        key: ResolveCallKey,
+    ) -> (ResolveCallStep, Option<DeclaredCallResult>) {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if initial_trip.is_some() {
-            return ResolveCallStep::Degraded(ResolveCallFailure::Budget);
+            return (ResolveCallStep::Degraded(ResolveCallFailure::Budget), None);
         }
         let idx = self.resolve_call_frame_open(&key);
         let outcome = self.run_resolve_call(&key);
-        match self.resolve_call_frame_pop(idx, outcome, false) {
+        // Only a completed winner with no return or applicability assumptions
+        // supplies the declared recipe. A provisional cached seed never does.
+        let proof = match &outcome {
+            CandidateVerdict::Selected(state)
+                if state.holds.is_empty()
+                    && !state.replay_applicability
+                    && state.concrete_seeds.len() == 1 =>
+            {
+                let result = state
+                    .selection
+                    .with_return_type(self, state.concrete_seeds[0]);
+                self.declared_call_result(&key, &result, state.self_roots.clone())
+            }
+            _ => None,
+        };
+        let step = match self.resolve_call_frame_pop(idx, outcome, false) {
             ResolveCallFramePop::Provisional(step) => step,
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Complete(result, _, _))
             | ResolveCallFramePop::RootClose(ResolveCallRootClose::CompleteReturnOnly(result)) => {
@@ -298,7 +512,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
                 ResolveCallStep::Degraded(failure)
             }
-        }
+        };
+        let proof = proof.filter(|proof| matches!(&step, ResolveCallStep::Complete(ResolvedCallResult::Selected { selected_signature, return_type, .. }) if *selected_signature == proof.signature && *return_type == proof.node));
+        (step, proof)
     }
 
     fn execute_resolve_call_root(&self, key: ResolveCallKey) -> ResolveCallStep {
@@ -332,18 +548,73 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &ResolveCallKey,
     ) -> QueryBuildOutput<SemanticQueryValue> {
-        let fence = self.project_generation_signature();
+        let idx = match self.open_resolve_call_build(key) {
+            Ok(idx) => idx,
+            Err(refusal) => return *refusal,
+        };
+        let outcome = self.run_resolve_call(key);
+        self.close_resolve_call_build(idx, outcome)
+    }
+
+    /// Open a machinery-root call resolution's executor frame, or the
+    /// refusal of a demand whose connected work already tripped.
+    pub(super) fn open_resolve_call_build(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Result<usize, Box<QueryBuildOutput<SemanticQueryValue>>> {
         let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
         if initial_trip.is_some() {
             self.dispatch_txn.borrow_mut().call.last_root_failure =
                 Some(ResolveCallFailure::Budget);
-            let mut output: QueryBuildOutput<SemanticQueryValue> =
-                (QueryResult::Error(QueryError::Miss), fence).into();
+            let mut output: QueryBuildOutput<SemanticQueryValue> = (
+                QueryResult::Error(QueryError::Miss),
+                self.project_generation_signature(),
+            )
+                .into();
             output.cache_suppress = true;
-            return output;
+            return Err(Box::new(output));
         }
-        let idx = self.resolve_call_frame_open(key);
-        let outcome = self.run_resolve_call(key);
+        Ok(self.resolve_call_frame_open(key))
+    }
+
+    /// One step of a call resolution's frame: walk its candidates — or
+    /// resume the walk `resume` holds — until it selects, fails, or stops
+    /// on operands its frame must demand first ([`CallWalkStep::Suspended`]).
+    pub(super) fn step_resolve_call_build(&self, key: &ResolveCallKey, idx: usize) -> CallWalkStep {
+        let (_connected_guard, _) = self.enter_connected_demand(false);
+        match self.run_resolve_call(key) {
+            CandidateVerdict::Suspended(suspension) => CallWalkStep::Suspended(suspension),
+            outcome => CallWalkStep::Done(Box::new(self.close_resolve_call_build(idx, outcome))),
+        }
+    }
+
+    /// Release a call resolution's frame abandoned between its steps: the
+    /// collector its walk held and its executor frame, with every
+    /// obligation the frame opened.
+    pub(super) fn abandon_resolve_call_build(
+        &self,
+        idx: usize,
+        suspension: Option<Box<CallSuspension>>,
+    ) {
+        if let Some(suspension) = suspension {
+            self.abandon_call_suspension(*suspension);
+        }
+        let _ = self.resolve_call_frame_pop(
+            idx,
+            CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
+            true,
+        );
+        self.relation_abort_completed_members();
+    }
+
+    /// Close a machinery-root call resolution's executor frame over its
+    /// walk's outcome: the build's output.
+    fn close_resolve_call_build(
+        &self,
+        idx: usize,
+        outcome: CandidateVerdict,
+    ) -> QueryBuildOutput<SemanticQueryValue> {
+        let fence = self.project_generation_signature();
         #[cfg(any(test, feature = "test-support"))]
         self.inject_unproven_flow_member_for_tests(idx);
         match self.resolve_call_frame_pop(idx, outcome, true) {
@@ -357,10 +628,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let admits =
                     crate::semantic_query::AdmissibleCallResult::admits(&result, proof_complete);
                 let mut output = QueryBuildOutput::from((
-                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(result),
+                    )),
                     fence,
                 ))
-                .with_observed_self_roots(self_roots);
+                .with_observed_self_roots(self_roots)
+                .with_positional_guarantee();
                 output.cache_suppress |= !admits;
                 output
             }
@@ -370,12 +644,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the caller receives it, the memo refuses admission, and
                 // the frame close already marked the request partial.
                 let mut output: QueryBuildOutput<SemanticQueryValue> = (
-                    QueryResult::Value(SemanticQueryValue::ResolveCall(Arc::new(result))),
+                    QueryResult::Value(SemanticQueryValue::ResolveCall(
+                        verter_session_query::retention::owned::Owned::new(result),
+                    )),
                     fence,
                 )
                     .into();
                 output.cache_suppress = true;
-                output
+                output.with_positional_guarantee()
             }
             ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure)) => {
                 self.dispatch_txn.borrow_mut().call.last_root_failure = Some(failure);
@@ -426,10 +702,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .any(|(canonical, _)| canonical == &key.point.canonical_id)
             {
-                self_roots.push((
-                    Arc::clone(&key.point.canonical_id),
-                    serve.indexed.whole_hash,
-                ));
+                self_roots.push((key.point.canonical_id.clone(), serve.indexed.whole_hash));
             }
             true
         } else {
@@ -506,6 +779,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 CandidateVerdict::Mismatch => {
                     unreachable!("candidate mismatch is not a call outcome")
                 }
+                CandidateVerdict::Suspended(_) => {
+                    unreachable!("a suspended walk stays on its frame")
+                }
             };
         }
 
@@ -576,6 +852,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return ResolveCallFramePop::RootClose(ResolveCallRootClose::Degraded(failure));
             }
             CandidateVerdict::Mismatch => unreachable!("candidate mismatch is not a call outcome"),
+            CandidateVerdict::Suspended(_) => unreachable!("a suspended walk stays on its frame"),
         };
         root.inline_flight = inline_flight;
         let relation_substitution: ProvisionalSubstitution = relation_members
@@ -893,14 +1170,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 root_result.clone(),
                 component_proof_complete,
             ) {
-                Some(result) => self.dispatch_txn.borrow_mut().call.completed_members.push(
-                    CompletedResolveCallMember {
+                Some(result) => {
+                    let member = CompletedResolveCallMember {
                         key: root_key,
                         result,
                         inline_flight: root.inline_flight,
                         self_roots: root.self_roots,
-                    },
-                ),
+                    }
+                    .held(self.graph());
+                    self.dispatch_txn
+                        .borrow_mut()
+                        .call
+                        .completed_members
+                        .push(member);
+                }
                 _ => {
                     // Incomplete proof stays transaction-local. The value
                     // still flows through `Complete`, so the enclosing
@@ -977,7 +1260,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// COMMIT BOUNDARY; every member published here is independently
     /// fenced backfill that stays cold — and recomputes on the next
     /// demand — if its own fence refuses.
-    fn resolve_call_drain_completed_members(
+    pub(super) fn resolve_call_drain_completed_members(
         &self,
         root_key: &ResolveCallKey,
         carrier: &crate::semantic_query_memo::PublishedMemoCandidate,
@@ -1066,6 +1349,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.relation_abort_completed_members();
                 Err(failure)
             }
+            CandidateVerdict::Suspended(_) => {
+                unreachable!("a replay relates in place and never suspends")
+            }
         }
     }
 
@@ -1096,16 +1382,49 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     fn run_resolve_call(&self, key: &ResolveCallKey) -> CandidateVerdict {
-        let graph = self.graph();
-        let session_watermark = self.dispatch_txn.borrow().relation.sessions.len();
-        let callee = self.substitute_canonical(key.callee, &key.context.substitution);
+        let _contextual_isolation = self.isolate_contextual_call(key);
+        // A walk its frame suspended resumes where it stopped, over the plan
+        // it acquired.
+        let resumed = self.take_call_resume(key);
+        let session_watermark = match &resumed {
+            Some(resumed) => {
+                resumed
+                    .walk
+                    .as_ref()
+                    .expect("a suspended walk")
+                    .session_watermark
+            }
+            None => self.dispatch_txn.borrow().relation.sessions.len(),
+        };
+        let callee = match &resumed {
+            Some(resumed) => resumed.walk.as_ref().expect("a suspended walk").plan.callee,
+            None => self.substitute_canonical(key.callee, &key.context.substitution),
+        };
         // The shared signature list reads an apparent global (a primitive or
         // collection callee) from the project of the demanding site: the
         // call site is that site.
         let _demand_scope = super::LexicalDemandScopeGuard::push(
             &self.lexical_demand_scope,
-            Arc::clone(&key.point.canonical_id),
+            key.point.canonical_id.clone(),
         );
+        let plan = match &resumed {
+            Some(resumed) => Arc::clone(&resumed.walk.as_ref().expect("a suspended walk").plan),
+            None => match self.prepare_call_plan(key, callee) {
+                Ok(plan) => Arc::new(plan),
+                Err(verdict) => return *verdict,
+            },
+        };
+        self.walk_call_plan(key, &plan, session_watermark, resumed)
+    }
+
+    /// Acquire the candidates and arguments a call resolution walks, or the
+    /// verdict that answers it before any candidate is tried.
+    fn prepare_call_plan(
+        &self,
+        key: &ResolveCallKey,
+        callee: SemanticNodeId,
+    ) -> Result<CallPlan, Box<CandidateVerdict>> {
+        let graph = self.graph();
         let explicit_type_args: Arc<[SemanticNodeId]> = Arc::from(
             key.explicit_type_args
                 .iter()
@@ -1115,14 +1434,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
         if self.call_callee_is_dynamic_any(callee) {
             let return_type = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Any));
-            return CandidateVerdict::Selected(self.resolve_call_pending_state(
-                key,
-                ResolveCallSelection::DynamicAny,
-                vec![return_type],
-                Vec::new(),
-                None,
-                false,
-            ));
+            return Err(Box::new(CandidateVerdict::Selected(
+                self.resolve_call_pending_state(
+                    key,
+                    ResolveCallSelection::DynamicAny,
+                    vec![return_type],
+                    Vec::new(),
+                    None,
+                    false,
+                ),
+            )));
         }
 
         // A call site demands exactly ITS bucket of the callee's shared
@@ -1137,7 +1458,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             key.context.resolve_env_hash,
         ) {
             CallCandidates::Candidates(visible) => visible,
-            failed => return CandidateVerdict::Degraded(self.candidate_failure(callee, failed)),
+            failed => {
+                return Err(Box::new(CandidateVerdict::Degraded(
+                    self.candidate_failure(callee, failed),
+                )))
+            }
         };
         // `resolveNewExpression` refuses an abstract class before resolving
         // anything: a `new` over a class's own construct signatures is an
@@ -1148,10 +1473,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .any(|candidate| self.is_abstract_class_construct_signature(candidate.node))
         {
-            return CandidateVerdict::Degraded(ResolveCallFailure::NotCallable);
+            return Err(Box::new(CandidateVerdict::Degraded(
+                ResolveCallFailure::NotCallable,
+            )));
         }
         let raw = if key.explicit_type_args.is_empty() {
-            Arc::clone(&visible)
+            visible.clone()
         } else {
             match self.acquire_call_candidates(
                 callee,
@@ -1164,26 +1491,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // it is paired positionally: a ROOTLESS candidate has no
                 // occurrence to pair by, and its raw form is the candidate
                 // at the same position in the equally-filtered list.
-                CallCandidates::Candidates(raw) => Arc::from(
-                    raw.iter()
-                        .filter(|candidate| {
-                            self.instantiate_call_candidate(candidate.node, &explicit_type_args)
-                                .is_some()
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
-                        .into_boxed_slice(),
-                ),
+                CallCandidates::Candidates(raw) => raw
+                    .iter()
+                    .filter(|candidate| {
+                        self.instantiate_call_candidate(candidate.node, &explicit_type_args)
+                            .is_some()
+                    })
+                    .cloned()
+                    .collect(),
                 failed => {
-                    return CandidateVerdict::Degraded(self.candidate_failure(callee, failed))
+                    return Err(Box::new(CandidateVerdict::Degraded(
+                        self.candidate_failure(callee, failed),
+                    )))
                 }
             }
         };
 
         let arguments = match self.acquire_call_arguments(key) {
             Ok(arguments) => arguments,
-            Err(failure) => return CandidateVerdict::Degraded(failure),
+            Err(failure) => return Err(Box::new(CandidateVerdict::Degraded(failure))),
         };
+        Ok(CallPlan {
+            callee,
+            visible,
+            raw,
+            arguments,
+        })
+    }
+
+    /// Try a call's candidates in list order, under the subtype pass then
+    /// assignability, and recover with a sole candidate; resume a suspended
+    /// walk at the candidate it stopped at.
+    fn walk_call_plan(
+        &self,
+        key: &ResolveCallKey,
+        plan: &Arc<CallPlan>,
+        session_watermark: usize,
+        mut resumed: Option<Box<CallSuspension>>,
+    ) -> CandidateVerdict {
+        let graph = self.graph();
+        let bucket = signature_bucket(key.kind);
+        let CallPlan {
+            visible,
+            raw,
+            arguments,
+            ..
+        } = &**plan;
         let mut budget = CallResolutionBudget::new(&self.connected_demand);
 
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
@@ -1214,9 +1567,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &[crate::semantic_query::RelationKind::Assignable]
         };
         let outer_applicability = self.dispatch_txn.borrow().call.applicability;
+        let resume_at = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.resume_at)
+            .or_else(|| {
+                resumed.as_ref().map(|resumed| {
+                    let walk = resumed.walk.as_ref().expect("a suspended walk");
+                    (walk.applicability, walk.candidate)
+                })
+            });
+        let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
+                if resuming {
+                    if resume_at != Some((applicability, candidate.node)) {
+                        continue;
+                    }
+                    resuming = false;
+                }
                 let Some(kind) = bucket_kind(candidate.node) else {
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
@@ -1246,29 +1619,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
                 self.dispatch_txn.borrow_mut().call.applicability = applicability;
-                let verdict = self.check_call_candidate(
-                    key,
-                    candidate,
-                    raw_candidate,
-                    &arguments,
-                    &mut budget,
-                    false,
-                    visible.len() == 1,
-                );
+                let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
+                    self.prepare_contextual_candidate(key, candidate, arguments, &mut budget)
+                } else {
+                    Ok(arguments.clone())
+                };
+                let verdict = match prepared {
+                    Ok(arguments) => self.check_call_candidate(
+                        key,
+                        candidate,
+                        raw_candidate,
+                        &arguments,
+                        &mut budget,
+                        false,
+                        visible.len() == 1,
+                        resumed.take().map(|resumed| resumed.candidate),
+                    ),
+                    Err(verdict) => verdict.into(),
+                };
                 self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
                 match verdict {
                     CandidateVerdict::Selected(result) => {
                         return CandidateVerdict::Selected(result)
+                    }
+                    CandidateVerdict::Suspended(mut suspension) => {
+                        suspension.walk = Some(SuspendedWalk {
+                            plan: Arc::clone(plan),
+                            applicability,
+                            candidate: candidate.node,
+                            session_watermark,
+                        });
+                        return CandidateVerdict::Suspended(suspension);
                     }
                     CandidateVerdict::Mismatch => {}
                     CandidateVerdict::Degraded(failure) => {
                         if failure == ResolveCallFailure::Budget {
                             self.abandon_call_sessions_since(session_watermark);
                         }
-                        // The first candidate that asks types a context-sensitive
-                        // argument: the checker assigns a function's contextual
-                        // parameter types once, under the first candidate that
-                        // reaches it, and later candidates read them.
+                        // A contextual request suspends this candidate. Its
+                        // collector is inactive while the callback body runs.
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
@@ -1290,14 +1679,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 key,
                 candidate,
                 raw_candidate,
-                &arguments,
+                arguments,
                 &mut budget,
                 true,
                 true,
+                None,
             );
             self.dispatch_txn.borrow_mut().call.applicability = outer_applicability;
             match verdict {
                 CandidateVerdict::Selected(result) => return CandidateVerdict::Selected(result),
+                CandidateVerdict::Suspended(_) => {
+                    unreachable!("an error-recovery candidate never suspends")
+                }
                 CandidateVerdict::Mismatch => {}
                 CandidateVerdict::Degraded(failure) => {
                     if failure == ResolveCallFailure::Budget {
@@ -1307,7 +1700,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        CandidateVerdict::Degraded(ResolveCallFailure::NoApplicableOverload)
+        let failure = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.failure())
+            .unwrap_or(ResolveCallFailure::NoApplicableOverload);
+        CandidateVerdict::Degraded(failure)
     }
 
     /// Whether an eager argument is a GENERIC function value. The checker's
@@ -1335,16 +1736,115 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
     }
 
-    /// Whether the return of a call signature of `target` — the contextual
-    /// signature a context-sensitive function argument is checked under —
-    /// mentions one of `params`. A signature list that does not settle
-    /// answers `true`: nothing proves the return free of them.
     /// The contextual type a context-sensitive argument is typed under: the
     /// parameter type `target` with every type parameter `fixed`, its one
     /// call signature's return read under the `inferred` bindings alone,
     /// so an uninferred parameter stays itself there (a literal context
     /// through its constraint).
     fn contextual_argument_type(
+        &self,
+        target: SemanticNodeId,
+        fixed: &CanonicalTypeSubstitution,
+        inferred: &CanonicalTypeSubstitution,
+    ) -> SemanticNodeId {
+        // Traverse wrapper templates, never the images of substituted binders.
+        // Each callback keeps fixed parameter types and an unfixed return.
+        let mut pending = vec![(target, false)];
+        let mut mapped = FxHashMap::default();
+        while let Some((node, finishing)) = pending.pop() {
+            if mapped.contains_key(&node) {
+                continue;
+            }
+            let data = self.graph().node_data(node);
+            let children: Vec<_> = match data.as_deref() {
+                Some(SemanticNodeData::Object(surface)) => surface
+                    .entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => Some(member.value),
+                        crate::semantic_query::SurfaceEntry::CallSignature(signature) => {
+                            Some(*signature)
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(index) => {
+                            Some(index.value_type)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                Some(SemanticNodeData::Tuple { elements, .. }) => {
+                    elements.iter().map(|element| element.value).collect()
+                }
+                Some(SemanticNodeData::Array { element, .. }) => vec![*element],
+                _ => {
+                    mapped.insert(node, self.contextual_callable_type(node, fixed, inferred));
+                    continue;
+                }
+            };
+            if !finishing {
+                pending.push((node, true));
+                pending.extend(children.into_iter().map(|child| (child, false)));
+                continue;
+            }
+            let rebuilt = match data.as_deref().expect("wrapper node") {
+                SemanticNodeData::Object(surface) => {
+                    let entries = surface
+                        .entries
+                        .iter()
+                        .map(|entry| match entry {
+                            crate::semantic_query::SurfaceEntry::Member(member) => {
+                                let mut member = member.clone();
+                                member.value = mapped[&member.value];
+                                crate::semantic_query::SurfaceEntry::Member(member)
+                            }
+                            crate::semantic_query::SurfaceEntry::CallSignature(signature) => {
+                                crate::semantic_query::SurfaceEntry::CallSignature(
+                                    mapped[signature],
+                                )
+                            }
+                            crate::semantic_query::SurfaceEntry::IndexSignature(index) => {
+                                let mut index = index.clone();
+                                index.value_type = mapped[&index.value_type];
+                                index.key_type = self.substitute_canonical(index.key_type, fixed);
+                                crate::semantic_query::SurfaceEntry::IndexSignature(index)
+                            }
+                            crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                                crate::semantic_query::SurfaceEntry::ConstructSignature(
+                                    self.substitute_canonical(*signature, fixed),
+                                )
+                            }
+                        })
+                        .collect();
+                    SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                        entries,
+                        surface
+                            .keyspace
+                            .map(|keyspace| self.substitute_canonical(keyspace, fixed)),
+                        surface.closed().has_index_signature(),
+                    ))
+                }
+                SemanticNodeData::Tuple { elements, readonly } => SemanticNodeData::Tuple {
+                    elements: elements
+                        .iter()
+                        .map(|element| {
+                            let mut element = element.copy();
+                            element.value = mapped[&element.value];
+                            element
+                        })
+                        .collect(),
+                    readonly: *readonly,
+                },
+                SemanticNodeData::Array { element, readonly } => SemanticNodeData::Array {
+                    element: mapped[element],
+                    readonly: *readonly,
+                },
+                _ => unreachable!("wrapper classified above"),
+            };
+            mapped.insert(node, self.graph().intern_preserving_scope(node, rebuilt));
+        }
+        mapped[&target]
+    }
+
+    fn contextual_callable_type(
         &self,
         target: SemanticNodeId,
         fixed: &CanonicalTypeSubstitution,
@@ -1363,15 +1863,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (Some(fixed_signature), Some(partial_signature)) =
             (single(fixed_target), single(partial_target))
         else {
-            return fixed_target;
+            // Non-callable contexts keep their uninferred binders, including
+            // the literal's own part of a contextual receiver.
+            return partial_target;
         };
         let graph = self.graph();
-        let Some(SemanticNodeData::Signature { return_type, .. }) =
-            graph.node_data(partial_signature).as_deref().cloned()
+        let Some(SemanticNodeData::Signature { return_type, .. }) = graph
+            .node_data(partial_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return fixed_target;
         };
-        let Some(mut data) = graph.node_data(fixed_signature).as_deref().cloned() else {
+        let Some(mut data) = graph
+            .node_data(fixed_signature)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
+        else {
             return fixed_target;
         };
         let SemanticNodeData::Signature {
@@ -1399,8 +1907,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         type_args: &Arc<[SemanticNodeId]>,
         resolve_env_hash: crate::semantic_query::HashValue,
     ) -> CallCandidates {
-        if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = self
-            .execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
+        let probe = self.observe_read(|| {
+            self.execute_via_cold_build_helper(SemanticQueryKey::ResolveOverloadSet {
                 callee,
                 kind: bucket,
                 type_args: Arc::clone(type_args),
@@ -1409,9 +1917,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ..Default::default()
                 },
             })
-            .value
-        {
-            return CallCandidates::Candidates(candidates);
+        });
+        if matches!(
+            &probe.value().value,
+            QueryResult::Value(SemanticQueryValue::OverloadSet(_))
+        ) {
+            if let Ok(read) = probe.adopt(self) {
+                if let QueryResult::Value(SemanticQueryValue::OverloadSet(candidates)) = read.value
+                {
+                    return CallCandidates::Candidates(candidates);
+                }
+            }
+            return CallCandidates::Incomplete(
+                crate::semantic_query::IncompleteReason::UnsettledInput,
+            );
+        }
+        if probe.discard().is_err() {
+            return CallCandidates::Incomplete(
+                crate::semantic_query::IncompleteReason::UnsettledInput,
+            );
         }
         match self.shared_signature_nodes(callee, bucket) {
             super::signature_discovery::SharedSignatureNodes::Nodes(nodes) if nodes.is_empty() => {
@@ -1543,6 +2067,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<Vec<CallArgument>, ResolveCallFailure> {
         let mut result = Vec::new();
         for argument in key.args.iter() {
+            record_argument_work(1);
             let context_sensitive = argument.is_context_sensitive();
             let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
                 CallArgKey::Eager {
@@ -1564,7 +2089,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .indexed_expression_source(point.canonical_id.as_ref())
                         .ok_or(ResolveCallFailure::Undecidable)?;
                     let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: Arc::clone(&point.canonical_id),
+                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
                         offset: point.offset,
                     };
                     let program_index = source_demand.function_program_index();
@@ -1645,6 +2170,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_call_candidate(
         &self,
         key: &ResolveCallKey,
@@ -1654,15 +2180,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         budget: &mut CallResolutionBudget<'_>,
         recovery: bool,
         sole_candidate: bool,
+        resume: Option<SuspendedCandidate>,
     ) -> CandidateVerdict {
         let graph = self.graph();
         let consumer = crate::semantic_query::ResolveCallConsumer::witness();
+        // A candidate suspended on its frame reads everything below as it
+        // did before it stopped: what follows up to its collector reads the
+        // graph and records nothing, so it reaches the collector exactly as
+        // the first run did.
+        let (contextual_fixed, contextual_diagnostic) = self
+            .dispatch_txn
+            .borrow()
+            .call
+            .contextual
+            .as_ref()
+            .and_then(|state| state.completed.as_ref())
+            .filter(|completed| completed.signature == candidate.node)
+            .map(|completed| (completed.fixed.clone(), completed.diagnostic))
+            .unwrap_or_default();
+        let contextual_substitution = CanonicalTypeSubstitution::new(
+            self.graph(),
+            contextual_fixed.iter().map(|(&p, &b)| (p, b)).collect(),
+        );
         let (params, visible_type_params) = match graph.node_data(candidate.node).as_deref() {
             Some(SemanticNodeData::Signature {
                 params,
                 type_parameters,
                 ..
-            }) => (Arc::clone(params), Arc::clone(type_parameters)),
+            }) => (
+                Arc::clone(params.as_arc()),
+                Arc::clone(type_parameters.as_arc()),
+            ),
             // The sealed index-composed carrier: applicability reads its
             // parameters and binders, never a return type — it has none.
             Some(SemanticNodeData::DeferredCallable(callable)) => {
@@ -1674,9 +2222,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let params: Arc<[FunctionParam]> = Arc::from(
             params
                 .iter()
-                .cloned()
+                .map(crate::semantic_query::FunctionParam::copy)
                 .map(|mut param| {
                     param.ty = self.substitute_canonical(param.ty, &key.context.substitution);
+                    param.ty = self.substitute_canonical(param.ty, &contextual_substitution);
                     param
                 })
                 .collect::<Vec<_>>()
@@ -1685,18 +2234,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let raw_type_params = match graph.node_data(raw_candidate.node).as_deref() {
             Some(SemanticNodeData::Signature {
                 type_parameters, ..
-            }) => Arc::clone(type_parameters),
+            }) => Arc::clone(type_parameters.as_arc()),
             Some(SemanticNodeData::DeferredCallable(callable)) => {
                 Arc::clone(callable.parts(&consumer).type_parameters)
             }
             _ => return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable),
         };
-        let own_return_function = match &candidate.return_carrier {
-            SignatureReturnCarrier::Function(
-                verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-            ) => Some(self.flow_return_key_for(identity).function),
-            _ => None,
-        };
+        let own_return_function = candidate
+            .return_carrier
+            .flow_identity()
+            .map(|identity| self.flow_return_key_for(identity).function);
         let receiver_source = key
             .receiver
             .map(|receiver| self.substitute_canonical(receiver, &key.context.substitution));
@@ -1740,7 +2287,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The diagnostic the checker reports for this candidate when it is
         // the call's error-recovery candidate (`recovery`): the first
         // failure applicability meets. An applicable candidate has none.
-        let mut failure: Option<crate::semantic_query::CheckerDiagnosticCode> = None;
+        let mut failure = match &resume {
+            Some(resume) => resume.failure,
+            None if recovery => contextual_diagnostic,
+            None => None,
+        };
         if too_few || too_many {
             // Only a non-generic candidate recovers past an argument-count
             // mismatch: it infers nothing from the arguments applicability
@@ -1765,7 +2316,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
             });
         }
-        let arguments = if failure.is_some() {
+        let arguments = if too_few || too_many {
             &arguments[..0]
         } else {
             arguments
@@ -1784,7 +2335,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|decl| {
                     InferenceInfoSetup::for_call(
                         decl.param,
-                        Arc::clone(&decl.name),
+                        Arc::<str>::from(&decl.name),
                         if decl.is_const {
                             ConstParamPolicy::Const
                         } else {
@@ -1797,6 +2348,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .into_boxed_slice(),
         );
         let setup = InferenceSessionSetup::new(
+            self.graph(),
             infer_params,
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,
@@ -1805,14 +2357,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ConstParamPolicy::NonConst,
             ContextualInferenceMode::None,
         );
-        let session_id = self
-            .dispatch_txn
-            .borrow_mut()
-            .push_collecting_session(setup, None);
+        // A resumed candidate's collector returns to the transaction with
+        // every deposit it accepted before it stopped.
+        let (session_id, checkpoint, resume) = match resume {
+            Some(resume) => {
+                let SuspendedCandidate {
+                    session,
+                    checkpoint,
+                    next_argument,
+                    failure: _,
+                    deferred_for_relation_scc,
+                    generic_function_arguments,
+                } = resume;
+                drop(setup);
+                let id = session.id;
+                self.restore_suspended_session(session);
+                (
+                    id,
+                    Some(checkpoint),
+                    Some((
+                        next_argument,
+                        deferred_for_relation_scc,
+                        generic_function_arguments,
+                    )),
+                )
+            }
+            None => (
+                self.dispatch_txn
+                    .borrow_mut()
+                    .push_collecting_session(setup, None),
+                None,
+                None,
+            ),
+        };
         // A bare type-parameter rest takes its arity from the arguments
         // (`impliedArity`), none when a spread feeds it; inference from
         // the receiver onward reads it.
-        if let Some((param, rest_start)) = generic_rest {
+        if let (Some((param, rest_start)), None) = (generic_rest, &resume) {
             let spread = arguments.iter().any(|argument| argument.indefinite_spread)
                 || key.args.iter().any(|argument| match argument {
                     CallArgKey::Eager { spread, .. }
@@ -1825,13 +2406,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        let checkpoint = self
-            .dispatch_txn
-            .borrow()
-            .active_session()
-            .expect("fresh call session")
-            .checkpoint();
-        let mut deferred_for_relation_scc = false;
+        let checkpoint = checkpoint.unwrap_or_else(|| {
+            self.dispatch_txn
+                .borrow()
+                .active_session()
+                .expect("fresh call session")
+                .checkpoint()
+        });
+        let resumed = resume.is_some();
+        let (first_argument, mut deferred_for_relation_scc, skipped_generic_functions) =
+            resume.unwrap_or_default();
         // An argument whose parameter IS a `const` type parameter of this
         // candidate is checked in its const context (`isConstContext`): a
         // literal the calling frame computes relates, and deposits, as its
@@ -1870,7 +2454,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             };
 
-        if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
+        // A resumed candidate related its receiver and generic rest before it
+        // stopped.
+        if let (Some(receiver_param), Some(receiver), false) =
+            (receiver_param, call_receiver, resumed)
+        {
             let deposits_before = self.accepted_inference_deposits();
             let source = self.receiver_relation_source(receiver, receiver_param.ty);
             let step = self.call_receiver_relation(source, receiver_param.ty, receiver, budget);
@@ -1901,7 +2489,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
 
-        if let Some((param, rest_start)) = generic_rest {
+        if let (Some((param, rest_start)), false) = (generic_rest, resumed) {
             let deposits_before = self.accepted_inference_deposits();
             let step = self.generic_rest_relation(arguments, rest_start, param, budget, true);
             if !budget
@@ -1932,9 +2520,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // The generic function arguments the first pass skips, each with the
         // one generic signature it holds and its parameter type.
-        let mut generic_function_arguments: Vec<(&CallArgument, SemanticNodeId, SemanticNodeId)> =
-            Vec::new();
-        for (index, argument) in arguments.iter().enumerate() {
+        let mut generic_function_arguments: Vec<(usize, SemanticNodeId, SemanticNodeId)> =
+            skipped_generic_functions;
+        // Only the walk a frame drives over its own call suspends; an
+        // error-recovery reading, a contextual route and every call
+        // evaluated in place relate in place. A contextual route suspends
+        // where its flow evaluation's frame holds it, between the callback
+        // it waits on and the relation of that callback's type
+        // (`flow_return_call_stack`).
+        let suspends = !recovery
+            && self.call_walk_suspends(key)
+            && self.dispatch_txn.borrow().call.contextual.is_none();
+        for (index, argument) in arguments.iter().enumerate().skip(first_argument) {
             if generic_rest.is_some_and(|(_, rest_start)| index >= rest_start) {
                 continue;
             }
@@ -1949,6 +2546,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 graph,
                 &mut canonical_evidence,
             );
+            // An argument relation whose operands need a demand its frame has
+            // no answer for stops here, before it records anything: the
+            // frame needs each, and the candidate resumes at this argument
+            // with its collector as it stands.
+            if let (true, Some(target), false) = (suspends, mapped, argument.context_sensitive) {
+                let (source, _, _) = argument_source(argument, target);
+                if self.call_operands_wait([source, target]) {
+                    let session = self.take_suspended_session(session_id);
+                    return CandidateVerdict::Suspended(Box::new(CallSuspension {
+                        walk: None,
+                        candidate: SuspendedCandidate {
+                            session,
+                            checkpoint,
+                            next_argument: index,
+                            failure,
+                            deferred_for_relation_scc,
+                            generic_function_arguments,
+                        },
+                    }));
+                }
+            }
             self.deposit_canonical_evidence(canonical_evidence);
             let Some(target) = mapped else {
                 self.abandon_session(session_id);
@@ -1964,7 +2582,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 && key.explicit_type_args.is_empty()
             {
                 if let Some(signature) = self.generic_function_against(argument.node, target) {
-                    generic_function_arguments.push((argument, signature, target));
+                    generic_function_arguments.push((index, signature, target));
                     continue;
                 }
             }
@@ -2019,7 +2637,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 RelationStep::Assignable { .. } => {}
                 // A non-generic candidate infers nothing here, so its
                 // error-recovery reading needs no complete relation pass.
-                RelationStep::NotAssignable if recovery && visible_type_params.is_empty() => {
+                RelationStep::NotAssignable
+                    if recovery
+                        && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
+                {
                     failure.get_or_insert(
                         crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     );
@@ -2065,7 +2686,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // callee's type parameters read with what the arguments inferred
         // so far (the checker's fixing mapper), and related as that
         // instantiation.
-        for (argument, signature, target) in generic_function_arguments {
+        for (index, signature, target) in generic_function_arguments {
+            let argument = &arguments[index];
             let return_structure = match &candidate.return_carrier {
                 SignatureReturnCarrier::Declared(declared) => Some(*declared),
                 _ => None,
@@ -2140,19 +2762,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.abandon_session(session_id);
             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
         };
-        let fixation = self.fix_inference_inputs(inputs, &raw_type_params, |this, from, to| {
+        let fixation_params: Vec<_> = raw_type_params
+            .iter()
+            .map(crate::semantic_query::TypeParamDecl::copy)
+            .map(|mut decl| {
+                decl.constraint = decl
+                    .constraint
+                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                decl.default = decl
+                    .default
+                    .map(|node| self.substitute_canonical(node, &contextual_substitution));
+                decl
+            })
+            .collect();
+        let fixation = self.fix_inference_inputs(inputs, &fixation_params, |this, from, to| {
             decided_call_relation(
                 this.call_relation(from, to, from, budget, false, false),
                 own_return_function.as_ref(),
             )
         });
-        let (fixed, uninferred_positions) = match fixation {
+        let (mut fixed, mut uninferred_positions) = match fixation {
             Ok(fixation) => fixation,
             Err(failure) => {
                 self.abandon_session(session_id);
                 return CandidateVerdict::Degraded(failure);
             }
         };
+        // A callback parameter has already observed these types. Later
+        // arguments and error recovery cannot infer them again.
+        for binding in &mut fixed {
+            if let Some(&bound) = contextual_fixed.get(&binding.param) {
+                binding.bound = bound;
+            }
+        }
+        uninferred_positions
+            .retain(|&position| !contextual_fixed.contains_key(&fixed[position].param));
         let uninferred_params: Vec<SemanticNodeId> = uninferred_positions
             .iter()
             .map(|&position| fixed[position].param)
@@ -2197,7 +2841,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
-                let prefix = CanonicalTypeSubstitution::new(substitution.clone());
+                let prefix = CanonicalTypeSubstitution::new(self.graph(), substitution.clone());
                 substitution.push((decl.param, self.substitute_canonical(default, &prefix)));
             }
         }
@@ -2206,8 +2850,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .map(|binding| (binding.param, binding.bound)),
         );
-        let substitution = CanonicalTypeSubstitution::new(substitution);
+        let substitution = CanonicalTypeSubstitution::new(self.graph(), substitution);
         let substitution = CanonicalTypeSubstitution::new(
+            self.graph(),
             substitution
                 .bindings()
                 .iter()
@@ -2221,16 +2866,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // arguments then fail against it. Applicability rejects the
         // candidate outright; its error-recovery reading takes the
         // replacement.
+        record_binding_work(substitution.bindings().len());
+        let mut bound_by_param: FxHashMap<_, _> = substitution.bindings().iter().copied().collect();
         let mut clamped: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
         for decl in raw_type_params.iter() {
-            let Some(bound) = substitution
-                .bindings()
-                .iter()
-                .find_map(|(param, bound)| (*param == decl.param).then_some(*bound))
-            else {
+            let Some(constraint) = decl.constraint else {
                 continue;
             };
-            if let Some(constraint) = decl.constraint {
+            record_binding_work(1);
+            let Some(&bound) = bound_by_param.get(&decl.param) else {
+                continue;
+            };
+            {
                 let constraint = self.substitute_canonical(constraint, &substitution);
                 match decided_call_relation(
                     self.call_relation(bound, constraint, bound, budget, false, false),
@@ -2271,6 +2918,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitution
         } else {
             let rebound = CanonicalTypeSubstitution::new(
+                self.graph(),
                 substitution
                     .bindings()
                     .iter()
@@ -2287,13 +2935,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     })
                     .collect(),
             );
-            CanonicalTypeSubstitution::new(
+            let substitution = CanonicalTypeSubstitution::new(
+                self.graph(),
                 rebound
                     .bindings()
                     .iter()
                     .map(|(param, bound)| (*param, self.substitute_canonical(*bound, &rebound)))
                     .collect(),
-            )
+            );
+            record_binding_work(substitution.bindings().len());
+            bound_by_param = substitution.bindings().iter().copied().collect();
+            substitution
         };
 
         if let (Some(receiver_param), Some(receiver)) = (receiver_param, call_receiver) {
@@ -2317,7 +2969,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // and its arguments recheck positionally. Only a rest still
         // uninstantiated after fixation stays one tuple bundle.
         let substituted_rest_param = rest.map(|rest| {
-            let mut param = rest.param.clone();
+            let mut param = rest.param.copy();
             param.ty = self.substitute_canonical(param.ty, &substitution);
             param
         });
@@ -2371,7 +3023,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the callee's type parameters is typed under that type and
             // checked on the next request, never as the untyped function it
             // is here.
-            if argument.context_sensitive && key.explicit_type_args.is_empty() {
+            if argument.context_sensitive
+                && key.explicit_type_args.is_empty()
+                && !(recovery && contextual_diagnostic.is_some())
+            {
                 let reads_inference = (!uninferred_params.is_empty()
                     && self.contextual_return_mentions(target, &uninferred_params))
                     || (sole_candidate
@@ -2395,7 +3050,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
                     );
                 }
-                Ok(Some(false)) => return self.reject_call_candidate(session_id, &checkpoint),
+                Ok(Some(false)) => {
+                    if self
+                        .dispatch_txn
+                        .borrow()
+                        .call
+                        .contextual
+                        .as_ref()
+                        .is_some_and(|state| state.was_context_sensitive(index))
+                    {
+                        let code = self.contextual_argument_failure(source, target, budget);
+                        if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
+                        {
+                            state.diagnostic = Some(code);
+                        }
+                    }
+                    return self.reject_call_candidate(session_id, &checkpoint);
+                }
                 Ok(None) => deferred_for_relation_scc = true,
                 Err(failure) => {
                     self.abandon_session(session_id);
@@ -2445,6 +3116,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the way the checker reads a literal context through a type
             // parameter's constraint.
             let inferred = CanonicalTypeSubstitution::new(
+                self.graph(),
                 substitution
                     .bindings()
                     .iter()
@@ -2452,32 +3124,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if !uninferred_params.contains(param) {
                             return (*param, *bound);
                         }
-                        let constrained =
-                            constraints
-                                .get(param)
-                                .copied()
-                                .flatten()
-                                .and_then(|constraint| {
-                                    let data = graph.node_data(*param)?;
-                                    let SemanticNodeData::TypeParam {
-                                        decl,
-                                        param_index,
-                                        default,
-                                        display_name,
-                                        constraint: None,
-                                    } = &*data
-                                    else {
-                                        return None;
-                                    };
-                                    Some(graph.intern_node(SemanticNodeData::TypeParam {
-                                        decl: decl.clone(),
-                                        param_index: *param_index,
-                                        constraint: Some(constraint),
-                                        default: *default,
-                                        display_name: Arc::clone(display_name),
-                                    }))
-                                });
-                        (*param, constrained.unwrap_or(*param))
+                        (
+                            *param,
+                            self.contextual_uninferred_parameter(
+                                *param,
+                                constraints.get(param).copied().flatten(),
+                            ),
+                        )
                     })
                     .collect(),
             );
@@ -2498,11 +3151,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let ordered_args = raw_type_params
             .iter()
             .map(|decl| {
-                substitution
-                    .bindings()
-                    .iter()
-                    .find_map(|(param, bound)| (*param == decl.param).then_some(*bound))
-                    .unwrap_or(unknown)
+                record_binding_work(1);
+                bound_by_param.get(&decl.param).copied().unwrap_or(unknown)
             })
             .collect::<Vec<_>>();
         let selected_node = if ordered_args.is_empty() {
@@ -2522,8 +3172,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut concrete_seeds = Vec::new();
         let mut holds = Vec::new();
         let mut fresh_literal_returns = Vec::new();
-        match &candidate.return_carrier {
-            SignatureReturnCarrier::Declared(declared) => {
+        match candidate.return_carrier.result_source() {
+            crate::semantic_query::SignatureResultSource::Declared(declared) => {
                 // Per-binder freshness at the call boundary (the checker's
                 // inference-widening rule, measured against the pinned
                 // checker): a FRESH literal deposit widens at the call
@@ -2574,9 +3224,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let instantiated =
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
-                concrete_seeds.push(self.reduce_instantiated_operators(instantiated));
+                concrete_seeds.push(self.evaluate_selected_value_with_context(
+                    instantiated,
+                    crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ));
             }
-            SignatureReturnCarrier::Function(source) => match source {
+            crate::semantic_query::SignatureResultSource::Function(source) => match source {
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity) => {
                     let flow_key = self.flow_return_key_for_instantiation(
                         identity,
@@ -2589,7 +3244,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .obligations
                         .pending()
                         .pending_len();
-                    match self.execute_flow_return(flow_key.clone()) {
+                    let read = self.observe_flow_return_value(flow_key.clone());
+                    let provisional = self
+                        .dispatch_txn
+                        .borrow()
+                        .obligations
+                        .pending()
+                        .pending_len()
+                        != pending_before;
+                    let declined = (provisional
+                        && matches!(
+                            read.value(),
+                            crate::semantic_query::FlowReturnStep::Complete(_)
+                        ))
+                        || matches!(
+                            read.value(),
+                            crate::semantic_query::FlowReturnStep::Hold(_)
+                                | crate::semantic_query::FlowReturnStep::NoValue(
+                                    crate::semantic_query::FlowReturnFailure::EmptyCycle
+                                )
+                        );
+                    let step = if declined {
+                        read.discard()
+                    } else {
+                        read.adopt(self)
+                    }
+                    .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                    match step {
                         // A callee that closed its own SCC independently
                         // is FINAL: its return is a concrete seed of this
                         // call, not an equation edge. A naked flow return
@@ -2685,15 +3366,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                match self.execute_flow_return(binder_key) {
+                                let read = self.observe_flow_return_value(binder_key);
+                                let exact = read.observations_are_complete()
+                                    && matches!(read.value(), crate::semantic_query::FlowReturnStep::Complete(value) if value.fact().status().is_complete())
+                                    && self
+                                        .dispatch_txn
+                                        .borrow()
+                                        .obligations
+                                        .pending()
+                                        .pending_len()
+                                        == binder_pending_before;
+                                let step = if exact {
+                                    read.adopt(self)
+                                } else {
+                                    read.discard()
+                                }
+                                .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                                match step {
                                     crate::semantic_query::FlowReturnStep::Complete(binder)
-                                        if self
-                                            .dispatch_txn
-                                            .borrow()
-                                            .obligations
-                                            .pending()
-                                            .pending_len()
-                                            == binder_pending_before =>
+                                        if exact =>
                                     {
                                         Some(binder.return_type())
                                     }
@@ -2776,7 +3467,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     .obligations
                                     .pending()
                                     .pending_len();
-                                match self.execute_flow_return(widened_key) {
+                                let read = self.observe_flow_return_value(widened_key);
+                                let retained = self
+                                    .dispatch_txn
+                                    .borrow()
+                                    .obligations
+                                    .pending()
+                                    .pending_len()
+                                    == widened_pending_before
+                                    && matches!(
+                                        read.value(),
+                                        crate::semantic_query::FlowReturnStep::Complete(_)
+                                    );
+                                let step = if retained {
+                                    read.adopt(self)
+                                } else {
+                                    read.discard()
+                                }
+                                .unwrap_or_else(crate::semantic_query::FlowReturnStep::Aborted);
+                                match step {
                                     crate::semantic_query::FlowReturnStep::Complete(widened)
                                         if self
                                             .dispatch_txn
@@ -2822,7 +3531,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.abandon_session(session_id);
                             return CandidateVerdict::Degraded(ResolveCallFailure::Budget);
                         }
-                        crate::semantic_query::FlowReturnStep::NoValue(_) => {
+                        crate::semantic_query::FlowReturnStep::Aborted(_)
+                        | crate::semantic_query::FlowReturnStep::NoValue(_) => {
                             self.abandon_session(session_id);
                             return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                         }
@@ -3013,6 +3723,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|(_, binding)| binding)
             .collect();
         let inferred = CanonicalTypeSubstitution::new(
+            self.graph(),
             inferred
                 .iter()
                 .map(|binding| (binding.param, binding.bound))
@@ -3121,7 +3832,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => argument.node,
         };
         let source = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(
+            elements: crate::semantic_query::PayloadArray::from(
                 trailing
                     .iter()
                     .map(|argument| crate::semantic_query::TupleElement {
@@ -3211,6 +3922,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             session.abandon();
         }
         CandidateVerdict::Mismatch
+    }
+
+    fn take_suspended_session(&self, id: SessionId) -> super::inference::session::InferenceSession {
+        self.take_collecting_session(id)
+    }
+
+    fn restore_suspended_session(&self, session: super::inference::session::InferenceSession) {
+        self.restore_collecting_session(&mut Some(session));
+    }
+
+    /// Release a call walk its frame abandoned while suspended: its held
+    /// collector returns to the transaction abandoned, as a rejected
+    /// candidate's does.
+    pub(super) fn abandon_call_suspension(&self, suspension: CallSuspension) {
+        let id = suspension.session_id();
+        self.restore_suspended_session(suspension.into_session());
+        self.abandon_session(id);
     }
 
     pub fn abandon_session(&self, session_id: SessionId) {
@@ -3468,13 +4196,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let oracle_demand = ProjectionReductionContext::structural_transit_with_mode(
             crate::semantic_query::ProjectionMode::Navigate,
         );
-        let owner_canonical = Arc::clone(&base.canonical_id);
+        let owner_canonical = base.canonical_id.clone();
         let slot = self.type_slot_for(
-            Arc::clone(&base.canonical_id),
+            base.canonical_id.clone(),
             base.owner,
-            Arc::clone(&base.decl_name),
+            base.decl_name.clone(),
         );
-        let args = Arc::clone(args);
+        let args = Arc::clone(args.as_arc());
         let read = self.execute_read(SemanticQueryKey::Instantiate(
             crate::semantic_query::InstantiateKey::new(
                 slot,
@@ -3483,7 +4211,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         ));
         crate::request_context::observe_component_meta_read_suppress(&read);
-        if read.result_is_partial {
+        if read.result_is_partial() {
             return AliasExpansion::Incomplete;
         }
         match read.value {
@@ -3594,7 +4322,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<CanonicalTypeSubstitution, ResolveCallFailure> {
         let mut bindings = widened.bindings().to_vec();
         for defaulted in defaulted {
-            let current = CanonicalTypeSubstitution::new(bindings.clone());
+            let current = CanonicalTypeSubstitution::new(self.graph(), bindings.clone());
             let mut bound = self.substitute_canonical(defaulted.default, &current);
             if let Some(constraint) = defaulted.constraint {
                 let constraint = self.substitute_canonical(constraint, &current);
@@ -3614,7 +4342,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 None => bindings.push((defaulted.param, bound)),
             }
         }
-        Ok(CanonicalTypeSubstitution::new(bindings))
+        Ok(CanonicalTypeSubstitution::new(self.graph(), bindings))
     }
 
     /// The widened substitution described above; a fresh deposit whose
@@ -3692,7 +4420,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             any_widened |= widened != *bound;
             widened_bindings.push((*param, widened));
         }
-        Ok(any_widened.then(|| CanonicalTypeSubstitution::new(widened_bindings)))
+        Ok(any_widened.then(|| CanonicalTypeSubstitution::new(self.graph(), widened_bindings)))
     }
 
     pub(super) fn call_inference_candidate(
@@ -3726,14 +4454,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(|element| self.call_shape_transform(element.value, policy, memo))
                     .collect::<Vec<_>>();
                 if policy == ConstParamPolicy::Const {
-                    let mut mapped = elements.to_vec();
+                    let mut mapped = elements
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect::<Vec<_>>();
                     for (element, value) in mapped.iter_mut().zip(values) {
                         element.value = value;
                     }
                     graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::Tuple {
-                            elements: Arc::from(mapped.into_boxed_slice()),
+                            elements: crate::semantic_query::PayloadArray::from(
+                                mapped.into_boxed_slice(),
+                            ),
                             readonly: true,
                         },
                     )
@@ -3791,7 +4524,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             Some(SemanticNodeData::Object(surface)) => {
-                let mut members = surface.positive_members().to_vec();
+                let mut members = surface
+                    .positive_members()
+                    .iter()
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect::<Vec<_>>();
                 for member in &mut members {
                     member.value = self.call_shape_transform(member.value, policy, memo);
                     member.readonly = policy == ConstParamPolicy::Const;
@@ -3817,7 +4554,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 enum CallCandidates {
     /// The bucket's ordered visible candidates, instantiated under the
     /// call's explicit type arguments when it carries any.
-    Candidates(Arc<[SignatureRef]>),
+    Candidates(verter_session_query::retention::owned::OwnedSlice<SignatureRef>),
     /// The bucket is complete and empty: the callee cannot be invoked this
     /// way.
     Empty,
@@ -3918,7 +4655,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::TypeParam { .. }) => RestShape::GenericTuple(resolved),
             Some(SemanticNodeData::Array { element, .. }) => RestShape::Array(*element),
             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                RestShape::Tuple(Arc::clone(elements))
+                RestShape::Tuple(Arc::clone(elements.as_arc()))
             }
             _ => RestShape::Unresolved,
         }
@@ -3936,6 +4673,7 @@ fn call_candidate_arity(
     params: &[FunctionParam],
     rest: Option<&RestParam<'_>>,
 ) -> (usize, Option<usize>, bool) {
+    record_argument_work(params.len());
     let fixed = params
         .iter()
         .filter(|param| !param.rest)
@@ -4106,10 +4844,18 @@ fn tuple_suffix_target(
     match suffix {
         [] => None,
         [only] if only.rest => Some(only.value),
-        _ => Some(graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from(suffix.to_vec().into_boxed_slice()),
-            readonly: false,
-        })),
+        _ => Some(
+            graph.intern_node(SemanticNodeData::Tuple {
+                elements: crate::semantic_query::PayloadArray::from(
+                    suffix
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+                readonly: false,
+            }),
+        ),
     }
 }
 

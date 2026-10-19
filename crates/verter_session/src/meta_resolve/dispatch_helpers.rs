@@ -21,7 +21,6 @@
 //! surface→shape raises. Dispatch is the sole resolution authority on these
 //! paths.
 
-use std::sync::Arc;
 use verter_type_engine::resolver_core::ResolverContext;
 
 /// Extract the OUTER utility/identifier name from a route-bearing
@@ -223,7 +222,7 @@ pub(crate) fn decompose_indexed_access_chain(
     expr: &verter_type_expr::TypeExpr,
 ) -> (
     &verter_type_expr::TypeExpr,
-    Arc<[verter_type_engine::semantic_query::PathSegment]>,
+    verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment>,
 ) {
     use verter_type_engine::semantic_query::{IndexKey, PathSegment};
     use verter_type_expr::{LiteralValue, TypeExpr};
@@ -234,9 +233,9 @@ pub(crate) fn decompose_indexed_access_chain(
             TypeExpr::IndexedAccess { object, index } => match index.as_ref() {
                 TypeExpr::Literal(LiteralValue::String(member)) => {
                     let inner_base = descend(object, path);
-                    path.push(PathSegment::Index(IndexKey::String(Arc::from(
-                        member.as_str(),
-                    ))));
+                    path.push(PathSegment::Index(IndexKey::String(
+                        verter_type_expr::OwnedStr::from(member.as_str()),
+                    )));
                     inner_base
                 }
                 _ => expr,
@@ -247,7 +246,10 @@ pub(crate) fn decompose_indexed_access_chain(
 
     let mut path: Vec<PathSegment> = Vec::new();
     let base = descend(expr, &mut path);
-    (base, Arc::from(path.into_boxed_slice()))
+    (
+        base,
+        verter_type_expr::OwnedSlice::from(path.into_boxed_slice()),
+    )
 }
 
 // Class B helpers (dispatch-only surface projection) resolve a root
@@ -360,7 +362,10 @@ pub(crate) fn arg_preserving_member_use_site_slot<
     // Gate: the observed value head must be an argument-bearing named
     // reference (the class the argument-less `Ref` publication is lossy
     // for). One bounded node-domain peek — no dispatch.
-    let observed = resolved_instantiation_head(dispatch, value_node)?;
+    // Every carrier the two head resolutions below construct stays held
+    // until their identities are compared.
+    let mut held = Vec::new();
+    let observed = resolved_instantiation_head(dispatch, value_node, &mut held)?;
 
     let origin = declaration_origin?;
     let declaring_owner = observed.0.owner;
@@ -404,14 +409,14 @@ pub(crate) fn arg_preserving_member_use_site_slot<
     // one member annotation (never a body expansion, never an Instantiate
     // execution).
     let raised = dispatch
-        .raise_authored_locator_to_hot(
+        .owning().raise_authored_locator_to_hot(
             &verter_type_expr::locators::AuthoredBodyLocator::DeclBody(slot.clone()),
             verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                 verter_type_engine::semantic_query::ProjectionMode::Navigate,
             ),
-        )
-        .at_optional_boundary()?;
-    let authored = resolved_instantiation_head(dispatch, raised.node())?;
+        );
+    let raised_hot = raised.value().clone().at_optional_boundary()?;
+    let authored = resolved_instantiation_head(dispatch, raised_hot.node(), &mut held)?;
     (authored == observed).then_some(slot)
 }
 
@@ -420,10 +425,17 @@ pub(crate) fn arg_preserving_member_use_site_slot<
 /// (`InstantiationRef`, or a `BareRef` / `ImportType` carrier still holding
 /// authored type arguments that head-resolves to one through the shared
 /// carrier-preserving normalization — name-to-declaration routing only,
-/// never body expansion). `None` for every other shape.
+/// never body expansion). `None` for every other shape. The carriers of the
+/// head resolutions it constructs are pushed onto `held`, which owns the
+/// returned identity's nodes for as long as the caller keeps it.
 fn resolved_instantiation_head<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
     node: verter_type_engine::semantic_query::SemanticNodeId,
+    held: &mut Vec<
+        verter_type_engine::semantic_query_memo::node_roots::Constructed<
+            verter_type_engine::semantic_query::SemanticNodeId,
+        >,
+    >,
 ) -> Option<(
     verter_type_engine::semantic_query::DeclIdentity,
     std::sync::Arc<[verter_type_engine::semantic_query::SemanticNodeId]>,
@@ -434,29 +446,27 @@ fn resolved_instantiation_head<C: verter_type_engine::resolver_core::ResolverCap
     // Bounded: alias chains are short; the cap only guards pathological
     // graph shapes.
     for _ in 0..16 {
-        let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            current,
-        )?;
+        let data = dispatch.graph().read_in_scope(current)?;
         match &*data {
             SemanticNodeData::Alias(inner) => current = *inner,
             SemanticNodeData::InstantiationRef { base, args } => {
-                return (!args.is_empty()).then(|| (base.clone(), std::sync::Arc::clone(args)));
+                return (!args.is_empty()).then(|| (base.clone(), std::sync::Arc::from(&args[..])));
             }
             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
                 if !data.carrier_type_args().is_empty() =>
             {
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let resolved = dispatch.owning().resolve_carrier_subject_node(
                     current,
                     verter_type_engine::semantic_query::ProjectionReductionContext::published(
                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
                 );
-                if resolved == current {
+                if *resolved.value() == current {
                     return None;
                 }
-                current = resolved;
+                current = *resolved.value();
+                held.push(resolved);
             }
             _ => return None,
         }

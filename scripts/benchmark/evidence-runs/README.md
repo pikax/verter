@@ -27,21 +27,62 @@ manifests under `scripts/benchmark/evidence-run-fixtures/` (`pnpm test:scripts`)
 
 `scripts/benchmark/evidence-runs/<name>.json`. Each run name has exactly one
 owner: the change that needs the run adds its manifest and no other change
-edits it. Shipped: `skr-perf0-structural`.
+edits it. Shipped: `skr-perf0-structural`, `skr-mapped-indexb`, `switch-discriminated`,
+`skr-callback-cost` (10, 100 and 500 contravariant callbacks; cold Verter time
+and peak memory beside whole-program TypeScript wall time),
+`skr-augment-scaleb` (a global interface merged from 2,000 script contributors
+and a module interface augmented by 2,000 unimported modules; cold Verter time
+and peak memory, and each reproduction's retention proof: one engine answering
+500 then 2,000 contributors against a 2,000-only baseline session),
+`skr-scale-answers`, `skr-mapped-expand`.
 
-| Field                             | Meaning                                                                                                                                                        |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`                            | the run name; equals the file stem (lower-case letters, digits, hyphens)                                                                                       |
-| `description`                     | what the run is for, in one sentence                                                                                                                           |
-| `tier`                            | `quick`, `standard` or `stress`: default scenario set, deadline and repetition counts                                                                          |
-| `scenarios`                       | scenario ids or prefixes from the catalog (`scenarios.mjs`), as `--only` takes them; omitted means the tier's set                                              |
-| `settings`                        | setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); the harness runs `strict` alone or all four, so any other subset is rejected; omitted means `strict` |
-| `arms`                            | arm ids from `ARMS` in `semantic-perf/analyze.mjs`; unknown ids are rejected                                                                                   |
-| `modes`                           | `cold` (fresh-process demands) and `warm` (in-process repeats); a whole-program `tsc -p` arm has only `cold`                                                   |
-| `threads`                         | `"default"` (the tool's own choice) or `1` (`tsc-cli-1`); the harness takes no thread option, so any other count for an arm is rejected                        |
-| `repeat`, `warmup`, `warmRepeats` | measured invocations, unmeasured warmups, in-process warm repeats per cell; omitted means the tier's defaults. `repeat` takes any count from 2 up              |
-| `noise`                           | link to a section of the semantic-benchmark page defining the noise methodology                                                                                |
-| `requiredCells`                   | cells the summary must contain: scenario, setting, arm, mode, thread count and required metrics                                                                |
+`skr-mapped-indexb` demands conditional mapped values through the entire source
+key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
+is `"b" | "n" | "s"`. Its strict, cold Verter cells require `firstTypeMs` and
+`peakBytes`; the fleet measures those cells on the benchmark worker. The run
+sets `requireAllMatched`, so a Verter answer at any of the three sizes that
+does not match the measured TypeScript answer exactly fails the run.
+
+`skr-scale-answers` demands the recursive `Names` and `Paths` conditionals over
+an `as const` route tree of 100 and 300 parents (five children each), a repeated
+`infer` pattern over a 100- and a 1,000-member union, and an inference through
+100 and 1,000 distinct aliases of one generic. TypeScript 7.0.2 answers every
+one with the full literal union and no diagnostic. Its required cells are the
+largest sizes: cold Verter `coldMs` and `peakBytes` beside whole-program
+`tsc-cli` `wallMs`; the middle sizes run beside them for comparison. The
+run also demands the `Names` of a 2,000-parent tree (12,000 names, every child
+name included) and the repeated `infer` over a 6,000-member union (6,000
+numbers). Those two are answer obligations with timing evidence: their Verter
+`coldMs` and `peakBytes` and `tsc-cli` `wallMs` cells are required, but no
+timing threshold passes or fails the run. The run sets `requireAllMatched`, so
+any Verter answer in it that does not match the measured TypeScript answer
+exactly (wrong, partial, refused or killed) fails the run.
+
+`skr-mapped-expand` demands homomorphic and remapped mapped types over
+concrete sources: the keys of a class built from 10, 25 and 40 mixins, the
+intersection a builder accumulates over 50, 200 and 500 calls, the 100, 1,000
+and 3,000 keys of an imported interface remapped through a recursive template
+conditional, and a generic interface heritage chain 10, 40 and 100 levels
+deep. TypeScript 7.0.2 answers each with the resolved object type. The run sets
+`requireAllMatched`, so every Verter answer must match the measured reference
+exactly; its required cells are the largest sizes' cold Verter `coldMs` and
+`peakBytes`.
+
+| Field                             | Meaning                                                                                                                                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`                            | the run name; equals the file stem (lower-case letters, digits, hyphens)                                                                                                                                 |
+| `description`                     | what the run is for, in one sentence                                                                                                                                                                     |
+| `tier`                            | `quick`, `standard` or `stress`: default scenario set, deadline and repetition counts                                                                                                                    |
+| `scenarios`                       | scenario ids or prefixes from the catalog (`scenarios.mjs`), as `--only` takes them; omitted means the tier's set                                                                                        |
+| `sessions`                        | exact session ids from the session catalog (`sessions.mjs`), run through `--only`; a growth session's baseline must be listed too; with no `scenarios`, the listed sessions run and no scenario does     |
+| `settings`                        | setting ids (`strict`, `snc-off`, `nia-off`, `both-off`); the harness runs `strict` alone or all four, so any other subset is rejected; omitted means `strict`                                           |
+| `arms`                            | arm ids from `ARMS` in `semantic-perf/analyze.mjs`; unknown ids are rejected                                                                                                                             |
+| `modes`                           | `cold` (fresh-process demands) and `warm` (in-process repeats); a whole-program `tsc -p` arm has only `cold`                                                                                             |
+| `threads`                         | `"default"` (the tool's own choice) or `1` (`tsc-cli-1`); the harness takes no thread option, so any other count for an arm is rejected                                                                  |
+| `repeat`, `warmup`, `warmRepeats` | measured invocations, unmeasured warmups, in-process warm repeats per cell; omitted means the tier's defaults. `repeat` takes any count from 2 up                                                        |
+| `requireAllMatched`               | `true` forwards `--require-all-matched` to `validate.mjs`: every Verter answer of the run must match the measured reference, or the run fails; omitted means `false` (a non-matched answer is a finding) |
+| `noise`                           | link to a section of the semantic-benchmark page defining the noise methodology                                                                                                                          |
+| `requiredCells`                   | cells the summary must contain: scenario, setting, arm, mode, thread count and required metrics                                                                                                          |
 
 Probe-arm `cold` metrics: `firstTypeMs`, `coldMs`, `initMs`, `setupMs`,
 `engineStartMs`, `observeMs`, `teardownMs`, `cpuMs`, `peakBytes`,
@@ -62,3 +103,9 @@ Each run writes `evidence-summary.json` into its output directory (default
 `harness/`. It holds the manifest name and byte digest, whether it was a dry
 run, the worker record, the per-cell status (measured, skeleton, or
 `unavailable` with a reason) and the harness validation verdict and problems.
+For each session the manifest lists it holds the status (present, missing or
+not run), the Verter answer class and, for a growth session, its retention
+proof (see `docs/contributing/semantic-benchmark.md#session-workloads`). The
+proof's figures are retention-account bytes and object counts, read on every
+worker; a missing session, a failed proof or a proof with nothing to compare
+fails the run.

@@ -542,6 +542,9 @@ impl VerterHost {
     /// invariant a regression test can drive directly and so the
     /// check is unambiguously computed before any per-request side effect.
     fn assert_canonicals_unique(canonicals: &[String]) {
+        if canonicals.len() < 2 {
+            return;
+        }
         let mut seen = std::collections::HashSet::with_capacity(canonicals.len());
         for canonical in canonicals {
             assert!(
@@ -1110,6 +1113,8 @@ impl VerterHost {
             .map(|commit| (commit.canonical_id, commit.parsed_edges))
             .collect::<Vec<_>>();
         self.ws().record_parsed_edges_many(&records);
+        self.ingest_injected_ambient_roots(None);
+        self.ingest_changed_program_files(records.into_iter().map(|(canonical, _)| canonical));
     }
 
     fn notify_upsert_many(&self, records: &[(String, Arc<str>)]) {

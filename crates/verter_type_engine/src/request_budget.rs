@@ -6,6 +6,8 @@
 //! worker propagation uses the same request-context TLS bridge as audit
 //! and cache counters.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -20,7 +22,7 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 /// utility / projection / generic-expansion recursion before the call
 /// stack exhausts. The cap is constructor-time on
 /// `HostConfig::projection_op_budget`; a value of `0` preserves the
-/// legacy default of 2000.
+/// default, [`DEFAULT_PROJECTION_OP_BUDGET`].
 ///
 /// The set of `SemanticQueryKey` kinds that count is the aggregate
 /// work-budget gate
@@ -34,14 +36,19 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 ///
 /// # Default rationale
 ///
-/// The default `2000` is a **fuse threshold**, not a correctness
-/// boundary. It is sized so legitimate component-meta resolutions on
-/// representative corpora (nuxt-ui, element-plus, primevue, etc.)
-/// complete well under the cap with substantial headroom, while
-/// pathological projections — recursive `Pick<...>` chains over
+/// The default is a **fuse threshold**, not a correctness boundary: the
+/// checker's own instantiation allowance
+/// ([`checker_policy::INSTANTIATION_COUNT`]). One operation is one counted
+/// query computed, coarser than the checker's instantiation: a distributive
+/// conditional repeating an `infer` costs 3 operations per union member
+/// where the checker instantiates 7, and a recursive conditional over an
+/// `as const` route tree 13 per parent where the checker instantiates 219.
+/// So a finite computation the checker answers within its allowance does
+/// not trip the fuse, and a smaller allowance would refuse where the
+/// checker answers. Pathological projections — recursive `Pick<...>` chains over
 /// untyped barrels, deep `Surface[K1][K2]...[Kn]` walks with missing
-/// types, generic-helper instantiation storms — exhaust within a
-/// few seconds and surface a partial.
+/// types, generic-helper instantiation storms — still exhaust the finite
+/// allowance and surface a partial.
 ///
 /// **Semantic contract on exhaustion**: a request that trips the cap
 /// returns a *partial* `ComponentMeta` with the same structural
@@ -71,6 +78,8 @@ use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
 /// ([`Self::admit_replayed_operations`]), so a request trips the fuse at
 /// the same point whether its sub-results were computed now, earlier in
 /// the request, or by an earlier request.
+///
+/// [`checker_policy::INSTANTIATION_COUNT`]: crate::semantic_query::checker_policy::INSTANTIATION_COUNT
 #[derive(Debug)]
 pub struct RequestBudget {
     /// Projection-operation budget for the request.
@@ -80,6 +89,12 @@ pub struct RequestBudget {
     /// in it, or replayed into it.
     operations_paid: Mutex<PaidOperations>,
 }
+
+/// Default finite headroom for projection operations, shared by host
+/// configuration and the zero-config fallback: the checker's instantiation
+/// allowance (see [`RequestBudget`]'s default rationale).
+pub const DEFAULT_PROJECTION_OP_BUDGET: usize =
+    crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize;
 
 /// The computations a request has paid the operations of, in the order it
 /// paid them, with an order-independent digest of the set: a demand's entry
@@ -101,8 +116,9 @@ impl PaidOperations {
     pub(crate) fn insert(&mut self, identity: CostIdentity) -> bool {
         let hash = identity.hash_value();
         if self.set.insert(identity.clone()) {
-            self.order.push(identity);
+            self.order.push(identity.clone());
             self.digest = self.digest.wrapping_add(spread(hash));
+            attribute_paid(&identity);
             true
         } else {
             false
@@ -134,6 +150,36 @@ pub struct RequestEntryState {
     paid_digest: u64,
 }
 
+impl RequestEntryState {
+    /// How many computations were already paid when the demand entered.
+    #[must_use]
+    pub(crate) fn paid_len(&self) -> usize {
+        self.paid_len
+    }
+
+    /// Order-independent digest of the paid set at entry.
+    #[must_use]
+    pub(crate) fn paid_digest(&self) -> u64 {
+        self.paid_digest
+    }
+
+    /// Projection operations already spent when the demand entered.
+    #[must_use]
+    pub(crate) fn operations(&self) -> usize {
+        self.operations
+    }
+}
+
+/// The request state a component-meta compute entered at, including the
+/// paid-set order. A later observation accepts a spend only when that
+/// order is still the prefix: an insertion ahead of it means the spend
+/// is not this compute's.
+#[derive(Clone)]
+pub(crate) struct RequestEntrySnapshot {
+    state: RequestEntryState,
+    paid: Box<[CostIdentity]>,
+}
+
 /// What one evaluation did to a request it ran in alone: the state it
 /// entered the request at, and its own effects from there — the operations
 /// it spent and the computations it paid.
@@ -149,10 +195,188 @@ pub struct RequestSpent {
 }
 
 impl RequestSpent {
-    /// The computations it names, entered at and paid.
-    pub(crate) fn identities(&self) -> usize {
-        self.entry_paid.len() + self.paid.len()
+    /// The bytes a retained copy of this spend keeps: both paid lists'
+    /// backings and every identity they name, once per `aliases`. A paid
+    /// identity can outlive the receipt that minted it, so a retained
+    /// spend counts what it keeps reachable.
+    pub(crate) fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::heap_block_bytes;
+        let list =
+            |identities: &[CostIdentity],
+             aliases: &mut verter_session_query::retention::allocation::AliasSet| {
+                heap_block_bytes(std::mem::size_of_val(identities))
+                    + identities
+                        .iter()
+                        .map(|identity| identity.owned_heap_bytes(aliases))
+                        .sum::<usize>()
+            };
+        list(&self.entry_paid, aliases) + list(&self.paid, aliases)
     }
+
+    /// A spend that names these identities and nothing else. Retention tests
+    /// use it to vary the stored prefix without a live request.
+    #[cfg(test)]
+    pub(crate) fn from_identities_for_test(
+        entry_paid: Vec<CostIdentity>,
+        paid: Vec<CostIdentity>,
+    ) -> Self {
+        Self {
+            entry: RequestEntryState {
+                operations: 0,
+                paid_len: entry_paid.len(),
+                paid_digest: 0,
+            },
+            entry_paid: entry_paid.into_boxed_slice(),
+            operations: 0,
+            paid: paid.into_boxed_slice(),
+        }
+    }
+}
+
+/// Operations and paid identities recorded on this thread while a
+/// component-meta compute owns the stack. Admission reads the copy taken
+/// at the end of that compute, not this stack.
+#[derive(Default)]
+struct ThreadSpendLog {
+    operations: usize,
+    paid: Vec<CostIdentity>,
+}
+
+thread_local! {
+    static THREAD_SPEND_LOGS: RefCell<Vec<Rc<RefCell<ThreadSpendLog>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Pushes a spend log for the current thread. Nested computes each keep
+/// their own log, and a spend is recorded on every log still on the stack
+/// so an outer compute includes the inner one's request effects.
+pub(crate) struct ThreadSpendGuard {
+    log: Rc<RefCell<ThreadSpendLog>>,
+}
+
+impl ThreadSpendGuard {
+    pub(crate) fn enter() -> Self {
+        let log = Rc::new(RefCell::new(ThreadSpendLog::default()));
+        THREAD_SPEND_LOGS.with(|logs| logs.borrow_mut().push(Rc::clone(&log)));
+        Self { log }
+    }
+
+    pub(crate) fn finish(self) -> (usize, Vec<CostIdentity>) {
+        let out = {
+            let log = self.log.borrow();
+            (log.operations, log.paid.clone())
+        };
+        drop(self);
+        out
+    }
+}
+
+impl Drop for ThreadSpendGuard {
+    fn drop(&mut self) {
+        THREAD_SPEND_LOGS.with(|logs| {
+            logs.borrow_mut().retain(|log| !Rc::ptr_eq(log, &self.log));
+        });
+    }
+}
+
+/// Capture the request operations and paid computations `body` spends, as
+/// a component-meta compute's spend log records them.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_request_spend_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, usize, usize) {
+    let guard = ThreadSpendGuard::enter();
+    let result = body();
+    let (operations, paid) = guard.finish();
+    (result, operations, paid.len())
+}
+
+/// The request spend of a semantic task, which may be polled on a thread
+/// other than the one that lent it its request: one log standing for every
+/// log on the stack where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only log, and the task's return
+/// records what it spent on the logs it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskSpendCarry {
+    open: bool,
+    operations: usize,
+    paid: Vec<CostIdentity>,
+}
+
+impl TaskSpendCarry {
+    /// The carry of a task lent here: open exactly when a log is.
+    pub(crate) fn lend() -> Self {
+        Self {
+            open: THREAD_SPEND_LOGS.with(|logs| !logs.borrow().is_empty()),
+            operations: 0,
+            paid: Vec::new(),
+        }
+    }
+
+    /// Install the task's log on this thread for one poll; the returned
+    /// guard restores the thread's own logs and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskSpendInstall<'_> {
+        let task = if self.open {
+            vec![Rc::new(RefCell::new(ThreadSpendLog {
+                operations: std::mem::take(&mut self.operations),
+                paid: std::mem::take(&mut self.paid),
+            }))]
+        } else {
+            Vec::new()
+        };
+        let thread = THREAD_SPEND_LOGS.with(|logs| logs.replace(task));
+        TaskSpendInstall {
+            carry: self,
+            thread,
+        }
+    }
+
+    /// Record what the task spent on every log on this thread's stack, the
+    /// one that lent it, in the order it spent it.
+    pub(crate) fn return_to_lender(self) {
+        attribute_operations(self.operations);
+        for identity in &self.paid {
+            attribute_paid(identity);
+        }
+    }
+}
+
+/// A task's spend log installed for one poll ([`TaskSpendCarry::install`]).
+pub(crate) struct TaskSpendInstall<'c> {
+    carry: &'c mut TaskSpendCarry,
+    thread: Vec<Rc<RefCell<ThreadSpendLog>>>,
+}
+
+impl Drop for TaskSpendInstall<'_> {
+    fn drop(&mut self) {
+        let task = THREAD_SPEND_LOGS.with(|logs| logs.replace(std::mem::take(&mut self.thread)));
+        if let Some(log) = task.first() {
+            let mut log = log.borrow_mut();
+            self.carry.operations = std::mem::take(&mut log.operations);
+            self.carry.paid = std::mem::take(&mut log.paid);
+        }
+    }
+}
+
+fn attribute_operations(n: usize) {
+    if n == 0 {
+        return;
+    }
+    THREAD_SPEND_LOGS.with(|logs| {
+        for log in logs.borrow().iter() {
+            let mut slot = log.borrow_mut();
+            slot.operations = slot.operations.saturating_add(n);
+        }
+    });
+}
+
+fn attribute_paid(identity: &CostIdentity) {
+    THREAD_SPEND_LOGS.with(|logs| {
+        for log in logs.borrow().iter() {
+            log.borrow_mut().paid.push(identity.clone());
+        }
+    });
 }
 
 impl RequestBudget {
@@ -210,7 +434,51 @@ impl RequestBudget {
             }
         }
         paid.extend(unpaid);
+        attribute_operations(operations);
         true
+    }
+
+    /// The request's state and paid-set order, for a compute that will
+    /// later ask what it spent.
+    pub(crate) fn capture_entry(&self) -> RequestEntrySnapshot {
+        let paid = self.operations_paid.lock();
+        RequestEntrySnapshot {
+            state: RequestEntryState {
+                operations: self.projection_ops_executed.load(Ordering::Relaxed),
+                paid_len: paid.set.len(),
+                paid_digest: paid.digest,
+            },
+            paid: paid.order.clone().into_boxed_slice(),
+        }
+    }
+
+    /// What changed since `snapshot` when the paid-set order still begins
+    /// with the order captured there. Direct projection-op checks count:
+    /// this is the counter delta, not only effects a connected demand
+    /// recorded. `None` when that prefix was replaced or the counter
+    /// moved backwards. Component-meta admission does not use it: a counter
+    /// delta includes sibling spends.
+    #[cfg(test)]
+    pub(crate) fn observed_spend_since(
+        &self,
+        snapshot: &RequestEntrySnapshot,
+    ) -> Option<RequestSpent> {
+        let paid = self.operations_paid.lock();
+        if paid.order.len() < snapshot.paid.len()
+            || paid.order[..snapshot.paid.len()] != snapshot.paid[..]
+        {
+            return None;
+        }
+        let now = self.projection_ops_executed.load(Ordering::Relaxed);
+        let operations = now.checked_sub(snapshot.state.operations)?;
+        Some(RequestSpent {
+            entry: snapshot.state.clone(),
+            entry_paid: snapshot.paid.clone(),
+            operations,
+            paid: paid.order[snapshot.paid.len()..]
+                .to_vec()
+                .into_boxed_slice(),
+        })
     }
 
     /// The request's state now, as a demand entering it would see it.
@@ -279,6 +547,7 @@ impl RequestBudget {
             return false;
         }
         paid.extend(spent.paid.iter().cloned());
+        attribute_operations(spent.operations);
         true
     }
 
@@ -291,7 +560,9 @@ impl RequestBudget {
         let before = self
             .projection_ops_executed
             .fetch_max(tripped, Ordering::Relaxed);
-        tripped.saturating_sub(before)
+        let spent = tripped.saturating_sub(before);
+        attribute_operations(spent);
+        spent
     }
 
     /// Increment the projection-op counter and return `true` when the
@@ -301,14 +572,43 @@ impl RequestBudget {
             .projection_ops_executed
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
+        attribute_operations(1);
         current > self.effective_projection_op_budget()
+    }
+
+    /// This thread's recorded spend since `snapshot`, and whether that spend
+    /// is the request's whole change. A sibling's operations or paid
+    /// identities make the second flag false; the spend is still only what
+    /// this thread recorded.
+    pub(crate) fn owned_spend(
+        &self,
+        snapshot: &RequestEntrySnapshot,
+        operations: usize,
+        paid: &[CostIdentity],
+    ) -> (RequestSpent, bool) {
+        let effects = crate::project_semantic_dispatch::connected_demand::RequestEffects {
+            operations,
+            paid: paid.len(),
+        };
+        if let Some(spent) = self.spent_alone_since(snapshot.state.clone(), effects) {
+            return (spent, true);
+        }
+        (
+            RequestSpent {
+                entry: snapshot.state.clone(),
+                entry_paid: snapshot.paid.clone(),
+                operations,
+                paid: paid.to_vec().into_boxed_slice(),
+            },
+            false,
+        )
     }
 
     /// Return the configured cap after applying the legacy default.
     #[must_use]
     pub fn effective_projection_op_budget(&self) -> usize {
         if self.projection_op_budget == 0 {
-            2000
+            DEFAULT_PROJECTION_OP_BUDGET
         } else {
             self.projection_op_budget
         }
@@ -353,7 +653,7 @@ impl RequestBudget {
 
 #[cfg(test)]
 mod tests {
-    use super::RequestBudget;
+    use super::{RequestBudget, DEFAULT_PROJECTION_OP_BUDGET};
 
     #[test]
     fn request_budget_check_increments_until_cap_then_returns_true() {
@@ -369,16 +669,25 @@ mod tests {
         );
     }
 
+    /// A zero cap falls back to the finite default, the checker's whole
+    /// instantiation allowance: a smaller one would refuse inputs the
+    /// checker answers.
     #[test]
-    fn request_budget_zero_cap_falls_back_to_default_2000() {
+    fn request_budget_zero_cap_falls_back_to_finite_default() {
+        assert_eq!(
+            DEFAULT_PROJECTION_OP_BUDGET,
+            crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
+        );
         let budget = RequestBudget::new(0);
-        for _ in 0..1999 {
-            assert!(!budget.check_projection_op_count());
-        }
-        assert!(!budget.check_projection_op_count(), "2000th call at cap");
+        assert!(budget.admit_replayed_operations(
+            (DEFAULT_PROJECTION_OP_BUDGET - 1) as u64,
+            budget.operations_paid(),
+            Vec::new(),
+        ));
+        assert!(!budget.check_projection_op_count(), "last call at cap");
         assert!(
             budget.check_projection_op_count(),
-            "2001st call exceeds default"
+            "next call exceeds default"
         );
     }
 
@@ -498,5 +807,33 @@ mod tests {
             paid: Box::from([]),
         }));
         assert_eq!(raced.projection_ops_executed_count(), 1);
+    }
+
+    #[test]
+    fn observed_spend_counts_direct_checks_and_rejects_a_replaced_prefix() {
+        let budget = RequestBudget::new(100);
+        let snapshot = budget.capture_entry();
+        assert!(!budget.check_projection_op_count());
+        budget.mark_operations_paid(std::iter::once(identity("own")));
+        let spent = budget
+            .observed_spend_since(&snapshot)
+            .expect("an append leaves the captured prefix in place");
+        assert_eq!(spent.operations, 1);
+        assert_eq!(spent.paid.len(), 1);
+        let fresh = RequestBudget::new(100);
+        assert!(fresh.apply_refusal(&spent));
+        assert_eq!(fresh.projection_ops_executed_count(), 1);
+        assert!(fresh.operations_paid().contains(&identity("own")));
+
+        let replaced = RequestBudget::new(100);
+        replaced.mark_operations_paid(std::iter::once(identity("real")));
+        let foreign = super::RequestEntrySnapshot {
+            state: replaced.entry_state(),
+            paid: Box::from([identity("other")]),
+        };
+        assert!(
+            replaced.observed_spend_since(&foreign).is_none(),
+            "a paid prefix that is not the captured order is not this compute's spend"
+        );
     }
 }

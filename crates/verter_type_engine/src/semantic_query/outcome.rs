@@ -164,7 +164,9 @@ impl IncompleteReason {
     #[must_use]
     pub fn from_query_error(error: &QueryError) -> Self {
         match error {
-            QueryError::Cancelled => Self::Cancelled,
+            QueryError::ExecutionAborted(super::ExecutionAbort::Cancelled)
+            | QueryError::Cancelled => Self::Cancelled,
+            QueryError::ExecutionAborted(_) => Self::UnsettledInput,
             QueryError::BudgetExceeded(_) => Self::Budget,
             QueryError::UnsupportedIntrinsic { .. } => Self::Unsupported,
             QueryError::Miss

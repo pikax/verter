@@ -78,6 +78,10 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 #[test]
 fn selected_key_mapped_materialization_closes_conditional_to_function() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/pricing_slots.ts".to_string()),
         input_id: "/pricing_slots.ts".to_string(),
@@ -124,7 +128,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
     // branch closes to a Function.
     let project_query = SemanticQueryKey::ProjectPath {
         base: carrier,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {
@@ -141,7 +145,7 @@ fn selected_key_mapped_materialization_closes_conditional_to_function() {
         .expect("surface node must have semantic data");
 
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!(
             "synthesise_mapped_surface MUST produce a \
              `SemanticNodeData::Object` for LiteralKeyedSlots<PricingPlan>. Got: {other:?}",

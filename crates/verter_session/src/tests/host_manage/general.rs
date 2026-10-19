@@ -487,19 +487,25 @@ fn arc_shared_fields_are_pointer_equal() {
     // Arc-shared fields should be pointer-equal between two calls
     // on the same unchanged file.
     assert!(
-        Arc::ptr_eq(&a1.module_references, &a2.module_references),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+            &a1.module_references,
+            &a2.module_references
+        ),
         "module_references should be Arc-shared (pointer equal)"
     );
     assert!(
-        Arc::ptr_eq(&a1.macros, &a2.macros),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(&a1.macros, &a2.macros),
         "macros should be Arc-shared (pointer equal)"
     );
     assert!(
-        Arc::ptr_eq(&a1.styles, &a2.styles),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(&a1.styles, &a2.styles),
         "styles should be Arc-shared (pointer equal)"
     );
     assert!(
-        Arc::ptr_eq(&a1.vue_api_calls, &a2.vue_api_calls),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+            &a1.vue_api_calls,
+            &a2.vue_api_calls
+        ),
         "vue_api_calls should be Arc-shared (pointer equal)"
     );
 }

@@ -184,6 +184,7 @@ fn with_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -194,13 +195,13 @@ fn key_for(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(canonical),
+            verter_type_expr::OwnedStr::from(canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(canonical),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -286,6 +287,10 @@ fn is_unresolved_marker(
 #[test]
 fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for (name, reason) in [
         (
             "objectWithUnmodeledCall",
@@ -429,6 +434,10 @@ fn an_unmodeled_member_marks_its_position_and_the_composite_survives() {
 #[test]
 fn every_positional_class_survives_inside_a_composite() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     for name in [
         "twinFrameShadowedLeaf",
         "twinDeclaratorAnnotation",
@@ -475,6 +484,10 @@ fn every_positional_class_survives_inside_a_composite() {
 #[test]
 fn the_local_binding_spelling_reaches_the_same_disposition() {
     let host = make_pos_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let outcome = evaluate(&host, POS_CANONICAL, "objectWithUnmodeledLocal")
         .expect("objectWithUnmodeledLocal must produce a value");
     with_dispatch(&host, |dispatch| {

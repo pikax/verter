@@ -36,7 +36,11 @@ use crate::request_footprint::RequestFootprintAccumulator;
 /// [`RequestContext`].
 #[must_use]
 pub fn current_request_budget() -> Option<Arc<RequestBudget>> {
-    current_request_context().map(|ctx| Arc::clone(&ctx.projection_budget))
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| Arc::clone(&ctx.projection_budget))
+    })
 }
 
 /// Return the stable cancellation token carried by the active request.
@@ -45,7 +49,121 @@ pub fn current_request_cancellation_token() -> Option<CancellationToken> {
     current_request_context().map(|ctx| ctx.cancellation_token())
 }
 
+/// Whether the installed request's cancellation token is cancelled, read in
+/// place; `None` when no request is installed.
+pub(crate) fn current_request_cancelled() -> Option<bool> {
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|ctx| ctx.cancellation.is_cancelled())
+    })
+}
+
 use crate::semantic_query::{PartialReasonSet, ResultCompleteness};
+
+thread_local! {
+    static EXECUTION_ABORTS: RefCell<Vec<Option<crate::semantic_query::ExecutionAbort>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Scoped execution validity. An abort always bubbles, even when an optional
+/// semantic observation is discarded. A fresh top-level scope starts clean.
+#[must_use]
+pub struct ExecutionValidityScope {
+    _private: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl ExecutionValidityScope {
+    /// Begin one execution or composition under independently tracked validity.
+    pub fn enter() -> Self {
+        EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            let inherited = stack.last().copied().flatten();
+            stack.push(inherited);
+        });
+        Self {
+            _private: std::marker::PhantomData,
+        }
+    }
+}
+
+impl Drop for ExecutionValidityScope {
+    fn drop(&mut self) {
+        EXECUTION_ABORTS.with(|stack| {
+            let mut stack = stack.borrow_mut();
+            if let Some(Some(abort)) = stack.pop() {
+                if let Some(parent) = stack.last_mut() {
+                    parent.get_or_insert(abort);
+                }
+            }
+        });
+    }
+}
+
+/// The execution validity of a semantic task that may run on any thread: the
+/// abort its polls observed, which it inherits from the execution that began
+/// it and hands back to the execution it returns to
+/// ([`Self::bubble`]). Each poll installs it as the innermost validity scope
+/// of the polling thread ([`Self::install`]).
+#[derive(Default)]
+pub(crate) struct TaskExecutionValidity {
+    abort: Option<crate::semantic_query::ExecutionAbort>,
+}
+
+impl TaskExecutionValidity {
+    /// The validity of a task begun under the execution active now.
+    pub(crate) fn inherit() -> Self {
+        Self {
+            abort: current_execution_abort(),
+        }
+    }
+
+    /// Make this the innermost validity scope on this thread until the
+    /// returned installation drops, unwinding included.
+    pub(crate) fn install(&mut self) -> InstalledTaskValidity<'_> {
+        EXECUTION_ABORTS.with(|stack| stack.borrow_mut().push(self.abort));
+        InstalledTaskValidity {
+            owner: self,
+            _thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Hand the abort the task observed to the execution active now.
+    pub(crate) fn bubble(&self) {
+        if let Some(abort) = self.abort {
+            observe_execution_abort(abort);
+        }
+    }
+}
+
+/// One poll's installation of a [`TaskExecutionValidity`].
+pub(crate) struct InstalledTaskValidity<'t> {
+    owner: &'t mut TaskExecutionValidity,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for InstalledTaskValidity<'_> {
+    fn drop(&mut self) {
+        let observed = EXECUTION_ABORTS
+            .with(|stack| stack.borrow_mut().pop())
+            .flatten();
+        self.owner.abort = self.owner.abort.or(observed);
+    }
+}
+
+/// Record an originating execution failure, never an explanatory reason set.
+pub fn observe_execution_abort(abort: crate::semantic_query::ExecutionAbort) {
+    EXECUTION_ABORTS.with(|stack| {
+        if let Some(top) = stack.borrow_mut().last_mut() {
+            top.get_or_insert(abort);
+        }
+    });
+}
+
+/// The active execution's validity refusal, independent of availability.
+pub fn current_execution_abort() -> Option<crate::semantic_query::ExecutionAbort> {
+    EXECUTION_ABORTS.with(|stack| stack.borrow().last().copied().flatten())
+}
 
 thread_local! {
     /// Per-thread nesting depth of [`RootTemplateDemandScope`].
@@ -117,10 +235,10 @@ thread_local! {
     /// completeness — NOT a request-global proxy that would let one
     /// consumer's partial poison a sibling consumer's complete entry.
     ///
-    /// Single-threaded by construction: each singleflight cold compute
-    /// runs start-to-finish on the winning flight's thread, so the
-    /// per-thread stack matches the compute's call tree. A nested
-    /// compute bubbles its completeness into its parent on scope drop.
+    /// A suspended semantic task carries its enclosing compute's
+    /// accumulator between polls, installing it independently of the
+    /// polling thread's stack. A nested compute bubbles its completeness
+    /// into its parent on scope drop.
     static COLD_COMPUTE_COMPLETENESS: RefCell<Vec<ResultCompleteness>> =
         const { RefCell::new(Vec::new()) };
 }
@@ -255,6 +373,62 @@ impl Drop for DeferredPartialStickyScope {
     }
 }
 
+/// A semantic task's cold-compute completeness and sticky-partial deferral.
+/// Each poll isolates these from the polling thread's unrelated computes;
+/// returning or reclaiming the task folds its observations into its lender.
+#[derive(Default)]
+pub(crate) struct TaskCompletenessCarry {
+    completeness: Option<ResultCompleteness>,
+    sticky_depth: usize,
+}
+
+impl TaskCompletenessCarry {
+    pub(crate) fn lend() -> Self {
+        Self {
+            completeness: COLD_COMPUTE_COMPLETENESS.with(|stack| stack.borrow().last().copied()),
+            sticky_depth: DEFERRED_PARTIAL_STICKY_DEPTH.with(Cell::get),
+        }
+    }
+
+    pub(crate) fn install(&mut self) -> TaskCompletenessInstall<'_> {
+        let task = self.completeness.into_iter().collect();
+        let thread = COLD_COMPUTE_COMPLETENESS.with(|stack| stack.replace(task));
+        let sticky_depth =
+            DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.replace(self.sticky_depth));
+        TaskCompletenessInstall {
+            carry: self,
+            thread,
+            sticky_depth,
+            _thread_bound: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn return_to_lender(self) {
+        if let Some(completeness) = self.completeness {
+            // The poll already applied the request sticky under the lender's
+            // deferral policy. Only its compute-local observation returns here.
+            fold_cold_compute_completeness(completeness);
+        }
+    }
+}
+
+/// One poll's completeness installation; restores the thread on unwind too.
+pub(crate) struct TaskCompletenessInstall<'c> {
+    carry: &'c mut TaskCompletenessCarry,
+    thread: Vec<ResultCompleteness>,
+    sticky_depth: usize,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl Drop for TaskCompletenessInstall<'_> {
+    fn drop(&mut self) {
+        let task =
+            COLD_COMPUTE_COMPLETENESS.with(|stack| stack.replace(std::mem::take(&mut self.thread)));
+        self.carry.completeness = task.last().copied();
+        DEFERRED_PARTIAL_STICKY_DEPTH.with(|depth| depth.set(self.sticky_depth));
+    }
+}
+
 /// Store the request-level partial sticky — unless an active
 /// [`DeferredPartialStickyScope`] defers it to the probe owner.
 fn store_request_sticky_partial() {
@@ -335,6 +509,7 @@ pub fn mark_request_result_inference_budget_exceeded() {
 
 /// Mark the active result partial for the exact cancellation reason.
 pub(crate) fn mark_request_result_cancelled() {
+    observe_execution_abort(crate::semantic_query::ExecutionAbort::Cancelled);
     mark_request_result_partial_with(PartialReasonSet::CANCELLED);
 }
 
@@ -396,7 +571,7 @@ pub fn fold_result_completeness(joined: ResultCompleteness) {
 /// the sole correct authority.
 #[inline]
 pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::CacheRead<T>) {
-    if read.result_is_partial {
+    if read.result_is_partial() {
         mark_request_result_partial_from_read_with(read.partial_reason_classes());
     }
 }
@@ -2380,6 +2555,15 @@ pub fn current_request_context() -> Option<Arc<RequestContext>> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_ref().map(Arc::clone))
 }
 
+/// Run `read` against the request context installed on this thread, in
+/// place: `None` when none is installed. For a caller that only reads or
+/// records into the context, so the context's handle is not cloned.
+pub(crate) fn with_current_request_context<R>(
+    read: impl FnOnce(&RequestContext) -> R,
+) -> Option<R> {
+    CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
+}
+
 /// The canonical id the currently installed request resolves for — the
 /// file whose owning project's configuration (its effective tsconfig
 /// semantic options) governs every checker judgement the request makes.
@@ -2475,6 +2659,49 @@ impl Drop for NestedAuditGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_completeness_preserves_sticky_deferral_across_polls() {
+        for defer in [false, true] {
+            let request = make_ctx(201, false);
+            let lender = ColdComputeCompletenessScope::enter();
+            let deferred = defer.then(DeferredPartialStickyScope::enter);
+            let mut carry = TaskCompletenessCarry::lend();
+            for poll in 0..2 {
+                std::thread::scope(|scope| {
+                    scope
+                        .spawn(|| {
+                            let poller_request = make_ctx(202, false);
+                            let _poller_context =
+                                RequestContextGuard::install(poller_request.clone());
+                            let poller = ColdComputeCompletenessScope::enter();
+                            let _poller_deferred = (!defer).then(DeferredPartialStickyScope::enter);
+                            {
+                                let _context = RequestContextGuard::install(request.clone());
+                                let _installed = carry.install();
+                                assert_eq!(
+                                    current_cold_compute_completeness().is_partial(),
+                                    poll > 0
+                                );
+                                mark_request_result_partial();
+                                assert_eq!(current_request_result_is_partial(), !defer);
+                            }
+                            assert!(!current_cold_compute_completeness().is_partial());
+                            mark_request_result_partial();
+                            assert_eq!(current_request_result_is_partial(), defer);
+                            poller.discard();
+                        })
+                        .join()
+                        .expect("the task's poll completes on another thread");
+                });
+            }
+            assert!(!current_cold_compute_completeness().is_partial());
+            carry.return_to_lender();
+            assert!(current_cold_compute_completeness().is_partial());
+            drop(deferred);
+            lender.discard();
+        }
+    }
 
     fn make_ctx(id: u64, capture: bool) -> Arc<RequestContext> {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)

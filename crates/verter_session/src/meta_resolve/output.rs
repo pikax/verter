@@ -35,8 +35,10 @@ use crate::meta_resolve::projectors::MetaResolveProjectorsOutputCap;
 /// A distinct type from the resolve-phase
 /// [`ResolvedComponentMetaState::completeness`](crate::meta_resolve::ResolvedComponentMetaState)
 /// so no output-bearing entry can pass the narrower term by accident. The
-/// value the wire must carry is the SAME merged signal the result-cache
-/// admission gate refuses on:
+/// value the wire must carry is the SAME merged signal the publication
+/// decision classified. Successful candidates stay complete-only. An
+/// eligible refusal is retained in the ledger and replayed with this
+/// signal; it is not a successful candidate.
 /// `resolved.completeness.merge(extract_scope_completeness)`.
 ///
 /// Extract-phase partiality (the pre-choke macro-DTO read and the fallthrough
@@ -72,16 +74,22 @@ impl PublishedCompleteness {
         Self(resolve.merge(extract))
     }
 
-    /// The WARM constructor: the completeness recorded on a cache entry that
-    /// was ADMITTED. Admission refuses every partial
-    /// (`if final_completeness.is_partial() { return_only }`), so a value that
-    /// reached a cache entry is by construction the merged signal — the warm
-    /// arms re-publish it rather than recomputing a merge they have no extract
-    /// phase for.
+    /// The WARM constructor for a successful candidate. Success admission is
+    /// still complete-only. Eligible refusals live in the refusal ledger and
+    /// are not successful values; replay those through
+    /// [`Self::from_retained_refusal`].
     pub(crate) fn from_admitted_cache_entry(
         cached: verter_type_engine::semantic_query::ResultCompleteness,
     ) -> Self {
         Self(cached)
+    }
+
+    /// Completeness stored with a retained refusal. The recovery is the
+    /// original refused outcome, not a successful cache candidate.
+    pub(crate) fn from_retained_refusal(
+        retained: verter_type_engine::semantic_query::ResultCompleteness,
+    ) -> Self {
+        Self(retained)
     }
 
     /// The carried value, for the envelope field and the wire projection.
@@ -172,6 +180,11 @@ impl ComponentMetaOutput {
             self.contract,
             self.completeness,
         )
+    }
+
+    /// Quality of the published facts, including terminal member materialization.
+    pub fn completeness(&self) -> verter_type_engine::semantic_query::ResultCompleteness {
+        self.completeness
     }
 
     /// Borrow the public contract availability.

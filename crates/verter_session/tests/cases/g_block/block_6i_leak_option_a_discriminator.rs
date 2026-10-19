@@ -175,6 +175,10 @@ fn instantiation_ref_args_contain_typeparam_named(
 #[test]
 fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let _ = host.upsert(UpsertRequest {
         canonical_id: Some("/slots.ts".to_string()),
         input_id: "/slots.ts".to_string(),
@@ -201,7 +205,9 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
 
     let graph = host.project_type_store().semantic_graph();
     let (decl_identity, args) = match graph.node_data(carrier).as_deref() {
-        Some(SemanticNodeData::InstantiationRef { base, args }) => (base.clone(), Arc::clone(args)),
+        Some(SemanticNodeData::InstantiationRef { base, args }) => {
+            (base.clone(), Arc::from(&args[..]))
+        }
         other => panic!(
             "expected `InstantiationRef` carrier from StructuralTransit(Navigate) lowering, \
              got {other:?}"
@@ -233,7 +239,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
     // Mapped node via `synthesise_mapped_surface`.
     let project_query = SemanticQueryKey::ProjectPath {
         base: body_node,
-        path: Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         context: ProjectionReductionContext::published(ProjectionMode::Shallow),
     };
     let surface_node = match for_tests::dispatch_execute_type_node_for_tests(&host, project_query) {
@@ -248,7 +254,7 @@ fn shallow_walker_substitutes_mapper_binder_per_enumerated_key() {
         .node_data(surface_node)
         .expect("surface node must have data");
     let view = match surface_data.as_ref() {
-        SemanticNodeData::Object(view) => view.clone(),
+        SemanticNodeData::Object(view) => view.copy_for_tests(),
         other => panic!("ProjectPath terminal must be `SemanticNodeData::Object`, got {other:?}"),
     };
 

@@ -69,6 +69,8 @@ fn resolve_button_meta(
 ) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     host.get_component_meta(canonical)
         .expect("getComponentMeta must succeed for the ComponentConfig fixture")
+        .analysis()
+        .clone()
 }
 
 // ── Positive #1: Record<string, unknown> AppConfig — no override possible ──

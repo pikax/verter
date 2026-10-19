@@ -21,9 +21,9 @@ use verter_type_engine::semantic_query::{
 };
 
 fn domain_of(host: &VerterHost, subject: SemanticNodeId) -> TruthinessDomain {
-    ProjectSemanticDispatch::new(host)
+    *ProjectSemanticDispatch::new(host)
         .classify_truthiness_domain_read(subject)
-        .value
+        .value()
 }
 
 fn prim(host: &VerterHost, kind: PrimitiveKind) -> SemanticNodeId {
@@ -42,14 +42,23 @@ fn template(host: &VerterHost, quasis: &[&str], expressions: &[SemanticNodeId]) 
     host.project_type_store()
         .semantic_graph()
         .intern_node(SemanticNodeData::TemplateLiteral {
-            quasis: quasis.iter().map(|q| Arc::from(*q)).collect(),
-            expressions: Arc::from(expressions.to_vec().into_boxed_slice()),
+            quasis: quasis
+                .iter()
+                .map(|q| verter_type_expr::OwnedStr::from(*q))
+                .collect(),
+            expressions: verter_type_engine::semantic_query::PayloadArray::from(
+                expressions.to_vec().into_boxed_slice(),
+            ),
         })
 }
 
 #[test]
 fn truthiness_rules_match_the_pinned_checker() {
     let host = VerterHost::new_standalone(Default::default());
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let graph = host.project_type_store().semantic_graph();
 
     let string = prim(&host, PrimitiveKind::String);
@@ -198,10 +207,10 @@ fn truthiness_rules_match_the_pinned_checker() {
     // `T extends "a"` leaves the falsy edge, `T extends string` keeps
     // it); unconstrained is `unknown`'s domain (measured q1).
     let decl = verter_type_engine::semantic_query::DeclIdentity {
-        canonical_id: Arc::from("/wb/t.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/wb/t.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: Default::default(),
-        decl_name: Arc::from("f"),
+        decl_name: verter_type_expr::OwnedStr::from("f"),
     };
     let param = |constraint: Option<SemanticNodeId>| {
         graph.intern_node(SemanticNodeData::TypeParam {
@@ -209,7 +218,7 @@ fn truthiness_rules_match_the_pinned_checker() {
             param_index: 0,
             constraint,
             default: None,
-            display_name: Arc::from("T"),
+            display_name: verter_type_expr::OwnedStr::from("T"),
         })
     };
     assert_eq!(
@@ -241,15 +250,16 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let host = VerterHost::new_standalone(Default::default());
     let graph = host.project_type_store().semantic_graph();
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
 
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let decided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: string };
     let first = dispatch.classify_truthiness_domain_read(string);
-    assert_eq!(first.value, TruthinessDomain::BOTH);
-    assert!(!first.cache_suppress, "a decided domain is admissible");
+    assert_eq!(first.value().clone(), TruthinessDomain::BOTH);
+    assert!(!first.cache_suppress(), "a decided domain is admissible");
     let cold_after_first = dispatch_cold_for(&decided_key);
     let second = dispatch.classify_truthiness_domain_read(string);
-    assert_eq!(second.value, TruthinessDomain::BOTH);
+    assert_eq!(second.value().clone(), TruthinessDomain::BOTH);
     assert_eq!(
         dispatch_cold_for(&decided_key),
         cold_after_first,
@@ -263,16 +273,16 @@ fn decided_domain_warms_and_undecided_domain_never_does() {
     let opaque = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let undecided_key = SemanticQueryKey::ClassifyTruthinessDomain { subject: opaque };
     let first = dispatch.classify_truthiness_domain_read(opaque);
-    assert_eq!(first.value, TruthinessDomain::UNDECIDED);
+    assert_eq!(first.value().clone(), TruthinessDomain::UNDECIDED);
     assert!(
-        first.cache_suppress,
+        first.cache_suppress(),
         "an undecided domain suppresses admission"
     );
-    assert_eq!(first.value.truthy, TruthinessInhabitance::Undecided);
+    assert_eq!(first.value().truthy, TruthinessInhabitance::Undecided);
     let cold_after_first = dispatch_cold_for(&undecided_key);
     let second = dispatch.classify_truthiness_domain_read(opaque);
-    assert_eq!(second.value, TruthinessDomain::UNDECIDED);
-    assert!(second.cache_suppress);
+    assert_eq!(second.value().clone(), TruthinessDomain::UNDECIDED);
+    assert!(second.cache_suppress());
     assert_eq!(
         dispatch_cold_for(&undecided_key),
         cold_after_first + 1,

@@ -5,6 +5,7 @@
 //! parent module docs for the overall producer contract.
 
 use super::*;
+use verter_type_engine::semantic_query::{root_narrowing_fact, FactResult};
 
 /// Prove a row-local missing dependency without conflating it with an
 /// authored `unknown` or with a reference nested below a constructor-bearing
@@ -20,6 +21,9 @@ pub(super) fn direct_member_dependency_is_missing(
         return false;
     }
 
+    // The walk carries resolved nodes across dispatcher operations; this
+    // explicit builder owns every one of them until the walk returns.
+    let builder = dispatch.enter_construction_scope();
     let carrier_context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
     let eager_context =
@@ -31,9 +35,7 @@ pub(super) fn direct_member_dependency_is_missing(
         if !visited.insert((node, tracked_dependency)) {
             continue;
         }
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(node) else {
             continue;
         };
         match data.as_ref() {
@@ -44,20 +46,18 @@ pub(super) fn direct_member_dependency_is_missing(
             }
             SemanticNodeData::BareRef(_) => {
                 let (name, _) = data.bare_ref_head().expect("BareRef carrier head");
-                let tracked_dependency =
-                    tracked_dependency || dependency_names.contains(name.as_ref());
+                let tracked_dependency = tracked_dependency || dependency_names.contains(name);
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let Some(resolved) = resolve_member_carrier(
+                    dispatch,
+                    &builder,
                     node,
-                    if tracked_dependency {
-                        eager_context
-                    } else {
-                        carrier_context
-                    },
-                );
-                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
+                    tracked_dependency,
+                    eager_context,
+                    carrier_context,
+                ) else {
                     return false;
-                }
+                };
                 if resolved != node {
                     work.push((resolved, tracked_dependency));
                 }
@@ -67,34 +67,32 @@ pub(super) fn direct_member_dependency_is_missing(
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(root.name.as_ref());
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let Some(resolved) = resolve_member_carrier(
+                    dispatch,
+                    &builder,
                     node,
-                    if tracked_dependency {
-                        eager_context
-                    } else {
-                        carrier_context
-                    },
-                );
-                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
+                    tracked_dependency,
+                    eager_context,
+                    carrier_context,
+                ) else {
                     return false;
-                }
+                };
                 if resolved != node {
                     work.push((resolved, tracked_dependency));
                 }
             }
             SemanticNodeData::ImportType(_) => {
                 drop(data);
-                let resolved = dispatch.resolve_carrier_subject_node(
+                let Some(resolved) = resolve_member_carrier(
+                    dispatch,
+                    &builder,
                     node,
-                    if tracked_dependency {
-                        eager_context
-                    } else {
-                        carrier_context
-                    },
-                );
-                if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
+                    tracked_dependency,
+                    eager_context,
+                    carrier_context,
+                ) else {
                     return false;
-                }
+                };
                 if resolved != node {
                     work.push((resolved, tracked_dependency));
                 }
@@ -104,24 +102,26 @@ pub(super) fn direct_member_dependency_is_missing(
                     tracked_dependency || dependency_names.contains(identity.decl_name.as_ref());
                 let identity = identity.clone();
                 drop(data);
-                match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                    scope: ScopeId {
-                        canonical_id: Arc::clone(&identity.canonical_id),
-                        owner: identity.owner,
-                        local_scope: None,
-                        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
-                            identity.owner,
-                        ),
-                    },
-                    name: Arc::clone(&identity.decl_name),
-                })) {
+                let (resolved, local) = observe_local(|| {
+                    dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                        scope: ScopeId {
+                            canonical_id: identity.canonical_id.clone(),
+                            owner: identity.owner,
+                            local_scope: None,
+                            binder_scope_id:
+                                verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                                    identity.owner,
+                                ),
+                        },
+                        name: identity.decl_name.clone(),
+                    }))
+                });
+                match resolved {
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
                     QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
-                        if tracked_dependency
-                            && !verter_type_engine::request_context::current_cold_compute_completeness()
-                                .is_partial() =>
+                        if tracked_dependency && !local.is_partial() =>
                     {
                         return true;
                     }
@@ -132,33 +132,34 @@ pub(super) fn direct_member_dependency_is_missing(
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(base.decl_name.as_ref());
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args: Arc<[_]> = Arc::from(&args[..]);
                 drop(data);
-                match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    verter_type_engine::semantic_query::InstantiateKey::new(
-                        dispatch.type_slot_for(
-                            Arc::clone(&base.canonical_id),
-                            base.owner,
-                            Arc::clone(&base.decl_name),
+                let (resolved, local) = observe_local(|| {
+                    dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                        verter_type_engine::semantic_query::InstantiateKey::new(
+                            dispatch.type_slot_for(
+                                base.canonical_id.clone(),
+                                base.owner,
+                                base.decl_name.clone(),
+                            ),
+                            args,
+                            dispatch.instantiate_context_for(
+                                &base.canonical_id,
+                                if tracked_dependency {
+                                    eager_context
+                                } else {
+                                    carrier_context
+                                },
+                            ),
                         ),
-                        args,
-                        dispatch.instantiate_context_for(
-                            &base.canonical_id,
-                            if tracked_dependency {
-                                eager_context
-                            } else {
-                                carrier_context
-                            },
-                        ),
-                    ),
-                )) {
+                    ))
+                });
+                match resolved {
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
                     QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
-                        if tracked_dependency
-                            && !verter_type_engine::request_context::current_cold_compute_completeness()
-                                .is_partial() =>
+                        if tracked_dependency && !local.is_partial() =>
                     {
                         return true;
                     }
@@ -175,31 +176,32 @@ pub(super) fn direct_member_dependency_is_missing(
             ) => {
                 let tracked_dependency =
                     tracked_dependency || dependency_names.contains(name.as_ref());
-                let canonical_id = Arc::clone(canonical_id);
+                let canonical_id = canonical_id.clone();
                 let owner = *owner;
-                let name = Arc::clone(name);
+                let name = name.clone();
                 drop(data);
-                match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
-                    verter_type_engine::semantic_query::InstantiateKey::new(
-                        dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
-                        Arc::from([]),
-                        dispatch.instantiate_context_for(
-                            &canonical_id,
-                            if tracked_dependency {
-                                eager_context
-                            } else {
-                                carrier_context
-                            },
+                let (resolved, local) = observe_local(|| {
+                    dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+                        verter_type_engine::semantic_query::InstantiateKey::new(
+                            dispatch.type_slot_for(canonical_id.clone(), owner, name),
+                            Arc::from([]),
+                            dispatch.instantiate_context_for(
+                                &canonical_id,
+                                if tracked_dependency {
+                                    eager_context
+                                } else {
+                                    carrier_context
+                                },
+                            ),
                         ),
-                    ),
-                )) {
+                    ))
+                });
+                match resolved {
                     QueryResult::Value(resolved) if resolved.value != node => {
                         work.push((resolved.value, tracked_dependency));
                     }
                     QueryResult::Error(verter_type_engine::semantic_query::QueryError::Miss)
-                        if tracked_dependency
-                            && !verter_type_engine::request_context::current_cold_compute_completeness()
-                                .is_partial() =>
+                        if tracked_dependency && !local.is_partial() =>
                     {
                         return true;
                     }
@@ -207,10 +209,7 @@ pub(super) fn direct_member_dependency_is_missing(
                 }
             }
             SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::Miss)
-                if tracked_dependency
-                    && !verter_type_engine::request_context::current_cold_compute_completeness(
-                    )
-                    .is_partial() =>
+                if tracked_dependency =>
             {
                 return true;
             }
@@ -231,11 +230,12 @@ fn is_definitely_non_object_root(
     let mut visited = FxHashSet::default();
     let resolution_context =
         ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+    // The walk carries resolved nodes across dispatcher operations; this
+    // explicit builder owns every one of them until the walk returns.
+    let builder = dispatch.enter_construction_scope();
 
     while visited.insert(subject) {
-        let Some(data) =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
-        else {
+        let Some(data) = dispatch.graph().read_in_scope(subject) else {
             return false;
         };
         match data.as_ref() {
@@ -257,11 +257,18 @@ fn is_definitely_non_object_root(
                 // definitely-non-object root — exactly as its widened
                 // `symbol` inhabitant is — so widen and let the primitive
                 // arm decide.
-                if let Some(widened) = dispatch.widened_nominal_typeof(subject) {
+                if let Some(widened) = dispatch
+                    .owning()
+                    .widened_nominal_typeof(subject)
+                    .into_value_in(&builder)
+                {
                     subject = widened;
                     continue;
                 }
-                let resolved = dispatch.resolve_carrier_subject_node(subject, resolution_context);
+                let resolved = dispatch
+                    .owning()
+                    .resolve_carrier_subject_node(subject, resolution_context)
+                    .into_value_in(&builder);
                 if resolved == subject {
                     return false;
                 }
@@ -273,7 +280,7 @@ fn is_definitely_non_object_root(
                 let resolved =
                     dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                         scope: ScopeId {
-                            canonical_id: Arc::clone(&identity.canonical_id),
+                            canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
                             local_scope: None,
                             binder_scope_id:
@@ -281,7 +288,7 @@ fn is_definitely_non_object_root(
                                     identity.owner,
                                 ),
                         },
-                        name: Arc::clone(&identity.decl_name),
+                        name: identity.decl_name.clone(),
                     }));
                 let QueryResult::Value(resolved) = resolved else {
                     return false;
@@ -293,14 +300,14 @@ fn is_definitely_non_object_root(
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let base = base.clone();
-                let args = Arc::clone(args);
+                let args: Arc<[_]> = Arc::from(&args[..]);
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
                         dispatch.type_slot_for(
-                            Arc::clone(&base.canonical_id),
+                            base.canonical_id.clone(),
                             base.owner,
-                            Arc::clone(&base.decl_name),
+                            base.decl_name.clone(),
                         ),
                         args,
                         dispatch.instantiate_context_for(&base.canonical_id, resolution_context),
@@ -322,13 +329,13 @@ fn is_definitely_non_object_root(
                     ..
                 },
             ) => {
-                let canonical_id = Arc::clone(canonical_id);
+                let canonical_id = canonical_id.clone();
                 let owner = *owner;
-                let name = Arc::clone(name);
+                let name = name.clone();
                 drop(data);
                 let resolved = dispatch.execute_type_node(SemanticQueryKey::Instantiate(
                     verter_type_engine::semantic_query::InstantiateKey::new(
-                        dispatch.type_slot_for(Arc::clone(&canonical_id), owner, name),
+                        dispatch.type_slot_for(canonical_id.clone(), owner, name),
                         Arc::from([]),
                         dispatch.instantiate_context_for(&canonical_id, resolution_context),
                     ),
@@ -348,22 +355,25 @@ fn is_definitely_non_object_root(
 }
 
 /// Run the conservative non-object predicate in an exploratory completeness
-/// scope. A `false` result makes no authoritative claim: the following
-/// shallow-surface demand owns root completeness and will re-observe any real
-/// missing root/surface arm. A `true` result is authoritative and retains any
-/// partiality encountered while reaching the non-object terminal.
+/// scope.
+///
+/// A `true` result is the root-narrowing fact: the walk's own coverage is
+/// complete and the terminal is non-object. An incomplete walk is not that
+/// claim. Its partiality is discarded here; the following surface demand
+/// re-observes it and does not inherit a definitive negative.
 pub(super) fn probe_definitely_non_object_root(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     subject: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> bool {
     let probe_scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let definitely_non_object = is_definitely_non_object_root(dispatch, subject);
-    if definitely_non_object {
-        drop(probe_scope);
-    } else {
-        probe_scope.discard();
+    let observed = verter_type_engine::request_context::current_cold_compute_completeness();
+    probe_scope.discard();
+    if !definitely_non_object {
+        return false;
     }
-    definitely_non_object
+    let domain = demand_fact(observed).status();
+    root_narrowing_fact(&domain, &[]).exact().is_some()
 }
 
 pub(super) struct RuntimeClassification {
@@ -377,24 +387,28 @@ pub(super) fn classify_runtime(
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
     counters.runtime_classifier_calls += 1;
-    let result = dispatch.execute(dispatch.broad_runtime_key_for(subject));
-    if macro_projection_faulted(MacroProjectionLane::RuntimeMemberValue) {
-        return Err(partial_failure());
-    }
-    let classification = match result {
-        QueryResult::Value(output) => match output.value {
-            SemanticQueryValue::BroadRuntime(classification) => classification,
-            _ => {
-                return Err(ProjectionFailure::Unsupported(
-                    UnsupportedReason::SemanticConstruct,
-                ))
-            }
-        },
-        QueryResult::Recursive(_) => {
-            return Err(ProjectionFailure::Partial(MacroPartialReason::Recursion))
+    let fact = dispatch
+        .owning()
+        .execute_fact(dispatch.broad_runtime_key_for(subject));
+    let classification = match fact.value() {
+        Ok(verter_type_engine::semantic_query::FactResult::Complete(
+            SemanticQueryValue::BroadRuntime(classification),
+        )) => classification,
+        Ok(verter_type_engine::semantic_query::FactResult::Complete(_)) => {
+            return Err(ProjectionFailure::Unsupported(
+                UnsupportedReason::SemanticConstruct,
+            ));
         }
-        QueryResult::Error(_) => {
-            return Err(resolution_failure(MacroProjectionLane::RuntimeMemberValue))
+        Ok(
+            verter_type_engine::semantic_query::FactResult::Approximate { causes, .. }
+            | verter_type_engine::semantic_query::FactResult::Unavailable { causes },
+        ) => {
+            return Err(failure_from_causes(causes.get()));
+        }
+        Err(_) => {
+            return Err(ProjectionFailure::Partial(
+                MacroPartialReason::IncompleteTraversal,
+            ))
         }
     };
 
@@ -460,18 +474,13 @@ pub(super) fn emits_surface_has_invalid_member(
         .iter()
         .filter(|member| member.visibility.is_public())
         .any(|member| {
-            let Some(node) = dispatch
-                .normalize_node_for_structural_fact_demand(member.value, shape_context)
-                .into_complete_node()
-            else {
+            let normalized = dispatch
+                .owning()
+                .normalize_node_for_structural_fact_demand(member.value, shape_context);
+            let Some(node) = normalized.value().into_complete_node() else {
                 return false;
             };
-            match verter_type_engine::project_semantic_dispatch::node_data_for(
-                dispatch.graph(),
-                node,
-            )
-            .as_deref()
-            {
+            match dispatch.graph().read_in_scope(node).as_deref() {
                 Some(SemanticNodeData::Primitive(kind)) => {
                     !matches!(kind, PrimitiveKind::Any | PrimitiveKind::Unknown)
                 }
@@ -540,156 +549,68 @@ fn span_is_owned_by_macro(member: verter_span::Span, mac: verter_span::Span) -> 
     member.start >= mac.start && member.end <= mac.end
 }
 
-/// WHICH macro codegen consumer is asking whether an observed partial
-/// faults it.
-///
-/// The consumers read the same observation and are broken by different
-/// parts of it, so the containment set is a property of the CONSUMER and
-/// cannot be a single shared constant. Naming the consumer at every fault
-/// site is the point: a new site does not compile until it has said which
-/// output it is protecting.
-///
-/// The axis is not "TSC vs runtime" — it is whether the consumer DERIVES
-/// its output from the resolved value. A names-only runtime demand does
-/// not, which is why it sits beside the TSC lane rather than beside the
-/// option-rendering one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum MacroProjectionLane {
-    /// The TSC projection: it emits the AUTHORED declarations verbatim
-    /// into the generated TSX and splices the AUTHORED type argument, and
-    /// the external checker computes the member types itself.
-    Tsc,
-    /// A RUNTIME demand that RENDERS the option objects, asked at the
-    /// point that derives the MEMBER SET: it DERIVES `props: {…}` /
-    /// `emits: […]` from the resolved value, so a producer that yielded
-    /// no member set leaves members the module Vue executes does not
-    /// declare.
-    RuntimeOptions,
-    /// The SAME option-rendering demand, asked while classifying ONE
-    /// member's constructors.
-    ///
-    /// The class means something different here, and reading it the same
-    /// way is an over-degradation with teeth. At the member-SET point a
-    /// no-surface observation says members are missing; at THIS point it
-    /// says one member's TYPE is unknown, and the lane already has an
-    /// exact encoding for that — `type: null`, on that member alone. The
-    /// observed completeness is STICKY for the scope, so faulting here
-    /// would let the FIRST member whose value has no surface collapse
-    /// every LATER member's constructor too: `defineProps<{ a:
-    /// ReturnType<typeof unmodelled>; b: string }>()` publishes
-    /// `b: { type: null }` instead of `b: { type: String }`, for a `b` the
-    /// same tree types exactly.
-    RuntimeMemberValue,
-    /// A NAMES-ONLY runtime demand (the TSX / IDE compile). It renders no
-    /// option object at all, and the TSX it feeds splices the AUTHORED
-    /// macro call for the external checker — so it sits on the TSC side
-    /// of the containment axis, and faulting it would delete the whole
-    /// file's type-check surface to prevent an option object this demand
-    /// never emits.
-    RuntimeNames,
-    /// The FILE-level aggregate — the producer's own `completeness`,
-    /// which governs warm admission of the whole codegen artifact rather
-    /// than the content of either lane's output.
-    ///
-    /// It contains everything BOTH lanes contain between them, because a
-    /// lane that refused recorded the refusal IN its entry: the artifact
-    /// is a faithful, deterministic record of that refusal and re-deriving
-    /// it would produce the identical bytes. Faulting the file here
-    /// instead would make every module carrying one unmodelled helper
-    /// recompute its whole macro codegen on every touch, forever, to
-    /// re-derive a refusal it already holds.
-    File,
+/// Run `body` in a nested completeness scope and return what that body
+/// itself observed. Dropping the scope bubbles those reasons into the
+/// parent; the returned completeness is the body's own, read before the drop.
+pub(super) fn observe_local<R>(body: impl FnOnce() -> R) -> (R, ResultCompleteness) {
+    let scope = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
+    let value = body();
+    let local = verter_type_engine::request_context::current_cold_compute_completeness();
+    drop(scope);
+    (value, local)
 }
 
-impl MacroProjectionLane {
-    /// The partial classes whose observation does NOT, on its own, make
-    /// this lane's output an incomplete surface.
-    ///
-    /// The two DEGRADED-SUCCESS classes are contained by BOTH lanes. The
-    /// TSC projection is unaffected by construction (the declarations
-    /// ride verbatim), and faulting on them deleted the WHOLE props
-    /// projection over one class member's return type for programs the
-    /// checker types without difficulty. The RUNTIME projection does read
-    /// the value, but it reads it PER MEMBER and degrades per member: a
-    /// member carrying the positional marker, and every member of an
-    /// unverified frame, publish with `type: null` (validation and casting
-    /// off), while a member the substrate typed exactly keeps its real
-    /// constructor. Both classes leave a COMPLETE member set, which is
-    /// what makes containing them sound.
-    ///
-    /// [`PartialReasonSet::FLOW_RETURN_NO_SURFACE`] is where the lanes
-    /// part. It says the producer yielded no member set at all, so the
-    /// TSC splice is still whole and a derived option object is missing
-    /// members it cannot name. Containing it on the runtime lane and
-    /// relying on a structural "is the assembled surface empty" check
-    /// instead asks a per-SURFACE question of a per-CONTRIBUTION
-    /// invariant: one authored intersection arm, or one `interface …
-    /// extends` heritage clause, makes the surface non-empty and the
-    /// missing members disappear without a diagnostic.
-    ///
-    /// [`PartialReasonSet::UNDECIDED_CONDITIONAL`] parts the lanes the same
-    /// way: a conditional type the lane could not decide stands where the
-    /// checker's answer should be, and when it is the whole macro type
-    /// argument there is no member set to derive an option object from. At
-    /// ONE member's value the member classification contains it and encodes
-    /// that member's type as unknown, as it does a missing surface.
-    ///
-    /// The runtime lane still ALSO keeps the structural check, and it is
-    /// not redundant with this one: a DEGRADED SUCCESS whose marker sits
-    /// at the ROOT position (`{ ...new Box(), n: 1 }` — the literal fails
-    /// closed on a spread source it cannot evaluate) is a contained class
-    /// that nonetheless leaves no members. The class says the surface is
-    /// faithful; only the surface says it is empty.
-    ///
-    /// Every OTHER reason class still faults on BOTH lanes: a budget edge,
-    /// a cancellation, a superseded generation, an unstable view, a
-    /// recursion limit, a missing dependency, a semantic-query fault, and
-    /// the boolean-bridge `PROPAGATED` are all statements about the
-    /// REQUEST rather than about one declaration's inference. A
-    /// declaration-local budget the class-member inference records
-    /// precisely still reaches the FILE-level aggregate through its own
-    /// rail, so a budget-truncated class member keeps the entry `Complete`
-    /// (the authored splice is intact) while the file result reports
-    /// `BUDGET_EXCEEDED` and warms nothing.
-    const fn contained(self) -> PartialReasonSet {
-        match self {
-            Self::RuntimeOptions => PartialReasonSet::FLOW_RETURN_DEGRADED,
-            Self::Tsc | Self::RuntimeNames | Self::RuntimeMemberValue | Self::File => {
-                PartialReasonSet::FLOW_RETURN_DEGRADED
-                    .union(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
-                    .union(PartialReasonSet::UNDECIDED_CONDITIONAL)
-            }
-        }
-    }
-
-    /// The runtime lane for a demand that does (or does not) render the
-    /// option objects — the ONE derivation of that distinction, taken
-    /// from `VueMacroCodegenDemand::wants_runtime_constructors`.
-    pub(super) const fn runtime(renders_options: bool) -> Self {
-        if renders_options {
-            Self::RuntimeOptions
-        } else {
-            Self::RuntimeNames
-        }
+/// The carrier subject `node` resolves to, handed to `builder`, which keeps
+/// it live while the caller's walk continues from it.
+fn resolve_member_carrier(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+    tracked_dependency: bool,
+    eager_context: ProjectionReductionContext,
+    carrier_context: ProjectionReductionContext,
+) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+    let (resolved, local) = observe_local(|| {
+        dispatch
+            .owning()
+            .resolve_carrier_subject_node(
+                node,
+                if tracked_dependency {
+                    eager_context
+                } else {
+                    carrier_context
+                },
+            )
+            .into_value_in(builder)
+    });
+    if local.is_partial() {
+        None
+    } else {
+        Some(resolved)
     }
 }
 
-/// Whether the observed completeness FAULTS `lane`'s projection.
-pub(super) fn macro_projection_faulted(lane: MacroProjectionLane) -> bool {
-    let completeness = verter_type_engine::request_context::current_cold_compute_completeness();
-    !macro_projection_residual(completeness, lane).is_empty()
+/// This demand's fact from the completeness its own work observed.
+/// An empty set is a complete answer. Callers pass that observation,
+/// not a parent scope with another demand's reasons removed.
+pub(super) fn demand_fact(
+    inputs: verter_type_engine::semantic_query::ResultCompleteness,
+) -> FactResult<()> {
+    FactResult::from_demand_inputs(inputs.reasons())
 }
 
-/// The reasons of `completeness` that FAULT `lane` — the observed set
-/// minus [`MacroProjectionLane::contained`].
-pub(super) fn macro_projection_residual(
-    completeness: verter_type_engine::semantic_query::ResultCompleteness,
-    lane: MacroProjectionLane,
-) -> PartialReasonSet {
-    completeness.reasons().without(lane.contained())
+/// The fact of one testing row or one synthesized emit row that was emitted.
+///
+/// Emitting the row is that demand's answer. A typed degradation stays on
+/// the row (`unknown` plus the reason) and does not make the fact
+/// unavailable: one member's contained inference failure must not partial
+/// the file summary. A row that is not emitted publishes no fact, so it
+/// cannot borrow a sibling row's status.
+pub(super) fn row_derivation_fact() -> FactResult<()> {
+    FactResult::complete(())
 }
 
-/// Whether a DEGRADED flow return was observed while deriving this
+/// Whether a DEGRADED-SUCCESS flow return was observed while deriving this
 /// surface — the precondition for the runtime lane's empty-surface
 /// refusal.
 ///
@@ -699,14 +620,35 @@ pub(super) fn macro_projection_residual(
 /// there is no member set at all and publishing one declares a props-less
 /// component for a component that declares props.
 ///
-/// Scoped to the two DEGRADED-SUCCESS classes, which are exactly the ones
-/// the runtime lane CONTAINS: a no-surface observation already faulted the
-/// lane through [`macro_projection_faulted`] and never reaches here.
+/// Scoped to the two DEGRADED-SUCCESS classes. [`flow_return_no_surface_observed`]
+/// is the other side of that split: a producer that yielded no member set
+/// at all refuses even when a sibling arm made the assembled surface
+/// non-empty. A complete negative surface is discharged as its own
+/// resolution arm and never reaches here.
 pub(super) fn flow_return_degradation_observed() -> bool {
     let reasons =
         verter_type_engine::request_context::current_cold_compute_completeness().reasons();
     reasons.contains(PartialReasonSet::FLOW_RETURN_UNINFERRED)
         || reasons.contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED)
+}
+
+/// Whether a producer this derivation asked for yielded no member set.
+///
+/// Distinct from [`flow_return_degradation_observed`]: that pair leaves a
+/// surface whose member set is complete, so the runtime lane refuses only
+/// when the assembled option object is empty. This class has no structure
+/// to address a member of. One authored intersection arm or one `interface
+/// … extends` heritage clause makes the assembled surface non-empty, and
+/// an emptiness check then publishes the sibling arm alone.
+///
+/// Sample this immediately after the root surface projection. Member-value
+/// classification shares the cold scope and records the same bit when one
+/// member's type has no surface; that observation degrades the member and
+/// is not a missing member set.
+pub(super) fn flow_return_no_surface_observed() -> bool {
+    verter_type_engine::request_context::current_cold_compute_completeness()
+        .reasons()
+        .contains(PartialReasonSet::FLOW_RETURN_NO_SURFACE)
 }
 
 pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {
@@ -717,12 +659,16 @@ pub(super) fn expansion_kind(kind: AnalyzedMacroKind) -> MacroExpansionKind {
     }
 }
 
-/// An absent declaration, reported as `lane` sees it: a partial when the
-/// observation already faults that lane, a plain missing declaration
-/// otherwise.
-pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure {
-    if macro_projection_faulted(lane) {
-        partial_failure()
+/// An absent declaration. A partial observation of the lookup that missed
+/// is that lookup's [`failure_from_local`], not an ambient lane veto.
+pub(super) fn resolution_failure() -> ProjectionFailure {
+    ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)
+}
+
+/// `local` when that observation is partial; a missing declaration when it is not.
+pub(super) fn failure_from_local(local: ResultCompleteness) -> ProjectionFailure {
+    if local.is_partial() {
+        failure_from_causes(local.reasons())
     } else {
         ProjectionFailure::Unresolved(UnresolvedReason::MissingDeclaration)
     }
@@ -734,7 +680,12 @@ pub(super) fn resolution_failure(lane: MacroProjectionLane) -> ProjectionFailure
 pub(super) fn partial_failure() -> ProjectionFailure {
     let reasons =
         verter_type_engine::request_context::current_cold_compute_completeness().reasons();
+    failure_from_causes(reasons)
+}
+
+fn failure_from_causes(reasons: PartialReasonSet) -> ProjectionFailure {
     let reason = if reasons.contains(PartialReasonSet::BUDGET_EXCEEDED)
+        || reasons.contains(PartialReasonSet::OPERATION_BUDGET)
         || reasons.contains(PartialReasonSet::PROJECTION_WORK_LIMIT)
         || reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT)
         || reasons.contains(PartialReasonSet::DEFERRED_EVALUATION_LIMIT)
@@ -761,157 +712,54 @@ fn member_ordinal(index: usize) -> u32 {
 
 #[cfg(test)]
 mod lane_containment_tests {
-    use super::{macro_projection_residual, MacroProjectionLane};
-    use verter_type_engine::semantic_query::{PartialReasonSet, ResultCompleteness};
+    use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    use verter_type_engine::semantic_query::{
+        root_narrowing_fact, FactStatus, PartialReason, PartialReasonSet, ResultCompleteness,
+    };
 
-    fn residual(reason: PartialReasonSet, lane: MacroProjectionLane) -> PartialReasonSet {
-        macro_projection_residual(ResultCompleteness::Partial(reason), lane)
-    }
-
-    /// The lanes disagree on EXACTLY one class, and the disagreement is
-    /// the whole point of parameterising the predicate.
-    ///
-    /// A no-surface producer contributed no member set, so a lane that
-    /// DERIVES its output from the value is missing members it cannot
-    /// name and must fault; a lane that splices the AUTHORED declaration
-    /// for an external checker is unaffected.
-    ///
-    /// Mutation recipe: giving `Runtime` the same set as `Tsc` (a single
-    /// shared containment constant — which is exactly what this predicate
-    /// replaced) passes every degraded-success row here and fails the
-    /// no-surface row, and at the public boundary republishes every row of
-    /// `a_no_surface_flow_return_refuses_even_when_a_sibling_arm_contributes`.
     #[test]
-    fn only_the_no_surface_class_separates_the_two_macro_codegen_lanes() {
-        // The DEGRADED-SUCCESS pair: a complete member set, contained by
-        // BOTH lanes.
-        for degraded in [
-            PartialReasonSet::FLOW_RETURN_UNINFERRED,
-            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-        ] {
-            assert!(
-                residual(degraded, MacroProjectionLane::Tsc).is_empty(),
-                "the authored splice is intact under {degraded:?}"
-            );
-            assert!(
-                residual(degraded, MacroProjectionLane::RuntimeOptions).is_empty(),
-                "{degraded:?} leaves a COMPLETE member set, so the runtime lane publishes it \
-                 with the affected members' validation off rather than deleting the module"
-            );
-        }
+    fn exact_runtime_member_is_independent_of_an_earlier_failed_fact() {
+        use crate::{HostConfig, UpsertRequest, VerterHost};
+        use std::sync::Arc;
+        use verter_macro_dto::RuntimeConstructor;
+        use verter_type_engine::request_context::{
+            fold_result_completeness, ColdComputeCompletenessScope,
+        };
 
-        // The NO-SURFACE class: the lanes part, and they part on whether
-        // the demand RENDERS an option object rather than on whether it is
-        // nominally "runtime".
-        let no_surface = PartialReasonSet::FLOW_RETURN_NO_SURFACE;
-        assert!(
-            residual(no_surface, MacroProjectionLane::Tsc).is_empty(),
-            "the TSC lane splices the AUTHORED declaration, which rides verbatim whatever the \
-             substrate could not compute"
-        );
-        assert_eq!(
-            residual(no_surface, MacroProjectionLane::RuntimeOptions),
-            no_surface,
-            "an option-rendering demand DERIVES its output from the value: a producer that \
-             yielded no member set leaves it missing members it cannot name, and no \
-             structural check on the ASSEMBLED surface can see that once a sibling arm \
-             contributed"
-        );
-        assert!(
-            residual(no_surface, MacroProjectionLane::RuntimeNames).is_empty(),
-            "a NAMES-ONLY (TSX / IDE) demand emits no option object, and the TSX it feeds \
-             splices the AUTHORED macro call — faulting it would delete the whole file's \
-             type-check surface to prevent bytes this demand never writes"
-        );
-        assert!(
-            residual(no_surface, MacroProjectionLane::RuntimeMemberValue).is_empty(),
-            "and at ONE MEMBER's classification the same class says that member's TYPE is \
-             unknown, which the lane encodes as `type: null` on that member — the observation \
-             is STICKY for the scope, so faulting here collapses every LATER member's \
-             constructor too"
-        );
-
-        // The FILE aggregate contains both lanes' sets: a lane that
-        // refused recorded the refusal IN its entry, and warming that
-        // faithful record is correct.
-        for contained in [
-            PartialReasonSet::FLOW_RETURN_UNINFERRED,
-            PartialReasonSet::FLOW_RETURN_UNVERIFIED,
-            PartialReasonSet::FLOW_RETURN_NO_SURFACE,
-        ] {
-            assert!(
-                residual(contained, MacroProjectionLane::File).is_empty(),
-                "{contained:?} must not make the whole codegen artifact recompute forever to \
-                 re-derive a refusal it already holds"
+        let host = VerterHost::new_standalone(HostConfig::default());
+        let canonical = "/src/Independent.vue";
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from(
+                    "<script setup lang=\"ts\">defineProps<{ good: string }>()</script>",
+                ),
+                file_language: crate::FileLanguage::vue(),
+                aliases: Vec::new(),
+            })
+            .unwrap();
+        crate::resolver_core::with_bare_host_ctx_for_test(&host, |ctx| {
+            let dispatch = super::ProjectSemanticDispatch::new(ctx);
+            let indexed = ctx.ensure_indexed_ready_serve(canonical).unwrap().indexed;
+            let mac = &indexed.script_analysis.as_ref().unwrap().macros[0];
+            let owner = super::build_owner_decl_identity(ctx, canonical, mac.owner);
+            let subject = dispatch.broad_runtime_subject_for_macro(&owner, 0).unwrap();
+            let _scope = ColdComputeCompletenessScope::enter();
+            fold_result_completeness(ResultCompleteness::partial(
+                PartialReasonSet::BUDGET_EXCEEDED,
+            ));
+            let classification = super::classify_runtime(
+                &dispatch,
+                subject.member(Arc::from("good")),
+                &mut super::VueMacroCodegenCounters::default(),
+            )
+            .expect("an exact sibling's classification owns its guarantee");
+            assert_eq!(
+                classification.constructors.as_slice(),
+                &[RuntimeConstructor::String]
             );
-        }
-
-        // CONTROL — every class that is a statement about the REQUEST
-        // faults all three, and a mixed observation is governed by its
-        // worst class.
-        for request_class in [
-            PartialReasonSet::BUDGET_EXCEEDED,
-            PartialReasonSet::CANCELLED,
-            PartialReasonSet::SUPERSEDED_GENERATION,
-            PartialReasonSet::UNSTABLE_STATE,
-            PartialReasonSet::SAME_PATH_RECURSION,
-            PartialReasonSet::MISSING_DEPENDENCY,
-            PartialReasonSet::SEMANTIC_QUERY_FAULT,
-            PartialReasonSet::PROPAGATED,
-        ] {
-            for lane in [
-                MacroProjectionLane::Tsc,
-                MacroProjectionLane::RuntimeOptions,
-                MacroProjectionLane::RuntimeNames,
-                MacroProjectionLane::RuntimeMemberValue,
-                MacroProjectionLane::File,
-            ] {
-                assert_eq!(
-                    residual(request_class, lane),
-                    request_class,
-                    "{request_class:?} is a statement about the DEMAND and faults {lane:?}"
-                );
-                assert_eq!(
-                    residual(
-                        request_class.union(PartialReasonSet::FLOW_RETURN_UNINFERRED),
-                        lane
-                    ),
-                    request_class,
-                    "a mixed observation keeps its faulting class on {lane:?}"
-                );
-            }
-        }
-    }
-
-    /// An undecided conditional parts the lanes as a missing surface does:
-    /// the authored splice, a names-only demand, one member's
-    /// classification and the file aggregate contain it, and a demand that
-    /// renders the option object from the value faults on it.
-    #[test]
-    fn an_undecided_conditional_parts_the_lanes_as_a_missing_surface_does() {
-        let undecided = PartialReasonSet::UNDECIDED_CONDITIONAL;
-        for lane in [
-            MacroProjectionLane::Tsc,
-            MacroProjectionLane::RuntimeNames,
-            MacroProjectionLane::RuntimeMemberValue,
-            MacroProjectionLane::File,
-        ] {
-            assert!(
-                residual(undecided, lane).is_empty(),
-                "{lane:?} contains an undecided conditional"
-            );
-        }
-        assert_eq!(
-            residual(undecided, MacroProjectionLane::RuntimeOptions),
-            undecided,
-            "an option object derived from an undecided conditional is missing members it \
-             cannot name"
-        );
-        assert!(
-            !PartialReasonSet::FLOW_RETURN_DEGRADED.contains(undecided)
-                && !PartialReasonSet::FLOW_RETURN_NO_SURFACE.contains(undecided),
-            "the class is its own bit"
-        );
+        });
     }
 
     /// The two flow-return NO-VALUE and DEGRADED-SUCCESS classes are
@@ -933,5 +781,23 @@ mod lane_containment_tests {
                 .contains(PartialReasonSet::FLOW_RETURN_UNVERIFIED),
             "and the two must not alias"
         );
+    }
+
+    #[test]
+    fn root_narrowing_does_not_borrow_a_sibling_status() {
+        let open = FactStatus::Unavailable(NonEmptyReasons::of(PartialReason::FlowReturnNoSurface));
+        assert!(root_narrowing_fact(&open, &[FactStatus::Complete])
+            .exact()
+            .is_none());
+        assert!(
+            root_narrowing_fact(&FactStatus::Complete, &[FactStatus::Complete])
+                .exact()
+                .is_some()
+        );
+        let missing =
+            FactStatus::Unavailable(NonEmptyReasons::of(PartialReason::MissingDependency));
+        assert!(root_narrowing_fact(&FactStatus::Complete, &[missing])
+            .exact()
+            .is_none());
     }
 }

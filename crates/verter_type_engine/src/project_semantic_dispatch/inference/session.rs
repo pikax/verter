@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::dispatch_txn::SessionId;
 use crate::semantic_query::{
@@ -74,12 +74,36 @@ struct ProjectionInferenceInfo {
 }
 
 /// Recovered source-shape entries accumulated by the reverse pass.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) enum ReverseRecoveredEntry {
     ObjectMember { member: SurfaceMember },
     ArrayElement { value: SemanticNodeId },
     TupleElement { element: TupleElement },
     IndexSignature { signature: IndexSignature },
+}
+
+impl ReverseRecoveredEntry {
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::ObjectMember { member } => Self::ObjectMember {
+                member: member.clone(),
+            },
+            Self::ArrayElement { value } => Self::ArrayElement {
+                value: value.clone(),
+            },
+            Self::TupleElement { element } => Self::TupleElement {
+                element: element.copy(),
+            },
+            Self::IndexSignature { signature } => Self::IndexSignature {
+                signature: signature.clone(),
+            },
+        }
+    }
 }
 
 /// Session-owned journals for exact reverse-homomorphic mapped inference.
@@ -159,7 +183,10 @@ pub struct InferenceSessionSetup {
 }
 
 impl InferenceSessionSetup {
+    /// Its inferable parameter set is owned in `graph`, the graph that
+    /// issued the parameters.
     pub fn new(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
         infos: Arc<[InferenceInfoSetup]>,
         variance_phase: VariancePhase,
         pass_kind: InferencePassKind,
@@ -177,13 +204,16 @@ impl InferenceSessionSetup {
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
         );
-        let inferable_params = InferableParamSetId::new(Arc::from(
-            infos
-                .iter()
-                .map(|info| info.param_node)
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        ));
+        let inferable_params = InferableParamSetId::new(
+            graph,
+            Arc::from(
+                infos
+                    .iter()
+                    .map(|info| info.param_node)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            ),
+        );
         Self {
             context_key: InferenceContextKey {
                 inferable_params,
@@ -244,6 +274,7 @@ pub struct InferenceSession {
     setup: InferenceSessionSetup,
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
+    info_positions: FxHashMap<SemanticNodeId, usize>,
     /// Reverse-projection journals, present only for a reverse-homomorphic
     /// session selected at open.
     reverse_projection: Option<ReverseProjectionState>,
@@ -265,7 +296,7 @@ impl InferenceSession {
         setup: InferenceSessionSetup,
         reverse_projection: Option<ReverseProjectionState>,
     ) -> Self {
-        let infos = setup
+        let infos: Vec<_> = setup
             .infos
             .iter()
             .map(|info| InferenceInfo {
@@ -277,11 +308,16 @@ impl InferenceSession {
                 implied_arity: None,
             })
             .collect();
+        let mut info_positions = FxHashMap::default();
+        for (position, info) in infos.iter().enumerate() {
+            info_positions.entry(info.param_node).or_insert(position);
+        }
         Self {
             fresh_literal_deposits: Vec::new(),
             id,
             setup,
             infos,
+            info_positions,
             reverse_projection,
             staged_bindings: None,
             opened_at_depth: 0,
@@ -299,6 +335,12 @@ impl InferenceSession {
         self.reverse_projection
             .as_ref()
             .map(|reverse| &reverse.spec)
+    }
+
+    /// The candidates the session's parameters collected so far.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collected_candidates_for_tests(&self) -> usize {
+        self.infos.iter().map(|info| info.candidates.len()).sum()
     }
 
     /// A rollback point over the session's per-parameter candidate lists.
@@ -490,7 +532,12 @@ impl InferenceSession {
     ) -> Vec<ReverseRecoveredEntry> {
         self.reverse_projection
             .as_ref()
-            .map(|reverse| reverse.recovered[checkpoint.recovered_len..].to_vec())
+            .map(|reverse| {
+                reverse.recovered[checkpoint.recovered_len..]
+                    .iter()
+                    .map(ReverseRecoveredEntry::clone)
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -538,9 +585,9 @@ impl InferenceSession {
             return false;
         }
         let Some(info) = self
-            .infos
-            .iter_mut()
-            .find(|info| info.param_node == param_node)
+            .info_positions
+            .get(&param_node)
+            .and_then(|&position| self.infos.get_mut(position))
         else {
             return false;
         };
@@ -580,7 +627,29 @@ impl InferenceSession {
 
     /// Whether this session infers `param_node`.
     pub(crate) fn infers(&self, param_node: SemanticNodeId) -> bool {
-        self.infos.iter().any(|info| info.param_node == param_node)
+        self.info_positions.contains_key(&param_node)
+    }
+
+    /// A contextual mapper fixes only the binders its argument reads, rather
+    /// than solving the entire clause again for each callback in a chain.
+    pub(crate) fn fixation_inputs_for(
+        &self,
+        params: &[SemanticNodeId],
+    ) -> Option<Vec<FixationInput>> {
+        if self.state != InferenceSessionState::Collecting {
+            return None;
+        }
+        params
+            .iter()
+            .map(|param| {
+                let info = self.infos.get(*self.info_positions.get(param)?)?;
+                Some(FixationInput {
+                    param: info.param_node,
+                    name: Arc::clone(&info.param_name),
+                    candidates: super::winning_candidates(&info.candidates),
+                })
+            })
+            .collect()
     }
 
     /// Record the arity the call's arguments imply for the bare rest type
@@ -639,7 +708,7 @@ impl InferenceSession {
             let bound = combine(candidates, variance);
             bindings.push(InferBinding {
                 param: info.param_node,
-                name: Arc::clone(&info.param_name),
+                name: verter_type_expr::OwnedStr::from(info.param_name.clone()),
                 bound,
             });
         }

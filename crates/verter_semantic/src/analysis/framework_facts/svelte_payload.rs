@@ -80,9 +80,9 @@ pub(super) fn collect_snippet_candidate_members_from_lowered(
 /// component's synthesized default-export value symbol.
 pub(super) fn local_default_anchor(owner: verter_type_expr::TopLevelOwnerId) -> AuthoredAnchor {
     AuthoredAnchor {
-        canonical_id: Arc::from(""),
+        canonical_id: verter_type_expr::OwnedStr::from(""),
         owner,
-        symbol: Arc::from("default"),
+        symbol: verter_type_expr::OwnedStr::from("default"),
         space: LocatorSymbolSpace::Value,
     }
 }
@@ -131,7 +131,7 @@ pub(super) fn fill_empty_payload_ref_anchor(
         AuthoredBodyLocator::MacroPayload(payload) => &mut payload.anchor,
     };
     if anchor.canonical_id.is_empty() {
-        anchor.canonical_id = Arc::from(canonical);
+        anchor.canonical_id = verter_type_expr::OwnedStr::from(canonical);
     }
 }
 

@@ -55,7 +55,7 @@ use crate::typeinfo::framework_surface::vue_exec::{
 };
 use crate::typeinfo::framework_surface::{SvelteSurfaceKey, SvelteSurfaceSource};
 use crate::typeinfo::surface::{TypeInfoSurface, TypeInfoSurfaceEntry};
-use crate::typeinfo::surface_resolution::adopt_surface;
+use crate::typeinfo::surface_resolution::{adopt_surface, adopt_surface_claim};
 use crate::typeinfo::types::TypeInfoQueryLevel;
 use verter_type_engine::project_semantic_dispatch::callable_view::{
     CallableNodeView, PositionalParamNode,
@@ -189,10 +189,11 @@ pub(crate) fn resolve_svelte_surface(
             // A contributing read tripped after the family was identified but
             // before it could materialize a row. Preserve an explicit empty
             // carrier as PARTIAL; laundering this to `Missing` would make the
-            // public surface look like an ordinary absent macro.
+            // public surface look like an ordinary absent macro. The empty
+            // carrier is unavailable, not a supported-empty closed domain.
             ResolvedOutcome::Missing | ResolvedOutcome::Unsupported { .. } => {
                 ResolvedOutcome::Partial {
-                    value: Arc::new(MacroSurfaceDtos::default()),
+                    value: non_authoritative_membership(),
                     diagnostics,
                 }
             }
@@ -373,11 +374,45 @@ impl<'a> SvelteFactObservations<'a> {
     }
 }
 
+/// Empty membership whose absence is not a producer claim of an exact closed domain.
+fn non_authoritative_membership() -> Arc<MacroSurfaceDtos> {
+    Arc::new(MacroSurfaceDtos {
+        domain_guarantee: Some(
+            verter_session_query::analysis::component_meta::MetadataFactGuarantee::default(),
+        ),
+        ..MacroSurfaceDtos::default()
+    })
+}
+
+/// Keep a typed producer claim. Members without one stay a lower bound;
+/// an empty surface without one is unavailable rather than exact absence.
+fn retain_membership_claim(mut dtos: MacroSurfaceDtos) -> MacroSurfaceDtos {
+    if dtos.domain_guarantee.is_some() {
+        return dtos;
+    }
+    let has_surface = dtos.props.is_some()
+        || dtos.emits.is_some()
+        || dtos.slots.is_some()
+        || !dtos.exposed_fields.is_empty();
+    dtos.domain_guarantee = Some(if has_surface {
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee {
+            kind: 2,
+            causes: vec![104],
+            open: true,
+        }
+    } else {
+        verter_session_query::analysis::component_meta::MetadataFactGuarantee::default()
+    });
+    dtos
+}
+
 fn script_fact_partial(outcome: ResolvedMacroPayload) -> ResolvedMacroPayload {
     let value = match outcome {
-        ResolvedOutcome::Resolved(value) | ResolvedOutcome::Partial { value, .. } => value,
+        ResolvedOutcome::Resolved(value) | ResolvedOutcome::Partial { value, .. } => {
+            Arc::new(retain_membership_claim((*value).clone()))
+        }
         ResolvedOutcome::Unsupported { .. } | ResolvedOutcome::Missing => {
-            Arc::new(MacroSurfaceDtos::default())
+            non_authoritative_membership()
         }
     };
     ResolvedOutcome::Partial {
@@ -443,10 +478,26 @@ struct SvelteSurfaceSeal;
 /// supertrait seal is private to the trait module).
 pub(in crate::typeinfo::framework_surface) struct SvelteResolvedSurface {
     surface: VueMacroSurface,
+    member_source_base: Option<verter_type_expr::locators::AuthoredBodyLocator>,
     _seal: SvelteSurfaceSeal,
 }
 
 impl SvelteResolvedSurface {
+    fn with_member_source_base(
+        mut self,
+        base: verter_type_expr::locators::AuthoredBodyLocator,
+    ) -> Self {
+        self.member_source_base = Some(base);
+        self
+    }
+
+    /// The captured source body belonging to this resolved surface.
+    pub(in crate::typeinfo::framework_surface) fn member_source_base(
+        &self,
+    ) -> Option<&verter_type_expr::locators::AuthoredBodyLocator> {
+        self.member_source_base.as_ref()
+    }
+
     /// The resolution-derived carrier the shared normalizers read, by borrow.
     /// Exposed to the trait module
     /// [`crate::typeinfo::framework_surface::resolved_surface_access`] while the
@@ -488,6 +539,7 @@ fn macro_surface_shell(
             unresolved_surface_arms: Vec::new(),
         },
         _seal: SvelteSurfaceSeal,
+        member_source_base: None,
     }
 }
 
@@ -502,9 +554,11 @@ fn macro_surface_shell(
 ///   synthesise a surface);
 /// - there is no `$props()` call (sealed negative evidence). `Missing`
 ///   tells the public API projector to ask the legacy `export let`
-///   surface; present-but-empty would hide every legacy prop;
-/// - the key domain is open (rest or `let props = $props()`). Publishing
-///   only enumerated keys would close a surface the author left open.
+///   surface; present-but-empty would hide every legacy prop.
+///
+/// An open key set (rest or `let props = $props()`) is a complete open
+/// domain with no enumerated members. `Missing` would let the classifier
+/// publish that open set as exact closed absence.
 ///
 /// `prop_origins` stays empty: an untyped key has no type declaration.
 fn runes_props_from_destructure_geometry(
@@ -518,7 +572,14 @@ fn runes_props_from_destructure_geometry(
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for call in props_calls.iter() {
         if call.has_rest {
-            return ResolvedOutcome::Missing;
+            return ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
+                domain_guarantee: Some(
+                    verter_session_query::analysis::component_meta::MetadataFactGuarantee::complete(
+                        true,
+                    ),
+                ),
+                ..Default::default()
+            }));
         }
         for key in &call.public_keys {
             if !seen.insert(key.name.as_str()) {
@@ -604,101 +665,69 @@ fn resolve_runes_props(
     // per-member `origin.canonical_file` is the heritage-aware declaration file
     // (the file the member's `name`/`: T` is written in), so a member inherited
     // from an imported base reports THAT base's file, not the props_type's.
-    let surface = navigate_param_to_object_surface(ctx, dispatch, owner, props_type);
-    let (mut fields, prop_origins) = match surface {
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(
-            surface,
-        )
-        | verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::OpenPresence(
-            surface,
-        ) => {
-            let surface = surface.into_inner();
-            let prop_origins = prop_origins_from_surface(owner, &surface);
-
-            let callable_roles = surface
-                .members
-                .iter()
-                .filter(|member| member.visibility.is_public())
-                .filter_map(|member| {
-                    member.published_name().map(|name| {
-                        (
-                            name.to_string(),
-                            classify_svelte_callable_role(
-                                dispatch,
-                                member.value,
-                                &facts.snippet_imports,
-                            ),
-                        )
+    let (adopted, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
+        ctx, dispatch, owner, props_type,
+    ));
+    // A complete surface (closed or open) classifies callable roles. An
+    // approximate subset publishes the members it built and keeps the claim.
+    // No surface and an unavailable claim both publish an empty props vector
+    // with that claim attached, so a missing `$props` type is not exact absence.
+    let (mut fields, prop_origins) = if guarantee.kind == 1 {
+        match adopted {
+            Some(surface) => {
+                let prop_origins = prop_origins_from_surface(owner, &surface);
+                let callable_roles = surface
+                    .members
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                    .filter_map(|member| {
+                        member.published_name().map(|name| {
+                            (
+                                name.to_string(),
+                                classify_svelte_callable_role(
+                                    dispatch,
+                                    member.value,
+                                    &facts.snippet_imports,
+                                ),
+                            )
+                        })
                     })
-                })
-                .collect::<std::collections::HashMap<_, _>>();
-            let fields = props_from_typeinfo_surface(
-                ctx,
-                dispatch,
-                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
-            );
-            let fields = fields
-                .into_iter()
-                .map(|mut field| {
-                    field.callable_role = callable_roles
-                        .get(&field.analysis.name)
-                        .cloned()
-                        .unwrap_or_default();
-                    field
-                })
-                .collect();
-            (fields, prop_origins)
+                    .collect::<std::collections::HashMap<_, _>>();
+                let fields = props_from_typeinfo_surface(
+                    ctx,
+                    dispatch,
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                        .with_member_source_base(props_type.locator.clone()),
+                );
+                let fields = fields
+                    .into_iter()
+                    .map(|mut field| {
+                        field.callable_role = callable_roles
+                            .get(&field.analysis.name)
+                            .cloned()
+                            .unwrap_or_default();
+                        field
+                    })
+                    .collect();
+                (fields, prop_origins)
+            }
+            None => (Vec::new(), Vec::new()),
         }
-        // A props type that RESOLVES to no object surface (a primitive /
-        // open generic) still establishes a PRESENT props surface —
-        // supported-empty, never a Missing.
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::NoSurface(_) => {
-            (Vec::new(), Vec::new())
-        }
-        // An UNRESOLVABLE `$props()` type is NOT a supported-empty surface:
-        // record the typed reason (the enclosing cold-compute scope turns the
-        // outcome PARTIAL on the wire and refuses store admission) and
-        // publish the usable positive subset the producer still built.
-        verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Incomplete(
-            incomplete,
-        ) => match incomplete.into_recorded_partial() {
+    } else {
+        match adopted {
             Some(surface) => {
                 let prop_origins = prop_origins_from_surface(owner, &surface);
                 let fields = props_from_typeinfo_surface(
                     ctx,
                     dispatch,
-                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                    &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                        .with_member_source_base(props_type.locator.clone()),
                 );
                 (fields, prop_origins)
             }
             None => (Vec::new(), Vec::new()),
-        },
-    };
-    for row in &mut fields {
-        if matches!(
-            row.authority.outcome(),
-            verter_type_expr::ResolvedTypeOutcome::Failed { .. }
-        ) {
-            let source = verter_type_expr::facts::SourcePosition::Present(
-                verter_type_expr::facts::SemanticTypeSource::Projected(
-                    verter_type_expr::facts::ProjectedTypeFact::MemberPath {
-                        base: props_type.locator.clone(),
-                        path: Arc::from([verter_type_expr::facts::FactPropertyKey::from(
-                            row.analysis.name.clone(),
-                        )]),
-                    },
-                ),
-            );
-            let member_type = row.member_type.clone();
-            *row =
-                crate::typeinfo::framework_surface::results::ResolvedPropField::from_source_position(
-                    row.analysis.clone(),
-                    source,
-                    row.callable_role.clone(),
-                );
-            row.member_type = member_type;
         }
-    }
+    };
     // Apply runtime DEFAULTS DIRECTLY (the Svelte path does NOT use Vue's
     // analyzer default-merge path): a prop with a captured default is OPTIONAL
     // on the surface (`required = !is_optional` downstream), and the default
@@ -711,6 +740,7 @@ fn resolve_runes_props(
         }
     }
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         props: Some(PropsSurface {
             fields,
             index_signatures: Vec::new(),
@@ -909,12 +939,14 @@ fn resolve_bindable(
             adopt_surface(navigate_param_to_object_surface(
                 ctx, dispatch, owner, props_type,
             ))
+            .map(|surface| (surface, props_type.locator.clone()))
         })
-        .map(|surface| {
+        .map(|(surface, base)| {
             props_from_typeinfo_surface(
                 ctx,
                 dispatch,
-                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner),
+                &macro_surface_shell(surface, AnalyzedMacroKind::DefineProps, owner)
+                    .with_member_source_base(base),
             )
         })
         .unwrap_or_default();
@@ -980,17 +1012,18 @@ fn resolve_snippet_props(
     // An INCOMPLETE props-surface resolution records its typed reason; the
     // enclosing cold-compute scope then publishes the snippet surface as
     // PARTIAL instead of laundering it into an ordinary absent macro.
-    let Some(surface) = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, props_type,
-    )) else {
-        return ResolvedOutcome::Missing;
+    ));
+    let Some(surface) = surface else {
+        return snippet_claim_outcome(guarantee);
     };
 
     let filtered = retain_svelte_snippet_members(&surface, |member| {
         classify_svelte_callable_role(dispatch, member.value, &facts.snippet_imports)
     });
     if filtered.members.is_empty() {
-        return ResolvedOutcome::Missing;
+        return snippet_claim_outcome(guarantee);
     }
     // Typed role proof has already filtered every member before the callable
     // reader becomes reachable.
@@ -1001,11 +1034,28 @@ fn resolve_snippet_props(
     );
     let (slots, slot_return_publications) = rows.into_iter().unzip();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         slots: Some(slots),
         slot_return_publications,
         ..Default::default()
     };
     ResolvedOutcome::Resolved(Arc::new(dtos))
+}
+
+/// A complete closed snippet domain with no snippet members is absence.
+/// An open, approximate, or unavailable claim stays on an empty slot list
+/// so the classifier cannot promote it to exact absence.
+fn snippet_claim_outcome(
+    guarantee: verter_session_query::analysis::component_meta::MetadataFactGuarantee,
+) -> ResolvedMacroPayload {
+    if guarantee.kind == 1 && !guarantee.open {
+        return ResolvedOutcome::Missing;
+    }
+    ResolvedOutcome::Resolved(Arc::new(MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
+        slots: Some(Vec::new()),
+        ..Default::default()
+    }))
 }
 
 /// The SVELTE-SPECIFIC snippet-slot normalizer.
@@ -1061,18 +1111,19 @@ fn svelte_snippet_slots_from_typeinfo_surface(
             // to its ordered elements).
             // A fail-closed `None` (an unresolved `Params` carrier) drops the slot.
             let view = CallableNodeView::new(dispatch, member.value);
-            let params = view.validated_snippet_positional_params(context)?;
+            // Each carrier below owns the nodes this slot's bindings and
+            // return display are materialized from.
+            let params_carrier = view.owning().validated_snippet_positional_params(context);
+            let params = params_carrier.value().clone()?;
             // An UNRESOLVED snippet root records its typed reason; the
             // return display then stays absent honestly (the validated
             // snippet member itself already resolved above).
-            let return_node = view
+            let realized = view
+                .owning()
                 .realized_callable_root(context)
-                .recorded()
-                .and_then(|realized_root| {
-                    let combine = match verter_type_engine::project_semantic_dispatch::node_data_for(
-                        dispatch.graph(),
-                        realized_root,
-                    )
+                .map(verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::recorded);
+            let arms = realized.value().map(|realized_root| {
+                    let combine = match dispatch.graph().read_in_scope(realized_root)
                     .as_deref()
                     {
                         Some(SemanticNodeData::Union(_)) => {
@@ -1080,8 +1131,11 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                         }
                         _ => verter_type_engine::project_semantic_dispatch::callable_view::ArmCombineNode::Intersection,
                     };
-                    view.slot_param_and_return_by_arm(combine, context)
-                })
+                    view.owning().slot_param_and_return_by_arm(combine, context)
+                });
+            let return_node = arms
+                .as_ref()
+                .and_then(|arms| arms.value().as_ref())
                 .and_then(|parts| parts.return_type);
             // The slot member's scope (the shared member-value-scope rule) —
             // each published binding display value is paired with it.
@@ -1113,7 +1167,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                                 occurrence:
                                     verter_type_expr::facts::CallableOccurrenceHandle::member(
                                         member.value.0,
-                                        Arc::from([name.clone()]),
+                                        From::from([name.clone()]),
                                     ),
                                 projection:
                                     verter_type_expr::facts::CallableOccurrenceProjection::Return,
@@ -1268,6 +1322,7 @@ fn retain_svelte_snippet_members(
         .cloned()
         .collect();
     TypeInfoSurface {
+        domain_guarantee: surface.domain_guarantee.clone(),
         entries: surface
             .entries
             .iter()
@@ -1514,18 +1569,20 @@ fn resolve_dispatcher(
     // An UNRESOLVABLE event map records its typed reason (the enclosing
     // cold-compute scope publishes PARTIAL); a genuinely surface-less event
     // map stays the present-but-empty emits surface.
-    let fields = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, event_map,
-    ))
-    .map(|surface| {
-        emits_from_typeinfo_surface(
-            ctx,
-            dispatch,
-            &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
-        )
-    })
-    .unwrap_or_default();
+    ));
+    let fields = surface
+        .map(|surface| {
+            emits_from_typeinfo_surface(
+                ctx,
+                dispatch,
+                &macro_surface_shell(surface, AnalyzedMacroKind::DefineEmits, owner),
+            )
+        })
+        .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         emits: Some(EmitsSurface {
             fields,
             index_signatures: Vec::new(),
@@ -1565,14 +1622,16 @@ fn resolve_callback_prop_events(
     // An UNRESOLVABLE `$props()` source records its typed reason (the
     // enclosing cold-compute scope publishes PARTIAL); a resolvable props
     // type with no `on*` members stays the present-but-empty emits surface.
-    let fields = adopt_surface(navigate_param_to_object_surface(
+    let (surface, guarantee) = adopt_surface_claim(navigate_param_to_object_surface(
         ctx, dispatch, owner, props_type,
-    ))
-    .map(|surface| {
-        callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
-    })
-    .unwrap_or_default();
+    ));
+    let fields = surface
+        .map(|surface| {
+            callback_events_from_props_surface(dispatch, &surface, &props_type.locator, owner)
+        })
+        .unwrap_or_default();
     let dtos = MacroSurfaceDtos {
+        domain_guarantee: Some(guarantee),
         emits: Some(EmitsSurface {
             fields,
             index_signatures: Vec::new(),
@@ -1646,7 +1705,7 @@ fn callback_events_from_props_surface(
         // prop (`onclick: string` / `label?: string`), or a union with no single
         // callable arm — is NOT an event.
         let view = CallableNodeView::new(dispatch, member.value);
-        let Some(signature) = view.signature(context) else {
+        let Some(signature) = view.owning().signature(context) else {
             continue;
         };
         // Payload = the callback's PARAMETERS as a labelled tuple (ALL of them — a
@@ -1658,8 +1717,9 @@ fn callback_events_from_props_surface(
         // authored macro-payload position, so `payload` stays the honest `None`
         // (paired with a `None` scope); typed payload demand is host-raised
         // through the graph surface.
-        let raw_params = signature.raw_params();
-        let payload_tuple = materialize_payload_tuple(dispatch, &raw_params);
+        let raw_params_carrier = signature.raw_params();
+        let raw_params = raw_params_carrier.value();
+        let payload_tuple = materialize_payload_tuple(dispatch, raw_params);
         let payload_type =
             crate::resolver_core::surface_projector::render_type_expr_display(&payload_tuple);
         // The payload SOURCE: the closed tuple over the SAME callback params,
@@ -1671,7 +1731,7 @@ fn callback_events_from_props_surface(
         // so the position is the typed source-construction FAILURE — never a
         // fabricated `unknown` success.
         let payload_source = dispatch
-            .closed_params_tuple_source(&raw_params)
+            .closed_params_tuple_source(raw_params)
             .map(verter_type_expr::facts::SourcePosition::Present)
             .or_else(|| {
                 Some(verter_type_expr::facts::SourcePosition::Present(
@@ -1680,7 +1740,7 @@ fn callback_events_from_props_surface(
                             base: return_base.clone(),
                             occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                                 member.value.0,
-                                Arc::from([member_name.to_string()]),
+                                From::from([member_name.to_string()]),
                             ),
                             projection:
                                 verter_type_expr::facts::CallableOccurrenceProjection::Parameters {
@@ -1700,7 +1760,7 @@ fn callback_events_from_props_surface(
                     base: return_base.clone(),
                     occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                         member.value.0,
-                        Arc::from([member_name.to_string()]),
+                        From::from([member_name.to_string()]),
                     ),
                     projection: verter_type_expr::facts::CallableOccurrenceProjection::Return,
                 },
@@ -1721,7 +1781,7 @@ fn callback_events_from_props_surface(
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member_name.to_string()]),
+                    From::from([member_name.to_string()]),
                 ),
                 0,
             ),
@@ -1811,7 +1871,7 @@ pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_t
 /// renders. A non-`Alias` node (or an unresolved id) is returned as-is.
 fn follow_alias_chain(store: &SemanticGraphStore, mut id: SemanticNodeId) -> SemanticNodeId {
     for _ in 0..16 {
-        match store.node_data(id).as_deref() {
+        match store.read_in_scope(id).as_deref() {
             Some(SemanticNodeData::Alias(target)) => id = *target,
             _ => return id,
         }
@@ -1835,17 +1895,19 @@ fn instance_export_display_node(
     node: SemanticNodeId,
 ) -> SemanticNodeId {
     let resolved = follow_alias_chain(store, node);
-    if let Some(SemanticNodeData::Object(surface)) = store.node_data(resolved).as_deref() {
+    if let Some(SemanticNodeData::Object(surface)) = store.read_in_scope(resolved).as_deref() {
         if surface.positive_members().is_empty()
-            && surface.construct_signatures.is_empty()
-            && surface.index_signatures.is_empty()
+            && surface.construct_signatures().is_empty()
+            && surface.index_signatures().is_empty()
             && !surface.has_known_index_signature()
-            && surface.keyspace.is_none()
-            && surface.call_signatures.len() == 1
+            && surface.keyspace().is_none()
+            && surface.call_signatures().len() == 1
         {
-            let sig = surface.call_signatures[0];
+            let sig = surface.call_signatures()[0];
             if matches!(
-                store.node_data(follow_alias_chain(store, sig)).as_deref(),
+                store
+                    .read_in_scope(follow_alias_chain(store, sig))
+                    .as_deref(),
                 Some(SemanticNodeData::Signature { .. })
             ) {
                 return sig;
@@ -1874,13 +1936,13 @@ pub(crate) fn resolve_svelte_value_export_member(
     let read = dispatch.execute_read(dispatch.typeof_key_for(
         ValueRootKey {
             scope: ScopeId::file(Arc::from(owner), binding_key.owner),
-            name: Arc::clone(&binding_key.name),
+            name: verter_type_expr::OwnedStr::from(binding_key.name.clone()),
         },
         ProjectionReductionContext::published(ProjectionMode::Expanded),
     ));
     verter_type_engine::request_context::observe_component_meta_read_suppress(&read);
 
-    let node = match read.value {
+    let node = match *read.value() {
         QueryResult::Value(node) | QueryResult::Recursive(node) => Some(node),
         QueryResult::Error(_) => None,
     };
@@ -1917,8 +1979,10 @@ pub(crate) fn resolve_svelte_value_export_member(
         // widen helper, and the declaring identity stays on the graph for
         // the relation authority.
         let graph = dispatch.graph();
-        let is_declaring_export = graph
-            .node_data(reduced.node_id())
+        let is_declaring_export = reduced
+            .node()
+            .and_then(|node| graph.read(node))
+            .ok()
             .as_deref()
             .and_then(|data| data.typeof_nominal_identity())
             .is_some_and(|identity| {
@@ -1932,20 +1996,19 @@ pub(crate) fn resolve_svelte_value_export_member(
             // Collecting off the carrier's AUTHORED head would instead retain
             // the export's OWN name as an import of the surface that declares
             // it.
+            let widened = dispatch.owning().widened_nominal_typeof(reduced.node_id());
             let shallow =
                 verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                     dispatch,
-                    dispatch
-                        .widened_nominal_typeof(reduced.node_id())
-                        .unwrap_or_else(|| reduced.node_id()),
+                    widened.value().unwrap_or_else(|| reduced.node_id()),
                 )
                 .map(NamedTypeMemberOutput::from_raised_shallow)
                 .unwrap_or(NamedTypeMemberOutput::Opaque);
             return (Some(shallow), Some("unique symbol".to_string()), Vec::new());
         }
-        let member_node = dispatch
-            .widened_nominal_typeof(reduced.node_id())
-            .unwrap_or_else(|| reduced.node_id());
+        // The widened carrier owns the member node for the rest of this read.
+        let widened = dispatch.owning().widened_nominal_typeof(reduced.node_id());
+        let member_node = widened.value().unwrap_or_else(|| reduced.node_id());
         let shallow =
             verter_type_engine::project_semantic_dispatch::raise::node_shallow_member_output_with_dispatch(
                 dispatch,
@@ -1957,20 +2020,23 @@ pub(crate) fn resolve_svelte_value_export_member(
         // EXT_TOKEN` / `typeof Tokens.A`) — the precise type — so the display
         // and the retained references read the carrier, not the widened
         // primitive that backed the shallow output.
-        let display_node = if graph
-            .node_data(reduced.node_id())
-            .is_some_and(|data| data.typeof_nominal_identity().is_some())
+        let display_node = if reduced
+            .node()
+            .and_then(|node| graph.read(node))
+            .is_ok_and(|data| data.typeof_nominal_identity().is_some())
         {
             reduced.node_id()
         } else {
             instance_export_display_node(graph, member_node)
         };
-        let type_annotation: String = verter_type_engine::semantic_query::display::display(
-            graph,
-            &SemanticQueryValue::TypeNode(display_node),
-            DisplayNeeds::empty(),
-        )
-        .into();
+        // The dispatcher holds this graph's construction lane.
+        let type_annotation: Option<String> =
+            verter_type_engine::semantic_query::display::display_in_scope(
+                graph,
+                &SemanticQueryValue::TypeNode(display_node),
+                DisplayNeeds::empty(),
+            )
+            .map(Into::into);
         let mut reference_names = rustc_hash::FxHashSet::default();
         crate::resolver_core::component_meta_registry::collect_node_ref_names(
             dispatch,
@@ -1979,7 +2045,7 @@ pub(crate) fn resolve_svelte_value_export_member(
         );
         let mut type_references: Vec<_> = reference_names.into_iter().collect();
         type_references.sort();
-        (Some(shallow), Some(type_annotation), type_references)
+        (Some(shallow), type_annotation, type_references)
     });
 
     NamedTypeMember {

@@ -40,9 +40,10 @@ fn pair(
 }
 
 /// Forty object arms against the same forty written in reverse: no arm of
-/// `S` holds at its own position, so each scans the arms of `T` up to its
-/// partner, 820 alternatives in all, and holds. Every alternative is
-/// charged to the ledger; a ledger that cannot pay for them ends the
+/// `S` holds at its own position, so its authored prefix through its partner
+/// represents 820 alternatives in all, and holds. Every alternative is
+/// charged to the ledger, including batched missing-property negatives;
+/// a ledger that cannot pay for them ends the
 /// relation on the typed budget outcome, never on a verdict.
 ///
 /// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
@@ -65,6 +66,7 @@ fn a_union_targets_alternatives_are_connected_work() {
     });
     with_probe(&source, "[S, T]", |dispatch, node| {
         let (s, t) = pair(dispatch, node);
+        let before = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests();
         let related = dispatch.execute_relate(dispatch.relate_key_for(s, t));
         assert!(
             matches!(related, RelationStep::Assignable { .. }),
@@ -74,6 +76,11 @@ fn a_union_targets_alternatives_are_connected_work() {
             dispatch.connected_demand().work_used_for_tests() >= 820,
             "the 820 alternatives are charged, charged {}",
             dispatch.connected_demand().work_used_for_tests()
+        );
+        let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests() - before;
+        assert!(
+            reductions <= 4 * 40 + 8,
+            "missing-property alternatives must not open quadratic structural queries: {reductions}"
         );
     });
 }
@@ -165,6 +172,57 @@ fn aligned_object_unions_relate_in_linear_work() {
     }
 }
 
+#[test]
+fn object_union_key_index_preserves_matching_and_general_fallbacks() {
+    for (source, expected) in [
+        // Multiple candidates for one key retain their authored order.
+        (
+            "type S = {p: 1} | {q: 2}; type T = {q: string} | {q: number} | {p: number};",
+            "1",
+        ),
+        // Finding a key does not prove its value relates.
+        (
+            "type S = {p: 1} | {q: 2}; type T = {q: number} | {p: string};",
+            "2",
+        ),
+        // Numeric and canonical string property spellings share an index key.
+        (
+            "type S = {'0': 0} | {p: 1}; type T = {p: number} | {0: number};",
+            "1",
+        ),
+        // Optional and indexed targets keep the full structural path.
+        (
+            "type S = {p: 1} | {q: 2}; type T = {q: number} | {p?: number};",
+            "1",
+        ),
+        (
+            "type S = {p: 1} | {q: 2}; type T = {q: string} | {[key: string]: number};",
+            "1",
+        ),
+        // No single unit target covers boolean, but their discriminants do.
+        (
+            "type S = {p: boolean} | {q: 2}; type T = {p: true} | {p: false} | {q: number};",
+            "1",
+        ),
+    ] {
+        let failures = mismatches(source, &[("[S] extends [T] ? 1 : 2", expected)]);
+        assert!(failures.is_empty(), "{source}: {}", failures.join("\n"));
+    }
+    let failures = super::checker_probe_lane_tests::mismatches_in(
+        super::checker_probe_lane_tests::ProbeProject {
+            ambient_lib: Some("interface Object { r: number; s: number; }"),
+            ..Default::default()
+        },
+        "type S = {p: 1} | {q: 2}; type T = {r: number} | {s: number};",
+        &[("[S] extends [T] ? 1 : 2", "1")],
+    );
+    assert!(
+        failures.is_empty(),
+        "apparent Object members: {}",
+        failures.join("\n")
+    );
+}
+
 /// A structured comparison the relation records costs it at most
 /// `RELATION_UNITS_PER_COMPARISON` ledger units, the mapping the production
 /// ledger is to be sized by so a relation reaches the checker's TS2859
@@ -193,13 +251,13 @@ fn a_recorded_comparison_costs_the_ledgers_mapped_units() {
     );
 }
 
-/// Each structured pair reserves its bytes before it is related: under a
+/// Each structured pair reserves its logical bytes before it is related: under a
 /// construction allowance of 100 pairs, 40 reversed object arms (820 pairs)
 /// stop on the memory rail, typed: the allowance is used up, the work cap
 /// is not.
 #[test]
 fn a_relation_past_its_byte_allowance_stops_on_the_memory_rail() {
-    let limit = 100 * super::connected_demand::RELATION_PAIR_BYTES;
+    let limit = 100 * super::connected_demand::RELATION_PAIR_BYTES as u64;
     with_probe(&reversed_object_unions(40), "[S, T]", |dispatch, node| {
         let (s, t) = pair(dispatch, node);
         dispatch.set_construction_byte_limit_for_tests(limit);

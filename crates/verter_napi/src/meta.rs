@@ -175,9 +175,10 @@ impl NapiMetaProject {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
+            let workspace = self.inner.workspace_read();
             let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
-                .map(crate::napi_project_config_to_ide)
+                .map(|project| crate::napi_project_config_to_ide(&*workspace, project))
                 .collect();
             self.inner.configure_projects(configs).map_err(meta_err)
         }))?

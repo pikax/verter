@@ -247,6 +247,7 @@ fn with_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -256,13 +257,13 @@ fn r6_key(
 ) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
-            Arc::from(R6_CANONICAL),
+            verter_type_expr::OwnedStr::from(R6_CANONICAL),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from(name),
+            verter_type_expr::OwnedStr::from(name),
             FunctionPartIdentity::DeclarationBody,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(R6_CANONICAL),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -578,12 +579,15 @@ fn flow_return_new_of_a_local_class_constructs_that_class() {
             .graph()
             .node_data(result.return_type())
             .as_deref()
-            .cloned()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the local class's instance");
         };
-        let Some(SemanticNodeData::Object(surface)) =
-            dispatch.graph().node_data(instance).as_deref().cloned()
+        let Some(SemanticNodeData::Object(surface)) = dispatch
+            .graph()
+            .node_data(instance)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("the instance reads as an object surface");
         };

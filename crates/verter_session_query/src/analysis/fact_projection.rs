@@ -15,6 +15,8 @@
 #![allow(dead_code)]
 
 use std::sync::Arc;
+use verter_type_expr::OwnedSlice;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{
     AuthoredReferenceArgLocator, AuthoredReferenceHeadFact, DeclaredLiteralFreshness,
@@ -138,10 +140,10 @@ pub fn value_type_annotation_fact(
             if value_ref.path.len() == 1 && value_ref.path[0] != own_decl_name =>
         {
             Some(ValueDeclIdentityPart {
-                canonical_id: declaring_canonical.clone(),
+                canonical_id: OwnedStr::from(declaring_canonical.clone()),
                 owner,
-                symbol: Arc::from(value_ref.path[0].as_str()),
-                member_path: Arc::from([]),
+                symbol: OwnedStr::from(value_ref.path[0].as_str()),
+                member_path: OwnedSlice::from([]),
             })
         }
         _ => None,
@@ -160,12 +162,12 @@ pub fn value_type_annotation_fact(
         reference_head: authored_reference_head_fact_with(annotation, |arg_index| {
             Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
                 anchor: AuthoredAnchor {
-                    canonical_id: Arc::clone(declaring_canonical),
+                    canonical_id: OwnedStr::from(declaring_canonical),
                     owner,
-                    symbol: Arc::from(own_decl_name),
+                    symbol: OwnedStr::from(own_decl_name),
                     space: LocatorSymbolSpace::Value,
                 },
-                path: Arc::from([]),
+                path: OwnedSlice::from([]),
                 arg_index: u32::try_from(arg_index).ok()?,
             }))
         }),
@@ -195,7 +197,7 @@ pub fn signature_return_reference_head_fact(
     authored_reference_head_fact_with(annotation, |arg_index| {
         Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor.clone(),
-            path: Arc::from([first_step, TypeBodyPathStep::FunctionReturn]),
+            path: OwnedSlice::from([first_step, TypeBodyPathStep::FunctionReturn]),
             arg_index: u32::try_from(arg_index).ok()?,
         }))
     })
@@ -227,7 +229,7 @@ pub(crate) fn member_annotation_reference_head_fact(
     authored_reference_head_fact_with(annotation, |arg_index| {
         Some(AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor.clone(),
-            path: Arc::from(member_value_path.to_vec()),
+            path: OwnedSlice::from(member_value_path.to_vec()),
             arg_index: u32::try_from(arg_index).ok()?,
         }))
     })
@@ -258,11 +260,8 @@ fn authored_reference_head_fact_with(
         }
         other => other,
     };
-    let args = |len: usize| -> Option<Arc<[AuthoredReferenceArgLocator]>> {
-        (0..len)
-            .map(arg_locator)
-            .collect::<Option<Vec<_>>>()
-            .map(Arc::from)
+    let args = |len: usize| -> Option<OwnedSlice<AuthoredReferenceArgLocator>> {
+        (0..len).map(arg_locator).collect::<Option<OwnedSlice<_>>>()
     };
     match annotation {
         TypeExpr::Ref {
@@ -272,7 +271,7 @@ fn authored_reference_head_fact_with(
             let Some(args) = args(type_arguments.len()) else {
                 return AuthoredReferenceHeadFact::Unavailable;
             };
-            let mut parts = name.split('.').map(Arc::<str>::from);
+            let mut parts = name.split('.').map(OwnedStr::from);
             let Some(root) = parts.next() else {
                 return AuthoredReferenceHeadFact::Unavailable;
             };
@@ -285,7 +284,7 @@ fn authored_reference_head_fact_with(
             } else {
                 AuthoredReferenceHeadFact::Qualified {
                     local_root: root,
-                    member_path: Arc::from(members),
+                    member_path: OwnedSlice::from(members),
                     args,
                 }
             }
@@ -297,8 +296,8 @@ fn authored_reference_head_fact_with(
             ..
         } => args(type_arguments.len()).map_or(AuthoredReferenceHeadFact::Unavailable, |args| {
             AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(qualifier),
+                specifier: OwnedStr::from(specifier),
+                member_path: OwnedSlice::from(&**qualifier),
                 args,
             }
         }),
@@ -321,9 +320,9 @@ mod tests {
     fn ref_shape(name: &str) -> ResolvedLocalShape {
         ResolvedLocalShape::Ref(SymbolBodyLocator {
             anchor: AuthoredAnchor {
-                canonical_id: Arc::from("/ws/a.ts"),
+                canonical_id: OwnedStr::from("/ws/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from(name),
+                symbol: OwnedStr::from(name),
                 space: LocatorSymbolSpace::Type,
             },
         })

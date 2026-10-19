@@ -1,7 +1,6 @@
 mod analysis;
 mod diagnostics;
 mod foreground;
-mod guarded_host;
 pub(crate) use analysis::type_expr_contains_boolean;
 pub(crate) use analysis::SemanticReady;
 #[cfg(test)]
@@ -11,7 +10,9 @@ pub(crate) use diagnostics::DiagnosticsRefresh;
 pub(crate) use foreground::{
     ClosedTargetAuthority, EditBearing, ForegroundRequest, ForegroundRoute, Settled,
 };
-pub use guarded_host::{HostRef, SharedHost};
+/// A shareable handle to the session host for work that outlives one
+/// borrow (a blocking task, a background loop).
+pub type SharedHost = Arc<VerterHost>;
 pub mod carrier_structure;
 pub mod line_index;
 pub mod position_map;
@@ -41,9 +42,7 @@ use provider_projection::{
 
 /// Manages open documents and their relationship to verter_session.
 pub struct DocumentRegistry {
-    /// The session host. Private and non-dereferencing on purpose: every
-    /// access goes through [`Self::host`], which holds a semantic-activity
-    /// guard for the call (see [`guarded_host`]).
+    /// The session host.
     host: SharedHost,
     /// The host's language classifier, captured once: it is immutable for
     /// the host's lifetime, so protocol paths classify under the host's
@@ -84,6 +83,13 @@ pub struct DocumentRegistry {
     document_lanes: Arc<crate::document_sync_lane::DocumentSyncLanes>,
     /// Signalled on every document registration (a request racing `did_open` waits on it).
     pub(crate) registration: registration_signal::RegistrationSignal,
+    /// Test-only execution fence shared by all snapshot-drain producers.
+    /// A writer observes completion of existing drains and excludes new ones.
+    #[cfg(test)]
+    pub(crate) snapshot_drain_barrier: tokio::sync::RwLock<()>,
+    #[cfg(test)]
+    pub(crate) snapshot_drain_pause:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Full Verter semantic enrichment is deliberately isolated from the
     /// editor-critical projection host. The host is created lazily only when the
     /// client opts in, owns a single CPU worker, and is never queried inline by an
@@ -394,7 +400,9 @@ fn merge_stable_progressive_prop_definitions(
             template.prop_definitions.push(prop);
         }
     }
-    fresh.template = Some(Arc::new(template));
+    fresh.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+        template,
+    ));
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -590,7 +598,7 @@ impl DocumentRegistry {
         let (diagnostics_refresh_tx, _) = tokio::sync::broadcast::channel(64);
         let language_classifier = host.language_classifier().clone();
         Self {
-            host: SharedHost::new(host),
+            host,
             language_classifier,
             documents: DashMap::new(),
             diagnostics_state: Arc::new(parking_lot::Mutex::new(
@@ -609,6 +617,10 @@ impl DocumentRegistry {
             provider_surfaces: crate::provider_surface_store::ProviderSurfaceStore::new(),
             document_lanes: Arc::new(crate::document_sync_lane::DocumentSyncLanes::default()),
             registration: registration_signal::RegistrationSignal::default(),
+            #[cfg(test)]
+            snapshot_drain_barrier: tokio::sync::RwLock::new(()),
+            #[cfg(test)]
+            snapshot_drain_pause: parking_lot::Mutex::new(None),
             semantic_host: RwLock::new(None),
             semantic_workspace: RwLock::new(None),
             semantic_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -703,7 +715,7 @@ impl DocumentRegistry {
         &self,
         canonical_id: &str,
         attempted_source: &str,
-        outcome: &Result<bool, verter_session::HostError>,
+        outcome: &Result<bool, &verter_session::HostError>,
         ide_read_succeeded: bool,
         projection_installed: bool,
     ) {
@@ -1026,11 +1038,11 @@ impl DocumentRegistry {
         // Trigger compilation to populate the TSX cache (upsert only parses).
         // IDE-sync: drive the IDE/TSX surface explicitly. This profile asks for
         // the IDE product and template data, so it publishes no runtime node at
-        // all; `ensure_ide_compiled` is the route that serves what is read.
-        // `get_ide` below then reads the source map.
+        // all; `compile_ide` is the route that serves what is read, including
+        // an artifact the cache declined to keep.
         let carrier_compile = is_carrier.then(|| {
             self.host()
-                .ensure_ide_compiled(&canonical_id, &self.tsx_profile.read())
+                .compile_ide(&canonical_id, &self.tsx_profile.read())
         });
 
         let registered = is_carrier
@@ -1056,10 +1068,10 @@ impl DocumentRegistry {
         //    server refines it with resolver-backed rewrite segments once
         //    ownership is ready). Plain scripts carry a zero-line prelude —
         //    their provider buffer is the source verbatim.
-        let carrier_ide_read = if is_carrier {
-            self.host().get_ide(&canonical_id, &self.tsx_profile.read())
-        } else {
-            None
+        let carrier_ide_read = match &carrier_compile {
+            Some(Ok(ide)) => ide.clone(),
+            Some(Err(_)) => self.host().get_ide(&canonical_id, &self.tsx_profile.read()),
+            None => None,
         };
         let projection = if is_carrier {
             carrier_ide_read
@@ -1079,7 +1091,7 @@ impl DocumentRegistry {
             self.account_carrier_ide_content_verdict(
                 &canonical_id,
                 &source,
-                outcome,
+                &outcome.as_ref().map(Option::is_some),
                 carrier_ide_read.is_some(),
                 projection.is_some(),
             );
@@ -1714,16 +1726,9 @@ impl DocumentRegistry {
         // Main-less carrier (Svelte) has a `CachedTsx` but no `Main`, so
         // `ensure_compiled` (which demands `Main`) would return
         // `MissingVirtualNode` and abort here even though the IDE TSX exists.
-        // `ensure_ide_compiled` resolves through the `Ide` demand; `Ok(false)`
-        // (a genuine no-IDE surface) skips, `Ok(true)` proceeds to `get_ide`.
-        if !self
-            .host()
-            .ensure_ide_compiled(&canonical_id, &profile)
-            .ok()?
-        {
-            return None;
-        }
-        let resp = self.host().get_ide(&canonical_id, &profile)?;
+        // `compile_ide` resolves through the `Ide` demand; `Ok(None)`
+        // (a genuine no-IDE surface) skips, `Ok(Some)` serves the artifact.
+        let resp = self.host().compile_ide(&canonical_id, &profile).ok()??;
         #[cfg(test)]
         self.run_after_compile_hook(uri);
         // A `didChange` that committed while the compile ran makes this
@@ -1796,12 +1801,10 @@ impl DocumentRegistry {
         self.host().ensure_loaded(&canonical_id);
         // IDE-sync: drive the IDE/TSX surface (not the runtime `Main`) so a
         // Main-less carrier (Svelte) refreshes its mapper. `Ok(false)` (no IDE
-        // surface) and `Err` yield no response; `Ok(true)` proceeds to `get_ide`.
-        let ensured = self.host().ensure_ide_compiled(&canonical_id, &profile);
-        let resp = match &ensured {
-            Ok(true) => self.host().get_ide(&canonical_id, &profile),
-            _ => None,
-        };
+        // surface) and `Err` yield no response; `Ok(Some)` is the response.
+        let ensured = self.host().compile_ide(&canonical_id, &profile);
+        let resp = ensured.as_ref().ok().cloned().flatten();
+        let ensured = ensured.as_ref().map(Option::is_some);
         #[cfg(test)]
         self.run_after_compile_hook(uri);
         // SOURCE-IDENTITY FENCE (see `attempted` above): a `didChange` that
@@ -1932,10 +1935,10 @@ impl DocumentRegistry {
         // report the surface missing. An `Err` (a genuine compile failure) leaves
         // `ide` `None` exactly as before.
         let profile = self.tsx_profile.read().clone();
-        let _ = self.host().ensure_ide_compiled(&canonical_id, &profile);
         let ide = self
             .host()
-            .get_ide(&canonical_id, &profile)
+            .compile_ide(&canonical_id, &profile)
+            .unwrap_or_else(|_| self.host().get_ide(&canonical_id, &profile))
             .map(|t| CodeBlock {
                 code: t.code.to_string(),
                 source_map: t.source_map.map(|m| m.to_string()),
@@ -2033,10 +2036,9 @@ impl DocumentRegistry {
         self.documents.iter().map(|e| e.key().clone()).collect()
     }
 
-    /// Borrow the session host for one call under a semantic-activity guard
-    /// (see [`guarded_host`]).
-    pub fn host(&self) -> HostRef<'_> {
-        self.host.host()
+    /// Borrow the session host.
+    pub fn host(&self) -> &VerterHost {
+        &self.host
     }
 
     /// The serving host's language classifier — the admission-aware
@@ -2046,9 +2048,9 @@ impl DocumentRegistry {
     }
 
     /// A shareable host handle for work that outlives this borrow (a blocking
-    /// task, a background loop); every access through it is guarded.
+    /// task, a background loop).
     pub fn host_arc(&self) -> SharedHost {
-        self.host.clone()
+        Arc::clone(&self.host)
     }
 }
 

@@ -935,6 +935,7 @@ mod tests {
                 name: "p".to_string(),
                 node: verter_type_engine::semantic_query::SemanticNodeId(1),
             }],
+            roots: Default::default(),
         };
 
         let result = run_fallthrough_request(

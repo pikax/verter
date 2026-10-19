@@ -181,7 +181,7 @@ fn key_shape_predicate_discriminates() {
 /// never a key field.
 #[test]
 fn component_meta_result_key_carries_split_env_and_no_content_hash() {
-    let source = read_file("crates/verter_session/src/component_meta_result_db.rs");
+    let source = read_file("crates/verter_type_engine/src/component_meta_result_db.rs");
     let body = extract_brace_block(&source, "pub struct ComponentMetaResultKey {").expect(
         "R6/R21 GUARD: could not locate `pub struct ComponentMetaResultKey` body in \
          component_meta_result_db.rs",
@@ -492,9 +492,9 @@ fn materialization_cycle_gate_key_is_content_free_and_env_discriminating() {
 
     let slot = || {
         ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/a.ts"),
+            verter_type_expr::OwnedStr::from("/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
         )
     };
     let key_v1 = MaterializationCycleGateKey {
@@ -540,9 +540,9 @@ fn materialization_cycle_gate_key_is_content_free_and_env_discriminating() {
     // A different root (different decl name) discriminates.
     let other = MaterializationCycleGateKey {
         root: ResolvedDeclSlotIdentity::type_slot_unscoped(
-            Arc::from("/a.ts"),
+            verter_type_expr::OwnedStr::from("/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Bar"),
+            verter_type_expr::OwnedStr::from("Bar"),
         ),
         parse_env_hash: [3u8; 16],
         resolve_env_hash: [2u8; 16],
@@ -571,9 +571,9 @@ fn materialization_cycle_gate_key_slot_env_axes_discriminate() {
 
     let slot = |project: u32, t: [u8; 16], l: [u8; 16]| {
         ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/a.ts"),
+            verter_type_expr::OwnedStr::from("/a.ts"),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            Arc::from("Foo"),
+            verter_type_expr::OwnedStr::from("Foo"),
             project,
             t,
             l,
@@ -1556,6 +1556,12 @@ fn no_unsanctioned_semantic_node_id_in_shape_key() {
         "ShapeCacheKey",
         &shape_cache_key,
         &[
+            // Transport-only ownership: its Eq/Hash exclude the roots.
+            // The exact type prevents a raw node id becoming key identity.
+            ExpectedField {
+                name: "roots",
+                ty: Some("crate::semantic_query_memo::node_roots::IdentityNodeRoots"),
+            },
             ExpectedField {
                 name: "subject",
                 ty: None,
@@ -1894,7 +1900,7 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
     // (inside the whole `ShapeSubject` enum body), and nowhere in
     // ShapeCacheKey / ShapeDemand.
     let shape_cache_key = "subject: ShapeSubject, demand: ShapeDemand";
-    let shape_demand = "path: Arc<[PathSegment]>, terminal_context: ProjectionReductionContext, \
+    let shape_demand = "path: verter_type_expr::OwnedSlice<PathSegment>, terminal_context: ProjectionReductionContext, \
                         key_filter: KeyFilter, surface: PublishedSurfaceKind";
     let materialization_key = "decl: ResolvedDeclSlotIdentity, projection_path: RouteDemand, \
                                scope_axis: MaterializationScope, projection_mode: ProjectionMode, \
@@ -1917,7 +1923,8 @@ fn member_shape_node_subject_global_single_occurrence_self_test() {
     // the exact false-negative the global newtype pin closes: the
     // bare-`SemanticNodeId` scan never sees the inner ordinal because it is
     // sealed behind the newtype.
-    let rogue_shape_demand = "path: Arc<[PathSegment]>, decoy: MemberShapeNodeSubject, \
+    let rogue_shape_demand =
+        "path: verter_type_expr::OwnedSlice<PathSegment>, decoy: MemberShapeNodeSubject, \
                               terminal_context: ProjectionReductionContext, \
                               key_filter: KeyFilter, surface: PublishedSurfaceKind";
     let rogue_total = count_ident_tokens(shape_cache_key, "MemberShapeNodeSubject")

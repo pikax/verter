@@ -48,6 +48,8 @@ pub mod host_compile_request_ts;
 mod js_value_graph;
 mod memory_audit;
 mod meta;
+#[cfg(test)]
+mod project_config_tests;
 mod typeinfo;
 
 pub use host_compile_request::{
@@ -2063,14 +2065,30 @@ fn host_virtual_file_to_napi(
     }
 }
 
+/// The [`IdeProjectConfig`](verter_session_query::resolution::IdeProjectConfig)
+/// of one ingress project config.
+///
+/// A config naming a `tsconfigPath` is a configured project: its compiler
+/// options and its exact `files` / `include` / `exclude` membership — the
+/// program's root files in their authored order — are loaded from that
+/// tsconfig through the shared workspace loader, reading `ws` (the host's
+/// own workspace, so the same VFS view the host reads). A config with no
+/// `tsconfigPath` is a tsconfig-less project owning every file under its
+/// root. Either way the explicit fields layer on top: `providerRoot`,
+/// `workspaceAliases`, a present `baseUrl` / `paths`, and `references`.
 fn napi_project_config_to_ide(
+    ws: &dyn verter_workspace::WorkspaceRead,
     config: NapiIdeProjectConfig,
 ) -> verter_session_query::resolution::IdeProjectConfig {
-    let mut ide = verter_workspace::ide_project_config(
-        config.root.clone(),
-        config.workspaceRoot,
-        config.tsconfigPath,
-    );
+    let mut ide = match config.tsconfigPath {
+        Some(tsconfig_path) => verter_workspace::configured_ide_project(
+            ws,
+            config.root,
+            config.workspaceRoot,
+            &tsconfig_path,
+        ),
+        None => verter_workspace::ide_project_config(config.root, config.workspaceRoot, None),
+    };
     if let Some(provider_root) = config.providerRoot {
         ide.provider_root = provider_root;
     }
@@ -2084,7 +2102,9 @@ fn napi_project_config_to_ide(
             .collect();
     }
     if let Some(opts) = config.compilerOptions {
-        ide.compiler_options.base_url = opts.baseUrl;
+        if let Some(base_url) = opts.baseUrl {
+            ide.compiler_options.base_url = Some(base_url);
+        }
         if let Some(paths) = opts.paths {
             ide.compiler_options.paths =
                 paths.into_iter().map(|p| (p.pattern, p.targets)).collect();
@@ -2158,13 +2178,14 @@ impl NapiWorkspace {
     /// and falls through to the bare-VFS resolver.
     ///
     /// JS consumers that need a configured workspace MUST call
-    /// `configureProjects` after construction, supplying the alias map
-    /// derived from the project's tsconfig chain. The canonical pattern
-    /// lives in `packages/component-meta/src/compat/checker.ts`:
-    /// `extractPathAliases(parsedTsconfig, projectRoot)` produces the
-    /// `NapiIdeProjectConfig` shape, which is passed to
-    /// `workspace.configureProjects([aliases])`. Bench and audit
-    /// harnesses mirror the same shape.
+    /// `configureProjects` after construction. A tsconfig-backed project
+    /// passes `{ root, workspaceRoot, tsconfigPath }` and the native loader
+    /// reads the tsconfig's compiler options and `files` / `include` /
+    /// `exclude` membership itself (see `napi_project_config_to_ide`; the
+    /// canonical caller is `tsconfigProjectConfig` in
+    /// `packages/component-meta/src/runtime/discovery.ts`). A project with
+    /// no `tsconfigPath` is match-all under its root and carries only the
+    /// explicit `compilerOptions` it is given.
     #[napi(constructor)]
     pub fn new(roots: Vec<String>) -> Self {
         let ws = verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions {
@@ -2331,7 +2352,7 @@ impl NapiWorkspace {
         catch_panic(std::panic::AssertUnwindSafe(|| {
             let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
-                .map(napi_project_config_to_ide)
+                .map(|project| napi_project_config_to_ide(&*self.inner, project))
                 .collect();
             use verter_workspace::WorkspaceAccess;
             self.inner.configure_resolver(configs);
@@ -3272,9 +3293,10 @@ impl NapiVerterHost {
     #[napi(js_name = "configureProjects")]
     pub fn configure_projects(&self, projects: Vec<NapiIdeProjectConfig>) -> Result<()> {
         catch_panic(std::panic::AssertUnwindSafe(|| {
+            let workspace = self.inner.workspace_read();
             let configs: Vec<verter_session_query::resolution::IdeProjectConfig> = projects
                 .into_iter()
-                .map(napi_project_config_to_ide)
+                .map(|project| napi_project_config_to_ide(&*workspace, project))
                 .collect();
             self.inner.configure_projects(configs);
         }))
@@ -3787,7 +3809,7 @@ impl NapiVerterHost {
                     std::sync::Arc::<str>::from(canonical_id.as_str()),
                     verter_type_expr::TopLevelOwnerId::ordinary_file(),
                 ),
-                name: std::sync::Arc::<str>::from(decl_name.as_str()),
+                name: verter_type_expr::OwnedStr::from(decl_name.as_str()),
             });
             let record = host
                 .resolve_type_with_audit(key, &canonical_id)
@@ -4059,7 +4081,7 @@ impl NapiVerterHost {
             // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(Buffer::from),
                 None => None,
             };
@@ -4096,7 +4118,7 @@ impl NapiVerterHost {
             // adapter only wraps the bytes in a `Buffer`.
             let type_expr_buf = match resolved {
                 Some(node_id) => host
-                    .project_node_to_type_expr_json_bytes(node_id)
+                    .project_node_to_type_expr_json_bytes(&node_id)
                     .map(Buffer::from),
                 None => None,
             };

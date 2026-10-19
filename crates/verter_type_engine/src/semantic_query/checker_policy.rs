@@ -30,6 +30,15 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// deep fails with TS2589.
 pub(crate) const INSTANTIATION_DEPTH: u32 = 100;
 
+/// The checker's `instantiationCount` limit: once checking one statement
+/// has instantiated this many types, the next instantiation fails with
+/// TS2589. Measured on TypeScript 7.0.2 (`--extendedDiagnostics`): a
+/// distributive conditional repeating one `infer` instantiates 7 types per
+/// union member, and the recursive conditional collecting an `as const`
+/// route tree's names 219 per parent of five children, so the checker
+/// answers those shapes up to about 714,000 members and 22,800 parents.
+pub(crate) const INSTANTIATION_COUNT: u32 = 5_000_000;
+
 /// The checker's `checkCrossProductUnion` limit: an intersection
 /// distributed over unions, a template literal over union spans, or an
 /// object spread over union operands whose cross product has at least this
@@ -44,9 +53,9 @@ pub(crate) const CROSS_PRODUCT_UNION_SIZE: u64 = 100_000;
 /// cache, this, is the most the checker ever allows. The count lives on a
 /// relation chain's first frame, one chain per check, and skips memoized
 /// answers as the checker skips cached ones. The connected-work ledger is
-/// to be sized above it (two units per recorded comparison) once it charges
-/// the bytes a relation holds; until then it can refuse a relation first,
-/// as typed incompleteness.
+/// sized above it with reducer work, cold query-entry work and construction
+/// bytes mapped in `project_semantic_dispatch::connected_demand`, so reversed
+/// object rows reach this refusal before either operational rail stops them.
 ///
 /// Measured on TypeScript 7.0.2: a union of `M` single-property objects
 /// against the same objects in reverse order records about `M² / 2`

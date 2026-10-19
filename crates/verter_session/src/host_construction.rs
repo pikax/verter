@@ -16,6 +16,7 @@
 //! types ([`HostResolverState`], [`WorkspaceSourceLoader`],
 //! [`next_host_instance_id`]) live here.
 use verter_type_engine::project_semantic_dispatch::relation_knobs::RelationHostKnobs;
+use verter_type_engine::semantic_query_memo::MemoFamilyBound;
 
 use std::sync::Arc;
 
@@ -57,10 +58,11 @@ pub(crate) fn next_host_instance_id() -> u64 {
     NEXT_HOST_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Unit-test standalone hosts model an explicitly configured in-memory
-/// project. Production standalone hosts remain unconfigured until their
-/// caller supplies project authority; tests that exercise the no-project
-/// state construct a host with an explicit workspace instead.
+/// Unit-test hosts without project authority receive a tsconfig-less
+/// in-memory context for default environment and ownership identity. A
+/// missing, fabricated tsconfig must not turn that context into a configured
+/// program whose roots are eagerly discovered. Tests with authored roots or
+/// compiler options configure their real tsconfig through the shared loader.
 #[cfg(test)]
 pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace::WorkspaceAccess) {
     if workspace.resource_snapshot().published_project_count != 0 {
@@ -92,13 +94,7 @@ pub(crate) fn configure_workspace_test_projects(workspace: &dyn verter_workspace
                         )
                     })
                     .collect();
-            let tsconfig_path = if root == "/" {
-                "/__verter_test__/tsconfig.json".to_string()
-            } else {
-                format!("{root}__verter_test__/tsconfig.json")
-            };
-            let mut project =
-                verter_workspace::ide_project_config(root.clone(), root, Some(tsconfig_path));
+            let mut project = verter_workspace::ide_project_config(root.clone(), root, None);
             project.membership = membership;
             project
         })
@@ -346,6 +342,7 @@ impl VerterHost {
             workspace,
             scheduler_config,
             HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::Production,
         )
     }
 
@@ -368,6 +365,7 @@ impl VerterHost {
             workspace,
             scheduler_config,
             HostWorkerPoolSource::Shared(worker_pools),
+            MemoFamilyBound::Production,
         )
     }
 
@@ -376,6 +374,7 @@ impl VerterHost {
         workspace: Arc<dyn verter_workspace::WorkspaceAccess>,
         scheduler_config: verter_scheduler::scheduler::SchedulerConfig,
         worker_pool_source: HostWorkerPoolSource,
+        memo_family_bound: MemoFamilyBound,
     ) -> Self {
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
@@ -575,6 +574,7 @@ impl VerterHost {
             crate::project_type_store::ProjectTypeStore::compose(
                 Arc::clone(&provenance),
                 task_registry,
+                memo_family_bound,
             );
         let project_type_store = Arc::new(project_type_store);
         // Retained artifacts own their canonical's freshness evidence in the
@@ -765,6 +765,28 @@ impl VerterHost {
         Self::new(config, workspace)
     }
 
+    /// Test support: a standalone host whose semantic family memo retains
+    /// at most `memo_family_cap` families, fixed at construction. Eviction
+    /// past the bound is the production FIFO eviction; only the bound is
+    /// smaller, so a test overruns the memo without first answering the
+    /// production bound's worth of distinct questions.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_standalone_with_memo_family_cap_for_test(
+        config: HostConfig,
+        memo_family_cap: usize,
+    ) -> Self {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        Self::new_with_scheduler_config_and_worker_pool_source(
+            config,
+            workspace,
+            verter_scheduler::scheduler::SchedulerConfig::default(),
+            HostWorkerPoolSource::Fresh,
+            MemoFamilyBound::ForTest(memo_family_cap),
+        )
+    }
+
     /// TEST-ONLY: a standalone host over an in-memory workspace whose
     /// configured projects are PARSED from tsconfig sources. Each
     /// `(root, tsconfig_json)` pair is written to `{root}/tsconfig.json`
@@ -787,14 +809,12 @@ impl VerterHost {
                 let root = root.trim_end_matches('/').to_string();
                 let tsconfig_path = format!("{root}/tsconfig.json");
                 workspace.inject_file(tsconfig_path.clone(), Arc::from(*tsconfig_json));
-                let mut project = verter_workspace::ide_project_config(
+                verter_workspace::configured_ide_project(
+                    &*workspace,
                     root.clone(),
                     root,
-                    Some(tsconfig_path.clone()),
-                );
-                project.compiler_options =
-                    verter_workspace::load_compiler_options(&*workspace, &tsconfig_path);
-                project
+                    &tsconfig_path,
+                )
             })
             .collect();
         let host = Self::new(config, workspace);
@@ -925,7 +945,7 @@ impl VerterHost {
     #[must_use]
     pub fn semantic_dispatch(
         &self,
-    ) -> verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
+    ) -> verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         '_,
         crate::resolver_core::HostCapabilities,
     > {
@@ -1083,7 +1103,8 @@ impl VerterHost {
     /// Per-canonical env-hash bundle.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's env-hash array on `PublishedRoot::env_hashes_by_project`.
     /// Falls back to the workspace-default env-hash array when the
     /// canonical has no owning project (e.g. ambient libs, scratch
@@ -1149,7 +1170,8 @@ impl VerterHost {
     /// Per-canonical project identity.
     ///
     /// Maps `canonical` to its owning project via the published
-    /// snapshot's `owners_for_file().first()`, then looks up the
+    /// snapshot's configured roots, then discovered program membership (and
+    /// finally fallback ownership), then looks up the
     /// project's identity hash on
     /// `PublishedRoot::project_identity_hashes`. Falls back to the
     /// workspace-default project identity when the canonical has no
@@ -1182,31 +1204,7 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId> {
         let root = self.workspace().published_root()?;
-        root.snapshot.owners_for_file(canonical).first().copied()
-    }
-
-    /// Configured `files` index for `canonical`, or `u32::MAX` when the
-    /// path was discovered by include/globs (unordered inputs are then
-    /// normalized by canonical spelling).
-    pub(crate) fn declaration_sequence_rank(&self, canonical: &str) -> u32 {
-        let Some(pid) = self.resolve_project_for_canonical(canonical) else {
-            return u32::MAX;
-        };
-        let Some(root) = self.workspace().published_root() else {
-            return u32::MAX;
-        };
-        match &root.snapshot.project(pid).payload {
-            verter_workspace::workspace_snapshot::ProjectPayload::Configured {
-                membership, ..
-            } => membership
-                .spec
-                .files
-                .iter()
-                .position(|file| file.as_str() == canonical)
-                .map(|index| index as u32)
-                .unwrap_or(u32::MAX),
-            _ => u32::MAX,
-        }
+        self.project_for_canonical_in_snapshot(canonical, &root.snapshot)
     }
 
     /// IndexedReady for a declaration file whose source is a global/ambient
@@ -1235,6 +1233,7 @@ impl VerterHost {
     /// without consuming cold flights at upsert.
     pub(crate) fn ingest_program_ambient_roots(&self) {
         self.ingest_injected_ambient_roots(None);
+        self.ingest_configured_programs();
         let pending = self
             .project_type_store()
             .indexed()
@@ -1246,56 +1245,84 @@ impl VerterHost {
         }
     }
 
-    /// Ingest snapshot members that contribute globally and were never
-    /// upserted. Peeks workspace bytes; does not load export-only `.d.ts`
-    /// or unrelated ordinary scripts. Re-runs only when snapshot
-    /// content or membership changes.
+    /// Classify only changed injected members. Every contributor is made
+    /// IndexedReady before population lookup; ordinary scripts remain pending
+    /// until that lookup. The cursor is scoped to the attached workspace.
     pub(crate) fn ingest_injected_ambient_roots(&self, except: Option<&str>) {
         let index = self
             .project_type_store()
             .indexed()
             .global_contributor_index();
-        // Read the cheap owner revision before enumerating or cloning any IDs.
-        // If the snapshot changes during this scan, the next call sees a newer
-        // revision and scans again. Workspaces without a revision always scan.
-        let revision = self.workspace().snapshot_revision();
-        if index.snapshot_revision_is_ingested(revision) {
-            return;
-        }
-        let members = self.workspace().snapshot_canonicals();
-        #[cfg(test)]
-        for _ in &members {
+        let mut cursor = index.snapshot_ingestion_cursor();
+        let workspace = self.workspace();
+        let (revision, members) = if let Some(changes) = workspace.snapshot_changes_since(*cursor) {
+            (Some(changes.revision), changes.members)
+        } else {
+            let revision = workspace.snapshot_revision();
+            if revision.is_some() && *cursor == revision {
+                return;
+            }
+            (
+                revision,
+                workspace
+                    .snapshot_canonicals()
+                    .into_iter()
+                    .map(|canonical| verter_workspace::SnapshotMemberChange {
+                        canonical,
+                        present: true,
+                    })
+                    .collect(),
+            )
+        };
+        for change in members {
+            #[cfg(test)]
             index.note_snapshot_scan_visit();
-        }
-        for member in &members {
+            let member = change.canonical;
             if except == Some(member.as_str()) {
                 continue;
             }
-            if member.starts_with("ambient:/") {
-                let _ = self.ensure_loaded(member);
-                let _ = self.ensure_indexed_ready_serve(member);
+            index.retract_pending_overlay_ambient(&member);
+            if !is_ambient_declaration_canonical(&member)
+                && !is_ordinary_typescript_canonical(&member)
+            {
                 continue;
             }
-            if is_ambient_declaration_canonical(member) {
-                let Some(source) = self.workspace().read_file(member) else {
-                    continue;
-                };
-                self.ingest_ambient_contributor(member, source.as_ref());
-                continue;
-            }
-            if !is_ordinary_typescript_canonical(member) {
-                continue;
-            }
-            let Some(source) = self.workspace().read_file(member) else {
+            let Some(source) = workspace.read_file(&member) else {
+                if !change.present {
+                    // A snapshot tombstone may just invalidate a disk cache.
+                    // Retract host state only when the workspace also has no
+                    // active overlay or backing file for this canonical.
+                    // Upsert already holds the document admission fence.
+                    // Retire script content through the shared cache owners
+                    // without entering the fenced document-remove wrapper.
+                    self.project_type_store().evict_canonical(&member);
+                    self.resolver.runtime.hard_evict_canonical(&member);
+                    self.scheduler.remove(&member);
+                    self.drop_all_per_canonical_compile_caches(&member);
+                    self.bump_store_view_epoch();
+                }
                 continue;
             };
-            if crate::global_contributors::source_may_have_file_scope_global_contribution(
-                source.as_ref(),
-            ) {
-                index.note_pending_overlay_ambient(member);
+            if self
+                .scheduler
+                .try_get_source(&member)
+                .is_some_and(|loaded| loaded.source != source)
+            {
+                self.evict_loaded_content(&member);
+                self.project_type_store().evict_canonical(&member);
+                self.resolver.runtime.evict_canonical(&member);
+            }
+            if is_ambient_declaration_canonical(&member) {
+                self.ingest_ambient_contributor(&member, source.as_ref());
+            } else if crate::global_contributors::source_has_ambient_contribution(source.as_ref())
+                || crate::global_contributors::source_may_have_file_scope_global_contribution(
+                    source.as_ref(),
+                )
+            {
+                index.note_pending_overlay_ambient(&member);
             }
         }
-        index.set_ingested_snapshot_revision(revision);
+        *cursor = revision;
     }
 
     /// Host-owned scratch cache for the typeinfo
@@ -1819,6 +1846,10 @@ mod fact_validation_authority {
         }
     }
     impl FactValidation for crate::VerterHost {
+        fn publication_input_fingerprint(&self) -> Option<u64> {
+            Some(crate::VerterHost::current_external_supersession_fingerprint(self))
+        }
+
         fn current_external_supersession_fingerprint(&self) -> u64 {
             crate::VerterHost::current_external_supersession_fingerprint(self)
         }
@@ -1835,10 +1866,10 @@ mod fact_validation_authority {
         fn complete_graph_signature(
             &self,
             roots: &[(
-                std::sync::Arc<str>,
+                verter_type_expr::OwnedStr,
                 verter_session_query::analysis::types::Hash16,
             )],
-            facts: &[FactVersionRef],
+            facts: Vec<FactVersionRef>,
         ) -> Result<
             verter_type_engine::fact_signature_helpers::StructuralCarrierReadSet,
             verter_audit::NonAdmissionReason,
@@ -1847,9 +1878,7 @@ mod fact_validation_authority {
                 crate::resolver_store::StoreViewRead::Current(current) => current.view().clone(),
                 crate::resolver_store::StoreViewRead::ReturnOnly { view, .. } => view,
             };
-            verter_type_engine::semantic_query_memo::semantic_graph_read_set_signature(
-                &view, roots, facts,
-            )
+            verter_type_engine::semantic_query_memo::semantic_graph_carrier(&view, roots, facts)
         }
         fn tracer_forcing(&self) -> bool {
             self.test_force

@@ -309,12 +309,25 @@ pub(crate) enum ServedProducts {
         tsx: Option<CachedTsx>,
     },
     RuntimeSurfaceRefused {
-        diagnostic_code: Arc<str>,
-        message: Arc<str>,
+        diagnostic_code: verter_type_expr::OwnedStr,
+        message: verter_type_expr::OwnedStr,
     },
 }
 
 impl ServedProducts {
+    /// The first delivery owns its texts even if admission was refused,
+    /// bypassed or lost its publication fence.
+    fn pin_texts(&self, ctx: verter_session_query::retention::owned::ChargeCtx<'_>) {
+        if let Self::Produced { outputs, tsx } = self {
+            for output in outputs.values() {
+                pin_generated_texts(&output.code, output.source_map.as_ref(), ctx);
+            }
+            if let Some(tsx) = tsx {
+                pin_generated_texts(&tsx.code, tsx.source_map.as_ref(), ctx);
+            }
+        }
+    }
+
     /// The served virtual-node outputs; `None` on a refusal (which has none).
     pub(crate) fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
         match self {
@@ -374,8 +387,8 @@ enum CompiledProducts {
             Option<verter_session_query::analysis::template::TemplateAnalysisSnapshot>,
     },
     RuntimeSurfaceRefused {
-        diagnostic_code: Arc<str>,
-        message: Arc<str>,
+        diagnostic_code: verter_type_expr::OwnedStr,
+        message: verter_type_expr::OwnedStr,
     },
 }
 
@@ -383,6 +396,13 @@ impl CompiledProducts {
     fn outputs(&self) -> Option<&FxHashMap<VirtualNodeKind, CachedVirtualFile>> {
         match self {
             Self::Produced { outputs, .. } => Some(outputs),
+            Self::RuntimeSurfaceRefused { .. } => None,
+        }
+    }
+
+    fn tsx(&self) -> Option<&CachedTsx> {
+        match self {
+            Self::Produced { tsx, .. } => tsx.as_ref(),
             Self::RuntimeSurfaceRefused { .. } => None,
         }
     }
@@ -421,8 +441,8 @@ impl CompiledProducts {
                 diagnostic_code,
                 message,
             } => crate::types::CompileProducts::RuntimeSurfaceRefused {
-                diagnostic_code: Arc::clone(diagnostic_code),
-                message: Arc::clone(message),
+                diagnostic_code: diagnostic_code.clone(),
+                message: message.clone(),
             },
         }
     }
@@ -1709,7 +1729,7 @@ impl VerterHost {
                 // node's output + diagnostics, which are identical in shape
                 // across modes.
                 struct WarmHit {
-                    products: crate::types::CompileProducts,
+                    products: verter_retention::heap_size::OwnedTree<crate::types::CompileProducts>,
                     diagnostics: DiagnosticsSnapshot,
                 }
                 let warm_hit: Option<WarmHit> = match actual_mode {
@@ -1799,7 +1819,9 @@ impl VerterHost {
                     // falls through to a cold recompute that produces the
                     // missing surface.
                     let serve = CompileServe {
-                        products: served_products_from_cached(hit.products),
+                        products: served_products_from_cached(
+                            crate::types::CompileProducts::clone(&hit.products),
+                        ),
                         meta: hit_meta,
                         diagnostics: hit.diagnostics,
                         stale: false,
@@ -2025,8 +2047,8 @@ impl VerterHost {
             Ok(CompileEntryOutcome::Aborted(abort)) => return Err(HostError::from(abort)),
             Ok(CompileEntryOutcome::RuntimeSurfaceRefused(refusal)) => (
                 CompiledProducts::RuntimeSurfaceRefused {
-                    diagnostic_code: refusal.diagnostic_code,
-                    message: refusal.message,
+                    diagnostic_code: verter_type_expr::OwnedStr::from(refusal.diagnostic_code),
+                    message: verter_type_expr::OwnedStr::from(refusal.message),
                 },
                 refusal.diagnostics,
                 false,
@@ -2246,17 +2268,33 @@ impl VerterHost {
                     let is_cacheable = if let Some(mut cc) =
                         self.compile_cache().get_mut(&canonical_id)
                     {
+                        let account = self.project_type_store.retention_store_account();
                         let session_node =
                             crate::compile_output_node::CompileOutputNodeFactValidatedSession::with_retention_account(
-                                self.project_type_store.retention_store_account(),
+                                account.clone(),
                             );
-                        session_node.publish(
+                        let outcome = session_node.publish(
                             &mut cc,
                             profile_hash,
                             admission,
                             compile_output_value,
                             last_tick,
-                        ) == crate::compile_output_node::SessionPublishOutcome::Admitted
+                        );
+                        // The IDE surface a refused retention still owes its
+                        // readers stays with the document, charged to them; any
+                        // other outcome supersedes a surface held before.
+                        match (&outcome, compiled_products.tsx()) {
+                            (
+                                crate::compile_output_node::SessionPublishOutcome::Refused(
+                                    verter_audit::NonAdmissionReason::RetentionPressure,
+                                ),
+                                Some(tsx),
+                            ) => {
+                                cc.deliver_unretained_ide(profile_hash, tsx.clone(), account.get())
+                            }
+                            _ => cc.forget_unretained_ide(profile_hash),
+                        }
+                        outcome == crate::compile_output_node::SessionPublishOutcome::Admitted
                     } else {
                         false
                     };
@@ -2278,7 +2316,9 @@ impl VerterHost {
                         if let Some(template_analysis) = compiled_products.template_analysis() {
                             self.persist_raw_template_analysis(
                                 &canonical_id,
-                                Arc::new(template_analysis),
+                                verter_session_query::retention::heap_size::OwnedValue::new(
+                                    template_analysis,
+                                ),
                                 crate::types::RawTemplateSlotAdmission {
                                     store_published: true,
                                     source_version: Some(source_snap.version()),
@@ -2290,6 +2330,19 @@ impl VerterHost {
                                         .clone(),
                                 },
                             );
+                        }
+                    } else if let Some(mut derived) =
+                        self.derived_raw_cache().get_mut(&canonical_id)
+                    {
+                        // A refused session publication evicts its coupled raw
+                        // companion, with the same captured-version fence as
+                        // scheduler eviction. A late compile cannot clear a
+                        // newer generation's successful publication.
+                        if derived
+                            .raw_template_analysis()
+                            .is_some_and(|entry| entry.source_version <= source_snap.version())
+                        {
+                            derived.clear_raw_template_analysis();
                         }
                     }
 
@@ -2347,8 +2400,12 @@ impl VerterHost {
         // exception — it carries the previous compile's virtual nodes and no
         // `tsx`, so an IDE demand against it is unsatisfied and recomputes on
         // the next request (see `compile_serve_satisfies_demand`).
+        let products = compiled_products.into_served();
+        products.pin_texts(verter_session_query::retention::owned::ChargeCtx::new(
+            self.project_type_store.retention_account(),
+        ));
         Ok(CompileServe {
-            products: compiled_products.into_served(),
+            products,
             meta,
             diagnostics,
             stale,
@@ -2408,50 +2465,47 @@ impl VerterHost {
     /// flag, overrides) stay, so the IDE projection still reflects the
     /// caller's source-map / production choices without demanding runtime
     /// codegen.
-    fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
+    pub(crate) fn ide_normalized_profile(profile: &CompileProfile) -> CompileProfile {
         let mut normalized = profile.clone();
         normalized.target = normalized.target.without_runtime_module();
         normalized.target |= crate::CompileTarget::TSX;
         normalized
     }
 
-    /// Ensure the IDE (`CachedTsx`) projection exists for `(canonical, profile)`.
+    /// Compile the IDE (`CachedTsx`) projection for `(canonical, profile)` and
+    /// return it.
     ///
     /// Drives the shared compile under [`CompileDemand::Ide`] — it NEVER
     /// requests `VirtualNodeKind::Main`, so a carrier that projects only an IDE
     /// surface (Svelte today) succeeds without a runtime `Main`. The caller's
     /// profile is normalized to an IDE/TSX-bearing target INTERNALLY (see
     /// [`Self::ide_normalized_profile`]) so the compile produces the IDE surface
-    /// regardless of the caller's runtime target. Return contract:
+    /// regardless of the caller's runtime target, and never admits a
+    /// runtime-render capability. Return contract:
     ///
-    /// * `Ok(true)` — `(canonical, profile)` now has a cached `CachedTsx` (an
-    ///   immediate [`get_ide`](Self::get_ide) returns `Some`). This holds
-    ///   WHENEVER the carrier has an IDE surface — even when the caller passed a
-    ///   bundler / runtime profile with no `TSX` bit. Leftover runtime target
-    ///   bits are stripped by [`Self::ide_normalized_profile`], so this path
-    ///   never admits a runtime-render capability.
-    /// * `Ok(false)` — the loaded file has NO IDE projection surface (e.g. a
+    /// * `Ok(Some(ide))` — the IDE artifact this compile served. A warm call is
+    ///   a cache hit; when the retention account refuses to keep the entry (an
+    ///   artifact over the per-entry ceiling) the complete artifact is still
+    ///   returned, just uncached, so a later [`get_ide`](Self::get_ide) peek
+    ///   may find nothing. Callers that need the artifact consume this value
+    ///   rather than re-reading the cache.
+    /// * `Ok(None)` — the loaded file has NO IDE projection surface (e.g. a
     ///   non-carrier / a carrier that declined IDE): no error, simply nothing
-    ///   to project. `Ok(false)` means a genuine no-IDE-surface, never "the
-    ///   caller's profile happened to lack the TSX target", and never a
-    ///   refusal.
+    ///   to project, never a refusal.
     /// * `Err(_)` — a real failure (missing source, compile error, …); a real
-    ///   failure is NEVER collapsed into `Ok(false)`. Runtime-surface refusal
+    ///   failure is NEVER collapsed into `Ok(None)`. Runtime-surface refusal
     ///   belongs to a runtime-demanding identity (`get_virtual_file` Main,
     ///   host-backed compile with STYLE/SCRIPT/TEMPLATE), not this path.
-    ///
-    /// `get_ide` stays a PURE cached read — it never computes on read; this is
-    /// the explicit ensure path callers invoke first.
-    pub fn ensure_ide_compiled(
+    pub fn compile_ide(
         &self,
         canonical_id: &str,
         profile: &CompileProfile,
-    ) -> Result<bool, HostError> {
+    ) -> Result<Option<IdeResponse>, HostError> {
         use crate::host_executor::HostSourceData;
         let canonical = self.resolve_alias_or_canonical(canonical_id);
 
         // No IDE projection surface for a NON-carrier (a plain script): the
-        // contract's `Ok(false)`, never a compile attempt. The carrier gate
+        // contract's `Ok(None)`, never a compile attempt. The carrier gate
         // mirrors `ensure_compiled`'s — every framework carrier (Vue OR
         // Svelte) projects an IDE surface; everything else does not.
         {
@@ -2466,7 +2520,7 @@ impl VerterHost {
                         canonical_id: canonical.clone(),
                     })?;
             if !hd.file_language.is_framework_carrier() {
-                return Ok(false);
+                return Ok(None);
             }
         }
 
@@ -2487,7 +2541,20 @@ impl VerterHost {
                 message: message.to_string(),
             });
         }
-        Ok(served.products.tsx().is_some())
+        Ok(served.products.tsx().map(IdeResponse::from_cached))
+    }
+
+    /// Whether `(canonical, profile)` has an IDE projection surface, compiling
+    /// it if needed: [`Self::compile_ide`] without the artifact. `Ok(true)`
+    /// does not promise a later [`get_ide`](Self::get_ide) hit — a refused
+    /// cache admission serves its artifact uncached.
+    pub fn ensure_ide_compiled(
+        &self,
+        canonical_id: &str,
+        profile: &CompileProfile,
+    ) -> Result<bool, HostError> {
+        self.compile_ide(canonical_id, profile)
+            .map(|ide| ide.is_some())
     }
 
     /// List all virtual node kinds for a file (Main, Script, Template, Style, Custom).
@@ -2510,21 +2577,19 @@ impl VerterHost {
         let ide_profile = Self::ide_normalized_profile(profile);
         let profile_hash = compile_profile_hash(&ide_profile);
 
-        {
-            if self.is_canonical_evicted(&canonical) {
-                return None;
-            }
-            let cc = self.compile_cache().get(&canonical)?;
-            let session_node =
-                crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
-            let tsx = session_node.peek_tsx(&cc, profile_hash)?;
-            Some(IdeResponse {
-                code: tsx.code.clone(),
-                source_map: tsx.source_map.clone(),
-                is_jsx: tsx.is_jsx,
-                destructured_block: tsx.destructured_block.clone(),
-            })
+        if self.is_canonical_evicted(&canonical) {
+            return None;
         }
+        let cc = self.compile_cache().get(&canonical)?;
+        let session_node = crate::compile_output_node::CompileOutputNodeFactValidatedSession::new();
+        if let Some(tsx) = session_node.peek_tsx(&cc, profile_hash) {
+            return Some(IdeResponse::from_cached(&tsx));
+        }
+        // No slot retains this profile's output — the account refused to —
+        // yet its latest compile delivered one: the document's surface,
+        // charged to its readers.
+        cc.unretained_ide(profile_hash)
+            .map(IdeResponse::from_cached)
     }
 
     /// Generate public API output for a Vue SFC â€” minimal TypeScript declarations.
@@ -3383,11 +3448,11 @@ impl VerterHost {
 
         // Combined IDE output (TSX/JSX) for LSP type checking â€” stored separately, not as virtual file
         let cached_tsx = products.ide_companion().map(|tsx| CachedTsx {
-            code: Arc::from(tsx.code.as_str()),
+            code: verter_type_expr::OwnedStr::from(tsx.code.as_str()),
             source_map: if tsx.source_map.is_empty() {
                 None
             } else {
-                Some(Arc::from(tsx.source_map.as_str()))
+                Some(verter_type_expr::OwnedStr::from(tsx.source_map.as_str()))
             },
             is_jsx: tsx.is_jsx,
             destructured_block: tsx.destructured_block.clone(),
@@ -3888,8 +3953,8 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Main,
                 CachedVirtualFile {
-                    code: Arc::clone(staged.code()),
-                    source_map: staged.source_map().map(Arc::from),
+                    code: verter_type_expr::OwnedStr::from(staged.code()),
+                    source_map: staged.source_map().map(verter_type_expr::OwnedStr::from),
                     lang: Some(staged.lang().to_string()),
                     meta: VirtualMeta {
                         scope_id: if compiled.scope_id.is_empty() {
@@ -3907,11 +3972,11 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Script,
                 CachedVirtualFile {
-                    code: Arc::from(script.code.as_str()),
+                    code: verter_type_expr::OwnedStr::from(script.code.as_str()),
                     source_map: if script.source_map.is_empty() {
                         None
                     } else {
-                        Some(Arc::from(script.source_map.as_str()))
+                        Some(verter_type_expr::OwnedStr::from(script.source_map.as_str()))
                     },
                     lang: Some("ts".to_string()),
                     meta: VirtualMeta::default(),
@@ -3928,8 +3993,9 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Template,
                 CachedVirtualFile {
-                    code: Arc::from(code.as_ref()),
-                    source_map: source_map.map(|map| Arc::from(map.as_ref())),
+                    code: verter_type_expr::OwnedStr::from(code.as_ref()),
+                    source_map: source_map
+                        .map(|map| verter_type_expr::OwnedStr::from(map.as_ref())),
                     lang: Some("tsx".to_string()),
                     meta: VirtualMeta::default(),
                 },
@@ -3950,8 +4016,11 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Style { index: i },
                 CachedVirtualFile {
-                    code: Arc::from(style.result.code()),
-                    source_map: style.source_map.as_deref().map(Arc::from),
+                    code: verter_type_expr::OwnedStr::from(style.result.code()),
+                    source_map: style
+                        .source_map
+                        .as_deref()
+                        .map(verter_type_expr::OwnedStr::from),
                     lang: Some(style.lang().to_string()),
                     meta: VirtualMeta {
                         style_index: Some(i),
@@ -3995,7 +4064,7 @@ pub(super) fn publish_runtime_nodes(
             outputs.insert(
                 VirtualNodeKind::Custom { index: i },
                 CachedVirtualFile {
-                    code,
+                    code: verter_type_expr::OwnedStr::from(code),
                     source_map: None,
                     lang: descriptor.lang().map(str::to_string),
                     meta: VirtualMeta {

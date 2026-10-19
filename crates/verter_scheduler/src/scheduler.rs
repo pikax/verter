@@ -6522,6 +6522,90 @@ mod tests {
         );
     }
 
+    /// A dependency can finish Analysis before its parent's dispatched
+    /// Analysis publishes. Clearing the dependency must not dispatch the
+    /// parent's Artifact without the parent's own Analysis snapshot.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dep_analysis_finishing_before_parent_analysis_does_not_strand_artifact() {
+        struct DepExtractor;
+        impl StageExecutor for DepExtractor {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn extract_deps(
+                &self,
+                canonical_id: &str,
+                _source: &SourceSnapshot,
+            ) -> crate::execution::executor::ExtractedDeps {
+                if canonical_id == "/parent.vue" {
+                    crate::execution::executor::ExtractedDeps {
+                        forward_deps: vec!["/dep.ts".into()],
+                        blocker_ids: vec!["/dep.ts".into()],
+                    }
+                } else {
+                    crate::execution::executor::ExtractedDeps::default()
+                }
+            }
+        }
+
+        let loader = Arc::new(MemorySourceLoader::new());
+        loader.insert("/parent.vue".into(), Arc::from("<template>x</template>"));
+        loader.insert("/dep.ts".into(), Arc::from("export type T = 0;"));
+        let sched = Scheduler::test_new_sync_with_executor(
+            SchedulerConfig {
+                cpu_threads: 2,
+                io_threads: 2,
+                dag_budget: None,
+            },
+            loader,
+            Arc::new(DepExtractor),
+        );
+        let handle = sched.submit_request(Request {
+            file_id: "/parent.vue".into(),
+            target: TargetStage::Artifact { profile_hash: 0 },
+            priority: Priority::Interactive,
+            source: None,
+            file_language: None,
+            request_context: None,
+        });
+        assert!(sched.drive_one()); // Parent Source discovers and admits the dependency.
+        sched.drain_inbox();
+
+        // Dequeue both jobs, reserving the parent's Analysis as dispatched,
+        // but defer its execution until the dependency completes. This is
+        // the exact worker interleaving, controlled without thread timing.
+        let first = sched.dag.lock().next_ready().expect("first ready job");
+        let second = sched.dag.lock().next_ready().expect("second ready job");
+        let (parent_analysis, dep_source) = if first.kind == WorkKind::Analysis {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        assert_eq!(parent_analysis.kind, WorkKind::Analysis);
+        assert!(
+            matches!(&parent_analysis.identity, WorkNodeIdentity::FileStage { canonical, .. } if canonical.as_ref() == "/parent.vue")
+        );
+        assert_eq!(dep_source.kind, WorkKind::Load);
+        assert!(
+            matches!(&dep_source.identity, WorkNodeIdentity::FileStage { canonical, .. } if canonical.as_ref() == "/dep.ts")
+        );
+        sched.execute_stage_inline(dep_source);
+        sched.drive_all(); // Dependency Analysis completes; parent Analysis is still running.
+        assert!(sched.try_get_analysis("/dep.ts").is_some());
+        assert!(sched.try_get_analysis("/parent.vue").is_none());
+        assert!(handle.try_get().is_none());
+
+        sched.execute_stage_inline(parent_analysis);
+        sched.drive_all();
+        let result = handle.wait_timeout(std::time::Duration::from_millis(100));
+        assert!(
+            result.is_some_and(|state| state.is_ready()),
+            "dependency completion must not strand the parent's Artifact before its Analysis publishes",
+        );
+    }
+
     /// 16-thread stress: distinct requests on distinct files must not
     /// see each other's contexts. Each worker records `current_request_id()`
     /// per-file via the probe executor — we then confirm the per-file

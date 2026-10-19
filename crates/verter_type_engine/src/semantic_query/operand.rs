@@ -106,7 +106,7 @@ impl OperandLexicalScope {
     fn for_locator(locator: &AuthoredBodyLocator) -> Self {
         let anchor = authored_anchor(locator);
         Self {
-            canonical_id: Arc::clone(&anchor.canonical_id),
+            canonical_id: std::sync::Arc::<str>::from(anchor.canonical_id.as_str()),
             owner: anchor.owner,
         }
     }
@@ -273,6 +273,7 @@ pub(crate) use crate::semantic_query_memo::SemanticOperandEvidence;
 
 #[derive(Debug, Clone)]
 pub struct AuthoredSemanticOperand {
+    _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
     locator: AuthoredBodyLocator,
     lexical_scope: OperandLexicalScope,
     binder: OperandBinderIdentity,
@@ -308,6 +309,7 @@ impl AuthoredSemanticOperand {
     /// Seal an authored locator. Lexical scope and binder frame are derived
     /// from the locator; callers cannot supply them independently.
     fn from_authority(
+        graph: Option<&crate::semantic_query_memo::SemanticGraphStore>,
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticNodeId]>,
         split_env: OperandSplitEnv,
@@ -316,6 +318,16 @@ impl AuthoredSemanticOperand {
     ) -> Self {
         Self {
             lexical_scope: OperandLexicalScope::for_locator(&locator),
+            _roots: match graph {
+                Some(graph) => crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                    graph,
+                    substitution.iter().copied(),
+                ),
+                // A fixture with no issuing graph to name.
+                None => crate::semantic_query_memo::node_roots::IdentityNodeRoots::scoped(
+                    substitution.iter().copied(),
+                ),
+            },
             binder: OperandBinderIdentity::for_locator(&locator),
             locator,
             substitution,
@@ -368,6 +380,9 @@ impl AuthoredSemanticOperand {
 #[derive(Debug, Clone)]
 enum SemanticOperandKind {
     Node {
+        /// Held, never read: keeps `node` rooted in its issuing graph for
+        /// as long as any copy of the operand lives.
+        _lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
         store_identity: u64,
         generation: u64,
         node: SemanticNodeId,
@@ -384,16 +399,21 @@ pub struct SemanticOperand {
 
 impl SemanticOperand {
     /// Token-gated construction of the runtime-node arm: the forcing
-    /// authority seals a published node to its store and generation.
+    /// authority seals a published node to its store and generation. The
+    /// operand owns `node` through `lease`, the delivery that rooted it in
+    /// its issuing graph — never through whichever construction scope is
+    /// innermost on this thread, which may belong to another graph.
     pub(crate) fn node(
         store_identity: u64,
         generation: u64,
         node: SemanticNodeId,
         evidence: SemanticOperandEvidence,
+        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
         _authority: SemanticOperandAuthority,
     ) -> Self {
         Self {
             kind: SemanticOperandKind::Node {
+                _lease: lease,
                 store_identity,
                 generation,
                 node,
@@ -413,6 +433,7 @@ impl SemanticOperand {
     /// the unforgeable [`SemanticOperandAuthority`] no internal consumer
     /// can mint an authored operand.
     pub(crate) fn from_authored_authority(
+        graph: Option<&crate::semantic_query_memo::SemanticGraphStore>,
         locator: AuthoredBodyLocator,
         substitution: Arc<[SemanticNodeId]>,
         split_env: OperandSplitEnv,
@@ -421,6 +442,7 @@ impl SemanticOperand {
         _authority: SemanticOperandAuthority,
     ) -> Self {
         Self::authored(AuthoredSemanticOperand::from_authority(
+            graph,
             locator,
             substitution,
             split_env,
@@ -468,6 +490,7 @@ impl SemanticOperand {
                 generation,
                 node,
                 evidence,
+                ..
             } => SemanticOperandParts::Node {
                 store_identity: *store_identity,
                 generation: *generation,
@@ -556,6 +579,7 @@ impl Hash for SemanticOperand {
 /// (and its evidence) to feed `mint_node_semantic_operand`.
 #[derive(Debug, Clone)]
 pub struct ForcedSemanticOperand {
+    lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
     store_identity: u64,
     generation: u64,
     node: SemanticNodeId,
@@ -563,6 +587,18 @@ pub struct ForcedSemanticOperand {
 }
 
 impl ForcedSemanticOperand {
+    pub(crate) fn with_lease(
+        mut self,
+        lease: crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
+        self.lease = lease;
+        self
+    }
+    pub(crate) fn lease(
+        &self,
+    ) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.lease
+    }
     /// Token-gated construction: the forcing boundary's force read is the
     /// only producer.
     pub(crate) fn minted(
@@ -577,6 +613,7 @@ impl ForcedSemanticOperand {
             generation,
             node,
             evidence,
+            lease: Default::default(),
         }
     }
 
@@ -642,7 +679,7 @@ mod force_vocabulary {
         /// the boundary has already proven the index node belongs to the
         /// issuing store at the live generation and merged its producer
         /// evidence.
-        Path(Arc<[PathSegment]>),
+        Path(verter_type_expr::OwnedSlice<PathSegment>),
         /// Key-domain demand: the force answers the operand's `keyof`. It
         /// forces only key-producing structure and never member values.
         KeyDomain,
@@ -700,7 +737,7 @@ impl SemanticOperandForceProjection {
     /// family, so an empty `Path` would compute the whole-surface answer
     /// into a second, force-owned entry.
     #[must_use]
-    pub fn residual_path(&self) -> Option<&Arc<[PathSegment]>> {
+    pub fn residual_path(&self) -> Option<&verter_type_expr::OwnedSlice<PathSegment>> {
         match self {
             Self::Path(path) => Some(path),
             Self::WholeSurface | Self::KeyDomain => None,

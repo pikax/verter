@@ -357,14 +357,14 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
 
     let base = match dispatch.execute_type_node(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from(canonical_id),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_id),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })) {
         verter_type_engine::semantic_query::QueryResult::Value(
             verter_type_engine::semantic_query::SemanticQueryOutput { value: node, .. },
@@ -374,7 +374,7 @@ fn expanded_surface_expr(host: &VerterHost, canonical_id: &str, name: &str) -> T
 
     let terminal = match dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(Vec::new().into_boxed_slice()),
+        path: verter_type_expr::OwnedSlice::default(),
         context: ProjectionReductionContext::published(ProjectionMode::Expanded),
     }) {
         verter_type_engine::semantic_query::QueryResult::Value(
@@ -421,8 +421,8 @@ fn merged_interface_generic_heritage_own_member_shadows_expanded() {
     //    peer-merge reducer classifies heritage arms by topology — an
     //    eagerly-materialised heritage `Object` is indistinguishable from
     //    the own body and silently steals member precedence).
-    let contributors = match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+    let contributors = match graph.node_data(node.id()).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");
@@ -497,8 +497,8 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_expanded() {
     //    carrier (the peer-merge reducer classifies heritage arms by
     //    topology — a materialised heritage Object is indistinguishable
     //    from the own body and silently steals member precedence).
-    let contributors = match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+    let contributors = match graph.node_data(node.id()).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");
@@ -602,8 +602,8 @@ fn merged_interface_mapper_builtin_heritage_own_member_shadows_skeleton() {
     // A materialised heritage `Object` / `Mapped` there is mis-bucketed as OWN
     // surface by the topology-driven peer-merge reducer and silently steals
     // member precedence (own-body-shadows-heritage inverts).
-    let contributors = match graph.node_data(node).as_deref() {
-        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.clone(),
+    let contributors = match graph.node_data(node.id()).as_deref() {
+        Some(SemanticNodeData::MergedDecl { contributors }) => contributors.to_vec(),
         other => panic!("merged X must stay a MergedDecl carrier under Skeleton, got {other:?}"),
     };
     assert_eq!(contributors.len(), 2, "two same-name contributors");

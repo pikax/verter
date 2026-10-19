@@ -81,6 +81,11 @@ The existing five-way environment split remains structural:
 
 ## Closed resolution-fact taxonomy
 
+The immutable resolution root's version ledger shares its fact keys through
+`Arc`. Copying a persistent map node for a point mutation clones references,
+without copying the neighboring keys' canonical paths. Key equality, hashing,
+version advancement and propagation still use the complete typed key.
+
 `ResolutionFactKey` is closed over exactly seven key families. Adding a new
 resolver observation is compile-breaking until the enum, mutation rule,
 validator, and witness tests all handle it.

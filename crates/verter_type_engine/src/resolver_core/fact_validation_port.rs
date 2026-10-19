@@ -18,8 +18,14 @@ pub trait LiveFactValidation: FactValidation {
     fn request_snapshot(&self) -> &super::resolver_context::RequestSnapshot<Self::Clocks>;
 }
 
-pub trait FactValidation {
+/// `Sync`: a suspended semantic task that holds a fact tracer bound to its
+/// request's port moves between threads with it.
+pub trait FactValidation: Sync {
     fn current_external_supersession_fingerprint(&self) -> u64;
+    /// The external-input fingerprint of this request's captured base,
+    /// only when that base was proven current. Frozen session overlays
+    /// are normalized out; additive completions do not move this fence.
+    fn publication_input_fingerprint(&self) -> Option<u64>;
     /// The cancellation and project-generation handles the host captured
     /// when it admitted this request. Every read through them is live.
     fn request_flags(&self) -> &super::resolver_context::RequestFlags;
@@ -27,13 +33,15 @@ pub trait FactValidation {
         &self,
         key: &verter_session_query::source::artifact_key::FileArtifactKey,
     ) -> verter_session_query::source::env_identity::SourceEnvIdentity;
+    /// The carrier `facts` and the observed `roots` seal into. The facts
+    /// are taken by value: the carrier is built from them in place.
     fn complete_graph_signature(
         &self,
         roots: &[(
-            std::sync::Arc<str>,
+            verter_type_expr::OwnedStr,
             verter_session_query::analysis::types::Hash16,
         )],
-        facts: &[FactVersionRef],
+        facts: Vec<FactVersionRef>,
     ) -> Result<
         crate::fact_signature_helpers::StructuralCarrierReadSet,
         crate::cache_runtime::NonAdmissionReason,
@@ -132,6 +140,17 @@ pub trait FactValidation {
         sig: &[FactVersionRef],
         self_root_canonicals: &[&str],
     ) -> bool;
+    /// [`Self::validates_fact_signature_with_self_roots`] for a signature a
+    /// cache retains. A request-bound port answers one it already validated
+    /// in this request, under the same strict roots, without walking it
+    /// again.
+    fn validates_retained_signature_with_self_roots(
+        &self,
+        sig: &std::sync::Arc<[FactVersionRef]>,
+        self_root_canonicals: &[&str],
+    ) -> bool {
+        self.validates_fact_signature_with_self_roots(sig, self_root_canonicals)
+    }
     fn promote_route_completion(
         &self,
         canonical: &str,

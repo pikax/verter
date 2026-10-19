@@ -8,7 +8,7 @@ use verter_type_expr::TopLevelOwnerId;
 
 fn scope(canonical: &str) -> ScopeId {
     ScopeId {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         local_scope: None,
         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
@@ -38,8 +38,8 @@ fn carrier_naming(
 // Family-memo backfill matrix
 // ──────────────────────────────────────────────────────────────────
 
-fn family_test_path() -> Arc<[PathSegment]> {
-    Arc::from(
+fn family_test_path() -> verter_type_expr::OwnedSlice<PathSegment> {
+    verter_type_expr::OwnedSlice::from(
         vec![PathSegment::Member(
             crate::semantic_query::PropertyKey::identifier("foo"),
         )]
@@ -52,9 +52,9 @@ fn family_test_path() -> Arc<[PathSegment]> {
 // ──────────────────────────────────────────────────────────────────
 
 fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
-    Arc::from(
-        vec![(
-            Arc::<str>::from(canonical),
+    crate::semantic_query::DepSignature::new(
+        vec![crate::semantic_query::DepEntry::new(
+            canonical,
             crate::semantic_query::DepVersion::WholeHash([hash; 16]),
         )]
         .into_boxed_slice(),
@@ -62,12 +62,12 @@ fn dep_sig_for(canonical: &str, hash: u8) -> DepSignature {
 }
 
 // ──────────────────────────────────────────────────────────────────
-// Document-close release (`release_canonical`)
+// Document close (`close_canonical`)
 // ──────────────────────────────────────────────────────────────────
 
 fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
     NodeScopeId::File {
-        canonical_id: Arc::from(canonical),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [hash; 16],
         local_scope: None,
@@ -77,15 +77,15 @@ fn release_file_scope(canonical: &str, hash: u8) -> NodeScopeId {
 fn release_type_param(canonical: &str, hash: u8, name: &str) -> SemanticNodeData {
     SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [hash; 16],
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -151,8 +151,265 @@ fn release_intern_document(
 fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
     SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope(canonical),
-        name: Arc::from(name),
+        name: verter_type_expr::OwnedStr::from(name),
     })
+}
+
+fn populate_retirement_sidecars(
+    store: &SemanticGraphStore,
+    count: usize,
+) -> super::super::node_roots::NodeRootScope {
+    let build = store.enter_node_root_scope();
+    let scoped = release_file_scope("/w/a.ts", 1);
+    for index in 0..count {
+        let node = store.intern_node_with_scope(
+            release_type_param("/w/a.ts", 1, &format!("T{index}")),
+            scoped.clone(),
+        );
+        store.node_is_inert_structure(node);
+        if index % 32 == 0 {
+            let view = release_object_view(
+                (0..=index % 3)
+                    .map(|member| release_member(&format!("member{member}"), node))
+                    .collect(),
+            );
+            let object = store
+                .intern_node_with_scope(SemanticNodeData::Object(view.clone()), scoped.clone());
+            store.node_is_inert_structure(object);
+            let _ = store.member_ordinal_index(object, &view);
+            let _ = crate::semantic_query::stable_key::stable_key_for_node(store, object);
+            store.record_origin_edge(
+                object,
+                OriginEdgeKind::Normalize,
+                Arc::from([node]),
+                crate::semantic_query::OriginMeta::None,
+                dep_sig_for("/w/a.ts", 1),
+            );
+        }
+    }
+    assert!(!store.member_ordinal_index_memo.is_empty());
+    assert!(store.origin_edge_count() > 0);
+    assert!(store.stable_key_class_count() > 0);
+    build
+}
+
+fn assert_retirement_backing_released(store: &SemanticGraphStore) {
+    assert_eq!(
+        store.unresolved_reach.lock().capacity(),
+        0,
+        "empty bits release their table"
+    );
+    assert_eq!(
+        store.unresolved_reach.lock().storage_charge_bytes(),
+        0,
+        "freed bits keep no charge"
+    );
+    assert_eq!(
+        store.member_ordinal_index_memo.capacity(),
+        0,
+        "empty indexes release their tables"
+    );
+    assert_eq!(
+        store.member_ordinal_index_fifo.lock().capacity(),
+        0,
+        "empty ordering releases its deque"
+    );
+    assert_eq!(
+        store.derivation.lock().storage_charge_bytes(),
+        0,
+        "empty origins release their backing charge"
+    );
+    assert_eq!(store.stable_key_class_count(), 0);
+}
+
+/// A holder whose final drop comes after the close destroys the closed
+/// content then, with no close or sidecar write left to drain the log: the
+/// release that grows the destroyed log past its threshold drains it into
+/// the sidecars itself, so neither the log nor the stale sidecar entries
+/// outlive the drop by more than the threshold. When a sidecar lock is held
+/// across that final release the drain cannot run then; the lock's holder
+/// runs it as it unlocks, with no fresh entry of its own and no later work.
+///
+/// Discriminating against a log drained only by a later close or sidecar
+/// write, and against a release that gives up on a held sidecar lock: every
+/// destroyed id and its structure bits would stay retained.
+#[test]
+fn a_final_drop_after_close_keeps_the_destroyed_log_bounded() {
+    /// A lock guard held across the final release, dropped by type erasure.
+    trait Held {}
+    impl<T> Held for T {}
+    type Hold = for<'a> fn(&'a SemanticGraphStore) -> Box<dyn Held + 'a>;
+    let cases: [(&str, Option<Hold>); 5] = [
+        ("uncontended", None),
+        (
+            "key classes held",
+            Some(|store| Box::new(store.key_classes.lock())),
+        ),
+        (
+            "structure bits held",
+            Some(|store| Box::new(store.unresolved_reach.lock())),
+        ),
+        (
+            "origin edges held",
+            Some(|store| Box::new(store.derivation.lock())),
+        ),
+        (
+            "member-index order held",
+            Some(|store| Box::new(store.member_ordinal_index_fifo.lock())),
+        ),
+    ];
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    for (label, hold) in cases {
+        let counts = if hold.is_none() {
+            vec![threshold / 2, threshold * 4, threshold * 8]
+        } else {
+            vec![threshold * 4]
+        };
+        let mut previous_work = None;
+        for count in counts {
+            let store = SemanticGraphStore::new();
+            let scope = populate_retirement_sidecars(&store, count);
+            let described = store.unresolved_reach_count();
+            assert!(described >= count, "{label}");
+            assert!(store.unresolved_reach.lock().storage_charge_bytes() > 0);
+
+            store.close_canonical("/w/a.ts");
+            assert_eq!(
+                store.unresolved_reach_count(),
+                described,
+                "{label}: premise: the scope still holds every node"
+            );
+            let held = hold.map(|hold| hold(&store));
+            drop(scope);
+            assert_eq!(
+                store.node_count(),
+                0,
+                "{label}: the final drop destroys them all"
+            );
+            if held.is_some() {
+                assert_eq!(
+                    store.pending_destroyed_nodes(),
+                    described,
+                    "{label}: premise: the held lock blocks the release's drain"
+                );
+            }
+            drop(held);
+
+            assert!(
+                store.pending_destroyed_nodes() <= threshold,
+                "{label}: pending {} of {count}",
+                store.pending_destroyed_nodes()
+            );
+            assert!(
+                store.unresolved_reach_count() <= threshold,
+                "{label}: stale structure bits {} of {count}",
+                store.unresolved_reach_count()
+            );
+            if described > threshold {
+                assert_eq!(store.pending_destroyed_nodes(), 0);
+                assert_retirement_backing_released(&store);
+                let work = store.unresolved_reach.lock().retirement_work();
+                assert!(
+                    work <= 4 * described,
+                    "retirement work stays linear: {work} for {described}"
+                );
+                if let Some(previous) = previous_work {
+                    assert!(
+                        work <= 2 * previous + 64,
+                        "doubling the batch keeps linear retirement work"
+                    );
+                }
+                previous_work = Some(work);
+                eprintln!("retirement_batch={described} retirement_work={work}");
+            } else {
+                assert!(store.unresolved_reach.lock().capacity() <= 4 * threshold);
+            }
+        }
+    }
+}
+
+/// A final release's drain that takes some sidecar locks and is blocked on
+/// another overlaps the blocking holder's unlock: the holder's settle runs
+/// while the drain still holds its partial locks. The obligation must
+/// survive that overlap — the drain retries once it lets its partial locks
+/// go — so the log is drained with no later work.
+///
+/// Discriminating against overlapping drain attempts that each fail on the
+/// other's partial locks and both return: the obligation stays owed and
+/// every destroyed id and its structure bits stay retained.
+#[test]
+fn an_unlock_during_a_blocked_drain_leaves_no_cleanup_stranded() {
+    use crate::semantic_query_memo::arena::ArenaRaceEvent;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    const WAIT: Duration = Duration::from_secs(30);
+    let threshold = super::super::release::DESTROYED_DRAIN_THRESHOLD;
+    struct ClearHook<'a>(&'a super::super::arena::NodeArena);
+    impl Drop for ClearHook<'_> {
+        fn drop(&mut self) {
+            self.0.set_race_hook(None);
+        }
+    }
+    for count in [threshold * 4, threshold * 8] {
+        let store = SemanticGraphStore::new();
+        let scope = populate_retirement_sidecars(&store, count);
+        store.close_canonical("/w/a.ts");
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (unlock_tx, unlock_rx) = mpsc::channel::<()>();
+        let (unlocked_tx, unlocked_rx) = mpsc::channel();
+        let unlocked_rx = parking_lot::Mutex::new(unlocked_rx);
+        let blocked = Arc::new(AtomicUsize::new(0));
+        std::thread::scope(|threads| {
+            let unlock_tx = unlock_tx;
+            let holder = threads.spawn({
+                let store = &store;
+                move || {
+                    let held = store.derivation.lock();
+                    held_tx.send(()).unwrap();
+                    let _ = unlock_rx.recv_timeout(WAIT);
+                    // The guard's unlock settles while the drain holds its other
+                    // sidecar locks.
+                    drop(held);
+                    let _ = unlocked_tx.send(());
+                }
+            });
+            held_rx.recv_timeout(WAIT).unwrap();
+            let clear_hook = ClearHook(&store.arena);
+            let observed = Arc::clone(&blocked);
+            store.arena.set_race_hook(Some(Arc::new(move |event| {
+                if event == ArenaRaceEvent::SidecarDrainBlocked
+                    && observed.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    let _ = unlock_tx.send(());
+                    let _ = unlocked_rx.lock().recv_timeout(WAIT);
+                }
+            })));
+            drop(scope);
+            // Dropping the hook disconnects a holder the drain never released.
+            drop(clear_hook);
+            holder.join().unwrap();
+        });
+
+        assert!(
+            blocked.load(Ordering::SeqCst) >= 1,
+            "premise: the final release's drain was blocked by the held lock"
+        );
+        assert_eq!(store.node_count(), 0, "the final drop destroys them all");
+        assert!(
+            store.pending_destroyed_nodes() <= threshold,
+            "pending {} of {count}",
+            store.pending_destroyed_nodes()
+        );
+        assert!(
+            store.unresolved_reach_count() <= threshold,
+            "stale structure bits {} of {count}",
+            store.unresolved_reach_count()
+        );
+        assert_retirement_backing_released(&store);
+    }
 }
 
 /// The inert-structure bit and the unresolved-reach bit of a node live in
@@ -162,6 +419,7 @@ fn release_decl_key(canonical: &str, name: &str) -> SemanticQueryKey {
 #[test]
 fn a_nodes_structural_bits_share_one_sidecar_entry() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let array = store.intern_node(SemanticNodeData::Array {
         element: number,
@@ -235,7 +493,7 @@ fn intern_dedups_structural_values_across_contexts() {
     let scoped = store.intern_node_with_scope(
         SemanticNodeData::Primitive(PrimitiveKind::Number),
         NodeScopeId::File {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [0u8; 16],
             local_scope: None,
@@ -255,8 +513,9 @@ fn intern_dedups_structural_values_across_contexts() {
 #[test]
 fn intern_identity_discriminates_top_level_owner() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let scope = |owner| NodeScopeId::File {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -289,10 +548,10 @@ fn intern_identity_discriminates_top_level_owner() {
 #[test]
 fn declaration_and_slot_identity_discriminate_top_level_owner() {
     let decl = |owner| DeclIdentity {
-        canonical_id: Arc::from("/w/Component.vue"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/Component.vue"),
         owner,
         whole_hash: [9u8; 16],
-        decl_name: Arc::from("Shared"),
+        decl_name: verter_type_expr::OwnedStr::from("Shared"),
     };
     let module_decl = decl(TopLevelOwnerId::module(0));
     let instance_decl = decl(TopLevelOwnerId::instance(0));
@@ -300,9 +559,9 @@ fn declaration_and_slot_identity_discriminate_top_level_owner() {
 
     let slot = |owner| {
         ResolvedDeclSlotIdentity::type_slot(
-            Arc::from("/w/Component.vue"),
+            verter_type_expr::OwnedStr::from("/w/Component.vue"),
             owner,
-            Arc::from("Shared"),
+            verter_type_expr::OwnedStr::from("Shared"),
             3,
             [4u8; 16],
             [5u8; 16],
@@ -371,14 +630,19 @@ fn intern_identity_invariant_holds_across_threads() {
 #[test]
 fn intern_span_participates_in_identity() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let ret = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
     let mk = |end: u32| SemanticNodeData::Signature {
         kind: crate::semantic_query::SignatureKind::Call,
-        params: Arc::from(Vec::<crate::semantic_query::FunctionParam>::new()),
+        params: crate::semantic_query::PayloadArray::from(Vec::<
+            crate::semantic_query::FunctionParam,
+        >::new()),
         return_type: ret,
         occurrence: None,
         return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(ret),
-        type_parameters: Arc::from(Vec::<crate::semantic_query::TypeParamDecl>::new()),
+        type_parameters: crate::semantic_query::PayloadArray::from(Vec::<
+            crate::semantic_query::TypeParamDecl,
+        >::new()),
         signature_span: Some(verter_span::Span::new(0, end)),
         return_type_span: None,
         predicate: None,
@@ -408,17 +672,18 @@ fn intern_span_participates_in_identity() {
 fn intern_typeparam_display_name_excluded_from_identity() {
     use crate::semantic_query::DeclIdentity;
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let mk = |display: &str| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [3u8; 16],
-            decl_name: Arc::from("T"),
+            decl_name: verter_type_expr::OwnedStr::from("T"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(display),
+        display_name: verter_type_expr::OwnedStr::from(display),
     };
     let id1 = store.intern_node(mk("T"));
     let id2 = store.intern_node(mk("TRenamed"));
@@ -441,7 +706,7 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
     let data_b = SemanticNodeData::Primitive(PrimitiveKind::String);
     let scope_global = NodeScopeId::Global;
     let scope_file = NodeScopeId::File {
-        canonical_id: Arc::from("/w/x.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/x.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [0u8; 16],
         local_scope: None,
@@ -471,45 +736,30 @@ fn shard_routing_is_deterministic_per_payload_and_scope() {
 fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
     let interner = DepSignatureInterner::new();
     let payload_a = vec![
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/b.ts"),
-            DepVersion::WholeHash([2u8; 16]),
-        ),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/b.ts", DepVersion::WholeHash([2u8; 16])),
     ];
     // Reordered with a duplicate — must normalise to the same
     // canonical form.
     let payload_b = vec![
-        (
-            Arc::<str>::from("/w/b.ts"),
-            DepVersion::WholeHash([2u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
-        (
-            Arc::<str>::from("/w/a.ts"),
-            DepVersion::WholeHash([1u8; 16]),
-        ),
+        crate::semantic_query::DepEntry::new("/w/b.ts", DepVersion::WholeHash([2u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
+        crate::semantic_query::DepEntry::new("/w/a.ts", DepVersion::WholeHash([1u8; 16])),
     ];
     let arc_a = interner.intern(&payload_a);
     let arc_b = interner.intern(&payload_b);
     assert!(
-        Arc::ptr_eq(&arc_a, &arc_b),
+        crate::semantic_query::DepSignature::ptr_eq(&arc_a, &arc_b),
         "equivalent payloads (modulo order + dups) must intern to the same Arc"
     );
     // Different content → different Arc.
-    let payload_c = vec![(
-        Arc::<str>::from("/w/c.ts"),
+    let payload_c = vec![crate::semantic_query::DepEntry::new(
+        "/w/c.ts",
         DepVersion::WholeHash([3u8; 16]),
     )];
     let arc_c = interner.intern(&payload_c);
     assert!(
-        !Arc::ptr_eq(&arc_a, &arc_c),
+        !crate::semantic_query::DepSignature::ptr_eq(&arc_a, &arc_c),
         "different payloads must intern to different Arcs"
     );
 }
@@ -521,8 +771,8 @@ fn dep_signature_interner_returns_same_arc_for_equivalent_payloads() {
 #[test]
 fn dep_signature_intern_sweep_removes_empty_buckets() {
     let interner = DepSignatureInterner::new();
-    let payload = vec![(
-        Arc::<str>::from("/w/sweep.ts"),
+    let payload = vec![crate::semantic_query::DepEntry::new(
+        "/w/sweep.ts",
         DepVersion::WholeHash([7u8; 16]),
     )];
 
@@ -568,7 +818,7 @@ fn dep_signature_intern_auto_sweep_keeps_bucket_count_bounded() {
     // counter hits SWEEP_INTERVAL.
     for i in 0..(SWEEP_INTERVAL + 1) {
         let canonical: Arc<str> = Arc::from(format!("/w/n{i}.ts"));
-        let _arc = interner.intern_canonical(canonical, DepVersion::ProjectGeneration(i));
+        let _arc = interner.intern_canonical(&canonical, DepVersion::ProjectGeneration(i));
     }
     // After auto-sweep, dead-Weak buckets should be reclaimed.
     // Tolerate up to SWEEP_INTERVAL stragglers (the buckets that
@@ -604,6 +854,7 @@ fn node_arena_invalidation_preserves_global_scope() {
     use verter_session_query::analysis::types::Hash16;
 
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
 
     // Distinct payload per scope so dedup operates per scope key.
     let global_payload = || SemanticNodeData::Primitive(PrimitiveKind::String);
@@ -612,13 +863,13 @@ fn node_arena_invalidation_preserves_global_scope() {
     let whole_a: Hash16 = [1u8; 16];
     let whole_b: Hash16 = [2u8; 16];
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_a),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_a,
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::clone(&canonical_b),
+        canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: whole_b,
         local_scope: None,
@@ -629,27 +880,27 @@ fn node_arena_invalidation_preserves_global_scope() {
     // shard entries.
     let file_a_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_a),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_a.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_a,
-            decl_name: Arc::from("Param_A"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_A"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_A"),
+        display_name: verter_type_expr::OwnedStr::from("Param_A"),
     };
     let file_b_payload = SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::clone(&canonical_b),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical_b.clone()),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: whole_b,
-            decl_name: Arc::from("Param_B"),
+            decl_name: verter_type_expr::OwnedStr::from("Param_B"),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Param_B"),
+        display_name: verter_type_expr::OwnedStr::from("Param_B"),
     };
 
     let global_id_first = store.intern_node_with_scope(global_payload(), NodeScopeId::Global);
@@ -812,17 +1063,18 @@ fn many_distinct_relations_under_tiny_retention_keep_operand_only_residency() {
     const BUDGET: usize = 2;
     const RELATIONS: usize = 64;
     let store = SemanticGraphStore::new_with_memo_budget_for_test(BUDGET);
+    let _scope = store.enter_node_root_scope();
     let operand = |name: String| SemanticNodeData::TypeParam {
         decl: DeclIdentity {
-            canonical_id: Arc::from("/w/operands.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/operands.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
             whole_hash: [7u8; 16],
-            decl_name: Arc::from(name.as_str()),
+            decl_name: verter_type_expr::OwnedStr::from(name.as_str()),
         },
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from(name.as_str()),
+        display_name: verter_type_expr::OwnedStr::from(name.as_str()),
     };
     let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = (0..RELATIONS)
         .map(|i| {
@@ -973,7 +1225,7 @@ fn invalidate_all_clears_memo_budget_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1060,7 +1312,7 @@ fn warm_publish_records_memo_budget_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/publish.ts"),
-                name: Arc::from("Pub"),
+                name: verter_type_expr::OwnedStr::from("Pub"),
             }),
             QueryResult::Value(node),
             verter_session_query::facts::fact_cache::ReadSetSignature::empty(),
@@ -1139,7 +1391,7 @@ fn invalidate_all_clears_reverse_index_under_entries_lock() {
     store.publish_with_carrier_for_tests(
         SemanticQueryKey::ResolveDecl(ResolveDeclKey {
             scope: scope("/w/seed.ts"),
-            name: Arc::from("Seed"),
+            name: verter_type_expr::OwnedStr::from("Seed"),
         }),
         QueryResult::Value(node),
         carrier_naming("/w/seed.ts", 1),
@@ -1256,7 +1508,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope(canonical),
-                name: Arc::from(name),
+                name: verter_type_expr::OwnedStr::from(name),
             }),
             QueryResult::Value(node),
             carrier_naming(canonical, hash),
@@ -1290,7 +1542,7 @@ fn budget_eviction_prunes_reverse_index_under_entries_lock() {
         store_p.publish_with_carrier_for_tests(
             SemanticQueryKey::ResolveDecl(ResolveDeclKey {
                 scope: scope("/w/c.ts"),
-                name: Arc::from("C"),
+                name: verter_type_expr::OwnedStr::from("C"),
             }),
             QueryResult::Value(node),
             carrier_naming("/w/c.ts", 3),
@@ -1392,9 +1644,9 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     // normalization-builder dispatch shape — every such builder emits
     // a `project_generation_signature()` fence on top of whatever the
     // carrier's traced cross-file facts capture).
-    let dispatch_fence_a: DepSignature = Arc::from(
-        vec![(
-            Arc::<str>::from("<project>"),
+    let dispatch_fence_a: DepSignature = crate::semantic_query::DepSignature::new(
+        vec![crate::semantic_query::DepEntry::new(
+            "<project>",
             DepVersion::ProjectGeneration(0),
         )]
         .into_boxed_slice(),
@@ -1402,7 +1654,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_a = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_a = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/a.ts"),
-        name: Arc::from("A"),
+        name: verter_type_expr::OwnedStr::from("A"),
     });
     let carrier_a =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1424,7 +1676,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_b = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_b = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/b.ts"),
-        name: Arc::from("B"),
+        name: verter_type_expr::OwnedStr::from("B"),
     });
     let carrier_b =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1472,7 +1724,7 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     let node_c = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let key_c = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/c.ts"),
-        name: Arc::from("C"),
+        name: verter_type_expr::OwnedStr::from("C"),
     });
     let carrier_c =
         verter_session_query::facts::fact_cache::ReadSetSignature::new(Arc::from(vec![
@@ -1536,6 +1788,78 @@ fn fifo_eviction_prunes_dispatch_only_reverse_index_registration() {
     );
 }
 
+/// Publish one `ResolveDecl` candidate named `name` whose carrier names
+/// `canonical` at version `hash`.
+fn publish_decl_naming(store: &SemanticGraphStore, name: &str, canonical: &str, hash: u8) {
+    let node = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    store.publish_with_carrier_for_tests(
+        release_decl_key(canonical, name),
+        QueryResult::Value(node),
+        carrier_naming(canonical, hash),
+        Arc::from([]),
+    );
+}
+
+/// A read of the reverse index registers the candidates published since
+/// the previous read, not every resident candidate: an invalidation after
+/// one more publish inspects that one candidate however many the memo
+/// holds, and every resident candidate stays registered under its
+/// canonical.
+#[test]
+fn reverse_index_read_registers_only_candidates_published_since_the_last_read() {
+    let store = SemanticGraphStore::new();
+    const RESIDENT: usize = 32;
+    for i in 0..RESIDENT {
+        publish_decl_naming(&store, &format!("E{i}"), &format!("/w/e{i}.ts"), 1);
+    }
+    assert_eq!(store.invalidate_canonical("/w/unrelated.ts"), 0);
+    assert_eq!(
+        store.test_reverse_index_registration_visits(),
+        RESIDENT,
+        "the first read registers each resident candidate once",
+    );
+
+    publish_decl_naming(&store, "Late", "/w/late.ts", 1);
+    assert_eq!(store.invalidate_canonical("/w/unrelated.ts"), 0);
+    assert_eq!(
+        store.test_reverse_index_registration_visits() - RESIDENT,
+        1,
+        "a read after one publish inspects only that publish's candidate",
+    );
+    for i in 0..RESIDENT {
+        assert_eq!(store.canonical_to_entries_count(&format!("/w/e{i}.ts")), 1);
+    }
+    assert_eq!(
+        store.invalidate_canonical("/w/late.ts"),
+        1,
+        "the late candidate is registered, so its canonical drains it",
+    );
+}
+
+/// Publishes that outgrow the resident families before a read (repeat
+/// publishes into one family) still leave every resident candidate
+/// registered when the index is next read, and a displaced candidate
+/// leaves nothing behind.
+#[test]
+fn reverse_index_registers_every_resident_candidate_after_many_unread_publishes() {
+    let store = SemanticGraphStore::new();
+    let key = release_decl_key("/w/a.ts", "A");
+    for hash in 1..=6u8 {
+        publish_decl_naming(&store, "A", "/w/a.ts", hash);
+    }
+    publish_decl_naming(&store, "B", "/w/b.ts", 1);
+    let resident = store.slot_candidate_admission_seqs_for_tests(&key).len();
+    assert!(
+        (2..6).contains(&resident),
+        "the family cap displaced some of A's candidates: {resident} resident",
+    );
+    assert_eq!(store.canonical_to_entries_count("/w/a.ts"), resident);
+    assert_eq!(store.canonical_to_entries_count("/w/b.ts"), 1);
+    assert_eq!(store.invalidate_canonical("/w/a.ts"), resident);
+    assert_eq!(store.canonical_to_entries_count("/w/a.ts"), 0);
+    assert_eq!(store.invalidate_canonical("/w/b.ts"), 1);
+}
+
 /// Multiple edges of the same kind on the same result are stored as a
 /// list — walkers see all of them. This is the multi-derivation
 /// support the contract requires.
@@ -1596,6 +1920,7 @@ fn origin_walk_returns_all_sources() {
 #[test]
 fn alias_resolve_edge_walk_returns_declaration_identity() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
     let alias_decl = store.intern_node(SemanticNodeData::Alias(target));
 
@@ -1603,7 +1928,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
         target,
         OriginEdgeKind::AliasResolve,
         Arc::from(vec![alias_decl].into_boxed_slice()),
-        crate::semantic_query::OriginMeta::AliasName(Arc::from("AliasName")),
+        crate::semantic_query::OriginMeta::AliasName(verter_type_expr::OwnedStr::from("AliasName")),
         dep_sig_for("/w/a.ts", 1),
     );
 
@@ -1621,6 +1946,7 @@ fn alias_resolve_edge_walk_returns_declaration_identity() {
 #[test]
 fn alias_chain_multiple_hops_walk() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let final_target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let middle_alias = store.intern_node(SemanticNodeData::Alias(final_target));
     let outer_alias = store.intern_node(SemanticNodeData::Alias(middle_alias));
@@ -1686,7 +2012,11 @@ fn multiple_derivations_of_same_node_all_contribute_their_edges() {
     assert_eq!(edges.len(), 2);
     let canonicals: Vec<&str> = edges
         .iter()
-        .flat_map(|e| e.edge_dep_signature.iter().map(|(c, _)| c.as_ref()))
+        .flat_map(|e| {
+            e.edge_dep_signature
+                .iter()
+                .map(|crate::semantic_query::DepEntry(c, _)| c.as_ref())
+        })
         .collect();
     assert!(canonicals.contains(&"/w/p1.ts"));
     assert!(canonicals.contains(&"/w/p2.ts"));
@@ -1787,6 +2117,7 @@ fn record_path_length_and_projection_depth_drive_percentiles() {
 fn origin_edges_per_node_percentiles_derive_from_derivation_store() {
     use verter_type_expr::LiteralValue;
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let src = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     // Ten structurally-distinct payloads. Under C7 compound-key
     // interning each returns its own [`SemanticNodeId`]. The same
@@ -1851,8 +2182,15 @@ fn origin_edges_per_node_percentiles_derive_from_derivation_store() {
 #[test]
 fn walk_origin_chain_releases_derivation_lock_before_visitor() {
     let store = SemanticGraphStore::new();
-    let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
-    let alias_decl = store.intern_node(SemanticNodeData::Alias(target));
+    // Built in a scope that closes before the lane checks; the test holds
+    // the edge's source node itself.
+    let (target, alias_decl, _held) = {
+        let _build = store.enter_node_root_scope();
+        let target = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+        let alias_decl = store.intern_node(SemanticNodeData::Alias(target));
+        let held = store.root_nodes([alias_decl]).expect("live source");
+        (target, alias_decl, held)
+    };
     store.record_origin_edge(
         target,
         OriginEdgeKind::AliasResolve,
@@ -1861,6 +2199,19 @@ fn walk_origin_chain_releases_derivation_lock_before_visitor() {
         dep_sig_for("/w/x.ts", 1),
     );
 
+    let mut unlaned = 0usize;
+    store.walk_origin_chain(target, |_kind, _edge| unlaned += 1);
+    assert_eq!(
+        unlaned, 0,
+        "a bare ordinal outside a construction lane authorizes no origin read"
+    );
+    assert!(
+        store.export_origin_edges_in_scope().is_empty(),
+        "outside a construction lane the edge export names no ordinal"
+    );
+
+    let _lane = store.enter_node_root_scope();
+    assert_eq!(store.export_origin_edges_in_scope().len(), 1);
     let mut visited_count = 0usize;
     store.walk_origin_chain(target, |_kind, _edge| {
         // Recursive call back into the store from inside the
@@ -1892,6 +2243,7 @@ fn derivation_store_bounds_edge_bucket_growth() {
     use crate::semantic_query_memo::derivation::DERIVATION_EDGE_BUCKET_CAP;
 
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     // Record more distinct `(result, kind)` buckets than the cap. Each
     // `result` is a fresh node id (a distinct `Alias`-chain link), so
     // every `record_origin_edge` opens a brand-new bucket — exactly the
@@ -1951,6 +2303,7 @@ fn derivation_store_bounds_signature_pool_growth() {
     use crate::semantic_query_memo::derivation::DERIVATION_EDGE_BUCKET_CAP;
 
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     // Emit more distinct fences than the edge-bucket cap. Each edge gets
     // a distinct fence AND a fresh `result` node (a distinct `Alias`-chain
     // link), so every emission opens its own `(result, kind)` bucket. Once
@@ -1991,6 +2344,98 @@ fn derivation_store_bounds_signature_pool_growth() {
         "the signature pool must still retain the fences of its surviving \
          edge buckets — observed live pool size={live_pool_size}",
     );
+}
+
+/// An origin edge retains its fence's rail — the rail's own charge, held
+/// in the retained class while any edge shares the fence — and the store's
+/// clear lets go of it: the rail is then its remaining handle's, pinned,
+/// and released with that handle. The pool keeps no rail alive.
+#[test]
+fn an_origin_edge_retains_its_fence_until_its_store_lets_go() {
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    let _scope = store.enter_node_root_scope();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let result = store.intern_node(SemanticNodeData::Alias(source));
+    let fence = dep_sig_for("/w/fence.ts", 7);
+    store.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from(vec![source].into_boxed_slice()),
+        crate::semantic_query::OriginMeta::None,
+        fence.clone(),
+    );
+    let charged = fence
+        .charge_bytes()
+        .expect("the edge store charged the rail");
+    let rail = fence.owned().expect("a nonempty rail");
+    assert_eq!(rail.charge_class(), Some(ChargeClass::Retained));
+    assert_eq!(store.derivation_signature_pool_size(), 1);
+
+    store.invalidate_all();
+    assert_eq!(
+        rail.charge_class(),
+        Some(ChargeClass::Pinned),
+        "the cleared store no longer retains the rail; this handle still holds it"
+    );
+    assert_eq!(store.derivation_signature_pool_size(), 0);
+    let before = account.snapshot().pinned_bytes;
+    drop(fence);
+    assert_eq!(
+        before - account.snapshot().pinned_bytes,
+        charged
+            + verter_session_query::retention::owned::OwnedStr::charge_for_len("/w/fence.ts".len()),
+        "the last handle releases the rail's charge and its canonical's"
+    );
+}
+
+/// The origin-edge store's own storage — its tables, edge lists, source
+/// lists and pooled fence blocks — is charged while it holds them and
+/// given back as it drops them; the store's teardown restores the baseline.
+#[test]
+fn the_origin_edge_store_charges_its_own_storage_until_it_drops_it() {
+    use verter_session_query::retention::allocation::arc_block_bytes;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    const EDGES: usize = 200;
+    const SOURCES: usize = 32;
+    let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
+    // An edge describes a live node: the scope owns every endpoint.
+    let scope = store.enter_node_root_scope();
+    let source = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let before = store.bookkeeping_storage_charge_bytes();
+    for index in 0..EDGES {
+        let result = store.intern_node(SemanticNodeData::Literal(
+            crate::semantic_query::LiteralValue::String(format!("edge-{index}")),
+        ));
+        store.record_origin_edge(
+            result,
+            OriginEdgeKind::Normalize,
+            Arc::from(vec![source; SOURCES].into_boxed_slice()),
+            crate::semantic_query::OriginMeta::None,
+            dep_sig_for(&format!("/w/edge-{index}.ts"), index as u8),
+        );
+    }
+    let source_lists = EDGES * arc_block_bytes(SOURCES * std::mem::size_of::<SemanticNodeId>());
+    let grown = store.bookkeeping_storage_charge_bytes() - before;
+    assert!(
+        grown >= source_lists,
+        "every edge's source list is charged with the store: {grown} < {source_lists}"
+    );
+    store.invalidate_all();
+    let cleared = store.bookkeeping_storage_charge_bytes();
+    assert!(
+        cleared + source_lists <= before + grown,
+        "cleared edges give their lists back; only retained table capacity stays: {cleared}"
+    );
+    drop(scope);
+    drop(store);
+    assert_eq!(account.snapshot().total_bytes(), 0);
 }
 
 /// ORIGIN-EDGE DEDUP DURABILITY — re-emitting an origin edge whose fence
@@ -2228,11 +2673,12 @@ fn derivation_store_bounds_per_bucket_edge_growth() {
 #[test]
 fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
 
     // Non-exempt scope-bound origin (e.g. `build_resolve_decl` /
     // `build_instantiate` result).
     let scope = NodeScopeId::File {
-        canonical_id: Arc::from("/w/decl.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/decl.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [7u8; 16],
         local_scope: None,
@@ -2257,7 +2703,7 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
 
     // Multiple non-exempt nodes get independent sidecar slots.
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/other.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/other.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [8u8; 16],
         local_scope: Some(3),
@@ -2278,14 +2724,15 @@ fn node_scope_sidecar_populated_at_intern_time_for_every_decl_origin_node() {
 #[test]
 fn node_scope_returns_origin_not_reader_scope() {
     let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
     let scope_a = NodeScopeId::File {
-        canonical_id: Arc::from("/w/a.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
         local_scope: None,
     };
     let scope_b = NodeScopeId::File {
-        canonical_id: Arc::from("/w/b.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
         owner: TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
         local_scope: None,
@@ -2394,36 +2841,35 @@ fn carrier_facts_reference_a_canonical_deep_in_a_receipt_chain() {
     );
 }
 
-/// A document close releases EVERYTHING the semantic substrate retained
-/// for the closed canonical — its memo entries (drained through the
-/// reverse index AND through the released-id key / result sweep), its
-/// node payloads plus the nodes embedding them (the cascade reaches a
-/// Global alias shell over the closed object), its `unresolved_reach`
-/// bits, its member-ordinal index and its origin edges — while the
-/// neighbour document's entries, nodes and sidecars, and the shared Global
-/// primitive, stay intact and still dedup.
+/// A document close evicts every CACHE owner the semantic substrate kept for
+/// the closed canonical — its memo entries (drained through the reverse
+/// index AND through the closed-content key / result sweep) — so the closed
+/// content's nodes are destroyed once no caller holds them, and their
+/// `unresolved_reach` bits, member-ordinal index and origin edges go with
+/// them. The neighbour document's entries, held nodes and sidecars, and the
+/// shared Global primitive, stay intact and still dedup.
 ///
-/// On the old code a close reached only `invalidate_canonical`: the
-/// three `/w/a.ts` nodes stayed live (`node_count` would read 7, not 4),
-/// `unresolved_reach` kept every bit (7, not 4), the member-ordinal index
-/// kept both entries, and the two entries whose carriers name only `/w/b.ts` but
-/// whose key / result hold `/w/a.ts` nodes kept serving them.
+/// Discriminating: an edit-only drain (`invalidate_canonical`) leaves the
+/// two entries whose carriers name only `/w/b.ts` but whose key / result
+/// hold `/w/a.ts` nodes, so A's object and parameter stay live (7 nodes,
+/// not 4) and their sidecars stay with them.
 #[test]
-fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neighbours() {
+fn close_canonical_evicts_the_closed_documents_caches_and_keeps_the_neighbours() {
     use crate::semantic_query::{OriginEdgeKind, OriginMeta};
 
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let build = store.enter_node_root_scope();
     let (a_param, a_obj, a_alias, a_view) = release_intern_document(&store, "/w/a.ts", 1, shared);
     let (b_param, b_obj, b_alias, b_view) = release_intern_document(&store, "/w/b.ts", 2, shared);
-    assert_eq!(store.node_count(), 7);
-    assert_eq!(store.node_slot_count(), 7);
+    // The neighbour's caller holds B's nodes; nothing outside the caches
+    // holds A's.
+    let b_held = store.root_nodes([b_param, b_obj, b_alias]).unwrap();
 
-    // Memo entries. `key_a` / `key_b` are the ordinary self-rooted
-    // entries the reverse index drains. `key_b_holding_a` holds A's node
-    // as its RESULT and `key_path_on_a` embeds A's node in its KEY, yet
-    // both carriers name only `/w/b.ts` — the shapes only the released-id
-    // sweep can find.
+    // `key_a` / `key_b` are the ordinary self-rooted entries the reverse
+    // index drains. `key_b_holding_a` holds A's node as its RESULT and
+    // `key_path_on_a` embeds A's node in its KEY, yet both carriers name
+    // only `/w/b.ts` — the shapes only the closed-content sweep can find.
     let key_a = release_decl_key("/w/a.ts", "A");
     let key_b = release_decl_key("/w/b.ts", "B");
     let key_b_holding_a = release_decl_key("/w/b.ts", "ViaA");
@@ -2466,13 +2912,8 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
     assert_eq!(memo_entries_before, 5);
 
     // Per-node sidecars.
-    assert!(!store.node_reaches_unresolved(a_alias));
+    assert!(!store.node_reaches_unresolved(a_obj));
     assert!(!store.node_reaches_unresolved(b_alias));
-    assert_eq!(
-        store.unresolved_reach_count(),
-        7,
-        "alias + object + param per document, plus the shared primitive once"
-    );
     let _ = store.member_ordinal_index(a_obj, &a_view);
     let _ = store.member_ordinal_index(b_obj, &b_view);
     store.record_origin_edge(
@@ -2489,21 +2930,27 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
         OriginMeta::None,
         dep_sig_for("/w/b.ts", 2),
     );
-
-    let report = store.release_canonical("/w/a.ts");
-
-    assert_eq!(
-        report.nodes_released, 3,
-        "A's param + object, plus the Global alias embedding the object: {report:?}"
+    drop(build);
+    assert!(
+        !store.node_is_live(a_alias),
+        "A's alias had no owner but the construction scope"
     );
+    assert_eq!(
+        store.node_count(),
+        6,
+        "A's cached object + param, B's three, shared"
+    );
+
+    let report = store.close_canonical("/w/a.ts");
+
     for dead in [a_param, a_obj, a_alias] {
-        assert!(!store.node_is_live(dead), "{dead:?} must be released");
+        assert!(!store.node_is_live(dead), "{dead:?} must be destroyed");
         assert!(
             matches!(
                 store.node_data(dead).as_deref(),
                 Some(SemanticNodeData::Opaque(QueryError::Miss))
             ),
-            "a released id reads as the Opaque(Miss) placeholder"
+            "a destroyed id reads as the Opaque(Miss) placeholder"
         );
         assert_eq!(store.node_scope(dead), None);
     }
@@ -2519,11 +2966,11 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
     );
     assert!(
         store.get_unvalidated(&key_b_holding_a).is_none(),
-        "an entry whose RESULT is a released node is swept even though its carrier never named /w/a.ts"
+        "an entry whose RESULT is closed content is evicted even though its carrier never named /w/a.ts"
     );
     assert!(
         store.get_unvalidated(&key_path_on_a).is_none(),
-        "an entry whose KEY embeds a released node is swept even though its carrier never named /w/a.ts"
+        "an entry whose KEY embeds closed content is evicted even though its carrier never named /w/a.ts"
     );
     assert!(store.get_unvalidated(&key_b).is_some(), "B's entry intact");
     assert_eq!(store.memo_entry_count(), 1);
@@ -2541,21 +2988,23 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
     );
 
     assert_eq!(store.unresolved_reach_count(), 4, "B's three bits + shared");
-    assert_eq!(report.unresolved_reach_dropped, 3);
-    assert_eq!(report.member_indexes_dropped, 1);
-    assert_eq!(report.derivation_buckets_dropped, 1);
     assert!(store.origins(a_obj).is_empty(), "A's origin edges dropped");
     assert_eq!(store.origins(b_obj).len(), 1, "B's origin edge kept");
+    assert_eq!(
+        store.pending_destroyed_nodes(),
+        0,
+        "the close drained the log"
+    );
 
-    // Dedup: A's content mints fresh ids; B's and the shared primitive
-    // still dedup to their existing ids.
+    // Dedup: A's content mints fresh ids; B's held nodes and the shared
+    // primitive still dedup to their existing ids.
     let a_param_again = store.intern_node_with_scope(
         release_type_param("/w/a.ts", 1, "T"),
         release_file_scope("/w/a.ts", 1),
     );
     assert_ne!(
         a_param_again, a_param,
-        "a released id is never handed out again"
+        "a destroyed id is never handed out again"
     );
     assert_eq!(
         store.intern_node_with_scope(
@@ -2568,34 +3017,38 @@ fn release_canonical_reclaims_the_closed_documents_substrate_and_keeps_the_neigh
         store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)),
         shared
     );
+    drop(b_held);
 }
 
-/// Twenty open / edit-to-identical-content / close cycles of one
-/// document keep the LIVE substrate flat: after the first cycle the live
-/// node count, memo entries, reach bits and member indexes at the "open"
-/// point are exactly the first cycle's, and every close returns them to
-/// the baseline. Only the append-only id space grows — by exactly the
-/// document's three nodes per cycle, because a released id is never
+/// Twenty open / close cycles of one document keep the LIVE substrate
+/// flat, and a close never revokes what a caller holds: at every "open"
+/// point the live node count and memo entries equal the first
+/// cycle's; the close evicts the cache but the caller's held nodes stay
+/// readable; dropping the caller then returns the substrate to the
+/// baseline, while non-owning pending sidecars stay within their drain
+/// bound. Only the append-only id space grows — by exactly the
+/// document's three nodes per cycle, because a destroyed id is never
 /// reused.
 ///
-/// On the old code the close path could only reach `invalidate_canonical`,
-/// which dropped the dedup entries but never a payload: `node_count`
-/// (then the slot count) grew by three every cycle — 4, 7, 10, … — so the
-/// flat assertion failed on cycle 1, and the reach bits / member indexes
-/// accumulated with it.
+/// Discriminating: an edit-only drain leaves the cached object, its
+/// parameter and their bits behind every cycle, so the baseline assertion
+/// fails on cycle 0; a close that destroyed held nodes fails the held-read
+/// assertion.
 #[test]
-fn release_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
+fn close_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let baseline_live = store.node_count();
     let baseline_slots = store.node_slot_count();
     let roots_a: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/a.ts")]);
-    let mut first_open: Option<(usize, usize, usize)> = None;
+    let mut first_open: Option<(usize, usize)> = None;
 
     for cycle in 0..20usize {
         let slots_before = store.node_slot_count();
+        let build = store.enter_node_root_scope();
         let (a_param, a_obj, a_alias, a_view) =
             release_intern_document(&store, "/w/a.ts", 1, shared);
+        let held = store.root_nodes([a_param, a_obj, a_alias]).unwrap();
         store.publish_with_carrier_for_tests(
             release_decl_key("/w/a.ts", "A"),
             QueryResult::Value(a_obj),
@@ -2604,16 +3057,13 @@ fn release_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
         );
         assert!(!store.node_reaches_unresolved(a_alias));
         let _ = store.member_ordinal_index(a_obj, &a_view);
+        drop(build);
         assert!(
             a_param.0 as usize >= slots_before,
-            "cycle {cycle}: identical content must mint FRESH ids after a release, never a released one"
+            "cycle {cycle}: identical content must mint FRESH ids after a destruction, never a destroyed one"
         );
 
-        let open = (
-            store.node_count(),
-            store.memo_entry_count(),
-            store.unresolved_reach_count(),
-        );
+        let open = (store.node_count(), store.memo_entry_count());
         assert_eq!(
             open.0,
             baseline_live + 3,
@@ -2627,45 +3077,51 @@ fn release_canonical_keeps_the_live_substrate_flat_across_open_close_cycles() {
             ),
         }
 
-        let report = store.release_canonical("/w/a.ts");
-        assert_eq!(report.nodes_released, 3, "cycle {cycle}: {report:?}");
+        let report = store.close_canonical("/w/a.ts");
+        assert_eq!(report.memo_entries_evicted, 1, "cycle {cycle}: {report:?}");
+        assert_eq!(store.memo_entry_count(), 0, "cycle {cycle}");
+        assert!(
+            matches!(
+                store.node_data(a_obj).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ),
+            "cycle {cycle}: the close never revokes a held node"
+        );
+        drop(held);
         assert_eq!(
             store.node_count(),
             baseline_live,
-            "cycle {cycle}: live nodes back to baseline"
+            "cycle {cycle}: live nodes back to baseline once the caller drops"
         );
-        assert_eq!(store.memo_entry_count(), 0, "cycle {cycle}");
-        assert_eq!(
-            store.unresolved_reach_count(),
-            1,
-            "cycle {cycle}: only the shared bit"
+        assert!(
+            store.pending_destroyed_nodes() <= super::super::release::DESTROYED_DRAIN_THRESHOLD
+        );
+        assert!(
+            store.unresolved_reach_count() <= 1 + super::super::release::DESTROYED_DRAIN_THRESHOLD,
+            "cycle {cycle}: sidecar retirement stays bounded without later work"
         );
         assert_eq!(
             store.node_slot_count(),
             baseline_slots + (cycle + 1) * 3,
-            "cycle {cycle}: the id space grows by exactly the released nodes"
+            "cycle {cycle}: the id space grows by exactly the destroyed nodes"
         );
     }
 }
 
 /// The content-bound class a node-id / reverse-index drain cannot see:
-/// (a) nodes interned under the CONSUMER's scope whose payload carries the
-/// closed document's content identity (a `DeclRef` to one of its
-/// declarations, the `DeclPlaceholder` refusal for one) — no node id
+/// (a) cached nodes interned under the CONSUMER's scope whose payload
+/// carries the closed document's content identity (a `DeclRef` to one of
+/// its declarations, the `DeclPlaceholder` refusal for one) — no node id
 /// inside, consumer scope outside; (b) candidates whose carrier was
 /// COMPACTED to a domain aggregate, which `canonical_ids()` reports as
 /// naming no canonical, so the reverse index registers them nowhere and
 /// `invalidate_canonical` leaves them (the count assertion pins that
 /// under-approximation); (c) candidates whose FAMILY names the document
-/// through a content-free slot / scope. A close drops all three, and keeps
-/// a neighbour's precisely-registered candidate.
-///
-/// On the release before the content-bound drain, both consumer-scoped
-/// nodes stayed live (`nodes_released` was 0), the two aggregate-only
-/// candidates and the scope-keyed candidate survived, and
-/// `memo_entry_counts_by_family` reported `ResolveDecl` at 4 instead of 1.
+/// through a content-free slot / scope. A close evicts all three, so the
+/// content-bound nodes are destroyed, and keeps a neighbour's
+/// precisely-registered candidate.
 #[test]
-fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
+fn close_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     use verter_session_query::facts::fact_cache::FactVersionRef;
     use verter_session_query::facts::fact_cache::{
         AggregatePopulation, AggregateStamp, CompactionDomain, DomainGenerationFact,
@@ -2675,22 +3131,23 @@ fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     let store = SemanticGraphStore::new();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let scope_c = release_file_scope("/w/consumer.vue", 9);
+    let build = store.enter_node_root_scope();
     let decl_ref_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::DeclRef {
             identity: DeclIdentity {
-                canonical_id: Arc::from("/w/a.ts"),
+                canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
                 owner: TopLevelOwnerId::ordinary_file(),
                 whole_hash: [1u8; 16],
-                decl_name: Arc::from("T"),
+                decl_name: verter_type_expr::OwnedStr::from("T"),
             },
         },
         scope_c.clone(),
     );
     let placeholder_in_consumer = store.intern_node_with_scope(
         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/w/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
             owner: TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             whole_hash: [1u8; 16],
         }),
         scope_c,
@@ -2709,8 +3166,25 @@ fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
         ]))
     };
     let no_roots: Arc<[Arc<str>]> = Arc::from(Vec::<Arc<str>>::new());
+    let roots_c: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/consumer.vue")]);
     let roots_b: Arc<[Arc<str>]> = Arc::from(vec![Arc::<str>::from("/w/b.ts")]);
 
+    // (a) the consumer's own candidates, caching the content-bound nodes.
+    let key_decl_ref = release_decl_key("/w/consumer.vue", "ViaDeclRef");
+    let key_placeholder = release_decl_key("/w/consumer.vue", "ViaPlaceholder");
+    store.publish_with_carrier_for_tests(
+        key_decl_ref.clone(),
+        QueryResult::Value(decl_ref_in_consumer),
+        carrier_naming("/w/consumer.vue", 9),
+        Arc::clone(&roots_c),
+    );
+    store.publish_with_carrier_for_tests(
+        key_placeholder.clone(),
+        QueryResult::Value(placeholder_in_consumer),
+        carrier_naming("/w/consumer.vue", 9),
+        roots_c,
+    );
+    drop(build);
     // (b) compacted carriers: one keyed in A's scope, one in B's scope.
     let key_a_compacted = release_decl_key("/w/a.ts", "T");
     let key_b_compacted = release_decl_key("/w/b.ts", "ViaAggregate");
@@ -2750,18 +3224,20 @@ fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
     );
     assert_eq!(
         store.memo_entry_counts_by_family(),
-        vec![("ResolveDecl", 4)]
+        vec![("ResolveDecl", 6)]
     );
+    assert!(store.node_is_live(decl_ref_in_consumer), "premise: cached");
 
-    let report = store.release_canonical("/w/a.ts");
+    let report = store.close_canonical("/w/a.ts");
 
-    assert_eq!(
-        report.nodes_released, 2,
-        "the consumer-scoped DeclRef and DeclPlaceholder bind A's content: {report:?}"
+    assert!(
+        !store.node_is_live(decl_ref_in_consumer),
+        "the consumer-scoped DeclRef binds A's content: its cache is evicted"
     );
-    assert!(!store.node_is_live(decl_ref_in_consumer));
     assert!(!store.node_is_live(placeholder_in_consumer));
     assert!(store.node_is_live(shared));
+    assert!(store.get_unvalidated(&key_decl_ref).is_none());
+    assert!(store.get_unvalidated(&key_placeholder).is_none());
     assert!(
         store.get_unvalidated(&key_a_compacted).is_none(),
         "a compacted candidate in A's scope is dropped"
@@ -2782,23 +3258,22 @@ fn release_canonical_drops_content_bound_nodes_and_compacted_candidates() {
         store.memo_entry_counts_by_family(),
         vec![("ResolveDecl", 1)]
     );
-    assert_eq!(report.memo_entries_evicted, 3);
+    assert_eq!(report.memo_entries_evicted, 5);
     assert_eq!(
         store.memo_family_count_for_test(),
         store.memo_budget_tracked_len_for_test()
     );
 }
 
-/// A union member view (the per-store `union_views` cache) is released with
-/// its union: a view of a closed document's union is keyed by a union id the
-/// reload never mints again, so the close drops it, while a view whose union
-/// is live stays resident and is served unchanged.
+/// A union member view (the per-store `union_views` cache) owns its union,
+/// and a close evicts the views over closed content: the closed document's
+/// union is then destroyed, while a view whose union is the neighbour's
+/// stays resident and is served unchanged.
 ///
-/// Discriminating: without the sweep the view count grew by one per distinct
-/// union the churn built and never came back, and a stale holder could read
-/// released members through the resident view.
+/// Discriminating: without the view sweep the closed union stays live,
+/// held by its view, one per distinct union the churn built.
 #[test]
-fn release_canonical_drops_the_union_views_of_the_closed_document() {
+fn close_canonical_drops_the_union_views_of_the_closed_document() {
     use crate::semantic_query::composite::{CompositeList, UnionKind};
     use crate::semantic_query::stable_key::semantic_union_members;
     use crate::semantic_query::SemanticContext;
@@ -2806,6 +3281,7 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
     let store = SemanticGraphStore::new();
     let ctx = SemanticContext::production();
     let shared = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let build = store.enter_node_root_scope();
     let (a_param, _, _, _) = release_intern_document(&store, "/w/a.ts", 1, shared);
     let (b_param, _, _, _) = release_intern_document(&store, "/w/b.ts", 1, shared);
     let union_of = |canonical: &str, member: SemanticNodeId| {
@@ -2820,13 +3296,15 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
     let b_union = union_of("/w/b.ts", b_param);
     let _ = semantic_union_members(&store, a_union, &ctx);
     let b_view = semantic_union_members(&store, b_union, &ctx);
+    drop(build);
     assert_eq!(
         store.union_view_count(),
         2,
         "one resident view per union built"
     );
+    assert!(store.node_is_live(a_union), "premise: its view holds it");
 
-    let report = store.release_canonical("/w/a.ts");
+    let report = store.close_canonical("/w/a.ts");
     assert_eq!(report.union_views_released, 1, "{report:?}");
     assert_eq!(store.union_view_count(), 1);
     assert!(
@@ -2835,15 +3313,130 @@ fn release_canonical_drops_the_union_views_of_the_closed_document() {
     );
     assert!(
         !store.node_is_live(a_union),
-        "the closed document's union is released"
+        "the closed document's union is destroyed once its view is evicted"
     );
 
-    // A late reader of the released union id gets the placeholder's view but
-    // does not re-admit it: nothing would ever release that residue.
+    // A late reader of the destroyed union id gets the placeholder's view
+    // but does not re-admit it: no destruction would ever drop that residue.
     let _ = semantic_union_members(&store, a_union, &ctx);
     assert_eq!(
         store.union_view_count(),
         1,
-        "a view of a released union is served, never kept"
+        "a view of a destroyed union is served, never kept"
     );
+}
+
+/// The public display and union builder keyed by bare ordinals answer only
+/// inside a construction lane the thread holds of the graph: outside one,
+/// an ordinal authorizes neither a rendering nor a union over its subtree.
+#[test]
+fn display_and_union_by_ordinal_answer_only_inside_a_construction_lane() {
+    let store = SemanticGraphStore::new();
+    let number = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let string = store.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let value = SemanticQueryValue::TypeNode(number);
+    let union = |store: &SemanticGraphStore| {
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_in_scope(
+            store,
+            &[number, string],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+        )
+    };
+
+    assert!(
+        display::display_in_scope(&store, &value, DisplayNeeds::empty()).is_none(),
+        "outside a construction lane an ordinal renders nothing"
+    );
+    assert!(
+        union(&store).is_none(),
+        "outside a construction lane an ordinal builds no union"
+    );
+
+    let _lane = store.enter_node_root_scope();
+    let shown = display::display_in_scope(&store, &value, DisplayNeeds::empty())
+        .expect("inside the lane the ordinal renders");
+    assert_eq!(String::from(shown), "number");
+    let composite = union(&store).expect("inside the lane the union builds");
+    assert!(matches!(
+        store.node_data(composite.node).as_deref(),
+        Some(SemanticNodeData::Union(_))
+    ));
+}
+
+/// An interned rail's cell block lives until the rail's last handle AND its
+/// interner entry have let go, so it is charged by a share both keep: in
+/// either release order the block stays charged until the last of them
+/// drops, never longer. The interner charges its own entry lists and
+/// tables, and gives every byte back once the rails drain and are swept. A
+/// rail's entries are the rail's own: charged by its cell once an owner
+/// keeps it, never by the interner.
+#[test]
+fn dep_signature_interner_and_its_rails_share_each_rail_blocks_charge() {
+    use verter_session_query::retention::owned::{BlockShare, ChargeCtx};
+    use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
+
+    const RAILS: usize = 64;
+    const WIDTH: usize = 256;
+    for rails_first in [true, false] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let interner = DepSignatureInterner::charged(&account);
+        let rails: Vec<_> = (0..RAILS)
+            .map(|rail| {
+                let payload: Vec<_> = (0..WIDTH)
+                    .map(|entry| {
+                        crate::semantic_query::DepEntry::new(
+                            &format!("/w/{rail}/{entry}.ts"),
+                            DepVersion::ProjectGeneration(entry as u64),
+                        )
+                    })
+                    .collect();
+                interner.intern(&payload)
+            })
+            .collect();
+        let blocks = RAILS * BlockShare::bytes_for::<crate::semantic_query::DepRail>();
+        assert!(interner.storage_charge_bytes() > 0);
+        assert_eq!(
+            account.snapshot().pinned_bytes,
+            interner.storage_charge_bytes() + blocks,
+            "every interned rail's block is charged once, beside the interner's storage"
+        );
+
+        // A caller keeping a rail pays for its entries, never its block again.
+        rails[0]
+            .owned()
+            .expect("a nonempty rail")
+            .pin(ChargeCtx::new(&account));
+        let entries = verter_session_query::retention::allocation::heap_block_bytes(
+            WIDTH * std::mem::size_of::<crate::semantic_query::DepEntry>(),
+        ) + verter_session_query::retention::owned::child_registration_bytes(WIDTH);
+        assert_eq!(rails[0].charge_bytes(), Some(entries));
+        let canonicals: usize = (0..WIDTH)
+            .map(|entry| {
+                verter_session_query::retention::owned::OwnedStr::charge_for_len(
+                    format!("/w/0/{entry}.ts").len(),
+                )
+            })
+            .sum();
+
+        if rails_first {
+            drop(rails);
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                interner.storage_charge_bytes() + blocks,
+                "a dead rail's block stays allocated, and charged, until its entry is pruned"
+            );
+            interner.sweep();
+            assert_eq!(interner.storage_charge_bytes(), 0);
+            drop(interner);
+        } else {
+            drop(interner);
+            assert_eq!(
+                account.snapshot().pinned_bytes,
+                blocks + entries + canonicals,
+                "the rails outlive the interner: each keeps its block charged"
+            );
+            drop(rails);
+        }
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
 }

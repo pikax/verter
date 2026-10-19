@@ -27,6 +27,7 @@ fn under_nested_arrays<R: Send + 'static>(
         .spawn(move || {
             let host = VerterHost::new_standalone(HostConfig::default());
             let graph = Arc::clone(host.project_type_store().semantic_graph());
+            let _scope = graph.enter_node_root_scope();
             let mut node = leaf(&graph);
             for _ in 0..DEPTH {
                 node = graph.intern_node(SemanticNodeData::Array {
@@ -48,10 +49,10 @@ fn under_nested_arrays<R: Send + 'static>(
 /// A declaration of another file named `name`.
 fn foreign(name: &str) -> DeclIdentity {
     DeclIdentity {
-        canonical_id: Arc::from("/src/elsewhere.ts"),
+        canonical_id: verter_type_expr::OwnedStr::from("/src/elsewhere.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-        decl_name: Arc::from(name),
+        decl_name: verter_type_expr::OwnedStr::from(name),
     }
 }
 
@@ -65,7 +66,7 @@ fn a_type_param_reference_is_found_at_any_depth() {
                 param_index: 0,
                 constraint: None,
                 default: None,
-                display_name: Arc::from("T"),
+                display_name: verter_type_expr::OwnedStr::from("T"),
             })
         },
         |engine, node| {
@@ -87,12 +88,12 @@ fn an_imported_utility_route_is_found_at_any_depth() {
             });
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: DeclIdentity {
-                    canonical_id: Arc::from("__builtin__"),
+                    canonical_id: verter_type_expr::OwnedStr::from("__builtin__"),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     whole_hash: verter_type_engine::semantic_query::HashValue::default(),
-                    decl_name: Arc::from("Partial"),
+                    decl_name: verter_type_expr::OwnedStr::from("Partial"),
                 },
-                args: Arc::from([argument]),
+                args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
             })
         },
         |engine, node| {
@@ -117,7 +118,7 @@ fn an_imported_generic_route_is_found_at_any_depth() {
             ));
             graph.intern_node(SemanticNodeData::InstantiationRef {
                 base: foreign("Box"),
-                args: Arc::from([argument]),
+                args: verter_type_engine::semantic_query::PayloadArray::from([argument]),
             })
         },
         |engine, node| {

@@ -19,6 +19,194 @@ use verter_type_engine::signature_kernel::{
 
 const CANONICAL: &str = "/ws/signature-discovery.ts";
 
+#[test]
+fn deferred_signature_sources_capture_outer_binders_and_exclude_their_own_clause() {
+    use super::locator_shape::{LocatorBinderFrame, LocatorShapeCtx};
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{NodeScopeId, ProjectionReductionContext};
+    use verter_type_expr::{FunctionExpr, TypeExpr, TypeParam};
+    let host = host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.into()), input_id: CANONICAL.into(),
+        source: Arc::from("export function generic<T>(input: T) { return input; } export class Lexical<U, V> { get() { return null as unknown as U; } }"),
+        file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
+    }).unwrap();
+    let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
+    let number = prim(&d, PrimitiveKind::Number);
+    let string = prim(&d, PrimitiveKind::String);
+    let v = d.graph().intern_node(SemanticNodeData::TypeParam {
+        decl: verter_type_engine::semantic_query::DeclIdentity {
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+            decl_name: verter_type_expr::OwnedStr::from("V"),
+        },
+        param_index: 0,
+        constraint: None,
+        default: None,
+        display_name: verter_type_expr::OwnedStr::from("V"),
+    });
+    let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
+        anchor: verter_type_expr::locators::AuthoredAnchor {
+            canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            symbol: verter_type_expr::OwnedStr::from("generic"),
+            space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+        },
+        function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+        overload_ordinal: 0,
+    };
+    let mut function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("input".into()),
+            TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            },
+            false,
+            false,
+        )],
+        None,
+        vec![TypeParam {
+            name: "T".into(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        }],
+    );
+    function.flow_return = Some(Box::new(identity.clone()));
+    let expr = TypeExpr::Function(Arc::new(function));
+    let scope = NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    let env = rustc_hash::FxHashMap::from_iter([
+        ("T".into(), string),
+        ("U".into(), v),
+        ("V".into(), number),
+    ]);
+    let mut outer = LocatorBinderFrame::default();
+    outer.bind(Arc::from("T"), string);
+    outer.bind(Arc::from("U"), v);
+    outer.bind(Arc::from("V"), number);
+    let frames = [outer];
+    let names = rustc_hash::FxHashMap::default();
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let locator = d.lower_type_expr_for_locator_shape(
+        &expr,
+        &LocatorShapeCtx::new(&scope, &frames, Some(&names), None),
+    );
+    let reducing = d.shallow_lower_type_expr_with_context_for_tests(
+        &expr,
+        &env,
+        &scope,
+        &names,
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    for node in [locator, reducing] {
+        let data = d.graph().node_data(node).unwrap();
+        let SemanticNodeData::DeferredCallable(callable) = data.as_ref() else {
+            panic!("deferred headers have no return-value slot: {data:?}")
+        };
+        let SignatureReturnCarrier::DeferredFlow(source) = callable.return_carrier_for_tests()
+        else {
+            panic!("the header retains its owned source")
+        };
+        assert_eq!(
+            source.bindings_for_tests(),
+            &[(Arc::from("U"), v), (Arc::from("V"), number)],
+            "the signature owns T; only lexical U and V belong in the deferred substitution"
+        );
+    }
+    let mut lexical = FunctionExpr::synthetic(Vec::new(), None, Vec::new());
+    let mut lexical_identity = identity;
+    lexical_identity.anchor.symbol = verter_type_expr::OwnedStr::from("Lexical");
+    lexical_identity.function_part = verter_type_expr::facts::FunctionPartIdentity::Member {
+        member_path: verter_type_expr::OwnedSlice::from([0]),
+    };
+    lexical.flow_return = Some(Box::new(lexical_identity));
+    let callee = d.shallow_lower_type_expr_with_context_for_tests(
+        &TypeExpr::Function(Arc::new(lexical)),
+        &env,
+        &scope,
+        &names,
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        d.graph().node_data(callee).as_deref(),
+        Some(SemanticNodeData::DeferredCallable(_))
+    ));
+    drop(_refusal);
+    let key = super::call_resolve_tests::call_key_at(
+        &d,
+        CANONICAL,
+        callee,
+        verter_type_engine::semantic_query::CallKind::Call,
+        None,
+        Vec::new(),
+    );
+    let super::call_resolve::ResolveCallStep::Complete(
+        verter_type_engine::semantic_query::ResolvedCallResult::Selected { return_type, .. },
+    ) = d.execute_resolve_call(key)
+    else {
+        panic!("the deferred member's evaluated return must complete")
+    };
+    assert_eq!(
+        return_type, v,
+        "U -> V and V -> number are simultaneous lexical images, applied once"
+    );
+}
+
+#[test]
+fn receiver_utilities_distinguish_incomplete_signatures_from_exact_absence() {
+    use super::signature_utility::SignatureUtility;
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let context =
+        verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
+    let incomplete = dispatch
+        .graph()
+        .intern_node(SemanticNodeData::Opaque(QueryError::Miss));
+    // An object with no signatures proves absence without an apparent-lib
+    // demand. A primitive's apparent signatures require that separate scope.
+    let exact = dispatch.graph().intern_node(SemanticNodeData::Object(
+        verter_type_engine::semantic_query::SurfaceView::from_members(Vec::new(), None),
+    ));
+    for utility in [
+        SignatureUtility::ThisParameterType,
+        SignatureUtility::OmitThisParameter,
+    ] {
+        assert_eq!(
+            dispatch.resolve_signature_utility(utility, incomplete, context),
+            None,
+            "an unavailable signature set proves no receiver absence"
+        );
+        let answer = dispatch
+            .resolve_signature_utility(utility, exact, context)
+            .expect("the exact empty signature set proves absence");
+        if utility == SignatureUtility::OmitThisParameter {
+            assert_eq!(answer, exact);
+        } else {
+            assert!(matches!(
+                dispatch.graph().node_data(answer).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+            ));
+        }
+    }
+}
+
 fn host() -> Arc<VerterHost> {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let _ = host.upsert(UpsertRequest {
@@ -160,6 +348,7 @@ fn read_return(
 fn direct_signature_matches_only_its_own_kind() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let call = signature(
         &d,
@@ -200,6 +389,7 @@ fn direct_signature_matches_only_its_own_kind() {
 fn empty_is_a_complete_negative_distinct_from_incomplete() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let object = callable(&d, vec![], vec![]);
     assert_eq!(
         ready(discover(&d, object, SignatureKind::Call)),
@@ -210,7 +400,7 @@ fn empty_is_a_complete_negative_distinct_from_incomplete() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("Free"),
+        display_name: verter_type_expr::OwnedStr::from("Free"),
     });
     assert_eq!(
         ready(discover(&d, unconstrained, SignatureKind::Call)),
@@ -231,6 +421,7 @@ fn empty_is_a_complete_negative_distinct_from_incomplete() {
 fn object_surface_keeps_authored_order_and_overload_ordinals() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -288,6 +479,7 @@ fn object_surface_keeps_authored_order_and_overload_ordinals() {
 fn alias_and_constraint_settle_to_the_signature_shape() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let f = signature(
         &d,
@@ -305,7 +497,7 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
         param_index: 0,
         constraint: Some(alias),
         default: None,
-        display_name: Arc::from("Fn"),
+        display_name: verter_type_expr::OwnedStr::from("Fn"),
     });
     let store = d.graph().signature_store();
     assert_eq!(
@@ -325,19 +517,20 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
 fn optionality_and_tuple_rest_flatten_under_the_active_context() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let tuple = d.graph().intern_node(SemanticNodeData::Tuple {
-        elements: Arc::from(
+        elements: verter_type_engine::semantic_query::PayloadArray::from(
             vec![
                 TupleElement {
-                    label: Some(Arc::from("a")),
+                    label: Some(verter_type_expr::OwnedStr::from("a")),
                     value: string,
                     optional: false,
                     rest: false,
                 },
                 TupleElement {
-                    label: Some(Arc::from("b")),
+                    label: Some(verter_type_expr::OwnedStr::from("b")),
                     value: number,
                     optional: true,
                     rest: false,
@@ -394,12 +587,17 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
 fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let node = d.graph().intern_node(SemanticNodeData::Signature {
         kind: SignatureKind::Call,
-        params: Arc::from(vec![param(string)].into_boxed_slice()),
+        params: verter_type_engine::semantic_query::PayloadArray::from(
+            vec![param(string)].into_boxed_slice(),
+        ),
         return_type: string,
-        type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+        type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+            Vec::new().into_boxed_slice(),
+        ),
         occurrence: Some(occurrence("body", 0)),
         return_carrier: SignatureReturnCarrier::Function(
             verter_type_expr::facts::FunctionReturnSource::Absent,
@@ -453,13 +651,14 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
 fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let number = prim(&d, PrimitiveKind::Number);
     let t = d.graph().intern_node(SemanticNodeData::TypeParam {
         decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("Ret"),
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let ret = d.graph().intern_node(SemanticNodeData::Array {
         element: t,
@@ -472,7 +671,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
         SignatureKind::Call,
         vec![param(t)],
         vec![TypeParamDecl {
-            name: Arc::from("T"),
+            name: verter_type_expr::OwnedStr::from("T"),
             param: t,
             constraint: None,
             default: None,
@@ -492,7 +691,10 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
 
     let mapped = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(token, number)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(d.graph(), vec![(token, number)]),
+            ),
             None,
         )
         .unwrap();
@@ -521,6 +723,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
 fn union_common_match_builds_one_candidate_with_mapped_constituents() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -570,6 +773,7 @@ fn union_common_match_builds_one_candidate_with_mapped_constituents() {
 fn union_synthesis_is_restricted_and_absent_arm_yields_no_signatures() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let a = signature(
@@ -626,6 +830,7 @@ fn union_synthesis_is_restricted_and_absent_arm_yields_no_signatures() {
 fn intersection_dedups_by_signature_equivalence_in_authored_order() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let first = signature(
@@ -709,6 +914,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
 
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let any = prim(&d, PrimitiveKind::Any);
     let instance_a = d.graph().intern_node(SemanticNodeData::Literal(
@@ -831,7 +1037,10 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
             );
         } else {
             let elements = match d.graph().node_data(parameters).as_deref() {
-                Some(SemanticNodeData::Tuple { elements, .. }) => elements.to_vec(),
+                Some(SemanticNodeData::Tuple { elements, .. }) => elements
+                    .iter()
+                    .map(verter_type_engine::semantic_query::TupleElement::copy_for_tests)
+                    .collect::<Vec<_>>(),
                 other => panic!("{label}: expected a parameter tuple, got {other:?}"),
             };
             assert_eq!(
@@ -850,7 +1059,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
         param_index: 0,
         constraint: None,
         default: None,
-        display_name: Arc::from("T"),
+        display_name: verter_type_expr::OwnedStr::from("T"),
     });
     let generic = callable(
         &d,
@@ -867,7 +1076,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
                 true,
             )],
             vec![TypeParamDecl {
-                name: Arc::from("T"),
+                name: verter_type_expr::OwnedStr::from("T"),
                 param: binder,
                 constraint: None,
                 default: None,
@@ -911,7 +1120,7 @@ fn signature_set_of(
         context,
     }) {
         QueryResult::Value(output) => match output.value {
-            SemanticQueryValue::SignatureSet(value) => value.set,
+            SemanticQueryValue::SignatureSet(value) => value.set(),
             other => panic!("expected a signature set, got {other:?}"),
         },
         other => panic!("expected a value, got {other:?}"),
@@ -925,6 +1134,7 @@ fn signature_set_of(
 fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let sig = signature(
         &d,
@@ -981,6 +1191,7 @@ fn read_signature_result_distinct_demands_do_not_alias() {
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryApi, SemanticQueryKey};
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let sig = signature(
         &d,
@@ -1032,7 +1243,7 @@ fn generic_identity(
         param_index: 0,
         constraint,
         default: None,
-        display_name: Arc::from(name),
+        display_name: verter_type_expr::OwnedStr::from(name),
     });
     signature(
         d,
@@ -1041,7 +1252,7 @@ fn generic_identity(
         SignatureKind::Call,
         vec![param(t)],
         vec![TypeParamDecl {
-            name: Arc::from(name),
+            name: verter_type_expr::OwnedStr::from(name),
             param: t,
             constraint,
             default: None,
@@ -1058,6 +1269,7 @@ fn generic_identity(
 fn generic_union_members_match_exactly_under_binder_correspondence() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let store = d.graph().signature_store();
 
@@ -1180,6 +1392,7 @@ fn apparent_primitives_read_the_resolved_global_population() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(&with_lib, &store_view, overlay);
     let d = ProjectSemanticDispatch::new(&ctx);
+    let _builder = d.enter_construction_scope();
     let _scope =
         super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
     let store = d.graph().signature_store();
@@ -1236,6 +1449,7 @@ fn candidate_identity_is_independent_of_intern_order() {
     let observe = |warm_first: bool| {
         let host = host();
         let d = ProjectSemanticDispatch::new(host.as_ref());
+        let _builder = d.enter_construction_scope();
         if warm_first {
             // Unrelated nodes and signatures interned before the subject.
             for kind in [
@@ -1305,17 +1519,22 @@ fn candidate_identity_is_independent_of_intern_order() {
 fn untyped_javascript_signatures_publish_the_untyped_flag() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let any = prim(&d, PrimitiveKind::Any);
     let string = prim(&d, PrimitiveKind::String);
     let flagged = |file: &str, param_ty: SemanticNodeId| {
         let mut occ = occurrence("f", 0);
-        occ.function.anchor.canonical_id = Arc::from(file);
+        occ.function.anchor.canonical_id = verter_type_expr::OwnedStr::from(file);
         let identity = occ.function.clone();
         let node = d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(param_ty)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![param(param_ty)].into_boxed_slice(),
+            ),
             return_type: any,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: Some(occ),
             return_carrier: SignatureReturnCarrier::Function(
                 verter_type_expr::facts::FunctionReturnSource::Flow(identity),
@@ -1349,14 +1568,19 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
 fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let authored_at = |return_type_span: Option<verter_span::Span>, return_type| {
         d.graph().intern_node(SemanticNodeData::Signature {
             kind: SignatureKind::Call,
-            params: Arc::from(vec![param(string)].into_boxed_slice()),
+            params: verter_type_engine::semantic_query::PayloadArray::from(
+                vec![param(string)].into_boxed_slice(),
+            ),
             return_type,
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: verter_type_engine::semantic_query::PayloadArray::from(
+                Vec::new().into_boxed_slice(),
+            ),
             occurrence: Some(occurrence("f", 0)),
             return_carrier: SignatureReturnCarrier::Declared(return_type),
             signature_span: None,
@@ -1382,15 +1606,15 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let from_first = read(first);
     let from_second = read(second);
     assert_eq!(
-        candidates(from_first.set, store)[0].signature,
-        candidates(from_second.set, store)[0].signature,
+        candidates(from_first.set(), store)[0].signature,
+        candidates(from_second.set(), store)[0].signature,
         "premise: both subjects publish the one content-interned descriptor"
     );
     let authored = |value: &verter_type_engine::signature_kernel::SignatureSetValue| {
         value
-            .nodes
+            .candidate_nodes()
             .iter()
-            .map(|nodes| nodes.authored)
+            .map(|nodes| nodes.authored())
             .collect::<Vec<_>>()
     };
     assert_eq!(authored(&from_first), [Some(first)]);
@@ -1408,7 +1632,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let union = d.intern_normalized_union_or_intersection(&[first, other], true);
     let composite = read(union);
     assert!(matches!(
-        recipe_of(store, candidates(composite.set, store)[0]),
+        recipe_of(store, candidates(composite.set(), store)[0]),
         SignatureResultRecipe::UnionCommon { .. }
     ));
     assert_eq!(authored(&composite), [None]);
@@ -1421,7 +1645,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
         "premise: the union keeps both authored arms, got {arms:?}"
     );
     assert_eq!(
-        &*composite.nodes[0].constituents,
+        composite.candidate_nodes()[0].constituents(),
         arms.as_slice(),
         "a composite names the authored node of every constituent, in arm order"
     );
@@ -1437,6 +1661,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
 
     let host = host();
     let d = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let boolean = prim(&d, PrimitiveKind::Boolean);
@@ -1487,7 +1712,7 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
         param_index: 0,
         constraint: Some(overloaded),
         default: None,
-        display_name: Arc::from("Fn"),
+        display_name: verter_type_expr::OwnedStr::from("Fn"),
     });
     for subject in [union, constrained] {
         assert_ne!(
@@ -1510,5 +1735,265 @@ fn utility_inference_reads_the_last_shared_signature_and_never_a_union_or_binder
     assert_eq!(
         d.resolve_signature_utility(SignatureUtility::ReturnType, constrained, context),
         None
+    );
+}
+
+#[test]
+fn deferred_callable_headers_keep_event_parameters_without_demanding_the_return() {
+    use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{
+        LiteralValue, NodeScopeId, ProjectionReductionContext,
+    };
+    use verter_type_expr::{FunctionExpr, TypeExpr};
+    let host = host();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(CANONICAL.into()),
+            input_id: CANONICAL.into(),
+            source: Arc::from("export function emit(e: 'changed') { return opaqueCall(); }"),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: Vec::new(),
+        })
+        .unwrap();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let scope = NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+        owner,
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    let mut function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("e".into()),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::String("changed".into())),
+            false,
+            false,
+        )],
+        None,
+        Vec::new(),
+    );
+    function.flow_return = Some(Box::new(
+        verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                owner,
+                symbol: verter_type_expr::OwnedStr::from("emit"),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+    ));
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &TypeExpr::Function(Arc::new(function)),
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::DeferredCallable(_))
+    ));
+    let view = CallableNodeView::new(&dispatch, node);
+    let signature = view
+        .signature(ProjectionReductionContext::structural_transit())
+        .expect("a deferred return cannot remove the completed call header");
+    let params = signature.raw_params();
+    assert_eq!(params.len(), 1);
+    assert!(
+        matches!(dispatch.graph().node_data(params[0].ty).as_deref(), Some(SemanticNodeData::Literal(LiteralValue::String(name))) if name == "changed")
+    );
+    let names = view.event_names(ProjectionReductionContext::structural_transit());
+    assert!(
+        matches!(names, verter_type_engine::semantic_query::surface_resolution::SurfaceResolution::Resolved(ref names) if names.iter().map(|name| name.as_ref()).collect::<Vec<_>>() == ["changed"]),
+        "the complete event parameter belongs to the header: {names:?}"
+    );
+}
+
+fn with_deferred_utility_header(
+    symbol: &str,
+    mut function: verter_type_expr::FunctionExpr,
+    check: impl FnOnce(
+        &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+        SemanticNodeId,
+    ),
+) {
+    use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+    use verter_type_engine::semantic_query::{NodeScopeId, ProjectionReductionContext};
+    let host = host();
+    let _ = host.upsert(UpsertRequest {
+        canonical_id: Some(CANONICAL.into()), input_id: CANONICAL.into(),
+        source: Arc::from("export function generic<T extends string>(input: T) { return opaqueCall(); } export function receiver(this: string, input: number) { return opaqueCall(); }"),
+        file_language: crate::FileLanguage::script_ts(), aliases: Vec::new(),
+    }).unwrap();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+    let scope = NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+        owner,
+        whole_hash: host.shallow_file_state(CANONICAL).unwrap().whole_hash,
+        local_scope: None,
+    };
+    function.flow_return = Some(Box::new(
+        verter_type_expr::facts::FlowFunctionReturnIdentity {
+            anchor: verter_type_expr::locators::AuthoredAnchor {
+                canonical_id: verter_type_expr::OwnedStr::from(CANONICAL),
+                owner,
+                symbol: verter_type_expr::OwnedStr::from(symbol),
+                space: verter_type_expr::locators::LocatorSymbolSpace::Value,
+            },
+            function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
+            overload_ordinal: 0,
+        },
+    ));
+    let _refusal = super::flow_return::flow_admission_fault_injection::Guard::arm(
+        &host.flow_fault_injection.zero_obligation_budget,
+    );
+    let node = dispatch.shallow_lower_type_expr_with_context_for_tests(
+        &verter_type_expr::TypeExpr::Function(Arc::new(function)),
+        &rustc_hash::FxHashMap::default(),
+        &scope,
+        &rustc_hash::FxHashMap::default(),
+        None,
+        &ScopeShadowing::empty(),
+        &mut Vec::new(),
+        ProjectionReductionContext::structural_transit(),
+    );
+    assert!(matches!(
+        dispatch.graph().node_data(node).as_deref(),
+        Some(SemanticNodeData::DeferredCallable(_))
+    ));
+    check(&dispatch, node);
+}
+
+#[test]
+fn deferred_parameters_still_instantiate_their_own_base_constraint() {
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr, TypeParam};
+    let function = FunctionExpr::synthetic(
+        vec![verter_type_expr::FunctionParam::synthetic(
+            Some("input".into()),
+            TypeExpr::Ref {
+                name: Arc::from("T"),
+                type_arguments: Arc::from([]),
+            },
+            false,
+            false,
+        )],
+        None,
+        vec![TypeParam {
+            name: "T".into(),
+            constraint: Some(Arc::new(TypeExpr::Primitive(PrimitiveName::String))),
+            default: None,
+            is_const: false,
+        }],
+    );
+    with_deferred_utility_header("generic", function, |dispatch, node| {
+        let tuple = dispatch
+            .resolve_signature_utility(
+                super::signature_utility::SignatureUtility::Parameters,
+                node,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let data = dispatch.graph().node_data(tuple).unwrap();
+        let SemanticNodeData::Tuple { elements, .. } = data.as_ref() else {
+            panic!("Parameters returns a tuple")
+        };
+        assert!(
+            matches!(
+                dispatch.graph().node_data(elements[0].value).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::String))
+            ),
+            "a deferred return cannot leak the signature's own binder: {data:?}"
+        );
+    });
+}
+
+#[test]
+fn omit_this_parameter_rebuilds_a_deferred_header_without_its_receiver() {
+    use verter_type_expr::{FunctionExpr, PrimitiveName, TypeExpr};
+    let function = FunctionExpr::synthetic(
+        vec![
+            verter_type_expr::FunctionParam::synthetic(
+                Some("this".into()),
+                TypeExpr::Primitive(PrimitiveName::String),
+                false,
+                false,
+            ),
+            verter_type_expr::FunctionParam::synthetic(
+                Some("input".into()),
+                TypeExpr::Primitive(PrimitiveName::Number),
+                false,
+                false,
+            ),
+        ],
+        None,
+        Vec::new(),
+    );
+    with_deferred_utility_header("receiver", function, |dispatch, node| {
+        let output = dispatch
+            .resolve_signature_utility(
+                super::signature_utility::SignatureUtility::OmitThisParameter,
+                node,
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let data = dispatch.graph().node_data(output).unwrap();
+        let SemanticNodeData::DeferredCallable(callable) = data.as_ref() else {
+            panic!("the return remains deferred")
+        };
+        let _ = callable;
+        let view =
+            verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView::new(
+                dispatch, output,
+            );
+        let signature = view
+            .signature(
+                verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit(
+                ),
+            )
+            .unwrap();
+        let params = signature.raw_params();
+        assert_eq!(
+            params.len(),
+            1,
+            "OmitThisParameter must remove the receiver from a deferred header"
+        );
+        assert_eq!(params[0].name.as_deref(), Some("input"));
+    });
+}
+
+#[test]
+fn a_deferred_header_still_classifies_as_a_runtime_function() {
+    with_deferred_utility_header(
+        "generic",
+        verter_type_expr::FunctionExpr::synthetic(Vec::new(), None, Vec::new()),
+        |dispatch, node| {
+            let output = dispatch.classify_broad_runtime_transient(node);
+            let verter_type_engine::semantic_query::QueryResult::Value(
+                verter_type_engine::semantic_query::SemanticQueryValue::BroadRuntime(value),
+            ) = output.result
+            else {
+                panic!("a callable header has a runtime classification")
+            };
+            assert_eq!(
+                value.kinds(),
+                &[verter_type_engine::semantic_query::BroadRuntimeKind::Function],
+                "body deferral cannot hide a completed callable header"
+            );
+        },
     );
 }

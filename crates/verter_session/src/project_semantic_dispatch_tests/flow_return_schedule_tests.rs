@@ -251,9 +251,9 @@ fn a_deep_chain_over_a_reduced_budget_ends_on_the_work_rail() {
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
                 (
-                    read.result_is_partial,
-                    read.cache_suppress,
-                    read.partial_reasons,
+                    read.result_is_partial(),
+                    read.cache_suppress(),
+                    read.partial_reasons(),
                 ),
                 dispatch.connected_demand().work_used_for_tests(),
                 candidates,
@@ -715,13 +715,13 @@ fn warm_second(source: &str, scheduled: bool) -> WarmSecond {
         let candidates = dispatch
             .graph()
             .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key.clone())));
-        let value =
-            matches!(read.value, QueryResult::Value(_)).then(|| eval_key_on(&host, dispatch, key));
+        let value = matches!(read.value().clone(), QueryResult::Value(_))
+            .then(|| eval_key_on(&host, dispatch, key));
         WarmSecond {
             warm,
             value,
-            partial: read.result_is_partial && read.cache_suppress,
-            reasons: read.partial_reasons,
+            partial: read.result_is_partial() && read.cache_suppress(),
+            reasons: read.partial_reasons(),
             candidates,
             work,
         }
@@ -745,9 +745,9 @@ fn unscheduled_plain_chain(levels: usize) -> (bool, bool, PartialReasonSet, usiz
                 .graph()
                 .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
             (
-                matches!(read.value, QueryResult::Value(_)),
-                read.result_is_partial && read.cache_suppress,
-                read.partial_reasons,
+                matches!(read.value().clone(), QueryResult::Value(_)),
+                read.result_is_partial() && read.cache_suppress(),
+                read.partial_reasons(),
                 candidates,
             )
         })
@@ -854,7 +854,7 @@ fn cold_read(
     let candidates = dispatch
         .graph()
         .slot_candidate_count_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)));
-    let printed = match &read.value {
+    let printed = match &read.value() {
         QueryResult::Value(SemanticQueryValue::FlowReturn(result))
             if result.degradation().is_none() =>
         {
@@ -881,8 +881,8 @@ fn cold_read(
     };
     ColdRead {
         printed,
-        partial: read.result_is_partial,
-        reasons: read.partial_reasons,
+        partial: read.result_is_partial(),
+        reasons: read.partial_reasons(),
         candidates,
         work,
     }
@@ -2027,8 +2027,13 @@ fn a_tripped_demand_discovers_no_further_callee() {
             run(&host, MAX_CONNECTED_PROJECTION_WORK, Some(nth));
         assert!(cancelled, "cancelled at family {nth}");
         assert!(
-            matches!(step, FlowReturnStep::NoValue(_)),
-            "a cancellation at family {nth} ends on a typed no-value outcome: {step:?}"
+            matches!(
+                step,
+                FlowReturnStep::Aborted(
+                    verter_type_engine::semantic_query::ExecutionAbort::Cancelled
+                )
+            ),
+            "a cancellation at family {nth} ends on the typed execution abort: {step:?}"
         );
         assert!(
             discovered < 2 * LEVELS,
@@ -2060,9 +2065,9 @@ fn a_retry_after_a_cancellation_anywhere_answers_what_a_fresh_host_answers() {
     let source = sibling_chains(4, 8);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PATH),
+            canonical_id: verter_type_expr::OwnedStr::from(PATH),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from("witness"),
+            symbol: verter_type_expr::OwnedStr::from("witness"),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -2154,6 +2159,77 @@ fn switch_witness(cases: usize) -> String {
     format!("export function witness(x: number) {{ switch (x) {{ {arms}default: return -1; }} }}\n")
 }
 
+/// Every clause projects a distinct sibling from its discriminated member.
+fn discriminated_switch(cases: usize) -> String {
+    let members = (0..cases)
+        .map(|i| format!("{{ kind: \"k{i}\"; v{i}: {i} }}"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let clauses: String = (0..cases)
+        .map(|i| format!("case \"k{i}\": return x.v{i};\n"))
+        .collect();
+    format!("type U = {members};\nexport function witness(x: U) {{ switch (x.kind) {{ {clauses} }} }}\n")
+}
+
+/// Repeated full-union narrowing per clause must not hide behind memo hits:
+/// measure enumeration leaves as well as connected query work. Every size
+/// answers all its member literals, completely and within production caps.
+#[test]
+fn discriminated_switch_narrowing_work_grows_linearly() {
+    use verter_type_engine::project_semantic_dispatch::flow_return::union_leaf_visits_for_tests;
+
+    let mut measured = Vec::new();
+    for cases in [128, 512, 2_048] {
+        let source = discriminated_switch(cases);
+        let host = host_with(&[(PATH, &source)]);
+        let (outcome, work, leaves) = with_dispatch(&host, |dispatch| {
+            let before = union_leaf_visits_for_tests();
+            let key = key_of(dispatch, PATH, "witness");
+            let outcome = eval_key_on(&host, dispatch, key);
+            (
+                outcome,
+                dispatch.connected_demand_usage().work,
+                union_leaf_visits_for_tests() - before,
+            )
+        });
+        let Outcome::Value {
+            ty: TypeExpr::Union(arms),
+            degradation: None,
+            candidates: 1,
+        } = &outcome
+        else {
+            panic!("{cases} cases must answer completely and admit reuse: {outcome:?}");
+        };
+        let mut values: Vec<_> = arms
+            .iter()
+            .map(|arm| match arm {
+                TypeExpr::Literal(LiteralValue::Number(value)) => *value,
+                other => panic!("unexpected return contributor: {other:?}"),
+            })
+            .collect();
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, (0..cases).map(|i| i as f64).collect::<Vec<_>>());
+        assert!(work > 0 && leaves >= cases, "work counters must be live");
+        eprintln!("switch cases={cases} connected_work={work} union_leaves={leaves}");
+        measured.push((cases, work, leaves));
+    }
+    for pair in measured.windows(2) {
+        let [(small, small_work, small_leaves), (large, large_work, large_leaves)] = pair else {
+            unreachable!();
+        };
+        for (name, before, after) in [
+            ("connected work", small_work, large_work),
+            ("union leaves", small_leaves, large_leaves),
+        ] {
+            assert!(after > before, "{name} must grow with cases: {measured:?}");
+            assert!(
+                after * small * 10 <= before * large * 11,
+                "{name} grows faster than linear (10% tolerance): {measured:?}"
+            );
+        }
+    }
+}
+
 /// Each return site the slice plans is one unit of connected work, paid
 /// before the body evaluates: the work grows linearly with the returns (one
 /// unit per site, the two relation steps that compare its case with the
@@ -2186,6 +2262,10 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         );
 
         let host = host_with(&[(PATH, source.as_str())]);
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
         let step = with_dispatch(&host, |dispatch| {
             dispatch.set_connected_limits_for_tests(used - 1, MAX_CONNECTED_QUERY_DEPTH);
             let key = key_of(dispatch, PATH, "witness");

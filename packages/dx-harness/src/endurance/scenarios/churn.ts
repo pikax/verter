@@ -314,8 +314,8 @@ export interface RetentionReading {
   readonly unionViews: number;
   /** Stable-key classes the semantic store's key table holds. */
   readonly stableKeyClasses: number;
-  /** Close-time semantic releases queued behind in-flight computations, not yet applied. */
-  readonly deferredReleases: number;
+  /** Destroyed semantic nodes whose sidecar entries wait for cleanup (a bounded log). */
+  readonly pendingDestroyedNodes: number;
   /** Resolved-import fact entries (one key per document content hash). */
   readonly resolvedImportFacts: number;
   /** Resolver component-meta states (one key per document, mode and view fingerprint). */
@@ -332,14 +332,12 @@ export interface RetentionReading {
   readonly overlayValueVersions: number;
   /** Fallthrough nodes the resolver runtime caches, released with their component. */
   readonly fallthroughNodes: number;
-  /** Queued releases applied so far (monotonic by design, so not a retention counter). */
-  readonly releasesApplied: number;
-  /** The longest a queued release waited for a zero-reader instant, in microseconds. */
-  readonly releaseWaitMaxMicros: number;
-  /** The slowest single close-time release, in microseconds. */
-  readonly releaseElapsedMaxMicros: number;
-  /** The last close-time release applied, or null before the first. */
-  readonly lastRelease: LastReleaseReading | null;
+  /** Document closes applied so far (monotonic by design, so not a retention counter). */
+  readonly closesApplied: number;
+  /** The slowest single document close, in microseconds. */
+  readonly closeElapsedMaxMicros: number;
+  /** The last document close applied, or null before the first. */
+  readonly lastClose: LastCloseReading | null;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
   readonly shapeCacheEntries: number;
   /** Semantic-substrate retained objects (see the server's RetentionStatistics). */
@@ -368,37 +366,39 @@ export interface RetentionReading {
   readonly semanticMemoFamilies?: Readonly<Record<string, number>>;
 }
 
-/** One applied close-time release (`retention.lastRelease`). */
-export interface LastReleaseReading {
-  readonly waitMicros: number;
+/**
+ * One applied document close (`retention.lastClose`): its wall time and the
+ * cache owners it evicted. The closed content's nodes are destroyed as their
+ * last owner lets go, not by the close itself.
+ */
+export interface LastCloseReading {
   readonly elapsedMicros: number;
-  readonly nodesScanned: number;
-  readonly nodesReleased: number;
-  readonly storageSlotsBefore: number;
-  readonly storageSlotsAfter: number;
   readonly memoEntriesEvicted: number;
+  readonly unionViewsReleased: number;
+  readonly signatureTokensReleased: number;
+  readonly sidecarEntriesDropped: number;
+  readonly shapeEntriesReleased: number;
 }
 
-const LAST_RELEASE_KEYS: readonly (keyof LastReleaseReading)[] = [
-  "waitMicros",
+const LAST_CLOSE_KEYS: readonly (keyof LastCloseReading)[] = [
   "elapsedMicros",
-  "nodesScanned",
-  "nodesReleased",
-  "storageSlotsBefore",
-  "storageSlotsAfter",
   "memoEntriesEvicted",
+  "unionViewsReleased",
+  "signatureTokensReleased",
+  "sidecarEntriesDropped",
+  "shapeEntriesReleased",
 ];
 
-function readLastRelease(value: unknown): LastReleaseReading | null {
+function readLastClose(value: unknown): LastCloseReading | null {
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
-  const reading: Partial<Record<keyof LastReleaseReading, number>> = {};
-  for (const key of LAST_RELEASE_KEYS) {
+  const reading: Partial<Record<keyof LastCloseReading, number>> = {};
+  for (const key of LAST_CLOSE_KEYS) {
     const field = record[key];
     if (typeof field !== "number" || !Number.isFinite(field)) return null;
     reading[key] = field;
   }
-  return reading as LastReleaseReading;
+  return reading as LastCloseReading;
 }
 
 /** The `retention` object keys the host emits, exactly as serialized. */
@@ -424,7 +424,7 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "pinnedBytes",
   "retainedBytes",
   "refusalsPressure",
-  "deferredReleases",
+  "pendingDestroyedNodes",
   "resolvedImportFacts",
   "componentMetaStates",
   "registeredSources",
@@ -433,9 +433,8 @@ const RETENTION_KEYS: readonly (keyof RetentionReading)[] = [
   "overlayResolutionSlots",
   "overlayValueVersions",
   "fallthroughNodes",
-  "releasesApplied",
-  "releaseWaitMaxMicros",
-  "releaseElapsedMaxMicros",
+  "closesApplied",
+  "closeElapsedMaxMicros",
 ];
 
 /**
@@ -457,9 +456,7 @@ export function extractRetentionReading(snapshot: unknown): RetentionReading | n
   const heap = record.heapInUseBytes;
   (reading as { heapInUseBytes?: number | null }).heapInUseBytes =
     typeof heap === "number" && Number.isFinite(heap) ? heap : null;
-  (reading as { lastRelease?: LastReleaseReading | null }).lastRelease = readLastRelease(
-    record.lastRelease,
-  );
+  (reading as { lastClose?: LastCloseReading | null }).lastClose = readLastClose(record.lastClose);
   const families = record.semanticMemoFamilies;
   if (families && typeof families === "object") {
     const byFamily: Record<string, number> = {};
@@ -1104,7 +1101,7 @@ export const CHURN_RETENTION_COUNTERS = [
   "flowLoweredEntries",
   "mapperFingerprints",
   "frameworkSurfaceEntries",
-  "deferredReleases",
+  "pendingDestroyedNodes",
   "resolvedImportFacts",
   "componentMetaStates",
   "registeredSources",
@@ -1314,13 +1311,13 @@ export function describeRetentionReading(reading: RetentionReading | null): stri
     `importFacts=${reading.resolvedImportFacts} metaStates=${reading.componentMetaStates} ` +
     `registeredSources=${reading.registeredSources} signatureRecords=${reading.signatureRecords} ` +
     `overlayResolutionSlots=${reading.overlayResolutionSlots} overlayValueVersions=${reading.overlayValueVersions} fallthroughNodes=${reading.fallthroughNodes} ` +
-    `deferred=${reading.deferredReleases} releases=${reading.releasesApplied} ` +
-    `releaseWaitMax=${formatMicros(reading.releaseWaitMaxMicros)} releaseMax=${formatMicros(reading.releaseElapsedMaxMicros)} ` +
-    (reading.lastRelease
-      ? `lastRelease={wait=${formatMicros(reading.lastRelease.waitMicros)} took=${formatMicros(reading.lastRelease.elapsedMicros)} ` +
-        `scanned=${reading.lastRelease.nodesScanned} released=${reading.lastRelease.nodesReleased} ` +
-        `slots=${reading.lastRelease.storageSlotsBefore}>${reading.lastRelease.storageSlotsAfter} memo=${reading.lastRelease.memoEntriesEvicted}} `
-      : "lastRelease=none ") +
+    `pendingDestroyed=${reading.pendingDestroyedNodes} closes=${reading.closesApplied} ` +
+    `closeMax=${formatMicros(reading.closeElapsedMaxMicros)} ` +
+    (reading.lastClose
+      ? `lastClose={took=${formatMicros(reading.lastClose.elapsedMicros)} memo=${reading.lastClose.memoEntriesEvicted} ` +
+        `unionViews=${reading.lastClose.unionViewsReleased} tokens=${reading.lastClose.signatureTokensReleased} ` +
+        `sidecars=${reading.lastClose.sidecarEntriesDropped} shapes=${reading.lastClose.shapeEntriesReleased}} `
+      : "lastClose=none ") +
     `heapInUse=${reading.heapInUseBytes === null ? "n/a" : bytesToMib(reading.heapInUseBytes)}` +
     (reading.semanticMemoFamilies
       ? ` memoFamilies={${Object.entries(reading.semanticMemoFamilies)

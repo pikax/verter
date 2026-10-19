@@ -183,11 +183,15 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
             summary,
         )
     }
-    fn recursive_ref(&mut self, name: Arc<str>) -> RaisedShapeResult {
+    fn recursive_ref(
+        &mut self,
+        name: Arc<str>,
+        type_arguments: Vec<RaisedShapeResult>,
+    ) -> RaisedShapeResult {
         self.result(
             RaisedTerm::RecursiveRef {
                 name,
-                type_arguments: Vec::new(),
+                type_arguments: type_arguments.into_iter().map(|a| a.key).collect(),
                 conditional_context: Vec::new(),
             },
             summary::materialized_expanded_leaf(),
@@ -599,7 +603,10 @@ impl RaisedShapeAlgebra for RaisedShapeAlg<'_> {
 // ===========================================================================
 
 /// Stateless facts-only algebra — no interner.
-pub struct RaisedFactsAlg;
+#[derive(Default)]
+pub struct RaisedFactsAlg {
+    pub(super) source_presence: bool,
+}
 
 /// The facts-only function representation: only the folded `materialized` fact
 /// (the facts-only path never needs the `RaisedFunction` structure).
@@ -635,6 +642,24 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     type Fn = FactsFunction;
     type Member = FactsMember;
 
+    fn owned_function_return(
+        &mut self,
+        carrier: &crate::semantic_query::SignatureReturnCarrier,
+    ) -> Option<RaisedShapeSummary> {
+        (self.source_presence
+            && (matches!(
+                carrier,
+                crate::semantic_query::SignatureReturnCarrier::DeferredFlow(_)
+                    | crate::semantic_query::SignatureReturnCarrier::EvaluatedFlow(_)
+            ) || matches!(
+                carrier,
+                crate::semantic_query::SignatureReturnCarrier::Function(
+                    verter_type_expr::facts::FunctionReturnSource::Flow(_)
+                )
+            )))
+        .then(summary::materialized_expanded_leaf)
+    }
+
     fn primitive(&mut self, _kind: PrimitiveName) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
@@ -654,7 +679,11 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     fn opaque_sentinel(&mut self, err: &QueryError) -> RaisedShapeSummary {
         summary::opaque_sentinel(err)
     }
-    fn recursive_ref(&mut self, _name: Arc<str>) -> RaisedShapeSummary {
+    fn recursive_ref(
+        &mut self,
+        _name: Arc<str>,
+        _type_arguments: Vec<RaisedShapeSummary>,
+    ) -> RaisedShapeSummary {
         summary::materialized_expanded_leaf()
     }
     fn reference(
@@ -770,8 +799,24 @@ impl RaisedShapeAlgebra for RaisedFactsAlg {
     }
 
     fn build_function(&mut self, function: FoldedFunction<RaisedShapeSummary>) -> FactsFunction {
+        let source_slots = !self.source_presence
+            || (function.type_parameters.iter().all(|parameter| {
+                parameter
+                    .constraint
+                    .as_ref()
+                    .is_none_or(|out| out.facts.materialized)
+                    && parameter
+                        .default
+                        .as_ref()
+                        .is_none_or(|out| out.facts.materialized)
+            }) && function.predicate.as_ref().is_none_or(|predicate| {
+                predicate
+                    .ty
+                    .as_ref()
+                    .is_none_or(|out| out.facts.materialized)
+            }));
         FactsFunction {
-            materialized: Self::function_materialized(&function),
+            materialized: Self::function_materialized(&function) && source_slots,
         }
     }
     fn function_to_out(&mut self, function: FactsFunction) -> RaisedShapeSummary {
@@ -1020,8 +1065,16 @@ impl RaisedShapeAlgebra for DeclarationFactsAlg {
             ..DeclarationOut::unsafe_leaf()
         }
     }
-    fn recursive_ref(&mut self, _name: Arc<str>) -> DeclarationOut {
-        DeclarationOut::leaf(DeclarationTag::Other)
+    fn recursive_ref(
+        &mut self,
+        _name: Arc<str>,
+        type_arguments: Vec<DeclarationOut>,
+    ) -> DeclarationOut {
+        if type_arguments.is_empty() {
+            DeclarationOut::leaf(DeclarationTag::Other)
+        } else {
+            DeclarationOut::combine(DeclarationTag::Other, type_arguments)
+        }
     }
     fn reference(
         &mut self,

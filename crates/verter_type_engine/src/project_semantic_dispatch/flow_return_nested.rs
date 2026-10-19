@@ -243,7 +243,7 @@ pub(super) struct NestedChildParts {
     pub(super) execution_selection: Arc<super::super::flow_solve::FlowExecutionSelection>,
     pub(super) plan: Option<Arc<super::super::flow_solve::FlowDemandPlan>>,
     pub(super) bound: verter_session_query::flow::bundle::BoundFlowGraph,
-    pub(super) skeleton: Arc<FunctionBodySkeleton>,
+    pub(super) skeleton: verter_session_query::flow::bundle::SkeletonRef,
 }
 
 /// A nested function's signature evaluation up to its body's evaluation.
@@ -336,6 +336,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) -> DriveEnd
     where
         'b: 'a,
+        'd: 'a,
+        'd: 'r,
     {
         let mut delivered: Option<RegionDelivery> = None;
         loop {
@@ -408,6 +410,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             contextual,
             outer_env: _,
         } = demand;
+        self.constructive_signatures.remove(&function);
         let function = &function;
         let context = &context;
         let extended_captures: &[SkeletonBindingId] = &extended_captures;
@@ -415,9 +418,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &declared_evolving_captures;
         let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
             anchor: verter_type_expr::locators::AuthoredAnchor {
-                canonical_id: Arc::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 owner: function.declaration.owner,
-                symbol: Arc::clone(&function.declaration.name),
+                symbol: function.declaration.name.clone(),
                 space: verter_type_expr::locators::LocatorSymbolSpace::Value,
             },
             function_part: function.part.clone(),
@@ -448,6 +451,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         hash_key: site.slice_key.clone(),
                         slice_hash: planned.hash(),
                     },
+                    &planned,
                 )?;
                 Some((
                     planned,
@@ -507,7 +511,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             &content.bindings,
             skeleton,
             bound,
-            planned.as_deref(),
+            planned.as_deref().map(|planned| &**planned),
             anchor,
             &key,
             outer_env,
@@ -551,25 +555,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let capture_context = context;
         let mut evaluator = Box::new(FlowEvaluator {
+            independent_members: None,
+            independent_returns: None,
+            constructive_values: rustc_hash::FxHashMap::default(),
+            constructive_signatures: rustc_hash::FxHashMap::default(),
             dispatch: self.dispatch,
             call_receivers: rustc_hash::FxHashMap::default(),
             call_arguments: Arc::clone(&owned.content.call_arguments),
             self_slot: None,
             resolving_functions: std::rc::Rc::clone(&self.resolving_functions),
             this_free_values: std::rc::Rc::clone(&self.this_free_values),
+            declared_type_reads: std::rc::Rc::clone(&self.declared_type_reads),
             canonical: self.canonical,
             owner: self.owner,
             nullability: self.nullability,
             no_implicit_any: self.no_implicit_any,
             use_unknown_in_catch_variables: self.use_unknown_in_catch_variables,
             no_implicit_this: self.no_implicit_this,
+            contextual_object_this: None,
+            contextual_object_receiver: None,
+            inherits_contextual_object_receiver: false,
+            object_first_pass_context: ObjectFirstPassContext::default(),
             params: &owned.params,
             param_names: &owned.content.params,
             binder_env: &owned.binder_env,
             enclosing_frames,
-            bindings: Arc::clone(&owned.content.bindings),
-            skeleton: Arc::clone(&skeleton),
-            flow_graph: Arc::clone(bound.bundle().graph()),
+            bindings: owned.content.bindings.clone(),
+            skeleton: skeleton.clone(),
+            flow_graph: bound.graph_ref(),
             execution_selection,
             plan,
             anchor,
@@ -618,12 +631,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // against the receiver the class binds.
             receiver: matches!(
                 capture_context.this(),
-                Some(verter_session_query::flow::slice::SliceThis::Receiver)
+                Some(
+                    verter_session_query::flow::slice::SliceThis::Receiver
+                        | verter_session_query::flow::slice::SliceThis::Explicit
+                )
             )
             .then(|| self.receiver.clone())
             .flatten(),
         });
         let body = &owned.content.body;
+        if owned.content.declared_this.is_none()
+            && !capture_context.this_is_lexical()
+            && matches!(
+                capture_context.this(),
+                Some(verter_session_query::flow::slice::SliceThis::Receiver)
+            )
+        {
+            if let Some(binder) = contextual.as_ref().and_then(|signature| signature.receiver) {
+                evaluator.receiver = Some(std::rc::Rc::new(class_expression::ClassReceiver {
+                    binder,
+                    base: Some(binder),
+                    infer_literal_members: false,
+                    members: std::cell::RefCell::new(Vec::new()),
+                    declared: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
+                    forward_read: std::cell::Cell::new(false),
+                }));
+            }
+        }
+        evaluator.bind_explicit_this(owned.content.declared_this.as_ref());
         evaluator.seed_hoisted_var_declarations(body);
         let run = evaluator.start_region_run(body);
         NestedPrepared::Child(Box::new(NestedActivation {
@@ -661,17 +696,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             type_param_decls,
             contextual,
         } = finish;
+        let function = nested_evaluator.bindings.function().clone();
+        let constructive_signature;
         let signature = {
             let graph = self.dispatch.graph();
             let can_fall_through = owned.content.can_fall_through;
             let empty_completion = owned.content.empty_completion;
             let binder_env = &owned.binder_env;
-            let skeleton = Arc::clone(&nested_evaluator.skeleton);
+            let skeleton = nested_evaluator.skeleton.clone();
             let nested_holds;
             let nested_degradation;
             let nested_observations;
             let nested_yield_contributions;
             let nested_inferred_predicate;
+            let mut constructive_return = None;
+            let mut independently_typed_return = false;
             let (contributors, nested_body_falls_through) = {
                 let (outcome, nested_body_falls_through) = outcome;
                 nested_evaluator.promote_pending_statement_gap();
@@ -689,6 +728,33 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     nested_evaluator.executed_walk.aborted = true;
                 }
                 nested_holds = nested_evaluator.holds.clone();
+                let source_return = match owned.content.body.statements.as_ref() {
+                    [verter_session_query::flow::slice::SliceStatement::Return {
+                        argument: Some(argument),
+                        ..
+                    }] => Some(argument),
+                    _ => None,
+                };
+                let source_complete = outcome.as_ref().is_ok_and(|values| values.len() == 1)
+                    && !nested_body_falls_through
+                    && nested_holds.is_empty()
+                    && !nested_evaluator.executed_walk.aborted
+                    && !nested_evaluator.executed_walk.local_aborted
+                    && !crate::request_context::current_cold_compute_completeness().is_partial()
+                    && crate::request_context::current_execution_abort().is_none()
+                    && source_return.is_some();
+                let independent_return = outcome
+                    .as_ref()
+                    .ok()
+                    .filter(|values| values.len() == 1)
+                    .and_then(|values| {
+                        nested_evaluator
+                            .constructive_values
+                            .get(&values[0].node)
+                            .cloned()
+                            .map(|proof| (values[0].node, proof))
+                    })
+                    .filter(|_| source_complete);
                 let finished = nested_evaluator
                 .products
                 .finish(nested_evaluator.plan.as_deref())
@@ -754,13 +820,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         ))
                     }
                 });
+                let finished_ok = finished.is_ok();
                 if let Err(failure) = finished {
                     if matches!(failure, FlowProductFailure::BudgetExceeded(_)) {
                         self.products.execution.borrow_mut().failure = Some(failure);
+                        nested_evaluator.executed_walk.aborted = true;
                     }
                     nested_evaluator.record_degradation(
                         crate::semantic_query::FlowReturnDegradation::UnresolvedValue,
                     );
+                }
+                if finished_ok && !nested_evaluator.executed_walk.aborted {
+                    independently_typed_return = source_complete
+                        && source_return.is_some_and(super::independent_return_expression);
+                    if let Some((node, proof)) = independent_return {
+                        constructive_return = Some(node);
+                        self.constructive_values.insert(node, proof);
+                    }
                 }
                 nested_degradation = nested_evaluator.degradation;
                 nested_observations = nested_evaluator.observations;
@@ -869,11 +945,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 _ => return_type,
             };
+            constructive_signature = signature_params.is_empty()
+                && type_param_decls.is_empty()
+                && predicate.is_none()
+                && nested_degradation.is_none()
+                && skeleton.kind == verter_session_query::flow::skeleton::FunctionBodyKind::Plain
+                && (constructive_return == Some(return_type) || independently_typed_return);
             graph.intern_node(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
-                params: Arc::from(signature_params.into_boxed_slice()),
+                params: crate::semantic_query::PayloadArray::from(
+                    signature_params.into_boxed_slice(),
+                ),
                 return_type,
-                type_parameters: Arc::from(type_param_decls.into_boxed_slice()),
+                type_parameters: crate::semantic_query::PayloadArray::from(
+                    type_param_decls.into_boxed_slice(),
+                ),
                 signature_span: None,
                 return_type_span: None,
                 // A nested function value's synthesized signature has no
@@ -888,7 +974,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
         };
         drop(nested_evaluator);
-        self.nested_function_postlude(circular, declared_return_none, signature)
+        let value = self.nested_function_postlude(circular, declared_return_none, signature);
+        if constructive_signature && value == signature {
+            self.constructive_signatures.insert(function, signature);
+        }
+        value
     }
 
     /// A nested function's signature, once evaluated: its frame leaves the

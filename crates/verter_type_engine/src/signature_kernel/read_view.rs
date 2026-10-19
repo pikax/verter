@@ -55,9 +55,29 @@ pub struct SemanticReadView {
 }
 
 impl SemanticReadView {
+    pub(crate) fn lease(&self) -> super::lifetime::SignatureEpochLease {
+        super::lifetime::SignatureEpochLease::from_epoch(Arc::clone(&self.inner))
+    }
+    pub(super) fn from_epoch(inner: Arc<EpochInner>) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        inner.live_readers.fetch_add(1, Relaxed);
+        inner.store_live_readers.fetch_add(1, Relaxed);
+        inner.hold();
+        Self { inner }
+    }
+
+    pub fn applied_result(
+        &self,
+        id: super::records::AppliedResultId,
+    ) -> Result<&super::records::AppliedResult, ReadError> {
+        check_epoch(self.inner.epoch, id.epoch()).map_err(ReadError::from)?;
+        self.inner.results.get(id.index()).ok_or(ReadError::Missing)
+    }
     #[must_use]
     pub fn pin(store: &SignatureStore) -> Self {
-        Self { inner: store.pin() }
+        let inner = store.pin();
+        inner.hold();
+        Self { inner }
     }
 
     #[must_use]
@@ -176,7 +196,21 @@ impl SemanticReadView {
             .ok_or(ReadError::Missing)
     }
 
+    /// The construction ordinal a token stands for. Tokens are
+    /// kernel-internal shape identity: nothing outside the engine resolves
+    /// one, and test builds expose the ordinal as a seam.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
+        self.type_token_ordinal(token)
+    }
+
+    /// See the test-build variant.
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(crate) fn type_token_node(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
+        self.type_token_ordinal(token)
+    }
+
+    fn type_token_ordinal(&self, token: TypeToken) -> Result<SemanticNodeId, ReadError> {
         let raw = token.as_u64();
         check_epoch(self.inner.epoch, super::records::handle_epoch(raw))
             .map_err(ReadError::from)?;
@@ -242,5 +276,6 @@ impl SemanticReadView {
 impl Drop for SemanticReadView {
     fn drop(&mut self) {
         SignatureStore::unpin(&self.inner);
+        self.inner.release_hold();
     }
 }

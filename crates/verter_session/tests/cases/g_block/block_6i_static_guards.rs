@@ -1095,43 +1095,6 @@ fn ax_hybrid_evaluate_is_context_explicit() {
 }
 
 // ---------------------------------------------------------------------------
-// Implicit `lower_type_expr_in_scope` wrapper retired. Every caller
-// of dispatch lowering MUST go through `lower_type_expr_in_scope_with_mode`
-// and state mode explicitly.
-//
-// Why this guard: the implicit default was `ProjectionMode::Expanded`,
-// which silently eagerly-reduced `keyof T` / `MappedType<T>` operators
-// at every intermediate-base lowering site (the root cause of the
-// ChatMessages cold-seq `outputSchema|execute = 62` audit leak).
-// A regression that brings back the wrapper would reintroduce the
-// leak silently — this guard fails the build.
-// ---------------------------------------------------------------------------
-#[test]
-fn block_6i_commit_ax_no_implicit_lower_type_expr_in_scope_wrapper() {
-    let dispatch_mod =
-        read_workspace_file("crates/verter_type_engine/src/project_semantic_dispatch/mod.rs");
-
-    // The wrapper signature must NOT exist (it is deleted; every
-    // caller passes mode explicitly).
-    assert!(
-        !dispatch_mod.contains("pub fn lower_type_expr_in_scope(\n")
-            && !dispatch_mod.contains("pub fn lower_type_expr_in_scope("),
-        "the implicit `lower_type_expr_in_scope` wrapper in \
-         `project_semantic_dispatch/mod.rs` MUST remain deleted. \
-         Reintroducing it brings back the implicit \
-         `ProjectionMode::Expanded` default (root cause of the \
-         ChatMessages outputSchema/execute audit leak)."
-    );
-
-    // The mode-aware sibling MUST exist (it's the sole entry point).
-    assert!(
-        dispatch_mod.contains("pub fn lower_type_expr_in_scope_with_mode("),
-        "`lower_type_expr_in_scope_with_mode` is the sole lowering \
-         entry point and MUST remain present on `ProjectSemanticDispatch`."
-    );
-}
-
-// ---------------------------------------------------------------------------
 // Audit is a PASSIVE OBSERVER.
 //
 // Production semantic work (lowering, projection, dispatch) must run

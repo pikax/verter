@@ -12,8 +12,9 @@
 //! Lookup of a global symbol reads the published population and returns
 //! that symbol's contributor fingerprint, including a proved-empty set.
 use verter_session_query::inputs::contributors::{
-    classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical, ContributorEntry,
-    ContributorOrigin, FileModuleKind, SymbolContributors,
+    classify_shallow_module_kind, fingerprint_of, is_automatic_lib_canonical,
+    AugmentationCandidate, ContributorEntry, ContributorOrigin, FileModuleKind,
+    FileScopeContribution, SymbolContributors,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,7 @@ use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_session_query::analysis::types::Hash16;
 use verter_session_query::facts::SymbolSpace;
+use verter_session_query::inputs::program_order::ProgramFileOrder;
 use verter_type_expr::TopLevelOwnerId;
 
 use crate::file_artifact_store::{
@@ -73,8 +75,12 @@ pub struct GlobalContributorPopulation {
     pub revision: u64,
     by_symbol: Arc<FxHashMap<SymbolKey, Arc<[ContributorEntry]>>>,
     views: Arc<DashMap<ViewKey, SymbolContributors, rustc_hash::FxBuildHasher>>,
+    project_views: Arc<DashMap<ProjectViewKey, SymbolContributors, rustc_hash::FxBuildHasher>>,
+    collection_views: Arc<CollectionViews>,
     #[cfg(any(test, feature = "semantic-observe"))]
     materialized_view_entries: Arc<AtomicU64>,
+    #[cfg(any(test, feature = "semantic-observe"))]
+    ordering_work: Arc<AtomicU64>,
 }
 
 /// One view of one symbol's population. The view is a pure function of the
@@ -89,6 +95,37 @@ struct ViewKey {
     allow_automatic_libs: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectViewKey {
+    name: Arc<str>,
+    space: SymbolSpace,
+    overlay: Option<Hash16>,
+    project: Option<verter_session_query::resolution::ProjectId>,
+    membership_generation: Option<u64>,
+    /// Order and imported-membership fingerprint; absent when neither
+    /// relative precedence nor imported reachability affects the view.
+    program_order: Option<Hash16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CollectionViewKey {
+    target: crate::file_artifact_store::AugmentationTargetKey,
+    name: Arc<str>,
+    selection: FileScopeContribution,
+    augmenters: Hash16,
+    contributors: Hash16,
+    /// Fingerprint of the program order the view is sorted by; `None`
+    /// when its candidates span fewer than two program files.
+    program_order: Option<Hash16>,
+}
+
+fn program_rank(order: Option<&ProgramFileOrder>, canonical: &str) -> u32 {
+    order.map_or(u32::MAX, |order| order.rank(canonical))
+}
+
+type CollectionViews =
+    DashMap<CollectionViewKey, Arc<[AugmentationCandidate]>, rustc_hash::FxBuildHasher>;
+
 impl GlobalContributorPopulation {
     fn new(
         program_snapshot: u64,
@@ -100,8 +137,12 @@ impl GlobalContributorPopulation {
             revision,
             by_symbol,
             views: Arc::new(DashMap::with_hasher(rustc_hash::FxBuildHasher)),
+            project_views: Arc::new(DashMap::with_hasher(rustc_hash::FxBuildHasher)),
+            collection_views: Arc::new(DashMap::with_hasher(rustc_hash::FxBuildHasher)),
             #[cfg(any(test, feature = "semantic-observe"))]
             materialized_view_entries: Arc::new(AtomicU64::new(0)),
+            #[cfg(any(test, feature = "semantic-observe"))]
+            ordering_work: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -116,6 +157,11 @@ impl GlobalContributorPopulation {
     #[must_use]
     pub fn materialized_view_entry_count(&self) -> u64 {
         self.materialized_view_entries.load(Ordering::Relaxed)
+    }
+
+    #[cfg(any(test, feature = "semantic-observe"))]
+    pub fn ordering_work_count(&self) -> u64 {
+        self.ordering_work.load(Ordering::Relaxed)
     }
 
     /// Contributors for `target` + `decl_name` in type and namespace
@@ -180,6 +226,213 @@ impl GlobalContributorPopulation {
             allow_automatic_libs,
             &[space],
         )
+    }
+
+    /// A program's global contributor view in declaration precedence order,
+    /// shared for this population, immutable membership revision and
+    /// program order. Ownership changes require a new key; the unfiltered
+    /// fingerprint remains the population observation rail. The program
+    /// order/membership dependency is read on every lookup, including cached
+    /// project views, and returned for the reader to observe.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lookup_in_project(
+        &self,
+        name: &str,
+        space: SymbolSpace,
+        overlay: Option<Hash16>,
+        project: Option<verter_session_query::resolution::ProjectId>,
+        membership_generation: Option<u64>,
+        belongs: impl Fn(&ContributorEntry) -> bool,
+        order: impl FnOnce(&[ContributorEntry]) -> Option<Arc<ProgramFileOrder>>,
+    ) -> (SymbolContributors, Option<Arc<ProgramFileOrder>>) {
+        let contributors = self.lookup_in_space(
+            &AugmentationTargetKind::GlobalAugmentation,
+            name,
+            overlay,
+            true,
+            space,
+        );
+        if contributors.entries.is_empty() {
+            return (contributors, None);
+        }
+        let order = order(&contributors.entries);
+        let key = ProjectViewKey {
+            name: Arc::from(name),
+            space,
+            overlay,
+            project,
+            membership_generation,
+            program_order: order.as_ref().map(|order| order.fingerprint()),
+        };
+        if let Some(view) = self.project_views.get(&key) {
+            return (view.clone(), order);
+        }
+        let view = self
+            .project_views
+            .entry(key)
+            .or_insert_with(|| {
+                let mut entries: Vec<_> = contributors
+                    .entries
+                    .iter()
+                    .filter(|entry| belongs(entry))
+                    .cloned()
+                    .collect();
+                let ordering_work = stable_rank_order(&mut entries, |entry| {
+                    program_rank(order.as_deref(), &entry.artifact_key.canonical)
+                });
+                #[cfg(any(test, feature = "semantic-observe"))]
+                self.ordering_work
+                    .fetch_add(ordering_work, Ordering::Relaxed);
+                #[cfg(not(any(test, feature = "semantic-observe")))]
+                let _ = ordering_work;
+                #[cfg(any(test, feature = "semantic-observe"))]
+                self.materialized_view_entries
+                    .fetch_add(entries.len() as u64, Ordering::Relaxed);
+                SymbolContributors {
+                    entries: entries.into(),
+                    fingerprint: contributors.fingerprint,
+                }
+            })
+            .clone();
+        (view, order)
+    }
+
+    /// Materialize declaration precedence once for this contributor/index and
+    /// program order. Each declaring base borrows the same slot order. The
+    /// order is read through `order`, given every candidate file — `None`
+    /// when they need none — and returned for the reader to observe. A
+    /// library the program does not load contributes nothing. `selection`
+    /// names the file-scope declarations ordered beside the augmenters.
+    pub(crate) fn augmentation_order(
+        &self,
+        key: &crate::file_artifact_store::AugmentationTargetKey,
+        augmenters: &verter_session_query::resolution::AugmenterSet,
+        name: &str,
+        contributors: &SymbolContributors,
+        selection: FileScopeContribution,
+        order: impl FnOnce(&mut dyn Iterator<Item = &str>) -> Option<Arc<ProgramFileOrder>>,
+    ) -> (
+        Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>,
+        Option<Arc<ProgramFileOrder>>,
+    ) {
+        use verter_session_query::inputs::contributors::AugmentationCandidate;
+        if augmenters.entries.is_empty() && contributors.entries.is_empty() {
+            return (Arc::from([]), None);
+        }
+        let order = order(
+            &mut augmenters
+                .entries
+                .iter()
+                .map(|entry| entry.canonical().as_ref())
+                .chain(
+                    contributors
+                        .entries
+                        .iter()
+                        .map(|entry| entry.artifact_key.canonical.as_ref()),
+                ),
+        );
+        let rank = |canonical: &str| program_rank(order.as_deref(), canonical);
+        let view_key = CollectionViewKey {
+            target: key.clone(),
+            name: Arc::from(name),
+            selection,
+            augmenters: augmenters.fingerprint,
+            contributors: contributors.fingerprint,
+            program_order: order.as_ref().map(|order| order.fingerprint()),
+        };
+        if let Some(view) = self.collection_views.get(&view_key) {
+            return (Arc::clone(&view), order);
+        }
+        let view = Arc::clone(
+            self.collection_views
+                .entry(view_key)
+                .or_insert_with(|| {
+                    let interface_declarers: FxHashSet<_> = contributors
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.origin == ContributorOrigin::FileScopeInterface)
+                        .map(|entry| (entry.artifact_key.canonical.as_ref(), entry.symbol.as_ref()))
+                        .collect();
+                    // Both source arrays already have canonical/hash order. Merge
+                    // them stably before applying configured precedence, preserving
+                    // augmenter-first ties without another comparison sort.
+                    let mut augmenter_rows = augmenters
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, entry)| {
+                            (
+                                rank(entry.canonical()),
+                                Arc::clone(entry.canonical()),
+                                entry.parse_stable_hash,
+                                AugmentationCandidate::Augmenter(i),
+                            )
+                        })
+                        .peekable();
+                    let mut contributor_rows = contributors
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, entry)| {
+                            !entry.is_automatic_lib
+                                || order.as_ref().is_none_or(|order| {
+                                    order.loads_library(&entry.artifact_key.canonical)
+                                })
+                        })
+                        .filter(|(_, entry)| match selection {
+                            FileScopeContribution::TypeBody => {
+                                entry.origin == ContributorOrigin::FileScopeInterface
+                                    || (entry.origin == ContributorOrigin::FileScopeNamespace
+                                        && !interface_declarers.contains(&(
+                                            entry.artifact_key.canonical.as_ref(),
+                                            entry.symbol.as_ref(),
+                                        )))
+                            }
+                            FileScopeContribution::EnumBlock => {
+                                entry.origin == ContributorOrigin::FileScopeValue
+                            }
+                        })
+                        .map(|(i, entry)| {
+                            (
+                                rank(&entry.artifact_key.canonical),
+                                Arc::clone(&entry.artifact_key.canonical),
+                                entry.parse_stable_hash,
+                                AugmentationCandidate::FileScope(i),
+                            )
+                        })
+                        .peekable();
+                    let mut ordered =
+                        Vec::with_capacity(augmenters.entries.len() + contributors.entries.len());
+                    let mut ordering_work = 0;
+                    while let (Some(left), Some(right)) =
+                        (augmenter_rows.peek(), contributor_rows.peek())
+                    {
+                        ordering_work += 1;
+                        if (&left.1, &left.2) <= (&right.1, &right.2) {
+                            ordered.push(augmenter_rows.next().expect("peeked augmenter"));
+                        } else {
+                            ordered.push(contributor_rows.next().expect("peeked contributor"));
+                        }
+                    }
+                    ordered.extend(augmenter_rows);
+                    ordered.extend(contributor_rows);
+                    ordering_work += stable_rank_order(&mut ordered, |row| row.0);
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    self.ordering_work
+                        .fetch_add(ordering_work, Ordering::Relaxed);
+                    #[cfg(not(any(test, feature = "semantic-observe")))]
+                    let _ = ordering_work;
+                    #[cfg(any(test, feature = "semantic-observe"))]
+                    self.materialized_view_entries
+                        .fetch_add(ordered.len() as u64, Ordering::Relaxed);
+                    ordered
+                        .into_iter()
+                        .map(|(_, _, _, origin)| origin)
+                        .collect()
+                })
+                .value(),
+        );
+        (view, order)
     }
 
     fn lookup_spaces(
@@ -281,6 +534,45 @@ impl GlobalContributorPopulation {
             fingerprint,
         }
     }
+}
+
+/// Stable byte radix ordering of program-order ranks. The input's
+/// canonical/hash tie order survives; rank lookup and four fixed passes take
+/// linear work even when the program's file order is an arbitrary
+/// permutation.
+fn stable_rank_order<T: Clone>(entries: &mut [T], rank: impl Fn(&T) -> u32) -> u64 {
+    let mut positions: Vec<_> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| (rank(entry), i))
+        .collect();
+    let mut scratch = vec![(0u32, 0usize); entries.len()];
+    let mut work = entries.len() as u64;
+    for shift in [0, 8, 16, 24] {
+        let mut offsets = [0usize; 256];
+        for (rank, _) in &positions {
+            offsets[((rank >> shift) & 255) as usize] += 1;
+        }
+        let mut start = 0;
+        for offset in &mut offsets {
+            let count = *offset;
+            *offset = start;
+            start += count;
+        }
+        for &(rank, position) in &positions {
+            let bucket = ((rank >> shift) & 255) as usize;
+            scratch[offsets[bucket]] = (rank, position);
+            offsets[bucket] += 1;
+        }
+        std::mem::swap(&mut positions, &mut scratch);
+        work += 2 * entries.len() as u64 + 256;
+    }
+    let ordered: Vec<_> = positions
+        .iter()
+        .map(|(_, position)| entries[*position].clone())
+        .collect();
+    entries.clone_from_slice(&ordered);
+    work + 2 * entries.len() as u64
 }
 
 fn overlay_replacements<'a>(
@@ -419,7 +711,7 @@ pub struct GlobalContributorIndex {
     /// Drained from contribution collection, not from upsert, so fence
     /// flights stay cold.
     pending_overlay_ambient: parking_lot::Mutex<FxHashSet<Arc<str>>>,
-    /// Last fully scanned workspace snapshot revision. None forces a scan.
+    /// Last fully classified workspace snapshot revision; also serializes ingestion.
     ingested_snapshot_revision: parking_lot::Mutex<Option<u64>>,
     #[cfg(test)]
     publish_sorted_entries: AtomicU64,
@@ -500,12 +792,12 @@ impl GlobalContributorIndex {
         self.snapshot_scan_visits.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(crate) fn snapshot_revision_is_ingested(&self, revision: Option<u64>) -> bool {
-        revision.is_some() && *self.ingested_snapshot_revision.lock() == revision
+    pub(crate) fn snapshot_ingestion_cursor(&self) -> parking_lot::MutexGuard<'_, Option<u64>> {
+        self.ingested_snapshot_revision.lock()
     }
 
-    pub(crate) fn set_ingested_snapshot_revision(&self, revision: Option<u64>) {
-        *self.ingested_snapshot_revision.lock() = revision;
+    pub(crate) fn retract_pending_overlay_ambient(&self, canonical: &str) {
+        self.pending_overlay_ambient.lock().remove(canonical);
     }
 
     #[cfg(test)]
@@ -583,6 +875,9 @@ impl GlobalContributorIndex {
     }
 
     pub fn clear(&self) {
+        // Ingestion can publish/retract records while holding its cursor.
+        // Take the cursor first here too, so reset cannot invert that order.
+        let mut cursor = self.snapshot_ingestion_cursor();
         let _mutate = self.mutate.lock();
         let _guard = self.publish.lock();
         self.records.clear();
@@ -594,7 +889,7 @@ impl GlobalContributorIndex {
             Arc::new(FxHashMap::default()),
         ));
         self.revision.store(0, Ordering::Release);
-        *self.ingested_snapshot_revision.lock() = None;
+        *cursor = None;
         #[cfg(test)]
         self.publish_sorted_entries.store(0, Ordering::Relaxed);
     }

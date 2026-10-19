@@ -419,7 +419,10 @@ fn source_move_between_parse_facts_and_eval_source_never_serves_torn_identity() 
         .as_ref()
         .expect("IndexedReady export_signatures is source-bound");
     assert!(
-        Arc::ptr_eq(export_signatures, &indexed.snapshot.export_signatures),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(
+            export_signatures,
+            &indexed.snapshot.export_signatures
+        ),
         "snapshot and IndexedReady must share one export-signatures Arc"
     );
     let exports = export_names_of(&indexed.snapshot);

@@ -14,6 +14,14 @@ use crate::semantic_query::{
     SurfaceView,
 };
 
+/// Applicability is decided before a batch runs. A started batch either
+/// completes or returns its typed refusal; it never requests another route.
+pub(super) enum FiniteMappedIndexValues {
+    NotApplicable,
+    Complete(Vec<SemanticNodeId>),
+    Stopped(Box<QueryBuildOutput>),
+}
+
 /// Per-walk maximum frame-stack depth observed by
 /// [`expand_empty_path_shallow_terminal_surface`]. Used by
 /// [`probe_max_walker_frame_depth`] for the
@@ -92,7 +100,7 @@ pub(super) fn observe_typeof_internal_path_mode(mode: ProjectionMode) {
 pub fn probe_walk_typeof_internal_path_mode<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[crate::semantic_query::PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> Option<ProjectionMode> {
     LAST_WALK_TYPEOF_INTERNAL_PATH_MODE.with(|c| c.set(None));
@@ -115,7 +123,7 @@ pub fn probe_walk_typeof_internal_path_mode<C: crate::resolver_core::ResolverCap
 pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[crate::semantic_query::PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: crate::semantic_query::ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(None));
@@ -132,7 +140,7 @@ pub fn probe_walk_typeof_resolved<C: crate::resolver_core::ResolverCapabilities>
 /// Variants describe non-fatal observations (cycle short-circuits, open
 /// conditionals, pathological-input cap) so consumers can render
 /// human-readable messages without re-walking the graph.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub enum ShallowDiagnostic {
     /// The connected root demand exhausted its projection/evaluation work
     /// envelope while identities were still changing. This is operational
@@ -162,7 +170,7 @@ pub enum ShallowDiagnostic {
     /// distinguish missing declarations from budget exhaustion.
     InstantiationError {
         decl: DeclIdentity,
-        error: QueryError,
+        error: DiagnosticError,
     },
     /// Open conditional encountered at empty-path Shallow terminal —
     /// no branch was selected, so the walker yields the empty surface
@@ -196,8 +204,8 @@ pub enum ShallowDiagnostic {
     /// a root-level miss is the caller's missing-dependency channel and
     /// must not double-report.
     UnresolvedSurfaceArm {
-        name: Arc<str>,
-        owner_canonical: Arc<str>,
+        name: verter_session_query::retention::owned::OwnedStr,
+        owner_canonical: verter_session_query::retention::owned::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
     },
     /// A flow-bearing root whose reducer is still pending
@@ -221,6 +229,186 @@ pub enum ShallowDiagnostic {
         /// The check's target.
         target: SemanticNodeId,
     },
+}
+
+impl ShallowDiagnostic {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate. A consumer borrows this carrier from the lease that owns its graph operands; there is no public detached copy.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::ProjectionWorkLimit { root } => Self::ProjectionWorkLimit { root: root.clone() },
+            Self::ConnectedQueryDepthLimit { root } => {
+                Self::ConnectedQueryDepthLimit { root: root.clone() }
+            }
+            Self::ConnectedMemoryLimit { root } => {
+                Self::ConnectedMemoryLimit { root: root.clone() }
+            }
+            Self::DuplicateArmShortCircuited { node } => {
+                Self::DuplicateArmShortCircuited { node: node.clone() }
+            }
+            Self::CycleShortCircuited { node } => Self::CycleShortCircuited { node: node.clone() },
+            Self::CyclicInstantiation { decl } => Self::CyclicInstantiation { decl: decl.clone() },
+            Self::InstantiationError { decl, error } => Self::InstantiationError {
+                decl: decl.clone(),
+                error: error.clone(),
+            },
+            Self::OpenConditional { node } => Self::OpenConditional { node: node.clone() },
+            Self::PathologicalInput { root } => Self::PathologicalInput { root: root.clone() },
+            Self::UnionArmEmpty {
+                union_node,
+                arm_index,
+            } => Self::UnionArmEmpty {
+                union_node: union_node.clone(),
+                arm_index: arm_index.clone(),
+            },
+            Self::OpenSpreadProgram { node } => Self::OpenSpreadProgram { node: node.clone() },
+            Self::UnresolvedSurfaceArm {
+                name,
+                owner_canonical,
+                owner,
+            } => Self::UnresolvedSurfaceArm {
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
+                owner: owner.clone(),
+            },
+            Self::PendingFlowRoot { gap } => Self::PendingFlowRoot { gap: gap.clone() },
+            Self::RelationTooComplex { source, target } => Self::RelationTooComplex {
+                source: source.clone(),
+                target: target.clone(),
+            },
+        }
+    }
+}
+
+/// The walker diagnostics a read delivers.
+///
+/// A sealed, self-charged list: clones share one allocation and its one
+/// charge, released with the last handle, and the diagnostics are reachable
+/// only by borrow. Every empty list is the one process-static empty list,
+/// which no owner charges.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct WalkerDiagnostics(
+    verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>,
+);
+
+impl WalkerDiagnostics {
+    /// A list of `diagnostics`, in order.
+    #[must_use]
+    pub fn new(diagnostics: impl Into<Vec<ShallowDiagnostic>>) -> Self {
+        let diagnostics: Vec<ShallowDiagnostic> = diagnostics.into();
+        if diagnostics.is_empty() {
+            return crate::semantic_query_memo::empty_diagnostics();
+        }
+        Self(verter_session_query::retention::owned::Owned::new(
+            diagnostics.into_boxed_slice(),
+        ))
+    }
+
+    /// The process-static empty list. Only its static initialiser calls
+    /// this.
+    pub(crate) fn static_empty() -> Self {
+        Self(verter_session_query::retention::owned::Owned::new(
+            Box::new([]),
+        ))
+    }
+
+    /// The owned allocation behind a nonempty list; `None` for the static
+    /// empty list.
+    pub(crate) fn owned(
+        &self,
+    ) -> Option<&verter_session_query::retention::owned::Owned<Box<[ShallowDiagnostic]>>> {
+        (!self.is_empty()).then_some(&self.0)
+    }
+
+    /// Whether two lists share one allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        verter_session_query::retention::owned::Owned::ptr_eq(&this.0, &other.0)
+    }
+
+    /// Bytes this list's charge holds; `None` while no owner charged it.
+    #[must_use]
+    pub fn charge_bytes(&self) -> Option<usize> {
+        self.0.charge_bytes()
+    }
+}
+
+impl std::ops::Deref for WalkerDiagnostics {
+    type Target = [ShallowDiagnostic];
+    fn deref(&self) -> &[ShallowDiagnostic] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for WalkerDiagnostics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Default for WalkerDiagnostics {
+    fn default() -> Self {
+        crate::semantic_query_memo::empty_diagnostics()
+    }
+}
+
+impl From<Vec<ShallowDiagnostic>> for WalkerDiagnostics {
+    fn from(diagnostics: Vec<ShallowDiagnostic>) -> Self {
+        Self::new(diagnostics)
+    }
+}
+
+impl verter_session_query::retention::owned::Measured for ShallowDiagnostic {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        crate::semantic_query::allocation_footprint::OwnedHeap::owned_heap_bytes(self, aliases)
+    }
+}
+
+/// The query failure a diagnostic records. Consumers render it; its graph
+/// operands (a recursive back-edge's arguments) stay with the read that
+/// delivered the diagnostic, so the error has no public copy and no
+/// borrowed `QueryError` view to copy from.
+#[derive(PartialEq, Eq, Hash)]
+pub struct DiagnosticError(pub(crate) QueryError);
+
+impl DiagnosticError {
+    /// Record a fixture failure. Production diagnostics are minted by the
+    /// shallow walker.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn for_tests(error: QueryError) -> Self {
+        Self(error)
+    }
+
+    /// Whether the recorded failure is a fatal query-level failure.
+    #[must_use]
+    pub fn is_fatal(&self) -> bool {
+        is_fatal_query_error(&self.0)
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl std::fmt::Debug for DiagnosticError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
 impl ShallowDiagnostic {
@@ -302,9 +490,12 @@ pub struct QueryBuildOutput<T = SemanticNodeId> {
     /// through nested reads. Gates the component-meta + shape/materialize
     /// warm caches. The shared cold-build helper copies it onto the
     /// returned `CacheRead` so a partial's CLASS survives the query/build
-    /// boundary. [`Self::projection_fact`] reads it directly: the typed
-    /// fact is derived from this field, never from a parallel flag.
+    /// boundary. Memo settlement adopts the typed fact from this field and
+    /// the producer's interpretation, never from a parallel quality flag.
     pub completeness: crate::semantic_query::ResultCompleteness,
+    /// A bounded interpretation established by the producer's completed
+    /// structural outcome. Causes and incidental markers cannot mint one.
+    pub approximation: Option<super::projection_fact::ProjectionInterpretation>,
     /// The §18 provenance taint of this build's value: how trustworthy the
     /// inputs that produced it were. Defaults to
     /// [`ResultTaint::Clean`](crate::semantic_query::ResultTaint::Clean).
@@ -398,6 +589,7 @@ impl<T> From<(QueryResult<T>, DepSignature)> for QueryBuildOutput<T> {
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: crate::semantic_query::ResultCompleteness::Complete,
+            approximation: None,
             taint: crate::semantic_query::ResultTaint::Clean,
             observed_self_roots: Vec::new(),
             graph_carrier: None,
@@ -426,6 +618,7 @@ impl From<QueryBuildOutput<SemanticNodeId>>
             walker_diagnostics: output.walker_diagnostics,
             cache_suppress: output.cache_suppress,
             completeness: output.completeness,
+            approximation: output.approximation,
             taint: output.taint,
             observed_self_roots: output.observed_self_roots,
             graph_carrier: output.graph_carrier,
@@ -480,17 +673,6 @@ impl<T> QueryBuildOutput<T> {
         self.completeness = self.completeness.merge(other);
     }
 
-    /// Set partiality from a flag, keeping the classes already recorded
-    /// when it stays partial (a recomputed verdict).
-    #[inline]
-    pub fn set_partial(&mut self, partial: bool) {
-        self.completeness = if partial {
-            crate::semantic_query::ResultCompleteness::Partial(self.completeness.reasons())
-        } else {
-            crate::semantic_query::ResultCompleteness::Complete
-        };
-    }
-
     /// Fold a nested partiality flag in (never clears).
     #[inline]
     pub fn fold_partial(&mut self, partial: bool) {
@@ -508,12 +690,6 @@ impl<T> QueryBuildOutput<T> {
         }
     }
 
-    /// Replace the observed completeness outright (a recomputed verdict).
-    #[inline]
-    pub fn set_completeness(&mut self, completeness: crate::semantic_query::ResultCompleteness) {
-        self.completeness = completeness;
-    }
-
     pub fn map_result<U>(
         self,
         map: impl FnOnce(QueryResult<T>) -> QueryResult<U>,
@@ -524,6 +700,7 @@ impl<T> QueryBuildOutput<T> {
             walker_diagnostics: self.walker_diagnostics,
             cache_suppress: self.cache_suppress,
             completeness: self.completeness,
+            approximation: self.approximation,
             taint: self.taint,
             observed_self_roots: self.observed_self_roots,
             graph_carrier: self.graph_carrier,
@@ -606,7 +783,7 @@ enum SurfacelessWalk {
 /// for the type-resolution unification): named members PLUS call signatures,
 /// construct signatures, index signatures, and the keyspace. Members stay
 /// shallow — each `value` is a `SemanticNodeId`, never an expanded body.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct ShallowSurface {
     /// Resolver-ordered stream. This is the only ordering authority; the
     /// kind-specific vectors below are derived indexes.
@@ -624,12 +801,66 @@ pub struct ShallowSurface {
     pub keyspace: Option<SemanticNodeId>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl ShallowSurface {
+    /// A fixture copy. Test builds only: production consumers borrow the
+    /// carrier from the lease that owns its operands.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn copy_for_tests(&self) -> Self {
+        self.clone()
+    }
+
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            entries: self
+                .entries
+                .iter()
+                .map(ShallowSurfaceEntry::clone)
+                .collect(),
+            members: self
+                .members
+                .iter()
+                .map(ShallowSurfaceMember::clone)
+                .collect(),
+            call_signatures: self.call_signatures.clone(),
+            construct_signatures: self.construct_signatures.clone(),
+            index_signatures: self
+                .index_signatures
+                .iter()
+                .map(crate::semantic_query::IndexSignature::clone)
+                .collect(),
+            keyspace: self.keyspace.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum ShallowSurfaceEntry {
     Member(ShallowSurfaceMember),
     CallSignature(SemanticNodeId),
     ConstructSignature(SemanticNodeId),
     IndexSignature(crate::semantic_query::IndexSignature),
+}
+
+impl ShallowSurfaceEntry {
+    /// Copy inside the owning crate; there is no public detached copy of the graph operands it carries.
+    #[allow(
+        clippy::clone_on_copy,
+        reason = "an exhaustive field copy, so a new field cannot be skipped"
+    )]
+    pub(crate) fn clone(&self) -> Self {
+        match self {
+            Self::Member(v0) => Self::Member(v0.clone()),
+            Self::CallSignature(v0) => Self::CallSignature(v0.clone()),
+            Self::ConstructSignature(v0) => Self::ConstructSignature(v0.clone()),
+            Self::IndexSignature(v0) => Self::IndexSignature(v0.clone()),
+        }
+    }
 }
 
 /// One member contribution while the walker is merging arms. Carries the
@@ -643,7 +874,7 @@ pub enum ShallowSurfaceEntry {
 /// `merge_role` propagates the surface-merge role (OwnBody / Heritage /
 /// Authored) so the intersection merge can apply own-body-shadows-heritage
 /// ONLY to real interface/class heritage (not authored intersections).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ShallowSurfaceMember {
     pub key: crate::semantic_query::AuthoredPropertyKey,
     pub value: SemanticNodeId,
@@ -670,7 +901,7 @@ pub struct ShallowSurfaceMember {
     /// [`SurfaceMember::declaration_origin`] so the Shallow round-trip pairs
     /// the member's spans with its real declaration file (not its value-node
     /// scope).
-    pub declaration_origin: Option<Arc<str>>,
+    pub declaration_origin: Option<verter_type_expr::OwnedStr>,
     /// Excess-property provenance, carried verbatim from
     /// [`SurfaceMember::excess_origin`] through the walker's intermediate
     /// state so shallow projections round-trip it losslessly. A member
@@ -679,6 +910,27 @@ pub struct ShallowSurfaceMember {
     /// materialization; a verbatim single-source carry preserves the source
     /// origin.
     pub excess_origin: verter_type_expr::ExcessPropertyOrigin,
+}
+
+impl ShallowSurfaceMember {
+    /// Copy inside the owning crate; there is no public detached copy of the
+    /// graph operands a member carries.
+    pub(crate) fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value,
+            optional: self.optional,
+            readonly: self.readonly,
+            method_kind: self.method_kind,
+            has_implementation_body: self.has_implementation_body,
+            visibility: self.visibility,
+            declared_in_macro_type_arg: self.declared_in_macro_type_arg,
+            merge_role: self.merge_role,
+            spans: self.spans,
+            declaration_origin: self.declaration_origin.clone(),
+            excess_origin: self.excess_origin,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -740,7 +992,7 @@ impl ShallowSurface {
     /// signatures and the keyspace are carried verbatim so the empty-path
     /// Shallow projection no longer drops them.
     #[must_use]
-    pub fn from_object(view: &SurfaceView) -> Self {
+    pub(crate) fn from_object(view: &SurfaceView) -> Self {
         let entries = view
             .entries
             .iter()
@@ -797,7 +1049,10 @@ pub(crate) fn presence_intersection_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -814,7 +1069,9 @@ pub(crate) fn presence_intersection_members(
     match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -835,7 +1092,10 @@ pub(crate) fn presence_union_members(
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
-        return only.clone();
+        return only
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect();
     }
     let arm_surfaces: Vec<Option<ShallowSurface>> = arm_members
         .iter()
@@ -852,7 +1112,9 @@ pub(crate) fn presence_union_members(
     match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
-            .to_vec(),
+            .iter()
+            .map(crate::semantic_query::SurfaceMember::clone)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -961,7 +1223,7 @@ struct CompositeJoin {
     slot: usize,
     node: SemanticNodeId,
     arms: Arc<[SemanticNodeId]>,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     index: usize,
 }
 
@@ -1000,7 +1262,7 @@ enum CompositeHop {
 enum WalkFrame {
     Step {
         node: SemanticNodeId,
-        path: Arc<[PathSegment]>,
+        path: verter_type_expr::OwnedSlice<PathSegment>,
         index: usize,
         /// The union or intersection split this step is an arm of, and how
         /// it reads the segment there.
@@ -1058,7 +1320,7 @@ enum WalkFrame {
 /// fallen back to a deferred Mapped shell instead of substituting
 /// `K = 1.5`.
 enum LiteralKey {
-    String(Arc<str>),
+    String(verter_type_expr::OwnedStr),
     Number(f64),
 }
 
@@ -1071,10 +1333,16 @@ enum LiteralKey {
 /// `AliasResolve`, `ConditionalSelect`) as the walker descends. The
 /// caller emits the whole-path `ProjectPath` edge after the walk finishes.
 /// Numeric demand a pending path segment places on a tuple / array
-/// base: a concrete integer position or the broad `number` key.
+/// base: a concrete integer position, a negative integer key, or the broad
+/// `number` key.
 #[derive(Debug, Clone, Copy)]
 enum NumericIndexDemand {
     Position(usize),
+    /// A negative integer key (`T[-1]`): no tuple position. The checker
+    /// reads it through the number index, except that an access written
+    /// over a single tuple without a rest element recovers to `undefined`
+    /// beside its TS2514 error — a context this walker cannot see.
+    Negative,
     BroadNumber,
 }
 
@@ -1106,7 +1374,7 @@ struct WalkPrefixes<'a, 'b> {
     /// Open until the walk leaves its linear run; the receipts it sealed stay.
     recording: Option<crate::project_semantic_dispatch::connected_demand::PrefixRecording<'a, 'b>>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     receipts: Vec<Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>>,
 }
 
@@ -1171,6 +1439,12 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// class is not laundered into the anonymous bridge on its way out of
     /// the walk. One field is the authority for both facts.
     pub(super) completeness: crate::semantic_query::ResultCompleteness,
+    /// The value returned by an adopted child with a positional producer
+    /// guarantee. Only returning this same terminal can forward that guarantee.
+    positional_child_terminal: Option<SemanticNodeId>,
+    /// Every incomplete dependency must supply its own positional guarantee.
+    /// Local stops and unavailable reads invalidate terminal forwarding.
+    positional_children_supported: bool,
     /// `true` when any nested contribution during this walk was an open /
     /// multi-alternative construction program (or a failed program
     /// projection) — see [`ShallowDiagnostic::OpenSpreadProgram`]. The
@@ -1179,6 +1453,8 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// absence of every omitted key); it returns the walk's root node as
     /// the typed open evidence instead.
     open_spread_partial: bool,
+    /// A contributing root whose domain could not be evaluated. It is not an empty arm.
+    surface_failure: Option<QueryError>,
     /// `true` when this walk projects a NON-EMPTY path (the caller
     /// requested `base[seg..]`), as opposed to an EMPTY whole-surface
     /// projection (`ProjectPath(base, [])`). Set once in [`Self::walk`].
@@ -1195,20 +1471,22 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// apparent-wrapper read on the way is scoped to that file's project, so
     /// the entry's key names the project it read
     /// ([`Self::apparent_wrapper_read`]).
-    origin_file: Option<Arc<str>>,
+    origin_file: Option<verter_type_expr::OwnedStr>,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
-    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-    /// `Object` node. Each contributor's surface is extracted (an interface
-    /// body is an `Object`; an interface-with-`extends` body is an
-    /// `Intersection` whose own/heritage arms reduce via the intersection
-    /// merge first), then all contributors peer-merge via
-    /// [`merge_declaration_surfaces`]. This is the single declaration-merge
-    /// reducer every MergedDecl consumer (raise / expand / keyof / relation)
-    /// routes through.
-    pub fn reduce_merged_decl(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
-        reduce_merged_decl_with_graph(self.graph(), contributors)
+    construction_ordinal_seam! {
+        /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+        /// `Object` node. Each contributor's surface is extracted (an interface
+        /// body is an `Object`; an interface-with-`extends` body is an
+        /// `Intersection` whose own/heritage arms reduce via the intersection
+        /// merge first), then all contributors peer-merge via
+        /// [`merge_declaration_surfaces`]. This is the single declaration-merge
+        /// reducer every MergedDecl consumer (raise / expand / keyof / relation)
+        /// routes through.
+        fn reduce_merged_decl(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
+            reduce_merged_decl_with_graph(self.graph(), contributors)
+        }
     }
 }
 
@@ -1217,7 +1495,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDi
 /// [`merge_declaration_surfaces_core`]: the graph reducer interns it into an
 /// `Object`, the display projection renders it directly. Neither side
 /// re-implements the peer-merge precedence.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclSurface {
     pub(crate) members: Vec<MergedDeclMember>,
     pub(crate) call_signatures: Vec<SemanticNodeId>,
@@ -1235,7 +1513,7 @@ pub(crate) struct MergedDeclSurface {
 /// graph reducer interns a multi-value method group into an overload group
 /// `Intersection`; the display projection renders it as a property holding
 /// that intersection — both yield the identical surface.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct MergedDeclMember {
     pub(crate) member: ShallowSurfaceMember,
     pub(crate) values: Vec<SemanticNodeId>,
@@ -1246,59 +1524,61 @@ pub(crate) struct MergedDeclMember {
 /// `extends`/`implements` HERITAGE reference arms plus the peer-merged own-body
 /// surface. Mirrors the graph reducer's `Intersection([heritage…, own_object])`
 /// shape so the read-only display projection renders byte-identically.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct MergedDeclDisplaySurface {
     pub(crate) heritage_arms: Vec<SemanticNodeId>,
     pub(crate) own_surface: MergedDeclSurface,
 }
 
-/// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
-/// node (graph-only entry point; the dispatch method delegates here).
-///
-/// Each contributor body is split into its OWN-body surface(s) and its
-/// `extends`/`implements` HERITAGE arms:
-/// * an interface body with no heritage is a bare `Object` — its members are
-///   own-body;
-/// * an interface-with-`extends` body is an `Intersection` whose `Object`
-///   arm(s) are own-body and whose remaining (reference) arms are heritage.
-///
-/// All contributors' own-body surfaces peer-merge via
-/// [`merge_declaration_surfaces`] (member union + ordered method overload
-/// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
-/// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
-/// consumer paths (raise / expand / walk-segment / relation) resolve the
-/// heritage references lazily and apply own-body-shadows-heritage precedence
-/// (the own `Object` arm is last). When a contributor has no heritage the
-/// result is the peer-merged `Object` directly. This keeps a single
-/// declaration-merge engine and a single heritage-resolution path — the reducer
-/// never eagerly expands a heritage `Ref`.
-pub fn reduce_merged_decl_with_graph(
-    graph: &SemanticGraphStore,
-    contributors: &[SemanticNodeId],
-) -> SemanticNodeId {
-    let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
-    let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
-    for contributor in contributors {
-        collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+construction_ordinal_seam! {
+    /// Reduce a [`SemanticNodeData::MergedDecl`] carrier to a single peer-merged
+    /// node (graph-only entry point; the dispatch method delegates here).
+    ///
+    /// Each contributor body is split into its OWN-body surface(s) and its
+    /// `extends`/`implements` HERITAGE arms:
+    /// * an interface body with no heritage is a bare `Object` — its members are
+    ///   own-body;
+    /// * an interface-with-`extends` body is an `Intersection` whose `Object`
+    ///   arm(s) are own-body and whose remaining (reference) arms are heritage.
+    ///
+    /// All contributors' own-body surfaces peer-merge via
+    /// [`merge_declaration_surfaces`] (member union + ordered method overload
+    /// accumulation). Heritage arms are PRESERVED, not flattened here: the reducer
+    /// emits `Intersection([heritage…, peer_merged_own_Object])` so the existing
+    /// consumer paths (raise / expand / walk-segment / relation) resolve the
+    /// heritage references lazily and apply own-body-shadows-heritage precedence
+    /// (the own `Object` arm is last). When a contributor has no heritage the
+    /// result is the peer-merged `Object` directly. This keeps a single
+    /// declaration-merge engine and a single heritage-resolution path — the reducer
+    /// never eagerly expands a heritage `Ref`.
+    fn reduce_merged_decl_with_graph(
+        graph: &SemanticGraphStore,
+        contributors: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        let mut own_surfaces: Vec<ShallowSurface> = Vec::with_capacity(contributors.len());
+        let mut heritage_arms: Vec<SemanticNodeId> = Vec::new();
+        for contributor in contributors {
+            collect_merged_contributor_arms(graph, *contributor, &mut own_surfaces, &mut heritage_arms);
+        }
+        let merged = merge_declaration_surfaces(graph, &own_surfaces);
+        let own_object =
+            graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
+        if heritage_arms.is_empty() {
+            return own_object;
+        }
+        // Preserve heritage: own-body object LAST so the intersection heritage-shadow
+        // reducer lets the merged own members shadow inherited same-name members.
+        // A HERITAGE body: arm order is own-body-last topology and rendered
+        // type-text fidelity — never the commutative canonical route — and its
+        // signatures inherit by concatenation, own first.
+        let mut arms = heritage_arms;
+        arms.push(own_object);
+        graph.intern_node(SemanticNodeData::Intersection(
+            crate::semantic_query::composite::CompositeList::heritage(Arc::from(
+                arms.into_boxed_slice(),
+            )),
+        ))
     }
-    let merged = merge_declaration_surfaces(graph, &own_surfaces);
-    let own_object =
-        graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
-    if heritage_arms.is_empty() {
-        return own_object;
-    }
-    // Preserve heritage: own-body object LAST so the intersection heritage-shadow
-    // reducer lets the merged own members shadow inherited same-name members.
-    // A HERITAGE body: arm order is own-body-last topology and rendered
-    // type-text fidelity — never the commutative canonical route — and its
-    // signatures inherit by concatenation, own first.
-    let mut arms = heritage_arms;
-    arms.push(own_object);
-    graph.intern_node(SemanticNodeData::Intersection(
-        crate::semantic_query::composite::CompositeList::heritage(Arc::from(
-            arms.into_boxed_slice(),
-        )),
-    ))
 }
 
 /// Compute the peer-merged declaration surface for display without interning
@@ -1519,6 +1799,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Mark the walk partial and union `reasons` into its classes (an
     /// empty set is a genuine unclassified partial).
     fn mark_partial_with(&mut self, reasons: crate::semantic_query::PartialReasonSet) {
+        self.positional_children_supported = false;
         self.completeness = self
             .completeness
             .merge(crate::semantic_query::ResultCompleteness::Partial(reasons));
@@ -1534,7 +1815,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     pub(super) fn record_prefix_receipts(
         &mut self,
         base: SemanticNodeId,
-        path: &Arc<[PathSegment]>,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
     ) {
         if path.len() < 2 {
             return;
@@ -1545,7 +1826,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .map(|recording| WalkPrefixes {
                 recording: Some(recording),
                 base,
-                path: Arc::clone(path),
+                path: path.clone(),
                 receipts: Vec::new(),
             });
     }
@@ -1582,13 +1863,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
         let key = SemanticQueryKey::ProjectPath {
             base: prefixes.base,
-            path: Arc::from(prefixes.path[..=index].to_vec().into_boxed_slice()),
+            path: verter_type_expr::OwnedSlice::from(
+                prefixes.path[..=index].to_vec().into_boxed_slice(),
+            ),
             context: crate::semantic_query::ProjectionReductionContext::published(
                 ProjectionMode::Navigate,
             ),
         };
         let identity = crate::project_semantic_dispatch::cost_receipt::CostIdentity::of_producer(
-            crate::semantic_query_memo::prepared::PreparedKeyHandle::prepare(key)
+            self.dispatch
+                .graph()
+                .prepare_rooted_key(key)
                 .as_task_producer(),
         );
         let request = crate::request_context::current_request_budget();
@@ -1615,7 +1900,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             walker_diagnostics: Vec::new(),
             cache_suppress: false,
             completeness: crate::semantic_query::ResultCompleteness::Complete,
+            positional_child_terminal: None,
+            positional_children_supported: true,
             open_spread_partial: false,
+            surface_failure: None,
             original_path_non_empty: false,
             origin_file: None,
         }
@@ -1680,6 +1968,30 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         self.dispatch.opaque(QueryError::Miss)
     }
 
+    fn preserve_deferred_path(&self, base: SemanticNodeId, path: &[PathSegment]) -> SemanticNodeId {
+        // Member navigation carrier-stops on an open surface. Authored indexed
+        // accesses retain their operation and every subsequent path segment.
+        if !matches!(path.first(), Some(PathSegment::Index(_))) {
+            return base;
+        }
+        path.iter().fold(base, |object, segment| {
+            let index = match segment {
+                PathSegment::Index(key) => key.clone(),
+                PathSegment::Member(key) => match key {
+                    crate::semantic_query::PropertyKey::String(text) => {
+                        IndexKey::String(text.clone())
+                    }
+                    crate::semantic_query::PropertyKey::Number(number) => IndexKey::Number(*number),
+                    crate::semantic_query::PropertyKey::UniqueSymbol(symbol) => {
+                        IndexKey::UniqueSymbol(symbol.clone())
+                    }
+                },
+            };
+            self.graph()
+                .intern_preserving_scope(base, SemanticNodeData::IndexedAccess { object, index })
+        })
+    }
+
     /// The type an indexed access reads off the index signatures
     /// `signatures` for a key no property names — the index step of
     /// TypeScript's `getPropertyTypeForIndexType` over
@@ -1739,8 +2051,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .and_then(|scope| scope.canonical_file());
         // One entry per index key type: a union key type declares one
         // index signature per constituent, as the checker splits it.
-        let mut string_values: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
-        let mut applicable: Vec<(SemanticNodeId, Option<Arc<str>>)> = Vec::new();
+        let mut string_values: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> =
+            Vec::new();
+        let mut applicable: Vec<(SemanticNodeId, Option<verter_type_expr::OwnedStr>)> = Vec::new();
         for signature in signatures {
             let origin = signature
                 .declaration_origin
@@ -1961,7 +2274,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// Whether `node` is a surface every member of which is known and none
     /// of which is named `name` (in either element-access spelling).
     fn surface_proves_absent(&self, node: SemanticNodeId, name: &PropertyKey) -> bool {
-        let Some(SemanticNodeData::Object(view)) = self.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::Object(view)) = self
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(crate::semantic_query::SemanticNodeData::clone)
         else {
             return false;
         };
@@ -2012,7 +2329,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             edge_kind,
             Arc::from(vec![object].into_boxed_slice()),
             meta,
-            Arc::clone(self.fence),
+            self.fence.clone(),
         );
         self.record_intermediate(Some(value));
         value
@@ -2024,7 +2341,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match segment {
             PathSegment::Member(key) => OwnedIndexAccessKey::Name(key.clone()),
             PathSegment::Index(IndexKey::String(value)) => {
-                OwnedIndexAccessKey::Name(PropertyKey::String(Arc::clone(value)))
+                OwnedIndexAccessKey::Name(PropertyKey::String(value.clone()))
             }
             PathSegment::Index(IndexKey::Number(value)) => {
                 OwnedIndexAccessKey::Name(PropertyKey::Number(*value))
@@ -2274,7 +2591,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     self.visited_nodes.remove(&surface);
                     frames.push(WalkFrame::Step {
                         node: surface,
-                        path: Arc::clone(&join.path),
+                        path: join.path.clone(),
                         index: join.index,
                         arm_read: Some(ArmRead {
                             at: join.index,
@@ -2361,7 +2678,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         if !is_union {
             return probes
                 .iter()
-                .flat_map(|probe| probe.view.index_signatures.iter().cloned())
+                .flat_map(|probe| {
+                    probe
+                        .view
+                        .index_signatures
+                        .iter()
+                        .map(crate::semantic_query::IndexSignature::clone)
+                })
                 .collect();
         }
         let Some((first, rest)) = probes.split_first() else {
@@ -2371,7 +2694,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             view.index_signatures
                 .iter()
                 .find(|signature| self.index_key_types(signature.key_type).contains(&key_type))
-                .cloned()
+                .map(crate::semantic_query::IndexSignature::clone)
         };
         let mut signatures = Vec::new();
         for signature in first.view.index_signatures.iter() {
@@ -2456,22 +2779,74 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         key: SemanticQueryKey,
     ) -> QueryResult<SemanticNodeId> {
         let read = self.dispatch.execute_read(key);
-        if read.result_is_partial {
-            self.mark_partial_with(read.partial_reason_classes());
+        if read.result_is_partial() {
+            match (&read.value, read.fact_status.interpretation()) {
+                (
+                    QueryResult::Value(node),
+                    Some(super::projection_fact::ProjectionInterpretation::Positional),
+                ) => {
+                    self.completeness = self.completeness.merge(
+                        crate::semantic_query::ResultCompleteness::Partial(
+                            read.partial_reason_classes(),
+                        ),
+                    );
+                    self.positional_child_terminal = Some(*node);
+                }
+                _ => self.mark_partial_with(read.partial_reason_classes()),
+            }
+        }
+        if matches!(
+            read.fact_status,
+            crate::semantic_query::FactStatus::Unavailable(_)
+        ) {
+            self.positional_children_supported = false;
         }
         read.value
     }
 
+    fn resolve_carrier_subject(
+        &mut self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        let resolved = self.dispatch.resolve_carrier_subject_fact(node, context);
+        if !resolved.status.is_complete() {
+            if resolved.status.interpretation()
+                == Some(super::projection_fact::ProjectionInterpretation::Positional)
+            {
+                self.completeness = self.completeness.merge(resolved.status.completeness());
+                self.positional_child_terminal = Some(resolved.node);
+            } else {
+                self.mark_partial_with(resolved.status.completeness().reasons());
+            }
+        }
+        resolved.node
+    }
+
+    /// Forward an adopted child's guarantee only when the completed walk
+    /// returns that child's actual value and adopted no unsupported partial.
+    pub(super) fn completed_child_interpretation(
+        &self,
+        terminal: SemanticNodeId,
+    ) -> Option<super::projection_fact::ProjectionInterpretation> {
+        (self.positional_children_supported
+            && self.positional_child_terminal == Some(terminal)
+            && self.surface_failure.is_none()
+            && !self.open_spread_partial)
+            .then_some(super::projection_fact::ProjectionInterpretation::Positional)
+    }
+
     /// Classify a pending path segment as a numeric tuple/array demand:
     /// a concrete integer position (`T[0]`, `T['1']`, `T[index-node
-    /// normalising to an integer literal]`) or the broad `number` key
-    /// (`T[number]`). Returns `None` for every non-numeric segment —
-    /// member names, string keys, negative / fractional positions, and
-    /// symbolic index nodes that do not settle to a numeric domain.
+    /// normalising to an integer literal]`), a negative integer key
+    /// (`T[-1]`) or the broad `number` key (`T[number]`). Returns
+    /// `None` for every non-numeric segment — member names, string keys,
+    /// fractional positions, and symbolic index nodes that do not settle to
+    /// a numeric domain.
     fn classify_numeric_index_segment(&self, segment: &PathSegment) -> Option<NumericIndexDemand> {
         let key = match segment {
             PathSegment::Index(IndexKey::Number(n)) => IndexKey::Number(*n),
-            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(Arc::clone(s)),
+            PathSegment::Index(IndexKey::String(s)) => IndexKey::String(s.clone()),
             PathSegment::Index(IndexKey::UniqueSymbol(identity)) => {
                 IndexKey::UniqueSymbol(identity.clone())
             }
@@ -2481,9 +2856,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             PathSegment::Member(_) => return None,
         };
         match key {
-            IndexKey::Number(n) => usize::try_from(n.get())
-                .ok()
-                .map(NumericIndexDemand::Position),
+            // The sign alone decides a negative key; a position wider than
+            // the target's `usize` is past every element a tuple can hold.
+            IndexKey::Number(n) => Some(match n.get() {
+                key if key < 0 => NumericIndexDemand::Negative,
+                key => NumericIndexDemand::Position(usize::try_from(key).unwrap_or(usize::MAX)),
+            }),
             // TS coerces only CANONICAL numeric string keys
             // (`String(Number(s)) === s`): `T["0"]` projects position 0,
             // but `T["01"]` / `T["+1"]` / `T["1.0"]` are NOT numeric keys.
@@ -2516,6 +2894,440 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> SemanticNodeId {
         self.dispatch
             .optional_member_read(value, optional, declaring_file)
+    }
+
+    /// The shared known-member read for a single projection and a finite
+    /// batch. A batch supplies one index over the surface; visibility,
+    /// accessor, overload and optional-property rules are identical.
+    fn known_member_read(
+        &self,
+        object: SemanticNodeId,
+        surface: &SurfaceView,
+        key: &crate::semantic_query::PropertyKey,
+        index: Option<&crate::semantic_query::SurfaceKeyIndex<'_>>,
+        index_read: bool,
+    ) -> Option<SemanticNodeId> {
+        let cached_index = (index.is_none()
+            && surface.positive_members().len()
+                > crate::semantic_query_memo::member_index::MEMBER_ORDINAL_INDEX_LINEAR_SCAN_MAX)
+            .then(|| {
+                surface.key_index_from_ordinals(self.graph().member_ordinal_index(object, surface))
+            });
+        let index = index.or(cached_index.as_ref());
+        let overloads = match index {
+            Some(index) => index.project_known_key_overload_group(key),
+            None => surface.project_known_key_overload_group(key),
+        };
+        if let Some(signatures) = overloads {
+            return Some(self.graph().intern_node(SemanticNodeData::Object(
+                crate::semantic_query::surface_view! {
+                    members: Arc::from([]),
+                    call_signatures: Arc::from(signatures.into_boxed_slice()),
+                    construct_signatures: Arc::from([]),
+                    index_signatures: Arc::from([]),
+                    keyspace: None,
+                    has_index_signature: false,
+                },
+            )));
+        }
+        let accessor = match index {
+            Some(index) => index.project_known_key_accessor(key),
+            None => surface.project_known_key_accessor(key),
+        };
+        if let Some(accessor) = accessor {
+            return accessor.read_value(self.graph(), |signature| {
+                self.dispatch.materialize_returned_callable(signature)
+            });
+        }
+        let member = match index {
+            Some(index) => index.project_known_key(key),
+            None => surface.project_known_key(key),
+        };
+        match member {
+            crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                if member.visibility.is_public() =>
+            {
+                let object_scope = self
+                    .graph()
+                    .node_scope(object)
+                    .and_then(|scope| scope.canonical_file());
+                Some(if index_read {
+                    self.index_read(
+                        member.value,
+                        member.optional,
+                        member
+                            .declaration_origin
+                            .as_deref()
+                            .or(object_scope.as_deref()),
+                    )
+                } else {
+                    member.value
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// A mapped member read at one key under the mapping's optionality
+    /// modifier. `source_optional` reads the source member's authored
+    /// optionality at that key (`None` when no single member answers); a
+    /// batch answers it from one index over the source surface.
+    fn mapped_index_read(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        source_optional: impl Fn() -> Option<bool>,
+    ) -> SemanticNodeId {
+        let (value, optional) = match mapper.optionality {
+            crate::semantic_query::OptionalityMod::Add => (value, true),
+            crate::semantic_query::OptionalityMod::Keep => (value, source_optional() == Some(true)),
+            crate::semantic_query::OptionalityMod::Remove => (
+                self.dispatch.mapped_member_optionality_with(
+                    mapper,
+                    value,
+                    source,
+                    source_optional,
+                ),
+                false,
+            ),
+        };
+        let source_file = self
+            .graph()
+            .node_scope(source)
+            .and_then(|scope| scope.canonical_file());
+        self.index_read(
+            value,
+            optional,
+            source_file.as_deref().or(self.origin_file.as_deref()),
+        )
+    }
+
+    /// Project a finite key set from an already reduced object in one pass.
+    /// Unknown keys retain the ordinary walker path (including index signatures).
+    pub(super) fn finite_mapped_index_values(
+        &mut self,
+        object: SemanticNodeId,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        keys: &[IndexKey],
+        index_node: SemanticNodeId,
+    ) -> FiniteMappedIndexValues {
+        if mapper.name_remap.is_some()
+            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+            || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
+        {
+            return FiniteMappedIndexValues::NotApplicable;
+        }
+        // A homomorphic primitive/array/tuple is mapped by its container owner.
+        if mapper.over_type_variable {
+            let subject = match self.dispatch.normalize_node_for_structural_fact_demand(
+                source,
+                self.context
+                    .into_structural_transit_with_mode(ProjectionMode::Navigate),
+            ) {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => node,
+                super::evaluate::StructuralFactDemandOutcome::Recovered { reasons, .. }
+                | super::evaluate::StructuralFactDemandOutcome::Partial(reasons) => {
+                    return self.stop_finite_mapped_batch(object, index_node, reasons)
+                }
+            };
+            if !matches!(
+                self.graph().node_data(subject).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            ) {
+                return FiniteMappedIndexValues::NotApplicable;
+            }
+        }
+        // Prove membership once for the whole finite batch. A dictionary,
+        // remapping or open domain retains the ordinary per-key walker.
+        let domain_read = self
+            .dispatch
+            .observe_read(|| self.dispatch.key_space_domain(mapper.key_space));
+        let completion = domain_read.result_completeness();
+        let domain = match domain_read.adopt(self.dispatch) {
+            Ok(domain) if !completion.is_partial() => domain,
+            _ => return self.stop_finite_mapped_batch(object, index_node, completion.reasons()),
+        };
+        let Some(domain) = domain else {
+            return FiniteMappedIndexValues::NotApplicable;
+        };
+        if !domain.is_finite() {
+            return FiniteMappedIndexValues::NotApplicable;
+        }
+        if !keys.iter().all(|key| match key {
+            IndexKey::String(name) => {
+                domain.membership(&PropertyKey::String(name.clone())) == Some(true)
+            }
+            _ => false,
+        }) {
+            return FiniteMappedIndexValues::NotApplicable;
+        }
+        self.original_path_non_empty = true;
+        self.origin_file = self
+            .graph()
+            .node_scope(object)
+            .and_then(|scope| scope.canonical_file());
+        // Every key reads the source's authored modifier; one index over the
+        // source surface keeps the whole batch linear in its key count.
+        let source_read = self
+            .dispatch
+            .observe_read(|| self.dispatch.mapped_source_object(source));
+        let completion = source_read.result_completeness();
+        let source_object = match source_read.adopt(self.dispatch) {
+            Ok(source) if !completion.is_partial() => source,
+            _ => return self.stop_finite_mapped_batch(object, index_node, completion.reasons()),
+        };
+        let source_data = source_object.and_then(|source| self.graph().node_data(source));
+        let source_index = match source_data.as_deref() {
+            Some(SemanticNodeData::Object(surface)) => Some(
+                surface.key_index_from_ordinals(
+                    self.graph()
+                        .member_ordinal_index(source_object.expect("object view"), surface),
+                ),
+            ),
+            _ => None,
+        };
+        let source_reads = if source_index.is_some() {
+            match self.dispatch.mapped_index_source_reads(
+                mapper,
+                source,
+                source_object.expect("source view"),
+            ) {
+                Ok(reads) => reads,
+                Err(reasons) => return self.stop_finite_mapped_batch(object, index_node, reasons),
+            }
+        } else {
+            Vec::new()
+        };
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Err(reasons) = self.dispatch.charge_connected_work() {
+                return self.stop_finite_mapped_batch(object, index_node, reasons);
+            }
+            let IndexKey::String(name) = key else {
+                unreachable!("finite string keys checked above")
+            };
+            let property = PropertyKey::String(verter_type_expr::OwnedStr::from(name));
+            let source_optional = || match source_index.as_ref()?.project_known_key(&property) {
+                crate::semantic_query::SurfaceKeyProjection::Exact(member) => Some(member.optional),
+                crate::semantic_query::SurfaceKeyProjection::AbsentProven => None,
+            };
+            let argument = self.graph().intern_node(SemanticNodeData::Literal(
+                crate::semantic_query::LiteralValue::String(name.to_string()),
+            ));
+            let mut selected_mapper = mapper.clone();
+            // An accessor read infers its getter's return. That demand
+            // belongs only to a branch that selects the read, so the
+            // ordinary evaluator reads accessors lazily.
+            let accessor_read = source_index
+                .as_ref()
+                .is_some_and(|index| index.project_known_key_accessor(&property).is_some());
+            if !source_reads.is_empty() && !accessor_read {
+                let (Some(SemanticNodeData::Object(surface)), Some(index), Some(source_object)) =
+                    (source_data.as_deref(), source_index.as_ref(), source_object)
+                else {
+                    unreachable!("prepared source reads retain their indexed view")
+                };
+                let Some(read_value) =
+                    self.known_member_read(source_object, surface, &property, Some(index), true)
+                else {
+                    let miss = QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::Miss),
+                        self.fence.clone(),
+                    ));
+                    return self.stop_finite_mapped_with(miss, object, index_node);
+                };
+                // A prepared read carries the same polymorphic receiver as
+                // the ordinary single-member projection.
+                let read_value = if self.dispatch.is_this_receiver(source) {
+                    self.dispatch.bind_callee_receiver(read_value, source)
+                } else {
+                    read_value
+                };
+                self.graph().record_origin_edge(
+                    read_value,
+                    OriginEdgeKind::ProjectIndex,
+                    Arc::from([source, source_object, argument]),
+                    OriginMeta::Index(key.clone()),
+                    self.fence.clone(),
+                );
+                for &read in &source_reads {
+                    selected_mapper.value_expr = self.dispatch.substitute_semantic_type_param(
+                        selected_mapper.value_expr,
+                        read,
+                        read_value,
+                    );
+                }
+            }
+            let value = self.dispatch.materialize_mapped_index_value_outcome(
+                &selected_mapper,
+                argument,
+                // Selected values use the same publication context as
+                // ordinary single-key projection, including its structural
+                // provenance and authored merge role.
+                self.context_from_template(
+                    crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+                ),
+            );
+            let output = value.into_query_build_output(self.dispatch);
+            if output.completeness.is_partial() {
+                self.cache_suppress |= output.cache_suppress;
+                return self.stop_finite_mapped_batch(
+                    object,
+                    index_node,
+                    output.completeness.reasons(),
+                );
+            }
+            self.cache_suppress |= output.cache_suppress;
+            let value = match output.result {
+                QueryResult::Value(value) => value,
+                _ => return self.stop_finite_mapped_with(output, object, index_node),
+            };
+            let value = self.mapped_index_read(mapper, value, source, source_optional);
+            self.graph().record_origin_edge(
+                value,
+                OriginEdgeKind::ProjectIndex,
+                Arc::from([object, source, mapper.key_space]),
+                OriginMeta::Index(key.clone()),
+                self.fence.clone(),
+            );
+            self.visited_aliases.clear();
+            self.visited_nodes.clear();
+            let value = self.finish_path_terminal(value);
+            if self.completeness.is_partial() {
+                return self.stop_finite_mapped_batch(
+                    object,
+                    index_node,
+                    self.completeness.reasons(),
+                );
+            }
+            if matches!(
+                self.graph().node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            ) {
+                let miss = QueryBuildOutput::from((
+                    QueryResult::Error(QueryError::Miss),
+                    self.fence.clone(),
+                ));
+                return self.stop_finite_mapped_with(miss, object, index_node);
+            }
+            values.push(value);
+        }
+        FiniteMappedIndexValues::Complete(values)
+    }
+
+    /// A batch that stops on a direct result keeps the state earlier keys
+    /// collected: completeness, cache suppression, diagnostics and roots.
+    fn stop_finite_mapped_with(
+        &mut self,
+        output: QueryBuildOutput,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+    ) -> FiniteMappedIndexValues {
+        let mut output = output.with_observed_self_roots(
+            self.dispatch
+                .observed_self_roots_from_nodes([object, index]),
+        );
+        output.merge_completeness(self.completeness);
+        output.cache_suppress |= self.cache_suppress;
+        output
+            .walker_diagnostics
+            .append(&mut self.walker_diagnostics);
+        FiniteMappedIndexValues::Stopped(Box::new(output))
+    }
+
+    fn stop_finite_mapped_batch(
+        &mut self,
+        object: SemanticNodeId,
+        index: SemanticNodeId,
+        reasons: crate::semantic_query::PartialReasonSet,
+    ) -> FiniteMappedIndexValues {
+        let reasons = if reasons.is_empty() {
+            crate::semantic_query::PartialReasonSet::PROPAGATED
+        } else {
+            reasons
+        };
+        self.mark_partial_with(reasons);
+        let carrier = self.graph().intern_preserving_scope(
+            object,
+            SemanticNodeData::IndexedAccess {
+                object,
+                index: IndexKey::Computed(index),
+            },
+        );
+        let mut output = QueryBuildOutput::from((QueryResult::Value(carrier), self.fence.clone()))
+            .with_observed_self_roots(
+                self.dispatch
+                    .observed_self_roots_from_nodes([object, index]),
+            );
+        output.merge_completeness(self.completeness);
+        output.cache_suppress = true;
+        output.walker_diagnostics = std::mem::take(&mut self.walker_diagnostics);
+        FiniteMappedIndexValues::Stopped(Box::new(output))
+    }
+
+    /// Project a finite key set from an already reduced object in one pass.
+    /// Unknown keys retain the ordinary walker path (including index signatures).
+    pub(super) fn finite_object_index_values(
+        &mut self,
+        subject: SemanticNodeId,
+        object: SemanticNodeId,
+        surface: &SurfaceView,
+        keys: &[IndexKey],
+    ) -> Option<Vec<SemanticNodeId>> {
+        self.original_path_non_empty = true;
+        self.origin_file = self
+            .graph()
+            .node_scope(subject)
+            .and_then(|scope| scope.canonical_file());
+        let index = surface.key_index();
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            if let Err(reasons) = self.dispatch.charge_connected_work() {
+                self.mark_partial_with(reasons);
+                return None;
+            }
+            let known = match key {
+                IndexKey::String(value) => {
+                    crate::semantic_query::PropertyKey::String(value.clone())
+                }
+                IndexKey::Number(value) => crate::semantic_query::PropertyKey::Number(*value),
+                IndexKey::UniqueSymbol(value) => {
+                    crate::semantic_query::PropertyKey::UniqueSymbol(value.clone())
+                }
+                IndexKey::Computed(_) => return None,
+            };
+            values.push(self.known_member_read(object, surface, &known, Some(&index), true)?);
+        }
+        for (key, value) in keys.iter().zip(&values) {
+            self.graph().record_origin_edge(
+                *value,
+                OriginEdgeKind::ProjectIndex,
+                Arc::from([object]),
+                OriginMeta::Index(key.clone()),
+                self.fence.clone(),
+            );
+        }
+        let values: Vec<_> = values
+            .into_iter()
+            .map(|value| {
+                // Each key is an independent path. A declaration expanded
+                // for another key is not a recursive edge on this one.
+                self.visited_aliases.clear();
+                self.visited_nodes.clear();
+                self.finish_path_terminal(value)
+            })
+            .collect();
+        if values.iter().any(|value| {
+            matches!(
+                self.graph().node_data(*value).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::Miss))
+            )
+        }) {
+            return None;
+        }
+        Some(values)
     }
 
     /// The apparent wrapper surface a primitive, an array or a tuple reads
@@ -2575,8 +3387,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ///   `element.value` is returned). On a rest-bearing tuple, fixed
     ///   positions STRICTLY BEFORE the rest start resolve exactly (tsgo:
     ///   `[string, ...number[]][0]` = `string`); positions AT/AFTER the
-    ///   rest start have suffix-dependent arithmetic this walker does not
-    ///   guess → `None` (honest miss). Out-of-range → `None`.
+    ///   rest start read every element from the rest start on. A position
+    ///   past the end of a tuple without a rest element reads `undefined`
+    ///   (the checker's `getTupleElementTypeOutOfStartCount`, beside its
+    ///   TS2493 error).
+    /// - `Negative`: on a tuple with a rest element, the `BroadNumber`
+    ///   read — the tuple's number index, which the checker reads in every
+    ///   context. On a tuple without one, `None`: the checker answers
+    ///   `undefined` for an access written over that single tuple (its
+    ///   TS2514 recovery) and the number index for an instantiated one
+    ///   (`Last<["a", "b"]>` over `X[-1]`) or a union member, and this
+    ///   walker sees neither the access nor the whole object.
     /// - `BroadNumber`: the renormalised union of every element's
     ///   contribution — optional slots add `undefined`, a rest element
     ///   contributes its array ELEMENT type (an unresolved rest carrier
@@ -2609,10 +3430,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                 }
-                let element = elements.get(position)?;
-                Some(self.index_read(element.value, element.optional, declaring_file))
+                Some(match elements.get(position) {
+                    Some(element) => {
+                        self.index_read(element.value, element.optional, declaring_file)
+                    }
+                    None => self
+                        .graph()
+                        .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined)),
+                })
             }
-            NumericIndexDemand::BroadNumber => {
+            NumericIndexDemand::Negative if !elements.iter().any(|element| element.rest) => None,
+            NumericIndexDemand::Negative | NumericIndexDemand::BroadNumber => {
                 let mut arms: Vec<SemanticNodeId> = Vec::with_capacity(elements.len() + 1);
                 for element in elements {
                     if element.rest {
@@ -2672,7 +3500,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 canonical_id,
                 name,
                 ..
-            }) => Some((Arc::clone(canonical_id), Arc::clone(name))),
+            }) => Some((
+                std::sync::Arc::<str>::from(canonical_id.as_str()),
+                std::sync::Arc::<str>::from(name.as_str()),
+            )),
             _ => None,
         }
     }
@@ -2701,7 +3532,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .graph()
             .node_scope(base)
             .and_then(|scope| scope.canonical_file());
-        let initial_path: Arc<[PathSegment]> = Arc::from(path.to_vec().into_boxed_slice());
+        let initial_path: verter_type_expr::OwnedSlice<PathSegment> =
+            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice());
         let mut frames: Vec<WalkFrame> = vec![WalkFrame::Step {
             node: base,
             path: initial_path,
@@ -2774,7 +3606,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn advance_step(
         &mut self,
         start_node: SemanticNodeId,
-        path: &Arc<[PathSegment]>,
+        path: &verter_type_expr::OwnedSlice<PathSegment>,
         start_index: usize,
         arm_read: Option<ArmRead>,
         frames: &mut Vec<WalkFrame>,
@@ -2782,7 +3614,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) {
         if !self.visited_nodes.insert(start_node) {
             results.push(self.dispatch.opaque(QueryError::AliasCycle {
-                chain: Arc::from(Vec::<Arc<str>>::new()),
+                chain: verter_type_expr::OwnedSlice::from(Vec::<Arc<str>>::new()),
             }));
             return;
         }
@@ -2814,8 +3646,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         while index < path.len() {
             if cap_active && index >= budget {
                 results.push(self.dispatch.opaque(QueryError::RecursiveRef {
-                    name: Arc::from("depth-budget-exceeded"),
-                    args: Arc::from([]),
+                    name: verter_type_expr::OwnedStr::from("depth-budget-exceeded"),
+                    args: Default::default(),
                 }));
                 return;
             }
@@ -2838,7 +3670,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 SemanticNodeData::MergedDecl { contributors } => {
                     // Reduce the peer-merged surface and re-process the current
                     // segment against the merged object.
-                    let contributors = contributors.clone();
+                    let contributors = contributors.share();
                     drop(data);
                     current = self.dispatch.reduce_merged_decl(&contributors);
                     continue;
@@ -2847,7 +3679,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(value.clone())
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -2996,7 +3828,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         edge_kind,
                         Arc::from([current]),
                         meta,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = member_value;
                     index += 1;
@@ -3006,7 +3838,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let known_key = match segment {
                         PathSegment::Member(key) => key.clone(),
                         PathSegment::Index(IndexKey::String(value)) => {
-                            crate::semantic_query::PropertyKey::String(Arc::clone(value))
+                            crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(value))
                         }
                         PathSegment::Index(IndexKey::Number(value)) => {
                             crate::semantic_query::PropertyKey::Number(*value)
@@ -3125,72 +3957,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // type plus `undefined` (`index_read`); a property
                     // navigation step reads the declared type alone.
                     let index_read = matches!(segment, PathSegment::Index(_));
-                    let object_scope = self
-                        .graph()
-                        .node_scope(current)
-                        .and_then(|scope| scope.canonical_file());
-                    // An ACCESSOR is a property: its read is the accessor's
-                    // VALUE type (the getter's return, else the setter's
-                    // parameter), whichever of a get/set pair came first.
-                    let graph = self.dispatch.graph();
-                    let first_wins = |needle: &crate::semantic_query::PropertyKey| {
-                        if let Some(accessor) = surface.project_known_key_accessor(needle) {
-                            return accessor.read_value(graph);
-                        }
-                        match surface.project_known_key(needle) {
-                            crate::semantic_query::SurfaceKeyProjection::Exact(member)
-                                if member.visibility.is_public() =>
-                            {
-                                Some(if index_read {
-                                    self.index_read(
-                                        member.value,
-                                        member.optional,
-                                        member
-                                            .declaration_origin
-                                            .as_deref()
-                                            .or(object_scope.as_deref()),
-                                    )
-                                } else {
-                                    member.value
-                                })
-                            }
-                            _ => None,
-                        }
-                    };
-                    // Element access coerces a numeric key to its canonical
-                    // string spelling and vice versa (JS property identity);
-                    // `keyof` keeps the authored variant. Both projections
-                    // retry through the equivalent spelling.
-                    let equivalent = known_key.element_access_equivalent();
-                    let overload_group = surface
-                        .project_known_key_overload_group(&known_key)
-                        .or_else(|| {
-                            equivalent.as_ref().and_then(|equivalent| {
-                                surface.project_known_key_overload_group(equivalent)
-                            })
-                        });
-                    let member = match overload_group {
-                        Some(signatures) => Some(self.dispatch.graph().intern_node(
-                            crate::semantic_query::SemanticNodeData::Object(
-                                crate::semantic_query::surface_view! {
-                                    members: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-                                    call_signatures: std::sync::Arc::from(
-                                        signatures.into_boxed_slice(),
-                                    ),
-                                    construct_signatures: std::sync::Arc::from(
-                                        Vec::new().into_boxed_slice(),
-                                    ),
-                                    index_signatures: std::sync::Arc::from(
-                                        Vec::new().into_boxed_slice(),
-                                    ),
-                                    keyspace: None,
-                                    has_index_signature: false,
-                                },
-                            ),
-                        )),
-                        None => first_wins(&known_key)
-                            .or_else(|| equivalent.as_ref().and_then(first_wins)),
-                    };
+                    let member = self.known_member_read(current, surface, &known_key, None, index_read)
+                        .or_else(|| known_key.element_access_equivalent().as_ref().and_then(|equivalent| {
+                            self.known_member_read(current, surface, equivalent, None, index_read)
+                        }));
                     match member {
                         Some(member_value) => {
                             let meta = match segment {
@@ -3209,7 +3979,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_value;
                             index += 1;
@@ -3326,7 +4096,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // ([`Self::composite_hop`]). A union that is itself an
                     // arm of a split reports so, and its composite reads it
                     // flattened.
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     if Self::reports_at(arm_read, index).is_some() {
                         self.note_composite_arm(arm_read, index, current);
@@ -3343,7 +4113,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     slot,
                                     node: current,
                                     arms: arms.members_arc(),
-                                    path: Arc::clone(path),
+                                    path: path.clone(),
                                     index,
                                 }),
                             )
@@ -3359,7 +4129,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
-                            path: Arc::clone(&remaining_path),
+                            path: remaining_path.clone(),
                             index,
                             arm_read: Some(ArmRead {
                                 at: index,
@@ -3387,19 +4157,48 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // intersection ([`Self::composite_hop`]).
                     let heritage = arms.origin_category()
                         == crate::semantic_query::composite::CompositeOriginCategory::Heritage;
-                    let arms = arms.clone();
+                    let arms = arms.share();
                     drop(data);
                     let mut restricted = arm_read.filter(|read| read.at == index);
                     if heritage {
+                        // A served declaration's own member shadows its bases.
+                        // Its selected value depends on that header, not on a
+                        // coarse probe of every inherited member value.
                         let key = self.owned_index_access_key(segment);
-                        if let Some((view, composed)) =
-                            self.dispatch.resolve_typeinfo_surface_view_with_node(
-                                current,
-                                crate::semantic_query::ProjectionReductionContext::published(
-                                    ProjectionMode::Shallow,
-                                ),
-                            )
-                        {
+                        if let IndexAccessKey::Name(name) = key.borrowed() {
+                            let own = arms.iter().find_map(|arm| {
+                                let data = self.graph().node_data(*arm)?;
+                                let SemanticNodeData::Object(view) = data.as_ref() else { return None; };
+                                match view.project_known_key(name) {
+                                    crate::semantic_query::SurfaceKeyProjection::Exact(member)
+                                        if member.merge_role == crate::semantic_query::MemberMergeRole::OwnBody => Some((*arm, view.clone())),
+                                    _ => None,
+                                }
+                            });
+                            if let Some((owner, view)) = own {
+                                // Select through the shared member reader: an own
+                                // header still carries accessor, overload and visibility
+                                // semantics, while unrelated bases remain unobserved.
+                                let Some(selected) = self.known_member_read(owner, &view, name, None,
+                                    matches!(segment, PathSegment::Index(_))) else {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                };
+                                current = self.step_through_index_signature(current, selected, segment);
+                                index += 1;
+                                self.record_intermediate(Some(current));
+                                continue;
+                            }
+                        }
+                    }
+                    if heritage {
+                        let key = self.owned_index_access_key(segment);
+                        let probe = self.dispatch.observe_read(|| self.dispatch.resolve_typeinfo_surface_view_with_node(
+                            current, crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow),
+                        ));
+                        let complete = probe.observations_are_complete();
+                        let surface = if complete { probe.adopt(self.dispatch).ok().flatten() } else { let _ = probe.discard(); None };
+                        if let Some((view, composed)) = surface {
                             let declared = match key.borrowed() {
                                 IndexAccessKey::Name(name) => {
                                     !self.surface_view_proves_absent(&view, name)
@@ -3451,7 +4250,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     slot,
                                     node: current,
                                     arms: arms.members_arc(),
-                                    path: Arc::clone(path),
+                                    path: path.clone(),
                                     index,
                                 }),
                             )
@@ -3467,7 +4266,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     for (arm_index, arm) in arms.iter().enumerate() {
                         frames.push(WalkFrame::Step {
                             node: *arm,
-                            path: Arc::clone(&remaining_path),
+                            path: remaining_path.clone(),
                             index,
                             arm_read: Some(ArmRead {
                                 at: index,
@@ -3510,12 +4309,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         false,
                     );
                     let distributive = *distributive;
-                    let rest_path: Arc<[PathSegment]> =
-                        Arc::from(path[index..].to_vec().into_boxed_slice());
+                    let rest_path: verter_type_expr::OwnedSlice<PathSegment> =
+                        verter_type_expr::OwnedSlice::from(path[index..].to_vec().into_boxed_slice());
                     let true_projection =
                         self.execute_read_folding_partial(SemanticQueryKey::ProjectPath {
                             base: true_branch,
-                            path: Arc::clone(&rest_path),
+                            path: rest_path.clone(),
                             context: self.context_from_template(
                                 crate::semantic_query::ProjectionReductionContext::published(
                                     self.mode(),
@@ -3553,7 +4352,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::ConditionalSelect,
                         Arc::from(vec![check, extends].into_boxed_slice()),
                         OriginMeta::Branch(BranchSelection::Deferred),
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     self.graph().record_conditional_deferred();
                     results.push(wrapper);
@@ -3617,12 +4416,45 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             }
                         };
                     if resolved == current {
-                        results.push(current);
+                        results.push(self.preserve_deferred_path(current, &path[index..]));
+                        self.record_intermediate(None);
                         return;
                     }
                     current = resolved;
                 }
                 SemanticNodeData::Mapped { source, mapper } => {
+                    // Homomorphic arrays and tuples carry element layout and
+                    // optionality; their owner maps the container before a
+                    // selected element is read as an ordinary tuple/array hop.
+                    if mapper.over_type_variable && mapper.name_remap.is_none() {
+                        let subject = self.dispatch.resolve_signature_source_carrier(
+                            *source,
+                            self.context
+                                .into_structural_transit_with_mode(ProjectionMode::Navigate),
+                        );
+                        if matches!(
+                            self.graph().node_data(subject).as_deref(),
+                            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. })
+                        ) {
+                            let resolved = match self.execute_read_folding_partial(
+                                SemanticQueryKey::MappedType {
+                                    source: *source,
+                                    mapper: mapper.clone(),
+                                    context: self.context,
+                                },
+                            ) {
+                                QueryResult::Value(value) => value,
+                                _ => {
+                                    results.push(self.opaque_miss());
+                                    return;
+                                }
+                            };
+                            if resolved != current {
+                                current = resolved;
+                                continue;
+                            }
+                        }
+                    }
                     // Operator-level Mapped narrowing: when the walker
                     // has a literal key segment and the mapper has no
                     // name remap, close the selected key directly
@@ -3682,7 +4514,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         match next_segment {
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::String(name),
-                            )) => (Some(LiteralKey::String(Arc::clone(name))), true),
+                            )) => (Some(LiteralKey::String(name.clone())), true),
                             Some(PathSegment::Member(
                                 crate::semantic_query::PropertyKey::Number(number),
                             )) => (Some(LiteralKey::Number(number.get() as f64)), false),
@@ -3690,7 +4522,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 crate::semantic_query::PropertyKey::UniqueSymbol(_),
                             )) => (None, false),
                             Some(PathSegment::Index(IndexKey::String(s))) => {
-                                (Some(LiteralKey::String(Arc::clone(s))), true)
+                                (Some(LiteralKey::String(s.clone())), true)
                             }
                             Some(PathSegment::Index(IndexKey::Number(n))) => {
                                 // G4.4: integer-convention recovery.
@@ -3729,7 +4561,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             Some(PathSegment::Index(IndexKey::Computed(node))) => {
                                 match self.dispatch.normalized_index_key_node(*node) {
                                     IndexKey::String(text) => {
-                                        (Some(LiteralKey::String(Arc::clone(&text))), true)
+                                        (Some(LiteralKey::String(text.clone())), true)
                                     }
                                     IndexKey::Number(number) => {
                                         // `normalized_index_key_node`
@@ -3775,7 +4607,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                             Some(SemanticNodeData::Literal(
                                                 crate::semantic_query::LiteralValue::String(s),
                                             )) => (
-                                                Some(LiteralKey::String(Arc::<str>::from(
+                                                Some(LiteralKey::String(verter_type_expr::OwnedStr::from(
                                                     s.as_str(),
                                                 ))),
                                                 true,
@@ -3855,7 +4687,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     vec![current, *source, mapper.key_space].into_boxed_slice(),
                                 ),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = narrowed;
                             index += 1;
@@ -3890,7 +4722,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // bound) — fall back to the coarse path which
                     // produces a deferred shell re-dispatched once the
                     // domain becomes enumerable.
-                    let key_admission: MappedKeyAdmission =
+                    let mut key_admission: MappedKeyAdmission =
                         literal_key.as_ref().map_or(MappedKeyAdmission::Undecided, |key| {
                             // For Tier 1/2 enumerable lookups, both string
                             // and numeric segments compare against textual
@@ -3910,7 +4742,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             // under their canonical names.
                             let needle_key = match key {
                                 LiteralKey::String(s) => {
-                                    crate::semantic_query::PropertyKey::String(Arc::clone(s))
+                                    crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(s))
                                 }
                                 LiteralKey::Number(n) => {
                                     crate::semantic_query::PropertyKey::from_js_number(*n)
@@ -4066,6 +4898,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 MappedKeyAdmission::Undecided
                             }
                         });
+                    // A named member of a homomorphic dictionary still belongs
+                    // to its constraint. Resolve only the source's shallow
+                    // surface when non-emitting admission cannot decide it.
+                    if matches!(key_admission, MappedKeyAdmission::Undecided)
+                        && mapper.name_remap.is_none()
+                        && matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == *source)
+                    {
+                        if let Some(literal_key) = literal_key.as_ref() {
+                        let subject = self.dispatch.resolve_signature_source_carrier(
+                            *source,
+                            self.context.into_structural_transit_with_mode(ProjectionMode::Shallow),
+                        );
+                        let needle = match literal_key {
+                            LiteralKey::String(name) => PropertyKey::string_literal(name.as_ref()),
+                            LiteralKey::Number(number) => PropertyKey::from_js_number(*number),
+                        };
+                        if let Some(admits) = self.dispatch.base_member_admission_non_emitting(subject, &needle) {
+                            key_admission = if admits { MappedKeyAdmission::Admitted } else { MappedKeyAdmission::AbsentProven };
+                        }
+                        }
+                    }
                     // A CLOSED key domain that provably does not contain the
                     // demanded literal has already answered the demand: the
                     // member is absent, and the key-absent sentinel is the
@@ -4091,37 +4945,36 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         results.push(self.opaque_miss());
                         return;
                     }
+                    let nonliteral_key_arg = if literal_key.is_none() && mapper.name_remap.is_none() {
+                        match next_segment {
+                            Some(PathSegment::Index(key)) => self.dispatch
+                                .mapped_nonliteral_index_argument(mapper.key_space, key),
+                            Some(PathSegment::Member(
+                                crate::semantic_query::PropertyKey::UniqueSymbol(identity),
+                            )) => self.dispatch.mapped_nonliteral_index_argument(
+                                mapper.key_space,
+                                &IndexKey::UniqueSymbol(identity.clone()),
+                            ),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
                     let can_narrow = literal_key.is_some()
                         && mapper.name_remap.is_none()
                         && matches!(key_admission, MappedKeyAdmission::Admitted);
-                    if can_narrow {
-                        let key = literal_key.expect("literal_key is_some checked above");
-                        // Preserve string-vs-number literal kind through
-                        // substitution. `M['1']` and `M[1]` are
-                        // semantically distinct keys; the substituted
-                        // K must carry the originating segment's kind
-                        // so any value expression that depends on K
-                        // (identity mapping, `K extends ...`, template
-                        // literal positions, …) instantiates with the
-                        // correct LiteralValue variant.
-                        let key_literal_value = match &key {
-                            LiteralKey::String(s) => {
-                                crate::semantic_query::LiteralValue::String(s.as_ref().to_string())
-                            }
-                            // `LiteralKey::Number` already carries the
-                            // recovered f64 (construction sites pick
-                            // the convention-specific bits→f64 vs
-                            // int→f64 conversion). Intern the matching
-                            // `LiteralValue::Number` variant — `M[1]`
-                            // substitutes K = `Literal::Number(1)`,
-                            // NOT `Literal::String("1")`.
-                            LiteralKey::Number(n) => {
-                                crate::semantic_query::LiteralValue::Number(*n)
-                            }
+                    if can_narrow || nonliteral_key_arg.is_some() {
+                        let key_arg = if let Some(key_arg) = nonliteral_key_arg {
+                            key_arg
+                        } else {
+                            // Preserve the admitted literal's kind when binding
+                            // K: a numeric key substitutes its number, not text.
+                            let literal = match literal_key.expect("literal admission checked above") {
+                                LiteralKey::String(text) => crate::semantic_query::LiteralValue::String(text.as_ref().to_string()),
+                                LiteralKey::Number(number) => crate::semantic_query::LiteralValue::Number(number),
+                            };
+                            self.graph().intern_node(SemanticNodeData::Literal(literal))
                         };
-                        let key_arg = self
-                            .graph()
-                            .intern_node(SemanticNodeData::Literal(key_literal_value));
                         // An Identity mapper's per-key value IS
                         // `source[K]` by definition — dispatch it
                         // through the shared `IndexedAccess` query
@@ -4143,17 +4996,27 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         let value =
                             if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
                                 let source = *source;
-                                match self.execute_read_folding_partial(
-                                    SemanticQueryKey::IndexedAccess {
-                                        base: source,
-                                        index: IndexKey::Computed(key_arg),
-                                        mode: self.mode(),
-                                    },
-                                ) {
-                                    QueryResult::Value(id) => id,
-                                    _ => {
-                                        results.push(self.opaque_miss());
-                                        return;
+                                // Removing optionality consumes the authored
+                                // value before a member read adds absence. This
+                                // preserves explicit undefined in exact mode.
+                                let stored = (mapper.optionality == crate::semantic_query::OptionalityMod::Remove)
+                                    .then(|| self.dispatch.mapped_source_member(source, key_arg))
+                                    .flatten();
+                                if let Some(member) = stored {
+                                    member.value
+                                } else {
+                                    match self.execute_read_folding_partial(
+                                        SemanticQueryKey::IndexedAccess {
+                                            base: source,
+                                            index: IndexKey::Computed(key_arg),
+                                            mode: self.mode(),
+                                        },
+                                    ) {
+                                        QueryResult::Value(id) => id,
+                                        _ => {
+                                            results.push(self.opaque_miss());
+                                            return;
+                                        }
                                     }
                                 }
                             } else {
@@ -4186,9 +5049,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     ),
                                 )
                             };
-                        let value = self
-                            .dispatch
-                            .mapped_member_optionality(mapper, value, *source, key_arg);
+                        let value = self.mapped_index_read(mapper, value, *source, || {
+                            self.dispatch
+                                .mapped_source_member(*source, key_arg)
+                                .map(|member| member.optional)
+                        });
                         // Emit the per-key edge mirroring
                         // `build_mapped_type`'s ProjectMember edge so
                         // downstream origin-graph consumers see the
@@ -4209,7 +5074,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current, *source, mapper.key_space].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = value;
                         index += 1;
@@ -4236,24 +5101,24 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let source = *source;
                     let mapper = mapper.clone();
                     let mapped_mode = self.mode();
-                    let resolved =
-                        match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
-                            source,
-                            mapper,
-                            context: self.context_from_template(
-                                crate::semantic_query::ProjectionReductionContext::published(
-                                    mapped_mode,
-                                ),
-                            ),
-                        }) {
-                            QueryResult::Value(id) => id,
-                            _ => {
-                                results.push(self.opaque_miss());
-                                return;
-                            }
-                        };
+                    let resolved = match self.execute_read_folding_partial(SemanticQueryKey::MappedType {
+                        source,
+                        mapper,
+                        context: self.context_from_template(
+                            crate::semantic_query::ProjectionReductionContext::published(mapped_mode),
+                        ),
+                    }) {
+                        QueryResult::Value(id) => id,
+                        _ => {
+                            results.push(self.opaque_miss());
+                            return;
+                        }
+                    };
                     if resolved == current {
-                        results.push(current);
+                        // A deferred mapping has not consumed the pending
+                        // access. Preserve that operation for later substitution.
+                        results.push(self.preserve_deferred_path(current, &path[index..]));
+                        self.record_intermediate(None);
                         return;
                     }
                     current = resolved;
@@ -4297,7 +5162,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let typeof_context = self.context;
                     let typeof_key = self.dispatch.typeof_key_with_path(
                         value_root.clone(),
-                        Arc::clone(&typeof_path),
+                        typeof_path.clone(),
                         typeof_context,
                     );
                     let mut resolved = match self.execute_read_folding_partial(typeof_key) {
@@ -4332,10 +5197,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         };
                         let mut extended = typeof_path.to_vec();
-                        extended.push(member);
+                        extended.push(verter_type_expr::OwnedStr::from(member));
                         let member_key = self.dispatch.typeof_key_with_path(
                             value_root,
-                            Arc::from(extended.into_boxed_slice()),
+                            verter_type_expr::OwnedSlice::from(extended.into_boxed_slice()),
                             typeof_context,
                         );
                         current = match self.execute_read_folding_partial(member_key) {
@@ -4390,7 +5255,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     .collect::<Vec<_>>()
                                     .into_boxed_slice(),
                             );
-                            results.push(self.dispatch.opaque(QueryError::AliasCycle { chain }));
+                            results.push(self.dispatch.opaque(QueryError::AliasCycle { chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain) }));
                             return;
                         }
                         self.visited_aliases.push(identity);
@@ -4400,7 +5265,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         OriginEdgeKind::AliasResolve,
                         Arc::from(vec![current].into_boxed_slice()),
                         OriginMeta::None,
-                        Arc::clone(self.fence),
+                        self.fence.clone(),
                     );
                     current = target_id;
                     // Do not consume a segment; we unwrapped an alias.
@@ -4428,14 +5293,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     whole_hash: _,
                 }) => {
                     let base = self.dispatch.type_slot_for(
-                        Arc::clone(canonical_id),
+                        canonical_id.clone(),
                         *owner,
-                        Arc::clone(name),
+                        name.clone(),
                     );
                     let inst_ctx = self.dispatch.instantiate_context_for(
                         canonical_id,
                         self.context.into_structural_transit_with_mode(
-                            ProjectionMode::Shallow,
+                            ProjectionMode::Navigate,
                         ),
                     );
                     drop(data);
@@ -4479,12 +5344,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // site but transparent through alias chains during walk.
                 SemanticNodeData::DeclRef { identity } => {
                     let scope = ScopeId {
-                        canonical_id: Arc::clone(&identity.canonical_id),
+                        canonical_id: identity.canonical_id.clone(),
                         owner: identity.owner,
                         local_scope: None,
                         binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                     };
-                    let name = Arc::clone(&identity.decl_name);
+                    let name = identity.decl_name.clone();
                     drop(data);
                     let resolved = match self.execute_read_folding_partial(
                         SemanticQueryKey::ResolveDecl(ResolveDeclKey { scope, name }),
@@ -4572,17 +5437,26 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let identity = self
                         .dispatch
                         .type_slot_for(
-                            Arc::clone(&base.canonical_id),
+                            base.canonical_id.clone(),
                             base.owner,
-                            Arc::clone(&base.decl_name),
+                            base.decl_name.clone(),
                         );
-                    let args_clone = Arc::clone(args);
+                    let args_clone = Arc::clone(args.as_arc());
                     drop(data);
                     if let Some(callee_arg) = flow_member_arg {
                         if let Some(member_node) = self
                             .dispatch
-                            .flow_return_member_projection(callee_arg, &path[index])
+                            .flow_return_member_read(callee_arg, &path[index])
                         {
+                            let member_node = match member_node {
+                                super::flow_return::FlowMemberHop::Value(value) => value,
+                                super::flow_return::FlowMemberHop::AbsentSurface(surface) => {
+                                    // Resume ordinary apparent/index lookup using its exact
+                                    // negative own-key fact, without consuming sibling values.
+                                    current = surface;
+                                    continue;
+                                }
+                            };
                             let meta = match &path[index] {
                                 PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
                                 PathSegment::Member(key) => OriginMeta::ProjectedMember {
@@ -4599,7 +5473,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 edge_kind,
                                 Arc::from([current]),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = member_node;
                             index += 1;
@@ -4629,7 +5503,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // 62-edge leak in `compute_evaluated_types`.
                     let unwrap_context = if still_more_path {
                         self.context
-                            .into_structural_transit_with_mode(ProjectionMode::Shallow)
+                            .into_structural_transit_with_mode(ProjectionMode::Navigate)
                     } else {
                         self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(
@@ -4686,7 +5560,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // empty). `length` is the tuple's possible lengths;
                     // any other key is a member of the tuple's apparent
                     // `Array`.
-                    let elements = elements.clone();
+                    let elements = elements.share();
                     drop(data);
                     let member = self.dispatch.apparent_member_name(segment);
                     if member.as_deref() == Some("length") {
@@ -4708,7 +5582,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             edge_kind,
                             Arc::from(vec![current].into_boxed_slice()),
                             meta,
-                            Arc::clone(self.fence),
+                            self.fence.clone(),
                         );
                         current = length;
                         index += 1;
@@ -4787,10 +5661,30 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     }
                                 }
                             }
+                            // Past the end of a tuple without a rest
+                            // element the composite reads its number index,
+                            // which an unsettled wrapper leaves unknown: the
+                            // lone tuple's `undefined` is not that read.
+                            if matches!(demand, Some(NumericIndexDemand::Position(_)))
+                                && fixed == elements.len()
+                            {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
                         }
                     }
+                    // A negative key over a composite this tuple is an arm
+                    // of reads the composite's number index: the checker's
+                    // TS2514 recovery needs the whole object to be one tuple.
+                    let in_composite = arm_read.is_some_and(|read| read.at == index);
                     let projected = self
                         .classify_numeric_index_segment(segment)
+                        .map(|demand| match demand {
+                            NumericIndexDemand::Negative if in_composite => {
+                                NumericIndexDemand::BroadNumber
+                            }
+                            demand => demand,
+                        })
                         .and_then(|demand| {
                             let declaring_file = self
                                 .graph()
@@ -4812,7 +5706,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = value;
                             index += 1;
@@ -4876,7 +5770,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
                                 meta,
-                                Arc::clone(self.fence),
+                                self.fence.clone(),
                             );
                             current = element;
                             index += 1;
@@ -4901,7 +5795,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // fallback below.
                 SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                     drop(data);
-                    let resolved = self.dispatch.resolve_carrier_subject_node(
+                    let resolved = self.resolve_carrier_subject(
                         current,
                         self.context_from_template(
                             crate::semantic_query::ProjectionReductionContext::published(
@@ -4938,6 +5832,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         }
                     }
+                }
+                SemanticNodeData::Primitive(PrimitiveKind::Never) => {
+                    // The empty type absorbs every remaining projection hop.
+                    results.push(current);
+                    return;
                 }
                 // A primitive's members are its apparent wrapper's
                 // (`string['length']` is `String['length']`, `number`),
@@ -4982,6 +5881,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
             }
         }
+        results.push(self.finish_path_terminal(current));
+    }
+
+    fn finish_path_terminal(&mut self, mut current: SemanticNodeId) -> SemanticNodeId {
         // A projected member that is its declaration's self-reference
         // (`Chain['next']`) is the application it records, under every
         // mode — the terminal rules below then treat it like any other
@@ -5066,7 +5969,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // execution, and carrier-preserving on failure.
             current = self.resolve_navigate_terminal_reference_identity(current);
         }
-        results.push(current);
+        current
     }
 
     /// Resolve a NON-EMPTY-path terminal carrier under `Expanded`.
@@ -5093,14 +5996,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         match &*data {
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
                         identity.owner,
                     ),
                 };
-                let name = Arc::clone(&identity.decl_name);
+                let name = identity.decl_name.clone();
                 drop(data);
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey { scope, name },
@@ -5117,13 +6020,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
                 let carrier_mode = self.mode();
                 drop(data);
                 let inst_base = self.dispatch.type_slot_for(
-                    Arc::clone(&identity.canonical_id),
+                    identity.canonical_id.clone(),
                     identity.owner,
-                    Arc::clone(&identity.decl_name),
+                    identity.decl_name.clone(),
                 );
                 let inst_context = self.dispatch.instantiate_context_for(
                     &identity.canonical_id,
@@ -5156,7 +6059,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // rule, mirroring the `DeclRef` arm's Error fallback above.
             SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
                 drop(data);
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     node,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(self.mode()),
@@ -5169,11 +6072,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // opaque (a genuine `Miss`, a recursive back-edge, …) keeps
                 // the shallow carrier per the shallow-by-default rule.
                 if resolved == node
-                    || matches!(
-                        self.graph().node_data(resolved).as_deref(),
-                        Some(SemanticNodeData::Opaque(err))
-                            if !matches!(err, QueryError::DeclPlaceholder { .. })
-                    )
+                    || (self.completed_child_interpretation(resolved).is_none()
+                        && matches!(
+                            self.graph().node_data(resolved).as_deref(),
+                            Some(SemanticNodeData::Opaque(err))
+                                if !matches!(err, QueryError::DeclPlaceholder { .. })
+                        ))
                 {
                     node
                 } else {
@@ -5209,7 +6113,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {}
             _ => return node,
         }
-        let resolved = self.dispatch.resolve_carrier_subject_node(
+        let resolved = self.resolve_carrier_subject(
             node,
             self.context_from_template(
                 crate::semantic_query::ProjectionReductionContext::published(
@@ -5312,7 +6216,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let shape = match self.graph().node_data(value).as_deref() {
             Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
             Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
-                let head_name = data.bare_ref_head().map(|(name, _)| Arc::clone(name));
+                let head_name = data.bare_ref_head().map(|(name, _)| Arc::<str>::from(name));
                 let args = data.carrier_type_args();
                 match (head_name, args.len()) {
                     (Some(name), 1)
@@ -5363,7 +6267,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 self.present_terminal_surface_carriers(value, visited, depth + 1)
             }
             MemberShape::Unresolved => {
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     value,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(
@@ -5379,10 +6283,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         name,
                         whole_hash,
                     })) => crate::semantic_query::DeclIdentity {
-                        canonical_id: Arc::clone(canonical_id),
+                        canonical_id: canonical_id.clone(),
                         owner: *owner,
                         whole_hash: *whole_hash,
-                        decl_name: Arc::clone(name),
+                        decl_name: name.clone(),
                     },
                     _ => return value,
                 };
@@ -5449,10 +6353,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     return value;
                 }
                 let identity = crate::semantic_query::DeclIdentity {
-                    canonical_id: Arc::from(dep_canonical.as_str()),
+                    canonical_id: verter_type_expr::OwnedStr::from(dep_canonical.as_str()),
                     owner: *owner,
                     whole_hash: serve.indexed.whole_hash,
-                    decl_name: Arc::from(symbol_name.as_str()),
+                    decl_name: verter_type_expr::OwnedStr::from(symbol_name.as_str()),
                 };
                 self.graph()
                     .intern_preserving_scope(value, SemanticNodeData::DeclRef { identity })
@@ -5825,7 +6729,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }) => {
                 let identity =
                     self.dispatch
-                        .type_slot_for(Arc::clone(canonical_id), *owner, Arc::clone(name));
+                        .type_slot_for(canonical_id.clone(), *owner, name.clone());
                 if let Some(alias_id) = self.alias_identity(node) {
                     if self.visited_aliases.iter().any(|a| a == &alias_id) {
                         drop(data);
@@ -5879,18 +6783,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 work.push(ExpandFrame::Expand(expanded));
             }
-            // `DeclRef`/`InstantiationRef`
-            // arms are deliberately NOT added to
-            // `expand_terminal_step`. Eagerly unwrapping these
-            // carriers in the empty-path terminal under publication
-            // demand collapsed the slot-binding indexed-access
-            // preservation policy (the symbolic
-            // `IndexedAccess { object: DeclRef(AppProps), index }`
-            // form). The carrier-preserving path-walker arms above
-            // (`PathWalker::advance_step` at walk.rs:1204-1313)
-            // handle DeclRef/InstantiationRef under demand-bounded
-            // intermediate-vs-terminal selection; the empty-path
-            // terminal expander does not need a duplicate arm.
+            // A non-empty path has selected this terminal. Empty-path
+            // carriers remain addressable until a member demand reads them.
+            SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }
+                if self.original_path_non_empty =>
+            {
+                drop(data);
+                let resolved = self.resolve_expanded_terminal_carrier(node);
+                if resolved == node {
+                    results.push(node);
+                } else {
+                    work.push(ExpandFrame::Expand(resolved));
+                }
+            }
             SemanticNodeData::Mapped { source, mapper }
                 if matches!(self.mode(), ProjectionMode::Expanded) =>
             {
@@ -6040,7 +6945,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 // Reduce the peer-merged surface, then expand the merged object.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(ExpandFrame::Expand(merged));
@@ -6574,6 +7479,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         }
 
         LAST_SHALLOW_WALKER_MAX_FRAMES.store(max_depth, Ordering::Relaxed);
+        if let Some(error) = self.surface_failure.take() {
+            return self.dispatch.opaque(error);
+        }
 
         // An open / multi-alternative construction program contributed
         // anywhere in this walk: no honest closed `Object` exists for the
@@ -6866,7 +7774,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // Intersection through the heritage-overlay path so inherited
                 // members surface and own members shadow them — exactly the same
                 // resolution a single `interface extends Base` body receives.
-                let contributors = contributors.clone();
+                let contributors = contributors.share();
                 drop(data);
                 let merged = self.dispatch.reduce_merged_decl(&contributors);
                 work.push(Frame::Visit {
@@ -6908,7 +7816,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                intersection_buffers.insert(buffer_id, vec![None; arms.len()]);
+                intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 // Push the flush frame BEFORE the iterator frame so
                 // LIFO pop order executes the flush after every arm
                 // has contributed.
@@ -6938,7 +7846,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 drop(data);
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
-                union_buffers.insert(buffer_id, vec![None; arms.len()]);
+                union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
                 work.push(Frame::FlushUnion {
                     buffer_id,
                     parent_target: target,
@@ -6958,9 +7866,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::InstantiationRef { base, args } => {
                 let identity = base.clone();
-                let args_clone = Arc::clone(args);
-                let args_for_filter = Arc::clone(args);
+                let args_clone = Arc::clone(args.as_arc());
+                let args_for_filter = Arc::clone(args.as_arc());
                 drop(data);
+                // A result utility at a surface boundary owns its key source,
+                // while each member keeps a separate value demand.
+                let source_context = if identity.canonical_id.as_ref() == "__builtin__"
+                    && super::signature_utility::SignatureUtility::from_builtin_name(
+                        identity.decl_name.as_ref(),
+                    ).is_some_and(|utility| {
+                        utility.projection() == super::signature_utility::SignatureUtilityProjection::Result
+                    })
+                {
+                    crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Shallow)
+                        .with_orthogonal_axes_from(self.context)
+                } else {
+                    self.context.into_structural_transit_with_mode(ProjectionMode::Navigate)
+                }.with_provenance(self.effective_provenance(provenance_override));
                 // Skeleton mode: unbound TypeParam arguments stay
                 // symbolic so Conditional branches don't collapse to
                 // `never`. The Skeleton-mode contract mandates
@@ -6975,14 +7897,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // structurally at the `Ref` arm, so only `Foo`'s own
                 // members carry the bit.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ), args_clone, self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
-                        self.context
-                        .into_structural_transit_with_mode(ProjectionMode::Navigate)
-                        .with_provenance(self.effective_provenance(provenance_override)),
+                        source_context,
                     )))) {
                     QueryResult::Value(SemanticQueryOutput { value: body, .. }) => {
                         // L1 carrier-stopped object-filter at a SURFACE
@@ -7005,7 +7925,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         {
                             let buffer_id = *next_buffer_id;
                             *next_buffer_id += 1;
-                            intersection_buffers.insert(buffer_id, vec![None; 1]);
+                            intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(1).collect::<Vec<_>>());
                             work.push(Frame::FlushObjectFilter {
                                 buffer_id,
                                 keys,
@@ -7061,6 +7981,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                     QueryResult::Error(error) => {
+                        if self.context.demand == crate::semantic_query::ReductionDemand::VueRuntimeObjectSurface
+                            && !self.original_path_non_empty
+                            && member_role_override != Some(crate::semantic_query::MemberMergeRole::Heritage)
+                        { self.surface_failure = Some(error.clone()); }
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
                             self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
@@ -7068,7 +7992,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7087,10 +8011,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 whole_hash,
             }) => {
                 let identity = DeclIdentity {
-                    canonical_id: Arc::clone(canonical_id),
+                    canonical_id: canonical_id.clone(),
                     owner: *owner,
                     whole_hash: *whole_hash,
-                    decl_name: Arc::clone(name),
+                    decl_name: name.clone(),
                 };
                 drop(data);
                 // Preserve the walker's surface provenance onto the
@@ -7114,9 +8038,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // unwrap so `Base`'s own-body members are NOT mis-stamped as
                 // the macro type argument's own body.
                 match self.dispatch.execute_type_node(SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(self.dispatch.type_slot_for(
-                        Arc::clone(&identity.canonical_id),
+                        identity.canonical_id.clone(),
                         identity.owner,
-                        Arc::clone(&identity.decl_name),
+                        identity.decl_name.clone(),
                     ), Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()), self.dispatch.instantiate_context_for(
                         &identity.canonical_id,
                         self.context
@@ -7154,6 +8078,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                     }
                     QueryResult::Error(error) => {
+                        if self.context.demand == crate::semantic_query::ReductionDemand::VueRuntimeObjectSurface
+                            && !self.original_path_non_empty
+                            && member_role_override != Some(crate::semantic_query::MemberMergeRole::Heritage)
+                        { self.surface_failure = Some(error.clone()); }
                         if is_fatal_query_error(&error) {
                             self.cache_suppress = true;
                             self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
@@ -7161,7 +8089,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         self.walker_diagnostics
                             .push(ShallowDiagnostic::InstantiationError {
                                 decl: identity,
-                                error,
+                                error: DiagnosticError(error),
                             });
                         self.contribute_surface(
                             target,
@@ -7224,7 +8152,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // optional automatically.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -7264,7 +8192,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // using the iterator-frame discipline.
                     let buffer_id = *next_buffer_id;
                     *next_buffer_id += 1;
-                    union_buffers.insert(buffer_id, vec![None; 2]);
+                    union_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(2).collect::<Vec<_>>());
                     work.push(Frame::FlushUnion {
                         buffer_id,
                         parent_target: target,
@@ -7373,13 +8301,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
-                    canonical_id: Arc::clone(&identity.canonical_id),
+                    canonical_id: identity.canonical_id.clone(),
                     owner: identity.owner,
                     local_scope: None,
                     binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(identity.owner),
                 };
-                let name = Arc::clone(&identity.decl_name);
-                let target_canonical = Arc::clone(&identity.canonical_id);
+                let name = identity.decl_name.clone();
+                let target_canonical = identity.canonical_id.clone();
                 let target_owner = identity.owner;
                 drop(data);
                 // Declaring file of the AUTHORING reference (the interning
@@ -7398,7 +8326,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 match self.execute_read_folding_partial(SemanticQueryKey::ResolveDecl(
                     ResolveDeclKey {
                         scope,
-                        name: Arc::clone(&name),
+                        name: name.clone(),
                     },
                 )) {
                     QueryResult::Value(resolved) => {
@@ -7474,13 +8402,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // the module specifier for a bare module reference.
                 let head_name = data
                     .bare_ref_head()
-                    .map(|(name, _)| Arc::clone(name))
+                    .map(|(name, _)| verter_type_expr::OwnedStr::from(name))
                     .or_else(|| {
                         data.import_type_head().map(|(specifier, qualifier, _)| {
                             qualifier
                                 .last()
                                 .cloned()
-                                .unwrap_or_else(|| Arc::clone(specifier))
+                                .unwrap_or_else(|| verter_type_expr::OwnedStr::from(specifier))
                         })
                     });
                 let bare_scope_owner = data.bare_ref_head().and_then(|(_, scope)| match scope {
@@ -7488,7 +8416,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         canonical_id,
                         owner,
                         ..
-                    } => Some((Arc::clone(canonical_id), *owner)),
+                    } => Some((canonical_id.clone(), *owner)),
                     crate::semantic_query::NodeScopeId::Global => None,
                 });
                 drop(data);
@@ -7502,7 +8430,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         crate::semantic_query::NodeScopeId::Global => None,
                     })
                 });
-                let resolved = self.dispatch.resolve_carrier_subject_node(
+                let resolved = self.resolve_carrier_subject(
                     cur,
                     self.context_from_template(
                         crate::semantic_query::ProjectionReductionContext::published(self.mode()),
@@ -7677,6 +8605,21 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             // intersection drops out (the contributor rule), and a
             // primitive arm in a union becomes a `UnionArmEmpty`
             // diagnostic at flush time.
+            SemanticNodeData::Opaque(error @ QueryError::UnmodeledPosition) =>
+            {
+                // An unknown root provides no domain. A named sibling cannot
+                // turn it into a complete empty intersection contributor.
+                // Invalid heritage clauses are ignored by the checker.
+                if self.context.demand == crate::semantic_query::ReductionDemand::VueRuntimeObjectSurface
+                    && !self.original_path_non_empty
+                    && member_role_override != Some(crate::semantic_query::MemberMergeRole::Heritage) {
+                    self.surface_failure = Some(error.clone());
+                    self.cache_suppress = true;
+
+                }
+                drop(data);
+                self.contribute_surface(target, root_contribution, intersection_buffers, union_buffers, None);
+            }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
@@ -7805,8 +8748,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     fn note_unresolved_surface_arm(
         &mut self,
         target: BufferTarget,
-        name: Arc<str>,
-        owner: Option<(Arc<str>, verter_type_expr::TopLevelOwnerId)>,
+        name: verter_type_expr::OwnedStr,
+        owner: Option<(
+            verter_type_expr::OwnedStr,
+            verter_type_expr::TopLevelOwnerId,
+        )>,
     ) {
         if matches!(target, BufferTarget::Root) {
             return;
@@ -7949,7 +8895,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> Option<RemappedKeyNarrowing> {
         let demanded = match literal_key? {
             LiteralKey::String(text) => {
-                crate::semantic_query::PropertyKey::String(Arc::clone(text))
+                crate::semantic_query::PropertyKey::String(verter_type_expr::OwnedStr::from(text))
             }
             LiteralKey::Number(number) => {
                 crate::semantic_query::PropertyKey::from_js_number(*number)
@@ -8063,11 +9009,28 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // `StructuralTransit(Navigate)`, so the open generic survives
         // as a deferred carrier on the published binding — shallow
         // values, enumerated keys.
-        if crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
-            self.dispatch,
-            source,
-            mapper,
-        ) {
+        let closed_domain = self.dispatch.probe_optional(|| {
+            (!crate::project_semantic_dispatch::raise::mapped_type_key_domain_is_open_or_unknown(
+                self.dispatch, source, mapper,
+            )).then_some(())
+        }).is_some();
+        // A shallow map can enumerate proven presence without proving the
+        // complete key domain. Only the authored keyof-source mapping owns
+        // this subset; arbitrary keyspaces and remaps still need exact keys.
+        let presence_subset = if !closed_domain
+            && mapper.name_remap.is_none()
+            && matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                Some(SemanticNodeData::KeyOf { base }) if *base == source)
+        {
+            self.dispatch.probe_optional(|| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(source, self.context)
+                    .filter(|(members, causes)| !members.is_empty() && !causes.is_empty())
+            })
+        } else {
+            None
+        };
+        if !closed_domain && presence_subset.is_none() {
             return None;
         }
         // Prefer the explicit `key_space` for fast literal-union
@@ -8084,7 +9047,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // Shallow synthesiser through it keeps the two paths
         // structurally aligned.
         let mut keys: Vec<crate::project_semantic_dispatch::enumerate::KeyDomainKey> = Vec::new();
-        let collected = collect_literal_keys(self.graph(), mapper.key_space, &mut keys);
+        let collected = if let Some((members, causes)) = &presence_subset {
+            self.mark_partial_with(*causes);
+            keys = crate::project_semantic_dispatch::enumerate::KeyDomainKey::from_keys(
+                members
+                    .iter()
+                    .filter_map(|member| member.key.cloned_known())
+                    .collect(),
+            );
+            true
+        } else {
+            collect_literal_keys(self.graph(), mapper.key_space, &mut keys)
+        };
         // Optional source-member surface — populated only when the new
         // `mapped_surface_source_members_for_projection` helper resolves
         // the source carrier to an `Object`. Used by the per-key build
@@ -8098,7 +9072,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // `None` for sources that did not resolve to an Object (e.g.,
         // the source is itself a Mapped / KeyOf carrier-stop, primitive,
         // etc.).
-        let mut source_members: Option<Vec<crate::semantic_query::SurfaceMember>> = None;
+        let mut source_members: Option<Vec<crate::semantic_query::SurfaceMember>> =
+            presence_subset.map(|(members, _)| members);
         if !collected {
             // The shared enumerator on the SOURCE handles
             // `Opaque(DeclPlaceholder)` / `Object` / `Intersection` /
@@ -8280,6 +9255,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // dead and must never be materialised.
         let mut shared_value: Option<SemanticNodeId> = None;
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(keys.len());
+        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
+        let source_member_index = source_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -8328,10 +9313,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return None;
             }
             let member = {
-                let source_member = source_members.as_ref().and_then(|m| {
-                    m.iter()
-                        .find(|sm| sm.key.cloned_known().as_ref() == Some(&key.key))
-                });
+                let source_member = source_member_index
+                    .as_ref()
+                    .and_then(|index| index.get(&key.key).copied());
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -8426,6 +9410,16 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         materialise_context,
                     )
                 };
+                let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+                    self.dispatch
+                        .key_domain_binder(&key)
+                        .map_or(value, |key_node| {
+                            self.dispatch
+                                .mapped_member_optionality(mapper, value, source, key_node)
+                        })
+                } else {
+                    value
+                };
                 let visibility = source_member
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
                         sm.visibility
@@ -8465,11 +9459,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // `{ [K in 1 | "1"]: K }` = `{ 1: 1 | "1" }`). The first
                 // production keeps the member slot (position, modifiers,
                 // and declaration site).
-                if let Some(existing) = members.iter_mut().find(|m| {
-                    m.key
-                        .cloned_known()
-                        .is_some_and(|k| k.element_access_collides(&produced_name))
-                }) {
+                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
+                if let Some(&ordinal) = produced_by_key.get(&spelling) {
+                    let existing: &mut ShallowSurfaceMember = &mut members[ordinal];
                     if existing.value != value {
                         // Canonical construction (same fold as
                         // `build_mapped_type`'s rail — see that site).
@@ -8482,6 +9474,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 }
                 // Rationale on `build::mapped_produced_key_inherits_declaration_site`
                 // — the one shared predicate both rails judge inheritance with.
+                produced_by_key.insert(spelling, members.len());
                 let inherits_declaration_site = has_source_member
                     && crate::project_semantic_dispatch::build::mapped_produced_key_inherits_declaration_site(
                         &produced_name,
@@ -8795,7 +9788,9 @@ fn merge_declaration_surfaces(
     {
         match entry {
             ShallowSurfaceEntry::Member(member) => {
-                if let Some(member) = remaining_members.shift_remove(&member.key) {
+                // The contributor streams give the order; the map's own order
+                // is never read, so an O(1) removal keeps the merge linear.
+                if let Some(member) = remaining_members.swap_remove(&member.key) {
                     entries.push(ShallowSurfaceEntry::Member(member));
                 }
             }
@@ -8880,7 +9875,9 @@ fn merge_intersection_surfaces_with_graph(
         for entry in &surface.entries {
             match entry {
                 ShallowSurfaceEntry::Member(member) => {
-                    if let Some(member) = members.shift_remove(&member.key) {
+                    // The arm streams give the order; the map's own order is
+                    // never read, so an O(1) removal keeps the merge linear.
+                    if let Some(member) = members.swap_remove(&member.key) {
                         entries.push(ShallowSurfaceEntry::Member(member));
                     }
                 }
@@ -8940,10 +9937,10 @@ struct MergedMemberAccum {
     first_spans: Option<verter_type_expr::MemberSpans>,
     /// Declaration file of the first `OwnBody` contributor — paired with
     /// `own_body_spans` so the shadow winner's spans index its own file.
-    own_body_origin: Option<Arc<str>>,
+    own_body_origin: Option<verter_type_expr::OwnedStr>,
     /// Declaration file of the first contributor of ANY role — paired with
     /// `first_spans`.
-    first_origin: Option<Arc<str>>,
+    first_origin: Option<verter_type_expr::OwnedStr>,
     /// MOST-RESTRICTIVE visibility across ALL `OwnBody` contributors (the shared
     /// merge rule: `Private` > `Protected` > `Public`), folded over the RAW
     /// contributor stream (NOT deduped value nodes) — two contributors sharing
@@ -9428,100 +10425,102 @@ pub(super) fn value_may_contribute_call_signatures(
     false
 }
 
-/// Merge per-arm union surfaces under the TS-correct common-member rule,
-/// matching the canonical union common-member semantics:
-///
-/// - A member survives iff it is present (by name) in EVERY resolvable arm.
-/// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
-///   is `A['k'] | B['k']`).
-/// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
-///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
-///   THROUGH the union, never the macro-T own body or a heritage overlay, so
-///   it must not pretend to be own-body / heritage.
-/// - A union has no single call/construct/index surface, so the merged surface
-///   carries none.
-///
-/// Returns `Some(empty)` when there are no common members (a disjoint union
-/// resolved, it simply has no common members) or when any arm is a non-Object
-/// (`None`) surface — a union with an unreadable / non-Object arm has no
-/// common Object members. Returns `None` only when the arm vector is empty
-/// (defensive).
-pub fn merge_union_surfaces(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    // Any None arm means the union has a non-Object arm — there are
-    // no common Object members, so the merged surface is empty.
-    if arm_surfaces.iter().any(|s| s.is_none()) {
-        return Some(ShallowSurface::empty());
-    }
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // One-pass per-name aggregation (replacing the retired
-    // O(arms × members²) per-name `find` loop): each arm contributes its
-    // FIRST occurrence of a name, in arm order — identical selection to
-    // the retired per-arm `find`.
-    let by_name = aggregate_union_members(&live);
-    // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
-    // each arm-0 occurrence emits one row aggregated from the per-arm
-    // first occurrences, exactly as the retired per-name loop did. The
-    // lookup matches under JS property identity ([`authored_keys_collide`])
-    // so a dual-spelling arm-0 key finds its aggregated entry.
-    let mut members: Vec<ShallowSurfaceMember> = Vec::new();
-    for first_member in &live[0].members {
-        let Some((_, accum)) = by_name
-            .iter()
-            .find(|(key, _)| authored_keys_collide(key, &first_member.key))
-        else {
-            // Unreachable: arm 0's own members always aggregate.
-            continue;
-        };
-        // Common-member rule: a member survives iff present (by name) in
-        // EVERY resolvable arm.
-        if accum.declaring_arms != live.len() {
-            continue;
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the TS-correct common-member rule,
+    /// matching the canonical union common-member semantics:
+    ///
+    /// - A member survives iff it is present (by name) in EVERY resolvable arm.
+    /// - Its value is the UNION of the per-arm member value nodes (`(A | B)['k']`
+    ///   is `A['k'] | B['k']`).
+    /// - `optional` iff optional in ANY arm; `readonly` iff readonly in ALL arms.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; the merge role is
+    ///   [`MemberMergeRole::Authored`] — a synthesized common member is reached
+    ///   THROUGH the union, never the macro-T own body or a heritage overlay, so
+    ///   it must not pretend to be own-body / heritage.
+    /// - A union has no single call/construct/index surface, so the merged surface
+    ///   carries none.
+    ///
+    /// Returns `Some(empty)` when there are no common members (a disjoint union
+    /// resolved, it simply has no common members) or when any arm is a non-Object
+    /// (`None`) surface — a union with an unreadable / non-Object arm has no
+    /// common Object members. Returns `None` only when the arm vector is empty
+    /// (defensive).
+    fn merge_union_surfaces(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
         }
-        members.push(ShallowSurfaceMember {
-            key: first_member.key.clone(),
-            // Value type = union of the per-arm member values. A single
-            // shared value node stays as-is (no singleton union wrapper).
-            value: accum.value_node(graph, evidence),
-            optional: accum.optional_in_any,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union common-member synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
-            // accessibility across the per-arm contributors via the shared
-            // fold, so a member non-public in any arm is never synthesized
-            // as `Public` (matching the `_for_macro` sibling and TS
-            // member-access rules). For a single declaring arm the fold
-            // returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union common-member: the name appears in every arm, so there is
-            // no single source declaration site — genuinely synthetic. No spans
-            // and no single declaration file (a multi-origin fact).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        // Any None arm means the union has a non-Object arm — there are
+        // no common Object members, so the merged surface is empty.
+        if arm_surfaces.iter().any(|s| s.is_none()) {
+            return Some(ShallowSurface::empty());
+        }
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // One-pass per-name aggregation (replacing the retired
+        // O(arms × members²) per-name `find` loop): each arm contributes its
+        // FIRST occurrence of a name, in arm order — identical selection to
+        // the retired per-arm `find`.
+        let by_name = aggregate_union_members(&live);
+        // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
+        // each arm-0 occurrence emits one row aggregated from the per-arm
+        // first occurrences, exactly as the retired per-name loop did. The
+        // lookup matches under JS property identity ([`authored_keys_collide`])
+        // so a dual-spelling arm-0 key finds its aggregated entry.
+        let mut members: Vec<ShallowSurfaceMember> = Vec::new();
+        for first_member in &live[0].members {
+            let Some((_, accum)) = by_name
+                .iter()
+                .find(|(key, _)| authored_keys_collide(key, &first_member.key))
+            else {
+                // Unreachable: arm 0's own members always aggregate.
+                continue;
+            };
+            // Common-member rule: a member survives iff present (by name) in
+            // EVERY resolvable arm.
+            if accum.declaring_arms != live.len() {
+                continue;
+            }
+            members.push(ShallowSurfaceMember {
+                key: first_member.key.clone(),
+                // Value type = union of the per-arm member values. A single
+                // shared value node stays as-is (no singleton union wrapper).
+                value: accum.value_node(graph, evidence),
+                optional: accum.optional_in_any,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union common-member synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Union common-member (`(A|B)['k']`): the MOST-RESTRICTIVE
+                // accessibility across the per-arm contributors via the shared
+                // fold, so a member non-public in any arm is never synthesized
+                // as `Public` (matching the `_for_macro` sibling and TS
+                // member-access rules). For a single declaring arm the fold
+                // returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union common-member: the name appears in every arm, so there is
+                // no single source declaration site — genuinely synthetic. No spans
+                // and no single declaration file (a multi-origin fact).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 /// One-pass per-name aggregation state shared by the two union-arm merge
@@ -9648,108 +10647,110 @@ fn aggregate_union_members(
     ordered
 }
 
-/// Merge per-arm union surfaces under the **Vue macro object-surface**
-/// rule — the UNION of arm members, NOT the TS
-/// property-access common-member intersection.
-///
-/// A prop / slot present in ANY union arm is part of the component macro
-/// surface (`defineProps<FixedProps | BubbleProps>()` declares every
-/// arm's props). The merge rules:
-///
-/// - A member survives iff it is present (by name) in AT LEAST ONE arm.
-/// - Its value is the UNION of the per-arm member values for the arms
-///   that declare it (a single declaring arm stays as-is).
-/// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
-///   not declared by every arm is optional on the merged surface).
-/// - `readonly` iff readonly in ALL arms that declare it.
-/// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
-///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
-///   neither macro-T own-body nor heritage.
-/// - A union has no single call/construct/index surface, so the merged
-///   surface carries none.
-///
-/// Returns `Some(empty)` when no arm declares any Object member. Returns
-/// `None` only when the arm vector is empty (defensive). Unlike the
-/// common-member rule, a non-Object (`None`) arm does NOT collapse the
-/// whole surface — the Object arms still contribute their members (a
-/// `{ a } | string` macro surface publishes `a`, optional).
-pub fn merge_union_surfaces_for_macro(
-    graph: &SemanticGraphStore,
-    arm_surfaces: &[Option<ShallowSurface>],
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Option<ShallowSurface> {
-    if arm_surfaces.is_empty() {
-        return None;
-    }
-    let arm_count = arm_surfaces.len();
-    let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
-    if live.is_empty() {
-        return Some(ShallowSurface::empty());
-    }
-    // A non-Object arm (`None`) means that arm declares NO members, so
-    // every member is effectively absent from it → optional on the union.
-    let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
+construction_ordinal_seam! {
+    /// Merge per-arm union surfaces under the **Vue macro object-surface**
+    /// rule — the UNION of arm members, NOT the TS
+    /// property-access common-member intersection.
+    ///
+    /// A prop / slot present in ANY union arm is part of the component macro
+    /// surface (`defineProps<FixedProps | BubbleProps>()` declares every
+    /// arm's props). The merge rules:
+    ///
+    /// - A member survives iff it is present (by name) in AT LEAST ONE arm.
+    /// - Its value is the UNION of the per-arm member values for the arms
+    ///   that declare it (a single declaring arm stays as-is).
+    /// - `optional` iff optional in ANY arm OR ABSENT from any arm (a member
+    ///   not declared by every arm is optional on the merged surface).
+    /// - `readonly` iff readonly in ALL arms that declare it.
+    /// - `is_method` / `declared_in_macro_type_arg` are `false`; merge role is
+    ///   [`MemberMergeRole::Authored`] — a member reached THROUGH the union is
+    ///   neither macro-T own-body nor heritage.
+    /// - A union has no single call/construct/index surface, so the merged
+    ///   surface carries none.
+    ///
+    /// Returns `Some(empty)` when no arm declares any Object member. Returns
+    /// `None` only when the arm vector is empty (defensive). Unlike the
+    /// common-member rule, a non-Object (`None`) arm does NOT collapse the
+    /// whole surface — the Object arms still contribute their members (a
+    /// `{ a } | string` macro surface publishes `a`, optional).
+    fn merge_union_surfaces_for_macro(
+        graph: &SemanticGraphStore,
+        arm_surfaces: &[Option<ShallowSurface>],
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Option<ShallowSurface> {
+        if arm_surfaces.is_empty() {
+            return None;
+        }
+        let arm_count = arm_surfaces.len();
+        let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
+        if live.is_empty() {
+            return Some(ShallowSurface::empty());
+        }
+        // A non-Object arm (`None`) means that arm declares NO members, so
+        // every member is effectively absent from it → optional on the union.
+        let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
 
-    // Per-name aggregation emitting in first-seen order across all arms.
-    // JS property identity: dual spellings of one property
-    // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
-    // `member_position` already collides them, so the macro merge matches
-    // (surfaces are one-level and small, so a linear collides scan
-    // replaces the strict-key map).
-    let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
-        Vec::new();
-    for (arm_index, arm) in live.iter().enumerate() {
-        for member in &arm.members {
-            let position = ordered
-                .iter()
-                .position(|(key, _)| authored_keys_collide(key, &member.key));
-            match position {
-                Some(index) => ordered[index].1.absorb(arm_index, member),
-                None => {
-                    ordered.push((member.key.clone(), UnionMemberAccum::new()));
-                    let last = ordered.len() - 1;
-                    ordered[last].1.absorb(arm_index, member);
+        // Per-name aggregation emitting in first-seen order across all arms.
+        // JS property identity: dual spellings of one property
+        // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
+        // `member_position` already collides them, so the macro merge matches
+        // (surfaces are one-level and small, so a linear collides scan
+        // replaces the strict-key map).
+        let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
+            Vec::new();
+        for (arm_index, arm) in live.iter().enumerate() {
+            for member in &arm.members {
+                let position = ordered
+                    .iter()
+                    .position(|(key, _)| authored_keys_collide(key, &member.key));
+                match position {
+                    Some(index) => ordered[index].1.absorb(arm_index, member),
+                    None => {
+                        ordered.push((member.key.clone(), UnionMemberAccum::new()));
+                        let last = ordered.len() - 1;
+                        ordered[last].1.absorb(arm_index, member);
+                    }
                 }
             }
         }
-    }
 
-    let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
-    for (key, accum) in &ordered {
-        // Absent from at least one arm (a live arm without it, or a
-        // non-Object arm) ⇒ optional on the merged surface.
-        let optional =
-            accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
-        members.push(ShallowSurfaceMember {
-            key: key.clone(),
-            value: accum.value_node(graph, evidence),
-            optional,
-            readonly: accum.readonly_in_all,
-            method_kind: None,
-            has_implementation_body: false,
-            // Union-arm merge synthesis is never a literal origin.
-            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
-            // Most-restrictive accessibility across all DECLARING arms via
-            // the shared fold: `Public` only when Public in every declaring
-            // arm; a member non-public in any arm stays non-public (never
-            // synthesized Public). For a member declared by exactly one arm
-            // the fold returns that arm's accessibility.
-            visibility: accum.visibility,
-            declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
-            merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
-            // Union arm-member: reached THROUGH the union, no single source
-            // declaration site — genuinely synthetic (multi-origin).
-            spans: verter_type_expr::MemberSpans::default(),
-            declaration_origin: None,
-        });
+        let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
+        for (key, accum) in &ordered {
+            // Absent from at least one arm (a live arm without it, or a
+            // non-Object arm) ⇒ optional on the merged surface.
+            let optional =
+                accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
+            members.push(ShallowSurfaceMember {
+                key: key.clone(),
+                value: accum.value_node(graph, evidence),
+                optional,
+                readonly: accum.readonly_in_all,
+                method_kind: None,
+                has_implementation_body: false,
+                // Union-arm merge synthesis is never a literal origin.
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                // Most-restrictive accessibility across all DECLARING arms via
+                // the shared fold: `Public` only when Public in every declaring
+                // arm; a member non-public in any arm stays non-public (never
+                // synthesized Public). For a member declared by exactly one arm
+                // the fold returns that arm's accessibility.
+                visibility: accum.visibility,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                // Union arm-member: reached THROUGH the union, no single source
+                // declaration site — genuinely synthetic (multi-origin).
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(ShallowSurface::from_entries(
+            members
+                .into_iter()
+                .map(ShallowSurfaceEntry::Member)
+                .collect(),
+            None,
+        ))
     }
-    Some(ShallowSurface::from_entries(
-        members
-            .into_iter()
-            .map(ShallowSurfaceEntry::Member)
-            .collect(),
-        None,
-    ))
 }
 
 fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
@@ -9769,42 +10770,48 @@ fn surface_member_from_shallow(member: &ShallowSurfaceMember) -> SurfaceMember {
     }
 }
 
-/// Positive member evidence of an open / multi-alternative spread
-/// formula for MACRO surface consumers (props / emits branch merge):
-/// the union of per-alternative positive facts under the
-/// `MacroObjectSurface` enumeration rule. This is publication-only
-/// evidence — it never interns a closed `Object` and never claims
-/// completeness; the consumer carries incompleteness in its own channel
-/// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
-/// A single alternative bypasses the union merge so member fidelity
-/// (method kind, spans, origins) survives verbatim.
-#[must_use]
-pub fn spread_formula_positive_members_for_macro(
-    graph: &SemanticGraphStore,
-    formula: &crate::semantic_query::ObjectProjectionFormula,
-    evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
-) -> Vec<crate::semantic_query::SurfaceMember> {
-    if let [only] = formula.alternatives() {
-        let surface = shallow_surface_from_projection_alternative(graph, only);
-        return surface_view_from_shallow(&surface)
-            .positive_members()
-            .to_vec();
-    }
-    let arm_surfaces: Vec<Option<ShallowSurface>> = formula
-        .alternatives()
-        .iter()
-        .map(|alternative| {
-            Some(shallow_surface_from_projection_alternative(
-                graph,
-                alternative,
-            ))
-        })
-        .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
-        Some(merged) => surface_view_from_shallow(&merged)
-            .positive_members()
-            .to_vec(),
-        None => Vec::new(),
+construction_ordinal_seam! {
+    /// Positive member evidence of an open / multi-alternative spread
+    /// formula for MACRO surface consumers (props / emits branch merge):
+    /// the union of per-alternative positive facts under the
+    /// `MacroObjectSurface` enumeration rule. This is publication-only
+    /// evidence — it never interns a closed `Object` and never claims
+    /// completeness; the consumer carries incompleteness in its own channel
+    /// (the walker's `OpenSpreadProgram` diagnostic / `cache_suppress`).
+    /// A single alternative bypasses the union merge so member fidelity
+    /// (method kind, spans, origins) survives verbatim.
+    #[must_use]
+    fn spread_formula_positive_members_for_macro(
+        graph: &SemanticGraphStore,
+        formula: &crate::semantic_query::ObjectProjectionFormula,
+        evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
+    ) -> Vec<crate::semantic_query::SurfaceMember> {
+        if let [only] = formula.alternatives() {
+            let surface = shallow_surface_from_projection_alternative(graph, only);
+            return surface_view_from_shallow(&surface)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect();
+        }
+        let arm_surfaces: Vec<Option<ShallowSurface>> = formula
+            .alternatives()
+            .iter()
+            .map(|alternative| {
+                Some(shallow_surface_from_projection_alternative(
+                    graph,
+                    alternative,
+                ))
+            })
+            .collect();
+        match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+            Some(merged) => surface_view_from_shallow(&merged)
+                .positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -10039,6 +11046,71 @@ enum ExpansionCombineKind {
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    construction_ordinal_seam! {
+        /// Positive member evidence of an object-projection formula for macro
+        /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
+        /// computed in this dispatcher's construction lane. The members' value
+        /// operands are this graph's; the canonical evidence the union merge
+        /// gathers is deposited on this dispatcher.
+        #[must_use]
+        fn spread_formula_positive_members_for_macro(
+            &self,
+            formula: &crate::semantic_query::ObjectProjectionFormula,
+        ) -> Vec<crate::semantic_query::SurfaceMember> {
+            let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
+            let members = spread_formula_positive_members_for_macro(
+                self.graph(),
+                formula,
+                &mut canonical_evidence,
+            );
+            self.deposit_canonical_evidence(canonical_evidence);
+            members
+        }
+    }
+
+    /// A literal index absent from an exact closed domain, including the
+    /// apparent members the ordinary path reader adds. This proves absence
+    /// without asking the unavailable member for a value.
+    pub(super) fn indexed_access_proves_absence(
+        &self,
+        base: SemanticNodeId,
+        index: &IndexKey,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> bool {
+        let key = match index {
+            IndexKey::String(name) => PropertyKey::String(verter_type_expr::OwnedStr::from(name)),
+            IndexKey::Number(value) => PropertyKey::from_js_number(value.get() as f64),
+            IndexKey::UniqueSymbol(identity) => PropertyKey::UniqueSymbol(identity.clone()),
+            IndexKey::Computed(_) => return false,
+        };
+        let Some(data) = self.graph().node_data(base) else {
+            return false;
+        };
+        let SemanticNodeData::Object(view) = data.as_ref() else {
+            return false;
+        };
+        if !view.key_domain_is_closed() {
+            return false;
+        }
+        let fence = self.project_generation_signature();
+        let mut walker = PathWalker::new(self, context, &fence);
+        if !walker.surface_view_proves_absent(view, &key) {
+            return false;
+        }
+        walker.origin_file = self
+            .graph()
+            .node_scope(base)
+            .and_then(|scope| scope.canonical_file());
+        self.probe_optional(|| {
+            matches!(
+                walker.apparent_member_surface(base, view, &key),
+                ApparentMember::Absent
+            )
+            .then_some(true)
+        })
+        .unwrap_or(false)
+    }
+
     /// Whether `node` provably excludes both `null` and `undefined`, so the
     /// checker's intersection of it with either is `never`: a literal, a
     /// non-nullish primitive (`object` included), an object, array, tuple
@@ -10502,6 +11574,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn alias_wrapped_callables_keep_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
@@ -10567,6 +11640,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn bare_callable_objects_stay_a_kernel_owned_intersection_carrier() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let ret_a = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let ret_b = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let callable_object = |ret: crate::semantic_query::SemanticNodeId| {
@@ -10623,6 +11697,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn non_callable_object_values_still_merge_into_one_surface() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let keyspace = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         // Two DISTINCT plain surfaces (distinct keyspaces keep them from
         // interning to one node), neither carrying a signature entry.
@@ -10681,10 +11756,10 @@ mod overload_carrier_exclusion_tests {
 
         let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
         let identity = DeclIdentity {
-            canonical_id: Arc::from("/carrier.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
             owner,
             whole_hash: Default::default(),
-            decl_name: Arc::from(name),
+            decl_name: verter_type_expr::OwnedStr::from(name),
         };
         let empty_args: Arc<[crate::semantic_query::SemanticNodeId]> =
             Arc::from(Vec::new().into_boxed_slice());
@@ -10692,7 +11767,7 @@ mod overload_carrier_exclusion_tests {
             "DeclRef" => SemanticNodeData::DeclRef { identity },
             "InstantiationRef" => SemanticNodeData::InstantiationRef {
                 base: identity,
-                args: Arc::from(
+                args: crate::semantic_query::PayloadArray::from(
                     vec![graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String))]
                         .into_boxed_slice(),
                 ),
@@ -10702,21 +11777,23 @@ mod overload_carrier_exclusion_tests {
             }
             "ImportType" => SemanticNodeData::new_import_type(
                 Arc::from("./m"),
-                Arc::from(vec![Arc::<str>::from(name)].into_boxed_slice()),
+                verter_type_expr::OwnedSlice::from(
+                    vec![verter_type_expr::OwnedStr::from(name)].into_boxed_slice(),
+                ),
                 empty_args,
                 false,
             ),
             "TypeOf" => SemanticNodeData::new_typeof(
                 ValueRootKey {
                     scope: ScopeId {
-                        canonical_id: Arc::from("/carrier.ts"),
+                        canonical_id: verter_type_expr::OwnedStr::from("/carrier.ts"),
                         owner,
                         local_scope: None,
                         binder_scope_id: BinderScopeId::file_scope(owner),
                     },
-                    name: Arc::from(name),
+                    name: verter_type_expr::OwnedStr::from(name),
                 },
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_expr::OwnedSlice::default(),
                 empty_args,
             ),
             other => unreachable!("unknown reference carrier kind `{other}`"),
@@ -10778,8 +11855,6 @@ mod overload_carrier_exclusion_tests {
         kind: &str,
         terminal: PrimitiveKind,
     ) -> crate::semantic_query::SemanticNodeId {
-        use std::sync::Arc;
-
         let element = graph.intern_node(SemanticNodeData::Primitive(terminal));
         let data = match kind {
             "Array" => SemanticNodeData::Array {
@@ -10787,7 +11862,7 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "Tuple" => SemanticNodeData::Tuple {
-                elements: Arc::from(
+                elements: crate::semantic_query::PayloadArray::from(
                     vec![crate::semantic_query::TupleElement {
                         label: None,
                         value: element,
@@ -10799,8 +11874,12 @@ mod overload_carrier_exclusion_tests {
                 readonly: false,
             },
             "TemplateLiteral" => SemanticNodeData::TemplateLiteral {
-                quasis: Arc::from(vec![Arc::<str>::from("hello-")].into_boxed_slice()),
-                expressions: Arc::from(vec![element].into_boxed_slice()),
+                quasis: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(
+                    vec![verter_type_expr::OwnedStr::from("hello-")].into_boxed_slice(),
+                ),
+                expressions: crate::semantic_query::PayloadArray::from(
+                    vec![element].into_boxed_slice(),
+                ),
             },
             other => unreachable!("unknown apparent-type carrier kind `{other}`"),
         };
@@ -10821,6 +11900,7 @@ mod overload_carrier_exclusion_tests {
     fn augmentable_apparent_type_carriers_keep_authored_overload_order() {
         for kind in ["Array", "Tuple", "TemplateLiteral"] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             // Adversarial interning order: the SECOND authored contributor
             // is minted first, so its ordinal sorts lower.
             let b = apparent_type_carrier(&graph, kind, PrimitiveKind::Number);
@@ -10844,13 +11924,14 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn keyof_domain_keeps_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let type_param = |name: &str| {
             graph.intern_node(SemanticNodeData::TypeParam {
                 decl: crate::semantic_query::DeclIdentity::synthetic(name),
                 param_index: 0,
                 constraint: None,
                 default: None,
-                display_name: std::sync::Arc::from(name),
+                display_name: verter_type_expr::OwnedStr::from(name),
             })
         };
         // Adversarial interning order: the SECOND authored contributor
@@ -10880,6 +11961,7 @@ mod overload_carrier_exclusion_tests {
             "TypeOf",
         ] {
             let graph = SemanticGraphStore::new();
+            let _scope = graph.enter_node_root_scope();
             // Adversarial interning order: the SECOND authored contributor
             // is minted first, so its ordinal sorts lower.
             let b = reference_carrier(&graph, kind, "B");
@@ -10896,6 +11978,7 @@ mod overload_carrier_exclusion_tests {
     #[test]
     fn budget_exhausted_classification_keeps_authored_overload_order() {
         let graph = SemanticGraphStore::new();
+        let _scope = graph.enter_node_root_scope();
         let deep_chain = |terminal: PrimitiveKind| {
             let mut node = graph.intern_node(SemanticNodeData::Primitive(terminal));
             // bounded-loop: fixed 80-hop fixture chain, comfortably past the classification walk's node budget.

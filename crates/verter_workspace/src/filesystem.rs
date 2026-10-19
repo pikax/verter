@@ -444,6 +444,25 @@ impl FilesystemWorkspace {
         specifier: &str,
         ctx: verter_session_query::resolution::ResolutionContext,
     ) -> crate::resolution_currency::ResolutionOutcome {
+        self.resolve_import_in_project_snapshot(
+            published,
+            overlay,
+            None,
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
+    fn resolve_import_in_project_snapshot(
+        &self,
+        published: &Arc<crate::published_state::PublishedRoot>,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        project: Option<&verter_session_query::resolution::ProjectOwnership>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
         let mut input_ledger =
             crate::resolver::InputResolutionLedger::new(self.engine.input_resolution_budgets);
 
@@ -462,7 +481,8 @@ impl FilesystemWorkspace {
                         &mut input_ledger,
                         &|| true,
                     )
-                    .over(overlay),
+                    .over(overlay)
+                    .in_project(project),
                 );
             if matches!(
                 discovery.non_admission_reason(),
@@ -503,7 +523,8 @@ impl FilesystemWorkspace {
                             valid
                         },
                     )
-                    .over(overlay),
+                    .over(overlay)
+                    .in_project(project),
                 );
             if final_valid.get() {
                 return outcome;
@@ -2100,6 +2121,30 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
             .resolve_import_for_project_outcome(self, owner, specifier, ctx)
     }
 
+    fn resolve_import_from_project_outcome(
+        &self,
+        owner: &verter_session_query::resolution::ProjectOwnership,
+        overlay: Option<&crate::resolution_currency::ResolutionOverlaySnapshot>,
+        importer_id: &str,
+        specifier: &str,
+        ctx: verter_session_query::resolution::ResolutionContext,
+    ) -> crate::resolution_currency::ResolutionOutcome {
+        let Some(published) = self.load_published() else {
+            return crate::resolution_currency::ResolutionOutcome::refused(
+                None,
+                verter_audit::NonAdmissionReason::ResolutionIncompleteProvenance,
+            );
+        };
+        self.resolve_import_in_project_snapshot(
+            &published,
+            overlay,
+            Some(owner),
+            importer_id,
+            specifier,
+            ctx,
+        )
+    }
+
     fn is_workspace_owned(&self, canonical_id: &str) -> bool {
         let resolved = self.realpath(canonical_id);
         let target = resolved.as_deref().unwrap_or(canonical_id);
@@ -2179,6 +2224,10 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
 
     fn snapshot_revision(&self) -> Option<u64> {
         Some(self.engine.snapshot_revision())
+    }
+
+    fn snapshot_changes_since(&self, since: Option<u64>) -> Option<crate::SnapshotChanges> {
+        Some(self.engine.snapshot_changes_since(since))
     }
 
     fn snapshot_canonicals(&self) -> Vec<String> {

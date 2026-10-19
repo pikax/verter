@@ -6507,6 +6507,85 @@ async fn contention_on_one_document_leaves_another_documents_sync_unaffected() {
     drop(held);
 }
 
+/// A named request's priority survives a dispatch that yielded its document
+/// lane. Once both documents are quiet and their lanes are free, the requested
+/// document must still precede a newer replayed open.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_document_touch_survives_a_busy_lane_retry() {
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let documents = Arc::new(DocumentRegistry::new(host));
+    let requested_id = "/workspace/src/TouchedLaneRetry.vue";
+    let replayed_id = "/workspace/src/NewerLaneReplay.vue";
+    let requested_uri: Uri = "file:///workspace/src/TouchedLaneRetry.vue"
+        .parse()
+        .unwrap();
+    let replayed_uri: Uri = "file:///workspace/src/NewerLaneReplay.vue".parse().unwrap();
+    const SOURCE: &str = "<template><p>lane retry</p></template>";
+    let _requested_lease = open_with_lane(&documents, &requested_uri, requested_id, SOURCE);
+    let _replayed_lease = open_with_lane(&documents, &replayed_uri, replayed_id, SOURCE);
+    let held_lane = match documents.document_lanes().try_delivery_lane(requested_id) {
+        crate::document_sync_lane::DeliveryLane::Acquired(guard) => guard,
+        other => panic!("the requested document's lane must be free: {other:?}"),
+    };
+    let provider = Arc::new(MockTypeProvider::new());
+    let deps = lane_test_deps(&documents, &provider);
+    let needs_sync = Arc::clone(&deps.needs_provider_sync);
+    let pending_sync = Arc::clone(&deps.pending_snapshot_provider_sync);
+    let redrive = Arc::clone(&deps.carrier_transaction_coordinator);
+    // Observe the coordinator retry rather than a competing snapshot drain.
+    assert!(redrive.pending_redrive_try_arm());
+    let handle = spawn_sync_coordinator(deps);
+    let paused = handle.pause_dispatch_for_test().await;
+    let old_open = Instant::now() - Duration::from_secs(60);
+    needs_sync.insert(requested_id.to_string());
+    handle.signal(
+        requested_id.to_string(),
+        requested_uri.to_string(),
+        old_open,
+    );
+    handle.touch(requested_id);
+    drop(paused);
+    handle
+        .await_until(
+            || pending_sync.contains(requested_id) && needs_sync.contains(requested_id),
+            || panic!("the first dispatch must yield the held lane"),
+        )
+        .await;
+
+    let paused = handle.pause_dispatch_for_test().await;
+    // The retry's quiet time is allowed to elapse while dispatch is held; no
+    // ordering assertion depends on whether a document is still debounced.
+    needs_sync.insert(replayed_id.to_string());
+    handle.signal(
+        replayed_id.to_string(),
+        replayed_uri.to_string(),
+        old_open + Duration::from_millis(1),
+    );
+    tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS * 2)).await;
+    // The coordinator's own retry is the delivery under observation here.
+    pending_sync.remove(requested_id);
+    let (requested_arrived, release_requested) = test_hooks::block_after_lane_probe(requested_id);
+    let (replayed_arrived, release_replayed) = test_hooks::block_after_lane_probe(replayed_id);
+    drop(held_lane);
+    drop(paused);
+    let first = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            () = requested_arrived.notified() => requested_id,
+            () = replayed_arrived.notified() => replayed_id,
+        }
+    })
+    .await;
+    // Release both one-shot gates before asserting, including on timeout.
+    release_requested.notify_one();
+    release_replayed.notify_one();
+    redrive.pending_redrive_disarm();
+    assert_eq!(
+        first.expect("a quiet, lane-free document must dispatch"),
+        requested_id,
+        "yielding a lane must not consume the named request's priority"
+    );
+}
+
 /// A transaction that starts while its document is CLOSED and finds it
 /// open before delivery must take the lane (or yield to its holder).
 ///

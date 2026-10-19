@@ -10,8 +10,6 @@
 //! here so the only stage that materializes imported-root resolutions
 //! is one shared function.
 
-use std::sync::Arc;
-
 use crate::VerterHost;
 use verter_type_engine::component_meta_trace_custom;
 use verter_type_engine::instant::Instant;
@@ -106,7 +104,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
@@ -137,7 +135,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         // Test-only convenience: seed the resolve-and-cache method with a
         // cold-seed view (either `StoreViewRead` arm). The production
@@ -176,7 +174,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         self.resolve_imported_type_root_with_facts_with_context_and_store_view(
             ctx,
@@ -198,7 +196,7 @@ impl VerterHost {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     ) {
         let audit_started = self.config.audit_enabled.then(Instant::now);
 
@@ -290,7 +288,7 @@ impl VerterHost {
             None => (
                 None,
                 "miss",
-                verter_type_engine::fact_signature_helpers::empty_fact_signature(),
+                verter_session_query::facts::fact_cache::OwnedFactSignature::default(),
             ),
         };
 

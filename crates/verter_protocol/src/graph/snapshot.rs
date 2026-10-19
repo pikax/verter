@@ -152,6 +152,7 @@ pub(crate) enum PersistedGraphNode {
     },
     Infer {
         name: u32,
+        constraint: u32,
     },
     Rest {
         inner: u32,
@@ -276,7 +277,7 @@ fn try_persist(node: GraphNode) -> Result<PersistedGraphNode, SnapshotCaptureErr
         },
         GraphNode::Parenthesized { inner } => PersistedGraphNode::Parenthesized { inner },
         GraphNode::Unknown { raw } => PersistedGraphNode::Unknown { raw },
-        GraphNode::Infer { name } => PersistedGraphNode::Infer { name },
+        GraphNode::Infer { name, constraint } => PersistedGraphNode::Infer { name, constraint },
         GraphNode::Rest { inner } => PersistedGraphNode::Rest { inner },
         GraphNode::RecursiveRef {
             name,
@@ -408,6 +409,104 @@ impl ResolvedTypeGraphSnapshot {
     /// in-range at construction).
     pub(crate) fn root_node_id(&self) -> u32 {
         self.root_node_id
+    }
+
+    /// Heap the snapshot keeps reachable beyond its inline bytes: both
+    /// tables' `Arc` blocks — each counted once per `aliases`, so clones of
+    /// one snapshot share them — and every string's and node list's
+    /// backing by capacity. The snapshot's owner charges it inline.
+    #[must_use]
+    pub fn owned_heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        use verter_session_query::retention::allocation::{arc_slice_block_bytes, string_bytes};
+        let Self {
+            strings,
+            nodes,
+            root_node_id: _,
+            stable_key: _,
+        } = self;
+        let strings_bytes = arc_slice_block_bytes(strings, aliases).map_or(0, |block| {
+            block + strings.iter().map(string_bytes).sum::<usize>()
+        });
+        let nodes_bytes = arc_slice_block_bytes(nodes, aliases).map_or(0, |block| {
+            block
+                + nodes
+                    .iter()
+                    .map(PersistedGraphNode::heap_bytes)
+                    .sum::<usize>()
+        });
+        strings_bytes + nodes_bytes
+    }
+}
+
+impl PersistedGraphNode {
+    /// Every list backing this node owns, by capacity. Every other field
+    /// is an inline id or flag.
+    fn heap_bytes(&self) -> usize {
+        use verter_session_query::retention::allocation::vec_bytes;
+        match self {
+            Self::Union { types } | Self::Intersection { types } => vec_bytes(types),
+            Self::Tuple {
+                readonly: _,
+                elements,
+            } => vec_bytes(elements),
+            Self::Object { members } => {
+                vec_bytes(members)
+                    + members
+                        .iter()
+                        .map(|member| member.key.as_ref().map_or(0, property_key_heap_bytes))
+                        .sum::<usize>()
+            }
+            Self::Function {
+                parameters,
+                return_type: _,
+                type_parameters,
+            } => vec_bytes(parameters) + vec_bytes(type_parameters),
+            Self::Ref {
+                name: _,
+                type_arguments,
+            } => vec_bytes(type_arguments),
+            Self::IntrinsicApplication { op: _, arguments } => vec_bytes(arguments),
+            Self::TypeOf { path } => vec_bytes(path),
+            Self::TemplateLiteral {
+                quasis,
+                expressions,
+            } => vec_bytes(quasis) + vec_bytes(expressions),
+            Self::RecursiveRef {
+                name: _,
+                type_arguments,
+                conditional_context,
+            } => vec_bytes(type_arguments) + vec_bytes(conditional_context),
+            Self::Primitive { .. }
+            | Self::LiteralString { .. }
+            | Self::LiteralNumber { .. }
+            | Self::LiteralBoolean { .. }
+            | Self::LiteralBigInt { .. }
+            | Self::Array { .. }
+            | Self::TypeParameter { .. }
+            | Self::KeyOf { .. }
+            | Self::IndexedAccess { .. }
+            | Self::Conditional { .. }
+            | Self::Mapped { .. }
+            | Self::Parenthesized { .. }
+            | Self::Unknown { .. }
+            | Self::Infer { .. }
+            | Self::Rest { .. } => 0,
+        }
+    }
+}
+
+/// The member path list a unique-symbol key owns.
+fn property_key_heap_bytes(key: &GraphPropertyKey) -> usize {
+    match key {
+        GraphPropertyKey::UniqueSymbol { member_path, .. } => {
+            verter_session_query::retention::allocation::vec_bytes(member_path)
+        }
+        GraphPropertyKey::String { .. }
+        | GraphPropertyKey::Number { .. }
+        | GraphPropertyKey::Computed { .. } => 0,
     }
 }
 
@@ -589,7 +688,13 @@ fn validate_node_refs(
             nid(*inner)
         }
         PersistedGraphNode::Unknown { raw } => sid(*raw),
-        PersistedGraphNode::Infer { name } => sid(*name),
+        PersistedGraphNode::Infer { name, constraint } => {
+            sid(*name)?;
+            if *constraint != 0 {
+                nid(*constraint)?;
+            }
+            Ok(())
+        }
         PersistedGraphNode::RecursiveRef {
             name,
             type_arguments,
@@ -900,8 +1005,14 @@ mod tests {
                 PersistedGraphNode::Unknown { raw: 1 },
             ),
             (
-                GraphNode::Infer { name: 1 },
-                PersistedGraphNode::Infer { name: 1 },
+                GraphNode::Infer {
+                    name: 1,
+                    constraint: 0,
+                },
+                PersistedGraphNode::Infer {
+                    name: 1,
+                    constraint: 0,
+                },
             ),
             (
                 GraphNode::Rest { inner: 1 },
@@ -984,10 +1095,10 @@ mod tests {
 
         let mut builder = GraphBuilder::new();
         let root = builder.node_id(&TypeExpr::synthetic_slot_binding(SyntheticCarrierKey {
-            scope_canonical_id: Arc::from("/abs/Foo.vue"),
+            scope_canonical_id: From::from("/abs/Foo.vue"),
             surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
-            slot_name: Some(Arc::from("default")),
-            binding_name: Arc::from("controls"),
+            slot_name: Some(From::from("default")),
+            binding_name: From::from("controls"),
             value_node: 424242,
         }));
         assert_eq!(

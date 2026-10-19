@@ -120,24 +120,6 @@ fn language_of(canonical: &str) -> FileLanguage {
         .static_resolution()
 }
 
-/// The root files a scenario directory's tsconfig lists besides the library
-/// and the scenario module, in its order.
-fn companion_files(dir: &Path) -> Result<Vec<String>, JobError> {
-    let path = dir.join("tsconfig.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|err| JobError(format!("read {}: {err}", path.display())))?;
-    let config: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|err| JobError(format!("parse {}: {err}", path.display())))?;
-    Ok(config["files"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|file| file.as_str())
-        .filter(|file| !matches!(*file, "lib.bench.d.ts" | "scenario.ts"))
-        .map(String::from)
-        .collect())
-}
-
 /// Profile one semantic benchmark scenario directory.
 pub fn profile_scenario(dir: &Path) -> Result<LaneProfile, JobError> {
     let job = Job {
@@ -146,8 +128,17 @@ pub fn profile_scenario(dir: &Path) -> Result<LaneProfile, JobError> {
         tsconfig: "tsconfig.json".into(),
         lib: "lib.bench.d.ts".into(),
         lib_mode: LibMode::RootFile,
-        files: companion_files(dir)?,
         scenario: "scenario.ts".into(),
+        files: serde_json::from_str::<serde_json::Value>(&super::read(dir, "tsconfig.json")?)
+            .map_err(|error| JobError(format!("read scenario project: {error}")))?
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|file| *file != "scenario.ts" && *file != "lib.bench.d.ts")
+            .map(String::from)
+            .collect(),
         init_alias: "__BenchInit".into(),
         probes: vec!["__Probe".into()],
         warm_repeats: 1,

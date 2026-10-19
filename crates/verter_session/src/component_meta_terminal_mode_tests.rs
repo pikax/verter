@@ -87,10 +87,14 @@ fn intern_four_hop_object(host: &VerterHost) -> SemanticNodeId {
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -147,10 +151,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_route_target_pick_omit(
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -214,10 +222,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_fallthrough_inheritance
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -283,10 +295,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_userland_shadowing_pick
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reduction() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -353,10 +369,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_exclude_extract_reducti
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -423,10 +443,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_slot_binding_lowering()
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",
@@ -490,10 +514,14 @@ fn intermediate_hops_navigate_terminal_only_expanded_for_typeof_substitution() {
 #[test]
 fn intermediate_hops_navigate_terminal_only_expanded_for_engine_state_promotion() {
     let host = build_test_host();
+    let _scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let base = intern_four_hop_object(&host);
     let key = SemanticQueryKey::ProjectPath {
         base,
-        path: Arc::from(
+        path: verter_type_expr::OwnedSlice::from(
             vec![
                 PathSegment::Member(verter_type_engine::semantic_query::PropertyKey::identifier(
                     "a",

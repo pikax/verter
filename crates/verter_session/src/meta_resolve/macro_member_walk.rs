@@ -69,14 +69,11 @@ pub(crate) fn collect_define_props_root_names(
         let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical, macro_index) else {
             continue;
         };
-        let Some(data) = verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            product.hot.node(),
-        ) else {
+        let Some(data) = dispatch.graph().read_in_scope(product.hot.node()) else {
             continue;
         };
         if let Some((name, _)) = data.bare_ref_head() {
-            names.insert(name.as_ref().to_string());
+            names.insert(name.to_string());
         }
     }
     names
@@ -129,18 +126,21 @@ pub(crate) fn slot_binding_targets_define_props_root(
         verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
             verter_type_engine::semantic_query::ProjectionMode::Navigate,
         );
-    let raised = field
-        .authored_evidence
+    // The raised carriers own their nodes for the whole walk below.
+    let authored_raised = field.authored_evidence.as_ref().map(|evidence| {
+        dispatch
+            .owning()
+            .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
+    });
+    let authored = authored_raised
         .as_ref()
-        .and_then(|evidence| {
-            dispatch
-                .raise_authored_locator_to_hot(evidence.source().locator(), transit_ctx)
-                .at_optional_boundary()
-        })
-        .or_else(|| {
-            dispatch
-                .raise_semantic_type_source_to_hot(
-                    field.authority.source()?,
+        .and_then(|raised| raised.value().clone().at_optional_boundary());
+    let resolved_raised = authored
+        .is_none()
+        .then(|| {
+            field.authority.source().map(|source| {
+                dispatch.owning().raise_semantic_type_source_to_hot(
+                    source,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: owner_canonical,
                         scope_owner: owner,
@@ -148,8 +148,14 @@ pub(crate) fn slot_binding_targets_define_props_root(
                         interior_failures: None,
                     },
                 )
-                .at_optional_boundary()
-        });
+            })
+        })
+        .flatten();
+    let raised = authored.or_else(|| {
+        resolved_raised
+            .as_ref()
+            .and_then(|raised| raised.value().clone().at_optional_boundary())
+    });
     let Some(raised) = raised else {
         return false;
     };
@@ -157,20 +163,13 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // carrier classifies through its SAME-GENERATION value-node seed (the
     // carrier's value-side provenance): the seed IS the lowered binding value
     // (`Props['avatar']`), exactly the node the root extraction below walks.
-    let subject = match verter_type_engine::project_semantic_dispatch::node_data_for(
-        dispatch.graph(),
-        raised.node(),
-    )
-    .as_deref()
-    {
+    let subject = match dispatch.graph().read_in_scope(raised.node()).as_deref() {
         Some(SemanticNodeData::SyntheticBinding { value_node, .. }) => {
             verter_type_engine::semantic_query::SemanticNodeId(*value_node)
         }
         _ => raised.node(),
     };
-    let Some(data) =
-        verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), subject)
-    else {
+    let Some(data) = dispatch.graph().read_in_scope(subject) else {
         return false;
     };
 
@@ -189,23 +188,18 @@ pub(crate) fn slot_binding_targets_define_props_root(
     // projection rooted at a single reference. Parens are structurally
     // transparent in the graph.
     let root_name = |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
-        let data =
-            verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)?;
+        let data = dispatch.graph().read_in_scope(node)?;
         // A builtin object-filter utility application (`Pick<Props, …>` /
         // `Omit<Props, …>`): the root is the SOURCE argument's reference head.
         if let Some((name, _)) = data.bare_ref_head() {
             let args = data.carrier_type_args();
-            let is_utility = verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
-                name.as_ref(),
-            )
-            .is_some();
+            let is_utility =
+                verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name)
+                    .is_some();
             if is_utility && !args.is_empty() {
-                let source = verter_type_engine::project_semantic_dispatch::node_data_for(
-                    dispatch.graph(),
-                    args[0],
-                )?;
+                let source = dispatch.graph().read_in_scope(args[0])?;
                 let (source_name, _) = source.bare_ref_head()?;
-                return Some(source_name.as_ref().to_string());
+                return Some(source_name.to_string());
             }
             return None;
         }
@@ -215,10 +209,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
         |node: verter_type_engine::semantic_query::SemanticNodeId| -> Option<String> {
             let mut current = node;
             loop {
-                let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-                    dispatch.graph(),
-                    current,
-                )?;
+                let data = dispatch.graph().read_in_scope(current)?;
                 match data.as_ref() {
                     SemanticNodeData::IndexedAccess { object, index } => {
                         if !matches!(index, IndexKey::String(_) | IndexKey::Number(_)) {
@@ -231,7 +222,7 @@ pub(crate) fn slot_binding_targets_define_props_root(
                             return data
                                 .carrier_type_args()
                                 .is_empty()
-                                .then(|| name.as_ref().to_string());
+                                .then(|| name.to_string());
                         }
                         // A root the lowering already RESOLVED interns the
                         // `DeclRef` identity carrier — same root, same name.

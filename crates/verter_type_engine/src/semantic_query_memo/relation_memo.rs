@@ -41,73 +41,80 @@ pub(super) fn relation_satisfied_projection() -> MaterializedSet {
 }
 
 impl SemanticGraphStore {
-    /// Claim the ordinary family flight for a non-binding relation member
-    /// that will be computed inline. `None` means another cold owner already
-    /// owns this exact full relation key.
-    ///
-    /// Binding relation roots are refused here rather than in the shared
-    /// claim: they run on independently-owned cooperative flights, so
-    /// claiming the ordinary family flight for one would collide with the
-    /// root's own admission.
-    pub fn begin_inline_relation_flight(
-        &self,
-        key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<InlineMemberFlight> {
-        verter_debug_assert!(
-            key.inference_context.is_none(),
-            "binding relation roots use independently-owned cooperative flights"
-        );
-        self.begin_inline_member_flight(key.to_query_key())
+    construction_ordinal_seam! {
+        /// Claim the ordinary family flight for a non-binding relation member
+        /// that will be computed inline. `None` means another cold owner already
+        /// owns this exact full relation key.
+        ///
+        /// Binding relation roots are refused here rather than in the shared
+        /// claim: they run on independently-owned cooperative flights, so
+        /// claiming the ordinary family flight for one would collide with the
+        /// root's own admission.
+        fn begin_inline_relation_flight(
+            &self,
+            key: &crate::semantic_query::RelateMemoKey,
+        ) -> Option<InlineMemberFlight> {
+            verter_debug_assert!(
+                key.inference_context.is_none(),
+                "binding relation roots use independently-owned cooperative flights"
+            );
+            self.begin_inline_member_flight(key.to_query_key())
+        }
     }
 
-    /// Strict warm-hit read of a published relation payload for the full
-    /// relation identity `key`.
-    ///
-    /// Returns the PUBLIC [`crate::semantic_query::RelationPayload`] **only
-    /// when** the stored entry's self-version-rooted carrier validates
-    /// against the live store view — the carrier's
-    /// `FactVersionRef::ProjectGeneration` fact is the validity oracle
-    /// (`validated_at_generation` is recency metadata, not a gate). A stale
-    /// entry (same-canonical content edit, untracked self-root, or
-    /// `ProjectGeneration` bump) returns `None`. Only decided binary
-    /// payloads are ever stored, so a hit is always a determinate
-    /// judgement.
-    #[must_use]
-    pub fn get_relation_payload<C: crate::resolver_core::ResolverCapabilities>(
-        &self,
-        ctx: &dyn crate::resolver_core::ResolverContext<C>,
-        key: &crate::semantic_query::RelateMemoKey,
-    ) -> Option<CacheRead<crate::semantic_query::RelationPayload>> {
-        let family = FamilyKey::Relate {
-            key: super::family_intern::InternedRelateKey::intern(key.clone()),
-        };
-        // A relation entry always materialises the modeless identity
-        // point, so the §3.4 gate is the modeless identity point every
-        // entry records — only carrier validation can block.
-        let requested = MaterializedPoint::new(family::point_for_slot(
-            ModeSlot::Single,
-            &ProjectionPath::empty(),
-        ));
-        // Miss-neutral probe: a miss falls through to the owning
-        // cooperative dispatch, which records the single miss (see
-        // `get_validated_value_impl`'s `record_miss` contract).
-        let hit = self.get_validated_value_impl(
-            &family,
-            ModeSlot::Single,
-            &requested,
-            ctx,
-            None,
-            None,
-            false,
-        )?;
-        Some(hit.map_value(|value| match value {
-            QueryResult::Value(SemanticQueryValue::Relation(payload)) => payload,
-            // Structural invariant: the relation authority only ever
-            // stores `Relation` payloads in `Relate` family entries.
-            other => {
-                unreachable!("Relate family entries store Relation payloads only; found {other:?}")
-            }
-        }))
+    construction_ordinal_seam! {
+        /// Strict warm-hit read of a published relation payload for the full
+        /// relation identity `key`.
+        ///
+        /// Returns the PUBLIC [`crate::semantic_query::RelationPayload`] **only
+        /// when** the stored entry's self-version-rooted carrier validates
+        /// against the live store view — the carrier's
+        /// `FactVersionRef::ProjectGeneration` fact is the validity oracle
+        /// (`validated_at_generation` is recency metadata, not a gate). A stale
+        /// entry (same-canonical content edit, untracked self-root, or
+        /// `ProjectGeneration` bump) returns `None`. Only decided binary
+        /// payloads are ever stored, so a hit is always a determinate
+        /// judgement.
+        #[must_use]
+        fn get_relation_payload<C: crate::resolver_core::ResolverCapabilities>(
+            &self,
+            ctx: &dyn crate::resolver_core::ResolverContext<C>,
+            key: &crate::semantic_query::RelateMemoKey,
+        ) -> Option<CacheRead<crate::semantic_query::RelationPayload>> {
+            let family = FamilyKey::Relate {
+                key: super::family_intern::InternedRelateKey::intern(
+                    Some(&self.arena.core),
+                    key.clone(),
+                ),
+            };
+            // A relation entry always materialises the modeless identity
+            // point, so the §3.4 gate is the modeless identity point every
+            // entry records — only carrier validation can block.
+            let requested = MaterializedPoint::new(family::point_for_slot(
+                ModeSlot::Single,
+                &ProjectionPath::empty(),
+            ));
+            // Miss-neutral probe: a miss falls through to the owning
+            // cooperative dispatch, which records the single miss (see
+            // `get_validated_value_impl`'s `record_miss` contract).
+            let hit = self.get_validated_value_impl(
+                &family,
+                ModeSlot::Single,
+                &requested,
+                ctx,
+                None,
+                None,
+                false,
+            )?;
+            Some(hit.map_value(|value| match value {
+                QueryResult::Value(SemanticQueryValue::Relation(payload)) => payload,
+                // Structural invariant: the relation authority only ever
+                // stores `Relation` payloads in `Relate` family entries.
+                other => {
+                    unreachable!("Relate family entries store Relation payloads only; found {other:?}")
+                }
+            }))
+        }
     }
 
     /// Read back the just-published carrier (read-set signature,
@@ -122,7 +129,10 @@ impl SemanticGraphStore {
         key: &crate::semantic_query::RelateMemoKey,
     ) -> Option<RelationPublishedCarrier> {
         let family = FamilyKey::Relate {
-            key: super::family_intern::InternedRelateKey::intern(key.clone()),
+            key: super::family_intern::InternedRelateKey::intern(
+                Some(&self.arena.core),
+                key.clone(),
+            ),
         };
         let entries = self.entries_lock_diagnosed();
         let slots = entries.get(&family)?;
@@ -199,9 +209,9 @@ impl SemanticGraphStore {
         };
         self.intern_node(crate::semantic_query::SemanticNodeData::Signature {
             kind: crate::semantic_query::SignatureKind::Construct,
-            params: Arc::clone(params),
+            params: params.share(),
             return_type: *return_type,
-            type_parameters: Arc::clone(type_parameters),
+            type_parameters: type_parameters.share(),
             occurrence: occurrence.clone(),
             return_carrier: return_carrier.clone(),
             signature_span: *signature_span,
@@ -259,7 +269,7 @@ impl SemanticGraphStore {
         self.publish_unfenced_candidate_for_tests(
             None,
             FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(key),
+                key: super::family_intern::InternedRelateKey::intern(Some(&self.arena.core), key),
             },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),
@@ -287,7 +297,7 @@ impl SemanticGraphStore {
         self.publish_unfenced_candidate_for_tests(
             Some(view),
             FamilyKey::Relate {
-                key: super::family_intern::InternedRelateKey::intern(key),
+                key: super::family_intern::InternedRelateKey::intern(Some(&self.arena.core), key),
             },
             SemanticQueryValue::Relation(payload),
             relation_satisfied_projection(),
@@ -308,7 +318,7 @@ impl SemanticGraphStore {
     ) -> crate::semantic_query::RelationPayload {
         crate::semantic_query::RelationPayload {
             outcome,
-            bindings: Arc::from(Vec::new().into_boxed_slice()),
+            bindings: Vec::new().into(),
             recursion: crate::semantic_query::RelationRecursionFootprint::default(),
         }
     }

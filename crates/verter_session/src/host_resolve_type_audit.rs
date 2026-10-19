@@ -126,6 +126,11 @@ impl TypeResolutionRequestError {
     pub fn from_query_error(err: &verter_type_engine::semantic_query::QueryError) -> Option<Self> {
         use verter_type_engine::semantic_query::QueryError;
         match err {
+            QueryError::ExecutionAborted(abort) => Some(match abort {
+                verter_type_engine::semantic_query::ExecutionAbort::Cancelled => Self::Cancelled,
+                verter_type_engine::semantic_query::ExecutionAbort::Superseded => Self::UnstableState { attempts: 1 },
+                verter_type_engine::semantic_query::ExecutionAbort::Shutdown => Self::Other(Arc::from("execution shut down")),
+            }),
             QueryError::Miss
             | QueryError::RecursiveRef { .. }
             | QueryError::DeclPlaceholder { .. }
@@ -149,7 +154,7 @@ impl TypeResolutionRequestError {
             | QueryError::PermissiveWildcard
             | QueryError::CheckerRecovery { .. } => None,
             QueryError::UnsupportedIntrinsic { name } => Some(Self::UnsupportedIntrinsic {
-                name: Arc::clone(name),
+                name: std::sync::Arc::<str>::from(name.as_str()),
             }),
             QueryError::BudgetExceeded(failure) => Some(Self::BudgetExceeded(failure.clone())),
             QueryError::Cancelled => Some(Self::Cancelled),
@@ -168,9 +173,9 @@ impl TypeResolutionRequestError {
                 .as_str(),
             ))),
             QueryError::AliasCycle { chain } => Some(Self::AliasCycle {
-                chain: Arc::clone(chain),
+                chain: std::sync::Arc::<[std::sync::Arc<str>]>::from(chain.clone()),
             }),
-            QueryError::Other(text) => Some(Self::Other(Arc::clone(text))),
+            QueryError::Other(text) => Some(Self::Other(std::sync::Arc::<str>::from(text.as_str()))),
             // A typed caller asked for a value domain the query could not
             // provide. This is a genuine request fault; it surfaces through
             // the text-bearing carrier. (Unreachable until non-`TypeNode`
@@ -557,7 +562,7 @@ mod request_error_classification_tests {
             domain: BudgetDomain::SolverResolveSteps,
             limit: 10,
             actual: 11,
-            context: "test".to_string(),
+            context: "test".into(),
         }
     }
 
@@ -575,8 +580,8 @@ mod request_error_classification_tests {
     #[test]
     fn recursive_ref_is_not_a_request_fault() {
         let err = QueryError::RecursiveRef {
-            name: Arc::from("Tree"),
-            args: std::sync::Arc::from([]),
+            name: verter_type_expr::OwnedStr::from("Tree"),
+            args: Default::default(),
         };
         assert!(TypeResolutionRequestError::from_query_error(&err).is_none());
     }
@@ -584,9 +589,9 @@ mod request_error_classification_tests {
     #[test]
     fn decl_placeholder_is_not_a_request_fault() {
         let err = QueryError::DeclPlaceholder {
-            canonical_id: Arc::from("/a.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/a.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            name: Arc::from("Foo"),
+            name: verter_type_expr::OwnedStr::from("Foo"),
             whole_hash: Default::default(),
         };
         assert!(TypeResolutionRequestError::from_query_error(&err).is_none());
@@ -623,7 +628,7 @@ mod request_error_classification_tests {
     fn alias_cycle_is_a_request_fault() {
         let chain: Arc<[Arc<str>]> = Arc::from(vec![Arc::from("A"), Arc::from("B")]);
         let err = QueryError::AliasCycle {
-            chain: Arc::clone(&chain),
+            chain: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from(chain.clone()),
         };
         assert_eq!(
             TypeResolutionRequestError::from_query_error(&err),
@@ -634,7 +639,7 @@ mod request_error_classification_tests {
     #[test]
     fn unsupported_intrinsic_is_a_request_fault() {
         let err = QueryError::UnsupportedIntrinsic {
-            name: Arc::from("NoSuchIntrinsic"),
+            name: verter_type_expr::OwnedStr::from("NoSuchIntrinsic"),
         };
         assert_eq!(
             TypeResolutionRequestError::from_query_error(&err),
@@ -646,7 +651,7 @@ mod request_error_classification_tests {
 
     #[test]
     fn other_is_a_request_fault() {
-        let err = QueryError::Other(Arc::from("boom"));
+        let err = QueryError::Other(verter_type_expr::OwnedStr::from("boom"));
         assert_eq!(
             TypeResolutionRequestError::from_query_error(&err),
             Some(TypeResolutionRequestError::Other(Arc::from("boom"))),

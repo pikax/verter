@@ -92,10 +92,14 @@ fn session_slot_present(host: &VerterHost, profile: &CompileProfile) -> bool {
 
 fn template_slot(
     host: &VerterHost,
-) -> Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>> {
+) -> Option<
+    verter_session_query::retention::heap_size::OwnedValue<
+        verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+    >,
+> {
     host.derived_raw_cache().get(OWNER).and_then(|cc| {
         cc.raw_template_analysis()
-            .map(|entry| Arc::clone(&entry.template))
+            .map(|entry| entry.template.clone())
     })
 }
 
@@ -172,7 +176,7 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
         .as_ref()
         .expect("the warm read carries a template");
     assert!(
-        Arc::ptr_eq(served, &persisted),
+        verter_session_query::retention::heap_size::OwnedValue::ptr_eq(served, &persisted),
         "the default lane warm-serves the compile-persisted value — the \
          admission must not decline the coherent default-extraction persist",
     );
@@ -183,4 +187,299 @@ fn default_profile_inline_compile_still_persists_and_warm_serves() {
             .any(|occ| occ.name == "msg"),
         "the persisted default extraction carries the msg interpolation occurrence",
     );
+}
+
+#[test]
+fn page_retention_refusal_evicts_compile_companions_and_serves_uncached() {
+    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let profile = CompileProfile::default();
+    for refused in [false, true] {
+        let host = make_host();
+        upsert(&host, INLINE_SOURCE);
+        let facts: Vec<_> = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH
+            + 3)
+            .map(|i| {
+                let canonical_id = format!("/publish-evidence/{i}.ts");
+                let _ = host
+                    .upsert(UpsertRequest {
+                        canonical_id: Some(canonical_id.clone()),
+                        input_id: canonical_id.clone(),
+                        source: Arc::from("export const value = 1;"),
+                        file_language: verter_language::FileLanguage::script_ts(),
+                        aliases: Vec::new(),
+                    })
+                    .unwrap();
+                let source = host.scheduler.try_get_source(&canonical_id).unwrap();
+                let hash = source
+                    .downcast_data::<crate::host_executor::HostSourceData>()
+                    .unwrap()
+                    .parse
+                    .whole_hash;
+                FactVersionRef::FileWholeHash { canonical_id, hash }
+            })
+            .collect();
+        let first = compile_with(&host, profile.clone()).unwrap();
+        assert!(template_slot(&host).is_some());
+        let profile_hash = compile_profile_hash(&profile);
+        assert!(host
+            .scheduler
+            .try_get_artifact(OWNER, profile_hash)
+            .is_some());
+        // Force the same production route cold, leaving both companions as
+        // witnesses that refusal must evict them rather than merely skip writes.
+        {
+            let mut state = host.compile_cache().get_mut(OWNER).unwrap();
+            crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+                .remove(&mut state, profile_hash);
+        }
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if refused { 1 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        let read = || {
+            let signature = ReadSetSignature::new(
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+            );
+            crate::compile_output_node::with_session_publish_evidence_for_test(
+                signature,
+                StoreAccount::new(Arc::clone(&account)),
+                || compile_with(&host, profile.clone()).unwrap(),
+            )
+        };
+        assert_eq!(
+            read().code,
+            first.code,
+            "retention never changes the product"
+        );
+        assert_eq!(session_slot_present(&host, &profile), !refused);
+        assert_eq!(template_slot(&host).is_some(), !refused);
+        assert_eq!(
+            host.scheduler
+                .try_get_artifact(OWNER, profile_hash)
+                .is_some(),
+            !refused
+        );
+        if refused {
+            assert_eq!(read().code, first.code, "repeat delivers uncached output");
+            assert!(!session_slot_present(&host, &profile));
+            assert!(template_slot(&host).is_none());
+            assert!(host
+                .scheduler
+                .try_get_artifact(OWNER, profile_hash)
+                .is_none());
+        } else {
+            let signature = host
+                .compile_cache()
+                .get(OWNER)
+                .and_then(|state| {
+                    crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+                        .peek_signature(&state, profile_hash)
+                })
+                .unwrap();
+            let view = host.resolver_store_view_read().into_owned_view();
+            assert!(
+                verter_session_query::facts::store_view::StoreView::validates_fact_signature(
+                    &view,
+                    &signature.facts
+                ),
+                "the admitted wide witness is current"
+            );
+            assert_eq!(
+                compile_with(&host, profile.clone()).unwrap().code,
+                first.code,
+                "valid admitted warm output equals the cold product"
+            );
+        }
+        drop(host);
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            0,
+            "dropping companions drains pages"
+        );
+    }
+}
+
+/// An IDE artifact the retention account declines to keep is still served by
+/// the compile that produced it: only the cache slot is missing, so a
+/// consumer that takes the served artifact never loses the IDE surface of a
+/// component whose output exceeds the per-entry ceiling.
+#[test]
+fn refused_ide_admission_still_serves_the_compiled_artifact() {
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::{
+        RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let profile = CompileProfile::default();
+    let mut admitted_code = None;
+    for refused in [false, true] {
+        let host = make_host();
+        upsert(&host, INLINE_SOURCE);
+        let account = SemanticRetentionAccount::new(RetentionLimits {
+            max_entry_bytes: if refused { 1 } else { usize::MAX },
+            ..RetentionLimits::defaults()
+        });
+        let ide = crate::compile_output_node::with_session_publish_evidence_for_test(
+            ReadSetSignature::new(
+                verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+            ),
+            StoreAccount::new(Arc::clone(&account)),
+            || host.compile_ide(OWNER, &profile),
+        )
+        .expect("the carrier compiles")
+        .expect("a .vue carrier projects an IDE surface");
+        assert!(
+            ide.code.contains("msg"),
+            "the served artifact is the compiled IDE surface"
+        );
+        assert_eq!(
+            session_slot_present(&host, &ide_profile(&profile)),
+            !refused,
+            "only an admitted artifact is cached"
+        );
+        match &admitted_code {
+            None => admitted_code = Some(ide.code),
+            Some(code) => assert_eq!(&*ide.code, &**code, "retention never changes the artifact"),
+        }
+        drop(host);
+        assert_eq!(account.snapshot().retained_bytes, 0);
+    }
+}
+
+/// An IDE output the account refuses to retain is still delivered: its
+/// compile hands it to the document as the surface the pure IDE read serves
+/// — complete, byte-equal to the retained output — charged to its readers,
+/// pinned, and never reused as a cache hit. The next compile the account
+/// retains supersedes it and gives the surface's charge back. Without this an
+/// oversized IDE surface was compiled and then lost, and the editor saw no
+/// provider surface at all.
+#[test]
+fn a_refused_ide_output_is_still_delivered_complete_to_the_reader() {
+    use crate::types::CompileTarget;
+    use verter_session_query::facts::fact_cache::ReadSetSignature;
+    use verter_session_query::retention::{
+        ChargeClass, RetentionLimits, SemanticRetentionAccount, StoreAccount,
+    };
+    let host = make_host();
+    upsert(&host, INLINE_SOURCE);
+    let profile = CompileProfile {
+        source_map: true,
+        target: CompileTarget::IDE,
+        ..CompileProfile::default()
+    };
+    let remove_slot = || {
+        let mut state = host.compile_cache().get_mut(OWNER).unwrap();
+        crate::compile_output_node::CompileOutputNodeFactValidatedSession::new()
+            .remove(&mut state, compile_profile_hash(&ide_profile(&profile)));
+    };
+    assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+    let retained = host
+        .get_ide(OWNER, &profile)
+        .expect("a retained IDE output is read");
+    remove_slot();
+
+    let account = SemanticRetentionAccount::new(RetentionLimits {
+        max_entry_bytes: 1,
+        ..RetentionLimits::defaults()
+    });
+    let delivered = crate::compile_output_node::with_session_publish_evidence_for_test(
+        ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(Vec::new()),
+        ),
+        StoreAccount::new(Arc::clone(&account)),
+        || {
+            assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+            host.get_ide(OWNER, &profile)
+        },
+    )
+    .expect("a refused IDE output is still delivered");
+    assert!(
+        !session_slot_present(&host, &ide_profile(&profile)),
+        "nothing is retained"
+    );
+    assert_eq!(&*delivered.code, &*retained.code, "the output is complete");
+    assert_eq!(
+        delivered.source_map.as_deref(),
+        retained.source_map.as_deref()
+    );
+    assert_eq!(delivered.code.charge_class(), Some(ChargeClass::Pinned));
+    let again = host
+        .get_ide(OWNER, &profile)
+        .expect("the surface is the document's");
+    assert!(
+        verter_type_expr::OwnedStr::ptr_eq(&again.code, &delivered.code),
+        "every read serves the one delivered surface"
+    );
+    let texts = delivered.code.charge_bytes().unwrap()
+        + delivered
+            .source_map
+            .as_ref()
+            .and_then(|map| map.charge_bytes())
+            .unwrap_or(0);
+    let snapshot = account.snapshot();
+    assert_eq!(snapshot.retained_bytes, 0, "no cache retains it");
+    assert_eq!(
+        snapshot.pinned_bytes, texts,
+        "its texts are charged to the readers"
+    );
+    drop((delivered, again));
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        texts,
+        "the document keeps its surface after the readers let go"
+    );
+
+    assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+    assert!(
+        session_slot_present(&host, &ide_profile(&profile)),
+        "an unrestricted compile is retained"
+    );
+    assert_eq!(
+        account.snapshot().pinned_bytes,
+        0,
+        "a retained slot supersedes the delivered surface and its charge goes"
+    );
+}
+
+/// The IDE-normalized profile `ensure_ide_compiled` / `get_ide` address.
+fn ide_profile(profile: &CompileProfile) -> CompileProfile {
+    VerterHost::ide_normalized_profile(profile)
+}
+
+#[test]
+fn stateless_generated_text_is_pinned_through_its_final_leaf() {
+    use verter_session_query::retention::{ChargeClass, SemanticRetentionAccount};
+    let host = make_host();
+    upsert(&host, INLINE_SOURCE);
+    let response = compile_with(
+        &host,
+        CompileProfile {
+            requested_mode: CompileCacheMode::Stateless,
+            source_map: true,
+            ..CompileProfile::default()
+        },
+    )
+    .expect("stateless compile produces complete output");
+    assert_eq!(response.actual_mode, CompileCacheMode::Stateless);
+    assert_eq!(response.code.charge_class(), Some(ChargeClass::Pinned));
+    let map = response
+        .source_map
+        .clone()
+        .expect("source maps were requested");
+    assert_eq!(map.charge_class(), Some(ChargeClass::Pinned));
+    let code = response.code.clone();
+    let bytes = verter_type_expr::OwnedStr::charge_for_len(code.len());
+    assert_eq!(code.charge_bytes(), Some(bytes));
+    drop((response, host, map));
+    assert_eq!(
+        code.charge_bytes(),
+        Some(bytes),
+        "leaf outlives host and response"
+    );
+    let account = SemanticRetentionAccount::process_local();
+    let before = account.snapshot().pinned_bytes;
+    drop(code);
+    assert_eq!(account.snapshot().pinned_bytes, before - bytes);
 }

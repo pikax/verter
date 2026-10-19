@@ -123,6 +123,48 @@ mod branches;
 mod class_expression;
 use branches::{arm_statements, LoopLower, LowerAcc, LowerEntered, LowerStep};
 
+/// A receiver-independent return contributes to the outer call's inference
+/// before methods that need a contextual receiver are checked.
+fn method_return_is_context_independent(
+    walks: &verter_semantic::analysis::walk_stack::ProgramWalkStack<'_>,
+    expression: &Expression<'_>,
+) -> bool {
+    let Expression::FunctionExpression(function) = expression else {
+        return false;
+    };
+    if function
+        .params
+        .items
+        .iter()
+        .any(|param| param.type_annotation.is_none())
+        || function
+            .params
+            .rest
+            .as_ref()
+            .is_some_and(|param| param.type_annotation.is_none())
+    {
+        return false;
+    }
+    struct ThisRead(bool);
+    impl<'a> Visit<'a> for ThisRead {
+        fn visit_this_expression(&mut self, _: &oxc_ast::ast::ThisExpression) {
+            self.0 = true;
+        }
+        // Ordinary nested functions own their `this`; arrows inherit it.
+        fn visit_function(
+            &mut self,
+            _: &oxc_ast::ast::Function<'a>,
+            _: oxc_syntax::scope::ScopeFlags,
+        ) {
+        }
+    }
+    let mut reads = ThisRead(false);
+    if let Some(body) = function.body.as_ref() {
+        walks.with_node_stack(body.span, || reads.visit_function_body(body));
+    }
+    !reads.0
+}
+
 // ---------------------------------------------------------------------------
 // Guards — the narrowing facts a conditional test establishes
 // ---------------------------------------------------------------------------
@@ -881,8 +923,8 @@ pub(crate) fn build_flow_slice_content(
     index: &verter_session_query::function_program::FunctionProgramIndex,
     entry: &FunctionProgramEntry,
     selection: Option<&FlowSliceSelection>,
-    skeleton: &Arc<FunctionBodySkeleton>,
-    bindings: Arc<verter_session_query::flow::binding::FlowBindingMap>,
+    skeleton: &verter_session_query::flow::bundle::SkeletonRef,
+    bindings: verter_session_query::flow::bundle::BindingsRef,
     carrier_module: bool,
     snapshot: &verter_session_query::source::snapshot::SnapshotKey,
     context: Option<&NestedFlowContext>,
@@ -972,6 +1014,7 @@ pub(crate) fn build_flow_slice_content(
         Ok(params) => params,
         Err(reason) => {
             return Some(SliceContent {
+                declared_this: None,
                 bindings,
                 declared_return,
                 declared_predicate,
@@ -1017,8 +1060,8 @@ pub(crate) fn build_flow_slice_content(
     // environment only.
     let frame_gate = DefiningFrameGate::seal(
         DefiningFrameDiscovery {
-            skeleton: Arc::clone(skeleton),
-            bindings: Arc::clone(&bindings),
+            skeleton: skeleton.clone(),
+            bindings: bindings.clone(),
             type_parameters: Arc::from(type_param_names.clone()),
             enclosing_type_parameters: enclosing_type_parameters
                 .iter()
@@ -1056,11 +1099,21 @@ pub(crate) fn build_flow_slice_content(
             FunctionNode::Function(function)
                 if function.is_declaration() && function.this_param.is_none()
         );
-    let this = match context {
+    let declared_this = match &node {
+        FunctionNode::Function(function) => function
+            .this_param
+            .as_ref()
+            .and_then(|param| param.type_annotation.as_ref())
+            .map(|annotation| {
+                signature_scope.gate(lower_ts_type(&annotation.type_annotation, source))
+            }),
+        _ => None,
+    };
+    let this = declared_this.as_ref().map(|_| SliceThis::Explicit).or_else(|| match context {
         Some(context) => context.this().cloned(),
         None if untyped_declaration_this => Some(SliceThis::Untyped),
         None => resolved.enclosing_this.and_then(|this| {
-            let class = Arc::clone(&entry.key().declaration.name);
+            let class = Arc::<str>::from(&entry.key().declaration.name);
             Some(match this {
                 verter_semantic::analysis::function_program::EnclosingThis::Instance => {
                     SliceThis::Instance {
@@ -1095,7 +1148,7 @@ pub(crate) fn build_flow_slice_content(
                 }
             })
         }),
-    };
+    });
     let mut lowerer = Lowerer {
         frame_gate,
         bindings: &bindings,
@@ -1308,6 +1361,7 @@ pub(crate) fn build_flow_slice_content(
     let decided_above_call_spans = lowerer.decided_above_call_spans;
     let call_arguments = lowerer.call_arguments;
     Some(SliceContent {
+        declared_this,
         bindings,
         declared_return,
         declared_predicate,
@@ -4000,7 +4054,7 @@ pub(crate) fn build_flow_capture_authority(
     });
     Some(finder.found?.map(|declared| SliceCaptureAuthority {
         binding: locator.binding().clone(),
-        name: locator.declaration().name.clone(),
+        name: Arc::<str>::from(&locator.declaration().name),
         declared,
         source: locator.source().clone(),
     }))
@@ -4409,8 +4463,13 @@ impl<'a> Lowerer<'a> {
         // Writes of one binding at one path share their answer: asking the
         // read index again per write would cost the binding's reads per
         // write.
-        let mut answered: FxHashMap<(SkeletonBindingId, Arc<[SkeletonPathSegment]>), bool> =
-            FxHashMap::default();
+        let mut answered: FxHashMap<
+            (
+                SkeletonBindingId,
+                verter_session_query::retention::owned::OwnedSlice<SkeletonPathSegment>,
+            ),
+            bool,
+        > = FxHashMap::default();
         skeleton
             .span_index
             .writes_within(loop_span)
@@ -4423,7 +4482,7 @@ impl<'a> Lowerer<'a> {
                 }
                 match &write.binding {
                     Some(FlowBindingRef::Local(binding)) => *answered
-                        .entry((*binding, Arc::clone(&write.path)))
+                        .entry((*binding, write.path.clone()))
                         .or_insert_with(|| {
                             self.binding_is_read_after_loop_at_path(
                                 *binding,
@@ -12396,10 +12455,16 @@ impl<'a> Lowerer<'a> {
             // rooted at a frame binding, it reads exactly as the dotted
             // spelling does — through the frame's substitution and every
             // narrowing standing at the path.
+            // Free of frame bindings (`ROLES[0]` over an imported `as const`
+            // tuple), it is the shared leaf's answer, or — where that
+            // lowering has no answer for the indexed read — the checker's
+            // element access of its object's type by its key's type.
             Expression::ComputedMemberExpression(_) if literal_member_chain(expr).is_some() => {
                 match self.lower_literal_member_read(expr) {
                     Some(read) => read,
-                    None => self.lower_leaf(expr, mode),
+                    None => self
+                        .lower_operator_form(expr, mode)
+                        .unwrap_or_else(|| self.lower_leaf(expr, mode)),
                 }
             }
             // A sequence whose LAST operand is its structural value
@@ -13624,6 +13689,7 @@ impl<'a> Lowerer<'a> {
                     readonly: policy.readonly(),
                     spans,
                     accessor_annotated: false,
+                    infer_return_eagerly: false,
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
                             Some(value_expression),
@@ -13635,7 +13701,7 @@ impl<'a> Lowerer<'a> {
         // function value (its return evaluates inline through
         // the same flow machinery); a method without a body
         // keeps the whole-literal leaf lowering.
-        if method_kind.is_some() {
+        if method_kind.is_some() || matches!(value_expression, Expression::FunctionExpression(_)) {
             let accessor_annotated = match (method_kind, value_expression) {
                 (
                     Some(verter_type_expr::ObjectMethodKind::Get),
@@ -13682,9 +13748,13 @@ impl<'a> Lowerer<'a> {
                     // A method / accessor member is never `readonly`,
                     // under `as const` or otherwise: the modifier applies
                     // to data properties.
-                    readonly: false,
+                    readonly: method_kind.is_none() && policy.readonly(),
                     spans,
                     accessor_annotated,
+                    infer_return_eagerly: method_return_is_context_independent(
+                        &self.walks,
+                        value_expression,
+                    ),
                     // An accessor is no context-sensitive member.
                     context_sensitive: !is_accessor(method_kind)
                         && verter_semantic::analysis::type_eval_build::indexed_context_sensitive(
@@ -13726,6 +13796,7 @@ impl<'a> Lowerer<'a> {
                     spans,
                     accessor_annotated: false,
                     context_sensitive: false,
+                    infer_return_eagerly: false,
                 })));
             return None;
         }
@@ -13823,6 +13894,7 @@ impl<'a> Lowerer<'a> {
                 spans,
                 accessor_annotated: false,
                 context_sensitive,
+                infer_return_eagerly: false,
             })));
     }
 
@@ -13991,7 +14063,9 @@ impl<'a> Lowerer<'a> {
             let key = || verter_session_query::function_program::FunctionProgramKey {
                 declaration: self.bindings.function().declaration.clone(),
                 part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                    member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                    member_path: verter_type_expr::OwnedSlice::from([
+                        u32::try_from(ordinal).unwrap_or(u32::MAX)
+                    ]),
                 },
                 overload_ordinal: 0,
             };
@@ -14032,7 +14106,9 @@ impl<'a> Lowerer<'a> {
         let key = |ordinal: usize| verter_session_query::function_program::FunctionProgramKey {
             declaration: self.bindings.function().declaration.clone(),
             part: verter_type_expr::facts::FunctionPartIdentity::Member {
-                member_path: Arc::from([u32::try_from(ordinal).unwrap_or(u32::MAX)]),
+                member_path: verter_type_expr::OwnedSlice::from([
+                    u32::try_from(ordinal).unwrap_or(u32::MAX)
+                ]),
             },
             overload_ordinal: 0,
         };
@@ -14157,6 +14233,7 @@ impl<'a> Lowerer<'a> {
         else {
             return None;
         };
+        let declaration = self.bindings.identity(*local).cloned()?;
         let fact = self.frame_gate.skeleton().binding(*local);
         if fact.kind != SkeletonBindingKind::Class {
             return None;
@@ -14171,7 +14248,10 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         self.lowering_local_classes.push(class.span.start);
-        let value = self.lower_class_expression(class, Some(name));
+        let mut value = self.lower_class_expression(class, Some(name));
+        if let SliceExpr::Class(source) = &mut value {
+            Arc::make_mut(source).declaration = Some(declaration);
+        }
         self.lowering_local_classes.pop();
         Some(value)
     }
@@ -14514,6 +14594,11 @@ impl<'a> Lowerer<'a> {
             },
         ) else {
             return SliceExpr::UnmodeledBinding;
+        };
+        let context = if matches!(node, FunctionNode::Arrow(_)) {
+            context.with_lexical_this()
+        } else {
+            context
         };
         SliceExpr::NestedFunctionValue {
             function: entry.key().clone(),

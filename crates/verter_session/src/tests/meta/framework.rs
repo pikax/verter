@@ -1218,6 +1218,7 @@ fn component_meta_budget_error_detects_symbolic_budget_exceeded() {
 #[test]
 fn symbolic_budget_is_not_fatal_when_component_surface_exists() {
     let analysis = verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
+        domain_guarantees: Default::default(),
         props: vec![
             verter_session_query::analysis::component_meta::PropAnalysis {
                 name: "label".to_string(),
@@ -2086,7 +2087,7 @@ fn component_meta_output_missing_sources_follow_central_policy_on_every_lane() {
                     tag: "div".to_string(),
                 }],
             }],
-            root_chain: Vec::new(),
+            root_chain: Default::default(),
             status: cm::BranchStatus::Resolved,
         }],
     };
@@ -2218,7 +2219,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                     condition_text: None,
                     props: Vec::new(),
                     events: Vec::new(),
-                    root_chain: Vec::new(),
+                    root_chain: Default::default(),
                     status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
                 verter_session_query::analysis::component_meta::FallthroughBranch {
@@ -2241,7 +2242,7 @@ fn component_meta_output_unraisable_nested_sources_fail_typed_with_inner_index()
                         },
                     ],
                     events: Vec::new(),
-                    root_chain: Vec::new(),
+                    root_chain: Default::default(),
                     status: verter_session_query::analysis::component_meta::BranchStatus::Resolved,
                 },
             ],
@@ -2286,7 +2287,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // (1) Closed OBJECT with a member whose value slot cannot deref.
     let object_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
-            members: Arc::from(
+            members: From::from(
                 vec![tf::ObjectMemberFact::Property(tf::ObjectPropertyFact {
                     key: "member".into(),
                     optional: false,
@@ -2322,8 +2323,8 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // cannot deref.
     let function_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(
                 vec![tf::FunctionParamFact {
                     name: Some("arg".to_string()),
                     optional: false,
@@ -2364,7 +2365,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     let tuple_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Tuple(tf::TuplePayloadFact {
             readonly: false,
-            elements: Arc::from(
+            elements: From::from(
                 vec![tf::TupleElementFact {
                     label: Some("payload".to_string()),
                     optional: false,
@@ -2389,7 +2390,7 @@ fn component_meta_output_failed_interior_locator_fails_closed_per_source_family(
     // (4) Closed OBJECT with an INDEX-SIGNATURE value slot that cannot deref.
     let index_source =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Object(tf::ObjectShapeFact {
-            members: Arc::from(
+            members: From::from(
                 vec![tf::ObjectMemberFact::IndexSignature(
                     tf::IndexSignatureFact {
                         key_name: "k".to_string(),
@@ -2436,8 +2437,8 @@ fn component_meta_output_genuinely_absent_positions_stay_typed_unknown_not_failu
 
     let unannotated_fn =
         tf::SemanticTypeSource::Closed(tf::ClosedTypeFact::Function(tf::FunctionSignatureFact {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(
                 vec![tf::FunctionParamFact {
                     name: Some("arg".to_string()),
                     optional: false,

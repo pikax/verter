@@ -1,0 +1,97 @@
+error[E0616]: field `value` of struct `verter_type_engine::semantic_query_memo::node_roots::Constructed` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:17:37
+   |
+17 |     dispatch.owning().opaque(error).value
+   |                                     ^^^^^ private field
+   |
+help: a method `value` also exists, call it with parentheses
+   |
+17 |     dispatch.owning().opaque(error).value()
+   |                                          ++
+
+error[E0624]: method `resolve_hot_handle_with_context` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:25:14
+   |
+25 |     dispatch.resolve_hot_handle_with_context(hot, context)
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `decl_body_hot_ref` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:32:14
+   |
+32 |     dispatch.decl_body_hot_ref(
+   |              ^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0624]: method `single_callable_arm` is private
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:51:14
+   |
+51 |     callable.single_callable_arm(context)
+   |              ^^^^^^^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/lib.rs
+   |
+   |         pub(crate) fn $($item)*
+   |         --- private method defined here
+
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:60:10
+   |
+60 |         .lower_type_expr_in_scope_with_mode("/public.ts", expr)
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^-------------------- argument #3 of type `ProjectionMode` is missing
+   |
+note: method defined here
+  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/owning_dispatch.rs
+   |
+   |     fn lower_type_expr_in_scope_with_mode(
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the argument
+   |
+60 |         .lower_type_expr_in_scope_with_mode("/public.ts", expr, /* ProjectionMode */)
+   |                                                               ++++++++++++++++++++++
+
+error[E0599]: no method named `lower_type_expr_in_scope` found for struct `OwningDispatch<'d, 'a, C>` in the current scope
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:69:10
+   |
+67 | /     dispatch
+68 | |         .owning()
+69 | |         .lower_type_expr_in_scope("/public.ts", expr)
+   | |_________-^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `lower_type_expr_in_scope_with_mode` with a similar name, but with different arguments
+  --> $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/owning_dispatch.rs
+   |
+   |                   pub fn $name(&self $(, $arg: $ty)*) -> Constructed<$ret> {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+   | / owning_methods! {
+   | |     /// Intern a typed opaque fallback in its owning carrier.
+   | |     fn opaque(&self, error: crate::semantic_query::QueryError) -> SemanticNodeId;
+...  |
+   | |     >;
+   | | }
+   | |_- in this macro invocation
+   = note: this error originates in the macro `owning_methods` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `lower_type_expr_in_scope` found for reference `&ProjectSemanticDispatch<'_, C>` in the current scope
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:76:14
+   |
+76 |     dispatch.lower_type_expr_in_scope("/public.ts", expr)
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&ProjectSemanticDispatch<'_, C>`
+
+error[E0515]: cannot return value referencing function parameter `result`
+  --> tests/cases/compile-fail/public_dispatcher_construction_cannot_detach.rs:10:5
+   |
+10 |     result.node(*result.value()).unwrap()
+   |     ------^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     returns a value referencing data owned by the current function
+   |     `result` is borrowed here

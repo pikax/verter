@@ -538,7 +538,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// them.
     fn evaluate_scheduled_callee(&self, key: &FlowReturnKey, probe: bool) -> ScheduledEvaluation {
         let (step, recorded) = self
-            .observe_flow_read(|| {
+            .observe_read(|| {
                 self.dispatch_txn
                     .borrow_mut()
                     .flow
@@ -557,7 +557,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .unwrap_or_default();
                 (step, recorded)
             })
-            .discard();
+            .discard()
+            .unwrap_or_else(|abort| (FlowReturnStep::Aborted(abort), CalleeKeys::default()));
         // An evaluation the instantiation transfer answered queued no
         // member, and needs none: every later demand is answered the same
         // way.
@@ -591,7 +592,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             hash_key: site.slice_key,
             slice_hash: planned.hash(),
         };
-        let Some(lowered) = self.flow_slice_driver().lookup_lowered(lowered_key) else {
+        let Some(lowered) = self
+            .flow_slice_driver()
+            .lookup_lowered(lowered_key, &planned)
+        else {
             return Vec::new();
         };
         self.callees_of(key, &index, entry, &lowered)
@@ -716,7 +720,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(identity) = identity {
                 out.push(NamedCall {
                     span,
-                    name: Arc::clone(name),
+                    name: Arc::<str>::from(name),
                     identity,
                 });
             }
@@ -1001,9 +1005,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let mut instantiated = demand;
-            instantiated.normalized_type_args = Arc::from(arguments.into_boxed_slice());
+            instantiated.normalized_type_args =
+                verter_type_expr::OwnedSlice::from(arguments.into_boxed_slice());
             instantiated.context.type_substitution =
-                crate::semantic_query::CanonicalTypeSubstitution::new(bindings);
+                crate::semantic_query::CanonicalTypeSubstitution::new(self.graph(), bindings);
             push_unique(out, instantiated);
         }
         true
@@ -1229,6 +1234,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 continue;
             };
             let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+                self.graph(),
                 callee
                     .type_parameters
                     .iter()
@@ -1274,18 +1280,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let SemanticNodeData::Signature {
             params,
             type_parameters,
-            return_carrier:
-                crate::semantic_query::SignatureReturnCarrier::Function(
-                    verter_type_expr::facts::FunctionReturnSource::Flow(identity),
-                ),
+            return_carrier,
             ..
         } = data.as_ref()
         else {
             return None;
         };
+        let identity = return_carrier.flow_identity()?;
         (self.flow_return_key_for(identity) == *expected).then(|| CallableSignature {
-            params: Arc::clone(params),
-            type_parameters: Arc::clone(type_parameters),
+            params: Arc::clone(params.as_arc()),
+            type_parameters: Arc::clone(type_parameters.as_arc()),
             identity: identity.clone(),
         })
     }
@@ -1403,9 +1407,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .unwrap_or_else(|| {
                 verter_type_expr::facts::FunctionReturnSource::Flow(FlowFunctionReturnIdentity {
                     anchor: verter_type_expr::locators::AuthoredAnchor {
-                        canonical_id: Arc::from(canonical),
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
                         owner: target.declaration.owner,
-                        symbol: Arc::clone(&target.declaration.name),
+                        symbol: target.declaration.name.clone(),
                         space: verter_type_expr::locators::LocatorSymbolSpace::Value,
                     },
                     function_part: target.part.clone(),
@@ -1561,7 +1565,8 @@ pub(super) fn is_uninstantiated(key: &FlowReturnKey) -> bool {
 /// demand, its own binders unbound.
 pub(super) fn uninstantiated(key: &FlowReturnKey) -> FlowReturnKey {
     let mut uninstantiated = key.clone();
-    uninstantiated.normalized_type_args = Arc::from(Vec::new().into_boxed_slice());
+    uninstantiated.normalized_type_args =
+        verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice());
     uninstantiated.context.type_substitution =
         crate::semantic_query::CanonicalTypeSubstitution::empty();
     uninstantiated
@@ -1579,6 +1584,29 @@ fn frame_entry<'i>(
             frame.function.overload_ordinal,
         )
         .map(|matched| matched.entry())
+}
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Whether `key`'s body calls with a function value among the
+    /// arguments: a callback the call's contextual route may type while its
+    /// candidate's collector is held. Read off the function's indexed call
+    /// sites in the served index of its file, the one its evaluation reads.
+    pub(in crate::project_semantic_dispatch) fn flow_body_types_callbacks(
+        &self,
+        key: &FlowReturnKey,
+    ) -> bool {
+        let canonical = key.function.declaration_slot.defining_canonical.as_ref();
+        let Some((_serve, Some(source_demand))) = self.ctx.indexed_flow_source(canonical) else {
+            return false;
+        };
+        let index = source_demand.function_program_index();
+        frame_entry(&index, key).is_some_and(|entry| {
+            entry
+                .call_sites()
+                .iter()
+                .any(|site| site.args.iter().any(|argument| argument.is_function_value))
+        })
+    }
 }
 
 /// Whether `outer` contains `inner` (inclusive at both edges).

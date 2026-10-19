@@ -69,6 +69,8 @@ fn get_meta(project: &Arc<MetaProject>, canonical_id: &str) -> ComponentMetaAnal
         .get_component_meta(canonical_id)
         .expect("get_component_meta must succeed")
         .expect("get_component_meta must return metadata")
+        .analysis()
+        .clone()
 }
 
 fn prop_names(meta: &ComponentMetaAnalysis) -> Vec<&str> {

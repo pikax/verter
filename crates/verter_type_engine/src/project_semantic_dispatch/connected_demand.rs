@@ -50,32 +50,81 @@ pub const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes interning one derived node reserves: its payload
 /// record, held twice (the arena slot and the dedup index's key), a fixed
-/// index entry, and the `payload_bytes` of text and children it owns.
+/// index entry, the construction root and arena ownership slots, and the
+/// `payload_bytes` of text and children it owns.
 pub(crate) fn derived_node_bytes(payload_bytes: usize) -> usize {
-    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>() + 32 + payload_bytes
+    2 * std::mem::size_of::<crate::semantic_query::SemanticNodeData>()
+        + 32
+        + crate::semantic_query_memo::node_roots::construction_root_bytes()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<bool>()
+        + payload_bytes
 }
 
+/// The work units one instantiation the checker counts costs a connected
+/// demand at most, on the shapes whose size only the checker's
+/// instantiation allowance bounds: a distributive conditional repeating an
+/// `infer` charges 60 units per union member where the checker instantiates
+/// 7 types, a tuple inferring through distinct aliases of one generic 30
+/// against 5, and a recursive conditional over an `as const` route tree 132
+/// per parent against 219 (measured with `tsc --extendedDiagnostics` on
+/// TypeScript 7.0.2).
+pub const WORK_UNITS_PER_INSTANTIATION: usize = 9;
+
+/// The construction bytes one instantiation the checker counts costs a
+/// connected demand at most, on the same shapes: the repeated `infer`
+/// reserves 8,192 bytes per union member against the checker's 7
+/// instantiations, the route tree 41 KB per parent against 219.
+pub const CONSTRUCTION_BYTES_PER_INSTANTIATION: usize = 1_280;
+
 /// Work-unit cap for one connected semantic demand: the operational
-/// backstop, sized from the checker's relation-complexity envelope
-/// ([`checker_policy::RELATION_COMPARISONS`] structured comparisons at
-/// [`RELATION_UNITS_PER_COMPARISON`] units each). Work units do not bound
+/// backstop, sized to cover both of the checker's own allowances at once,
+/// so it never refuses an input the checker answers. The checker counts
+/// relation comparisons and instantiations against separate limits, so one
+/// demand may spend both in full: a conditional distributing over a union
+/// relates every member it instantiates. The cap is their sum. The relation
+/// envelope is
+/// [`checker_policy::RELATION_COMPARISONS`] structured comparisons at
+/// [`RELATION_UNITS_PER_COMPARISON`] reducer units plus one cold query-entry
+/// unit each (the reducer mapping alone excludes the enclosing dispatch
+/// entries and would stop the reversed-object conditional construction
+/// before its comparison allowance). The instantiation envelope is
+/// [`checker_policy::INSTANTIATION_COUNT`] instantiations at
+/// [`WORK_UNITS_PER_INSTANTIATION`] units each: a distribution over a union
+/// of hundreds of thousands of members, which the checker answers, runs no
+/// relation the first envelope would size. Work units do not bound
 /// memory; the construction-byte rail
-/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does, and on a relation it binds
-/// first: at [`RELATION_PAIR_BYTES`] per comparison it stops a relation
-/// near 262,000 comparisons as typed incompleteness, until the per-pair
-/// footprint shrinks.
+/// ([`MAX_CONNECTED_CONSTRUCTION_BYTES`]) does. Both operational rails
+/// include both checker envelopes, so neither substitutes an unevaluated
+/// conditional for the checker's answer.
 ///
 /// [`checker_policy::RELATION_COMPARISONS`]: crate::semantic_query::checker_policy::RELATION_COMPARISONS
+/// [`checker_policy::INSTANTIATION_COUNT`]: crate::semantic_query::checker_policy::INSTANTIATION_COUNT
 pub const MAX_CONNECTED_PROJECTION_WORK: usize =
     crate::semantic_query::checker_policy::RELATION_COMPARISONS as usize
-        * RELATION_UNITS_PER_COMPARISON;
+        * (RELATION_UNITS_PER_COMPARISON + 1)
+        + crate::semantic_query::checker_policy::INSTANTIATION_COUNT as usize
+            * WORK_UNITS_PER_INSTANTIATION;
 /// Nested query-boundary cap for one connected semantic demand.
 pub const MAX_CONNECTED_QUERY_DEPTH: u16 = 24;
 /// Construction-byte allowance for one connected semantic demand: the bytes
 /// it reserves before it builds, never refunded within the demand, so the
-/// allowance bounds what the demand holds at its peak. Provisional: sized
-/// with the per-unit footprint in the combined performance phase.
-pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
+/// allowance bounds what the demand holds at its peak. The sum of the
+/// relation mapping (the full checker relation envelope at
+/// [`RELATION_PAIR_BYTES`] a pair) and the instantiation mapping (the
+/// checker's instantiation allowance at
+/// [`CONSTRUCTION_BYTES_PER_INSTANTIATION`]), for the same reason the work
+/// cap sums them, with the non-relation allowance left for operand
+/// construction and the consuming projection. This is logical construction
+/// accounting, not an allocation or a retained-memory quota, so it is
+/// counted in `u64` on every target: the allowance exceeds a 32-bit
+/// `usize`, and a target's pointer width must not change which inputs a
+/// demand answers.
+pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: u64 =
+    crate::semantic_query::checker_policy::RELATION_COMPARISONS as u64 * RELATION_PAIR_BYTES as u64
+        + crate::semantic_query::checker_policy::INSTANTIATION_COUNT as u64
+            * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64
+        + (512 << 20);
 
 /// What one connected demand has charged so far: its work units and its
 /// construction bytes.
@@ -83,7 +132,7 @@ pub(super) const MAX_CONNECTED_CONSTRUCTION_BYTES: usize = 512 << 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DemandUsage {
     pub work: usize,
-    pub bytes: usize,
+    pub bytes: u64,
 }
 
 /// Verter's own instantiation budget for one connected semantic demand:
@@ -239,8 +288,8 @@ pub struct ConnectedDemandLedger<'a> {
     active: Cell<bool>,
     work_used: Cell<usize>,
     work_limit: Cell<usize>,
-    bytes_used: Cell<usize>,
-    bytes_limit: Cell<usize>,
+    bytes_used: Cell<u64>,
+    bytes_limit: Cell<u64>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     instantiation_depth_limit: u32,
@@ -274,6 +323,212 @@ pub(crate) struct RequestEffects {
     pub(crate) paid: usize,
 }
 
+/// Connected charges of one component-meta compute. A root resets the
+/// demand counters; it does not reset an open span, so the compute keeps
+/// the sum across every root it entered. The copy admission stores is taken
+/// when the span ends. This stack is not that copy.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ComponentMetaSpan {
+    pub(crate) work: usize,
+    pub(crate) bytes: u64,
+    pub(crate) trip: PartialReasonSet,
+    pub(crate) schedule_cuts: u64,
+    pub(crate) certificates: u64,
+}
+
+thread_local! {
+    static COMPONENT_META_SPANS: RefCell<Vec<ComponentMetaSpan>> = const { RefCell::new(Vec::new()) };
+    static COMPONENT_META_SPAN_OPEN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Opens one component-meta span on this thread. Nested computes each keep
+/// their own frame, and a charge is recorded on every frame still open.
+pub(crate) struct ComponentMetaSpanGuard {
+    armed: bool,
+}
+
+impl ComponentMetaSpanGuard {
+    pub(crate) fn enter() -> Self {
+        COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().push(ComponentMetaSpan::default()));
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(true));
+        Self { armed: true }
+    }
+
+    pub(crate) fn finish(mut self) -> ComponentMetaSpan {
+        self.armed = false;
+        pop_component_meta_span()
+    }
+}
+
+impl Drop for ComponentMetaSpanGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = pop_component_meta_span();
+        }
+    }
+}
+
+/// Capture all connected work across the roots of one test request without
+/// installing or changing its request context. The ledger owns the charges;
+/// capture uses its existing scoped telemetry and panic cleanup.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_connected_work_capture_for_tests<R>(body: impl FnOnce() -> R) -> (R, DemandUsage) {
+    let guard = ComponentMetaSpanGuard::enter();
+    let result = body();
+    let span = guard.finish();
+    (
+        result,
+        DemandUsage {
+            work: span.work,
+            bytes: span.bytes,
+        },
+    )
+}
+
+fn pop_component_meta_span() -> ComponentMetaSpan {
+    let span = COMPONENT_META_SPANS.with(|spans| spans.borrow_mut().pop().unwrap_or_default());
+    let empty = COMPONENT_META_SPANS.with(|spans| spans.borrow().is_empty());
+    if empty {
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(false));
+    }
+    span
+}
+
+fn span_open() -> bool {
+    COMPONENT_META_SPAN_OPEN.with(Cell::get)
+}
+
+/// The component-meta charges of a semantic task, which may be polled on a
+/// thread other than the one that lent it its request: one span standing
+/// for every span open where it was lent (none when none was). Each poll
+/// installs it as the polling thread's only span, so a charge lands in the
+/// task — never in a span the polling thread has open for other work — and
+/// the task's return folds it into the spans it was lent under.
+#[derive(Default)]
+pub(crate) struct TaskSpanCarry {
+    open: bool,
+    /// The task's span while it is not polled: one entry when `open`.
+    stack: Vec<ComponentMetaSpan>,
+}
+
+impl TaskSpanCarry {
+    /// The carry of a task lent here: open exactly when a span is.
+    pub(crate) fn lend() -> Self {
+        let open = span_open();
+        Self {
+            open,
+            stack: if open {
+                vec![ComponentMetaSpan::default()]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    /// Install the task's span on this thread for one poll; the returned
+    /// guard restores the thread's own spans and takes the task's back.
+    pub(crate) fn install(&mut self) -> TaskSpanInstall<'_> {
+        let thread =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.stack)));
+        let thread_open = COMPONENT_META_SPAN_OPEN.with(|open| open.replace(self.open));
+        TaskSpanInstall {
+            carry: self,
+            thread,
+            thread_open,
+        }
+    }
+
+    /// Fold what the task charged into every span open on this thread, the
+    /// one that lent it, as if each charge had been made here.
+    pub(crate) fn return_to_lender(self) {
+        let Some(span) = self.stack.into_iter().next() else {
+            return;
+        };
+        if !span_open() {
+            return;
+        }
+        COMPONENT_META_SPANS.with(|spans| {
+            for open in spans.borrow_mut().iter_mut() {
+                open.work = open.work.saturating_add(span.work);
+                open.bytes = open.bytes.saturating_add(span.bytes);
+                open.trip = open.trip.union(span.trip);
+                open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
+                open.certificates = open.certificates.saturating_add(span.certificates);
+            }
+        });
+    }
+}
+
+/// A task's span installed for one poll ([`TaskSpanCarry::install`]).
+pub(crate) struct TaskSpanInstall<'c> {
+    carry: &'c mut TaskSpanCarry,
+    thread: Vec<ComponentMetaSpan>,
+    thread_open: bool,
+}
+
+impl Drop for TaskSpanInstall<'_> {
+    fn drop(&mut self) {
+        self.carry.stack =
+            COMPONENT_META_SPANS.with(|spans| spans.replace(std::mem::take(&mut self.thread)));
+        COMPONENT_META_SPAN_OPEN.with(|open| open.set(self.thread_open));
+    }
+}
+
+fn remember_work(n: usize) {
+    if n == 0 || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.work = span.work.saturating_add(n);
+        }
+    });
+}
+
+fn remember_bytes(n: u64) {
+    if n == 0 || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.bytes = span.bytes.saturating_add(n);
+        }
+    });
+}
+
+fn remember_trip(reason: PartialReasonSet) {
+    if reason.is_empty() || !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.trip = span.trip.union(reason);
+        }
+    });
+}
+
+fn remember_schedule_cut() {
+    if !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.schedule_cuts = span.schedule_cuts.saturating_add(1);
+        }
+    });
+}
+
+fn remember_certificate() {
+    if !span_open() {
+        return;
+    }
+    COMPONENT_META_SPANS.with(|spans| {
+        for span in spans.borrow_mut().iter_mut() {
+            span.certificates = span.certificates.saturating_add(1);
+        }
+    });
+}
+
 impl std::fmt::Debug for ConnectedDemandLedger<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectedDemandLedger")
@@ -292,6 +547,65 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
 }
 
 impl<'a> ConnectedDemandLedger<'a> {
+    /// A ledger at this one's caps, observing its cancellation, with no
+    /// demand of its own: the ledger a task's dispatcher holds while it
+    /// carries this one's state ([`Self::exchange_state`]).
+    pub(super) fn sibling(&self) -> Self {
+        Self {
+            instantiation_depth_limit: self.instantiation_depth_limit,
+            tail_steps_limit: self.tail_steps_limit,
+            ..Self::new(self.cancellation)
+        }
+    }
+
+    /// Exchange every counter, cap, trip, cost recording and paid
+    /// identity with `other`, a ledger at the same fixed caps: the
+    /// connected demand moves between the dispatchers whole.
+    pub(super) fn exchange_state(&self, other: &Self) {
+        let Self {
+            cancellation: _,
+            active,
+            work_used,
+            work_limit,
+            bytes_used,
+            bytes_limit,
+            query_depth,
+            query_depth_limit,
+            instantiation_depth_limit,
+            tail_steps_limit,
+            tripped,
+            scopes,
+            scope_open,
+            paid,
+            request_effects,
+            schedule_cut,
+        } = self;
+        verter_debug_assert!(
+            *instantiation_depth_limit == other.instantiation_depth_limit
+                && *tail_steps_limit == other.tail_steps_limit,
+            "a ledger exchanges its state with a sibling at its own fixed caps"
+        );
+        active.swap(&other.active);
+        work_used.swap(&other.work_used);
+        work_limit.swap(&other.work_limit);
+        bytes_used.swap(&other.bytes_used);
+        bytes_limit.swap(&other.bytes_limit);
+        query_depth.swap(&other.query_depth);
+        query_depth_limit.swap(&other.query_depth_limit);
+        tripped.swap(&other.tripped);
+        scopes.swap(&other.scopes);
+        scope_open.swap(&other.scope_open);
+        paid.swap(&other.paid);
+        request_effects.swap(&other.request_effects);
+        schedule_cut.swap(&other.schedule_cut);
+    }
+
+    /// How many cost recordings are open.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn open_cost_scopes_for_tests(&self) -> usize {
+        self.scopes.borrow().len()
+    }
+
     /// Install a ledger at the production caps, observing `cancellation`.
     pub(super) fn new(cancellation: DemandCancellation<'a>) -> Self {
         Self {
@@ -364,6 +678,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         &self,
         query_boundary: bool,
     ) -> (ConnectedDemandGuard<'_>, Option<PartialReasonSet>) {
+        self.enter_observed(query_boundary, self.cancellation.is_cancelled())
+    }
+
+    /// [`Self::enter`] with the request's cancellation already read as
+    /// `cancelled`, for a caller that reads it once for the entry and the
+    /// charge that follows it.
+    pub(super) fn enter_observed(
+        &self,
+        query_boundary: bool,
+        cancelled: bool,
+    ) -> (ConnectedDemandGuard<'_>, Option<PartialReasonSet>) {
         let root = !self.active.get();
         if root {
             self.work_used.set(0);
@@ -377,18 +702,15 @@ impl<'a> ConnectedDemandLedger<'a> {
             self.tripped.set(PartialReasonSet::empty());
             self.active.set(true);
         }
-        if self.cancellation.is_cancelled() {
-            self.tripped
-                .set(self.tripped.get().union(PartialReasonSet::CANCELLED));
+        if cancelled {
+            self.record_trip(PartialReasonSet::CANCELLED);
         }
         let mut entered_query_depth = false;
         let tripped = self.tripped.get();
         let trip = if !tripped.is_empty() {
             Some(tripped)
         } else if query_boundary && self.query_depth.get() >= self.query_depth_limit.get() {
-            let tripped = tripped.union(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT);
-            self.tripped.set(tripped);
-            Some(tripped)
+            Some(self.record_trip(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT))
         } else {
             if query_boundary {
                 self.query_depth.set(self.query_depth.get() + 1);
@@ -401,6 +723,7 @@ impl<'a> ConnectedDemandLedger<'a> {
                 ledger: self,
                 root,
                 entered_query_depth,
+                _operation: None,
             },
             trip,
         )
@@ -439,11 +762,17 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Charge one work unit. `Err` carries the sticky trip set that now
     /// forbids further work.
     pub fn charge(&self) -> Result<(), PartialReasonSet> {
+        self.charge_observed(self.cancellation.is_cancelled())
+    }
+
+    /// [`Self::charge`] with the request's cancellation already read as
+    /// `cancelled`.
+    pub(super) fn charge_observed(&self, cancelled: bool) -> Result<(), PartialReasonSet> {
         verter_debug_assert!(
             self.active.get(),
             "connected work must be charged inside a connected-demand guard"
         );
-        if self.cancellation.is_cancelled() {
+        if cancelled {
             return Err(self.record_trip(PartialReasonSet::CANCELLED));
         }
         let tripped = self.tripped.get();
@@ -452,11 +781,10 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
         let work_used = self.work_used.get();
         if work_used >= self.work_limit.get() {
-            let tripped = tripped.union(PartialReasonSet::PROJECTION_WORK_LIMIT);
-            self.tripped.set(tripped);
-            return Err(tripped);
+            return Err(self.record_trip(PartialReasonSet::PROJECTION_WORK_LIMIT));
         }
         self.work_used.set(work_used + 1);
+        remember_work(1);
         self.accrue(1, 0);
         Ok(())
     }
@@ -477,12 +805,27 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// any: a comparison the computation on top recorded itself.
     #[inline(always)]
     pub(crate) fn accrue_comparison(&self) {
+        self.accrue_comparisons(1);
+    }
+
+    /// Record a batch of proven structured comparisons without opening a
+    /// query or allocating a receipt for each rejected alternative.
+    pub(crate) fn accrue_comparisons(&self, comparisons: u32) {
         if !self.scope_open.get() {
             return;
         }
         if let Some(scope) = self.scopes.borrow_mut().last_mut() {
-            scope.exclusive.comparisons = scope.exclusive.comparisons.saturating_add(1);
+            scope.exclusive.comparisons = scope
+                .exclusive
+                .comparisons
+                .saturating_add(u64::from(comparisons));
         }
+    }
+
+    /// Construction room for a batch, before committing any reservation.
+    pub(crate) fn construction_bytes_available(&self) -> usize {
+        usize::try_from(self.bytes_limit.get().saturating_sub(self.bytes_used.get()))
+            .unwrap_or(usize::MAX)
     }
 
     /// Add `work` units and `bytes` to the open recording, if any: the cost
@@ -528,6 +871,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         let work_used = self.work_used.get();
         verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
         self.work_used.set(work_used + consumed);
+        remember_work(consumed);
         self.accrue(consumed, 0);
     }
 
@@ -548,9 +892,10 @@ impl<'a> ConnectedDemandLedger<'a> {
             return Err(tripped);
         }
         let used = self.bytes_used.get();
-        match used.checked_add(bytes) {
+        match used.checked_add(bytes as u64) {
             Some(total) if total <= self.bytes_limit.get() => {
                 self.bytes_used.set(total);
+                remember_bytes(bytes as u64);
                 self.accrue(0, bytes);
                 Ok(())
             }
@@ -583,8 +928,8 @@ impl<'a> ConnectedDemandLedger<'a> {
             )
         } else if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
             (
-                self.bytes_limit.get(),
-                self.bytes_used.get() as u64,
+                usize::try_from(self.bytes_limit.get()).unwrap_or(usize::MAX),
+                self.bytes_used.get(),
                 "construction-bytes",
             )
         } else {
@@ -611,7 +956,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// Replace the construction-byte allowance. Test-only, and refused inside
     /// an active demand.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn set_byte_limit_for_tests(&self, bytes: usize) {
+    pub fn set_byte_limit_for_tests(&self, bytes: u64) {
         assert!(
             !self.active.get(),
             "test limits must be set before entering a connected demand"
@@ -622,7 +967,7 @@ impl<'a> ConnectedDemandLedger<'a> {
     /// The construction bytes the last connected demand reserved. Test-only:
     /// kept after the demand ends, and reset when the next one enters.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn bytes_used_for_tests(&self) -> usize {
+    pub fn bytes_used_for_tests(&self) -> u64 {
         self.bytes_used.get()
     }
 
@@ -641,7 +986,17 @@ impl<'a> ConnectedDemandLedger<'a> {
         );
         let tripped = self.tripped.get().union(reason);
         self.tripped.set(tripped);
+        remember_trip(reason);
         tripped
+    }
+
+    /// A producer proved an exact same-path recurrence. A same-path bit
+    /// without this note is not a certificate. Recorded on an open
+    /// component-meta span only: outside one, admission has no compute to
+    /// attribute it to.
+    pub(crate) fn note_divergence_certificate(&self) {
+        let _ = self;
+        remember_certificate();
     }
 }
 
@@ -719,6 +1074,7 @@ impl ConnectedDemandLedger<'_> {
         if self.active.get() {
             self.schedule_cut.set(true);
         }
+        remember_schedule_cut();
     }
 
     /// Whether another task's schedule has cut this demand's evaluation:
@@ -792,12 +1148,33 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// Fold an ended recording into the recording below it, if any: the
-    /// usage it charged, and the prerequisites it consumed.
+    /// usage it charged, and the prerequisites it consumed — more than one
+    /// as a single failed-prefix receipt
+    /// ([`DemandCostReceipt::failed_prefix`]), so a chain of recordings
+    /// that each fail moves a bounded list per level, never every
+    /// prerequisite the levels above it already folded.
     fn fold_into_consumer(&self, scope: CostScope) {
         if let Some(consumer) = self.scopes.borrow_mut().last_mut() {
             consumer.exclusive = consumer.exclusive.saturating_add(scope.exclusive);
-            consumer.prerequisites.extend(scope.prerequisites);
             consumer.tail_steps = consumer.tail_steps.max(scope.tail_steps);
+            let mut prerequisites = scope.prerequisites;
+            match prerequisites.len() {
+                0 => {}
+                1 => consumer.prerequisites.append(&mut prerequisites),
+                _ => consumer.prerequisites.push(CostDependency {
+                    receipt: DemandCostReceipt::failed_prefix(prerequisites),
+                    nesting: Nesting::Folded,
+                }),
+            }
+        }
+    }
+
+    /// Release the receipts an ended demand paid: each roots the operands
+    /// its computation names, and the next root demand starts unpaid anyway.
+    pub(super) fn release_paid(&self) {
+        if !self.active.get() {
+            let paid = std::mem::take(&mut *self.paid.borrow_mut());
+            drop(paid);
         }
     }
 
@@ -873,7 +1250,10 @@ impl ConnectedDemandLedger<'_> {
             return Err(ReplayRefusal::Tripped);
         }
         let footprint = receipt.footprint();
-        if u32::from(self.query_depth.get()) + u32::from(footprint.query_depth)
+        // The reader's own nesting bounds where the result's drive, and so
+        // each of its frames, would be entered from.
+        if u32::from(self.query_depth.get())
+            + u32::from(footprint.query_depth.max(footprint.frame_query_depth))
             > u32::from(self.query_depth_limit.get())
         {
             return Err(ReplayRefusal::Depth);
@@ -881,7 +1261,7 @@ impl ConnectedDemandLedger<'_> {
         let first_frame = match nesting {
             Nesting::Frame { depth } => Some(depth),
             Nesting::Drive => Some(1),
-            Nesting::InPlace | Nesting::Entered => None,
+            Nesting::InPlace | Nesting::Entered | Nesting::Folded => None,
         };
         if footprint.instantiation_required > self.instantiation_depth_limit
             || first_frame.is_some_and(|depth| {
@@ -894,14 +1274,69 @@ impl ConnectedDemandLedger<'_> {
         if footprint.tail_steps >= self.tail_steps_limit && footprint.tail_steps > 0 {
             return Err(ReplayRefusal::TailSteps);
         }
+        let operations_paid = request.map(|request| request.operations_paid());
+        if self.paid.borrow().contains(receipt.identity())
+            && operations_paid
+                .as_ref()
+                .is_none_or(|paid| paid.contains(receipt.identity()))
+        {
+            // The closure walk stops at a root paid in both ledgers.
+            // Check its entry footprint above, then avoid allocating an
+            // empty replay and repeating zero-charge bookkeeping.
+            return Ok(0);
+        }
         let work_room = self.work_limit.get().saturating_sub(self.work_used.get()) as u64;
         let operation_room = request.map_or(u64::MAX, |request| {
             request
                 .effective_projection_op_budget()
                 .saturating_sub(request.projection_ops_executed_count()) as u64
         });
-        let operations_paid = request.map(|request| request.operations_paid());
-        let (unpaid, unpaid_operations, total) = {
+        let (unpaid, unpaid_operations, total) = if receipt.prerequisites().is_empty() {
+            // A leaf's closure is itself: what it owes is its own usage,
+            // with no traversal to deduplicate.
+            let identity = receipt.identity();
+            let demand_paid = self.paid.borrow().contains(identity);
+            let request_paid = operations_paid
+                .as_ref()
+                .is_none_or(|operations| operations.contains(identity));
+            let exclusive = receipt.exclusive();
+            let total = LogicalUsage {
+                work: if demand_paid { 0 } else { exclusive.work },
+                bytes: if demand_paid { 0 } else { exclusive.bytes },
+                operations: if request_paid {
+                    0
+                } else {
+                    exclusive.operations
+                },
+                comparisons: if demand_paid {
+                    0
+                } else {
+                    exclusive.comparisons
+                },
+            };
+            if total.work > work_room {
+                return Err(ReplayRefusal::Work);
+            }
+            if total.operations > operation_room {
+                return Err(ReplayRefusal::Operations);
+            }
+            if total.comparisons > u64::from(comparison_room) {
+                return Err(ReplayRefusal::RelationComparisons);
+            }
+            (
+                if demand_paid {
+                    Vec::new()
+                } else {
+                    vec![identity.clone()]
+                },
+                if request_paid {
+                    Vec::new()
+                } else {
+                    vec![identity.clone()]
+                },
+                total,
+            )
+        } else {
             let paid = self.paid.borrow();
             let mut unpaid: Vec<&CostIdentity> = Vec::new();
             let mut unpaid_operations: Vec<&CostIdentity> = Vec::new();
@@ -976,10 +1411,13 @@ impl ConnectedDemandLedger<'_> {
                 newly_paid,
             );
         }
-        self.work_used
-            .set(self.work_used.get() + total.work as usize);
+        let replayed_work = total.work as usize;
+        let replayed_bytes = total.bytes;
+        self.work_used.set(self.work_used.get() + replayed_work);
         self.bytes_used
-            .set(self.bytes_used.get().saturating_add(total.bytes as usize));
+            .set(self.bytes_used.get().saturating_add(replayed_bytes));
+        remember_work(replayed_work);
+        remember_bytes(replayed_bytes);
         self.paid.borrow_mut().extend(unpaid);
         // Within `comparison_room`, so within `u32`.
         Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
@@ -1102,17 +1540,19 @@ impl ConnectedDemandLedger<'_> {
     }
 
     /// The work units and construction bytes the active demand charged.
-    pub(crate) fn charged(&self) -> (usize, usize) {
+    pub(crate) fn charged(&self) -> (usize, u64) {
         (self.work_used.get(), self.bytes_used.get())
     }
 
     /// Leave the active demand as a sealed refusal's evaluation left it:
     /// its work and bytes charged and `trip` tripped.
-    pub(crate) fn apply_refusal(&self, work: usize, bytes: usize, trip: PartialReasonSet) {
+    pub(crate) fn apply_refusal(&self, work: usize, bytes: u64, trip: PartialReasonSet) {
         self.work_used
             .set(self.work_used.get().saturating_add(work));
         self.bytes_used
             .set(self.bytes_used.get().saturating_add(bytes));
+        remember_work(work);
+        remember_bytes(bytes);
         self.record_trip(trip);
     }
 
@@ -1156,11 +1596,20 @@ pub struct ConnectedDemandGuard<'g> {
     ledger: &'g ConnectedDemandLedger<'g>,
     root: bool,
     entered_query_depth: bool,
+    /// The dispatcher operation a root demand is: its construction owner
+    /// and the receipts it paid are released when the demand ends, never
+    /// kept by the dispatcher.
+    _operation: Option<super::DispatchOperation<'g>>,
 }
 
-impl ConnectedDemandGuard<'_> {
+impl<'g> ConnectedDemandGuard<'g> {
     pub(super) fn is_root(&self) -> bool {
         self.root
+    }
+
+    /// Run this root demand as one dispatcher operation.
+    pub(super) fn own_operation(&mut self, operation: super::DispatchOperation<'g>) {
+        self._operation = Some(operation);
     }
 }
 
@@ -1178,5 +1627,165 @@ impl Drop for ConnectedDemandGuard<'_> {
             );
             self.ledger.active.set(false);
         }
+    }
+}
+
+/// An active connected-demand root for a component-meta test. Dropping the
+/// token ends the root.
+#[cfg(any(test, feature = "test-support"))]
+pub struct ComponentMetaDemandRoot<'a> {
+    ledger: &'a ConnectedDemandLedger<'a>,
+    _guard: ConnectedDemandGuard<'a>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ComponentMetaDemandRoot<'_> {
+    /// Charge this root. Panics when the demand refuses the work or the bytes.
+    pub fn charge(&self, work: usize, bytes: usize, trip: PartialReasonSet) {
+        if work > 0 {
+            self.ledger
+                .charge_units(work)
+                .unwrap_or_else(|refused| panic!("test work charge refused: {refused:?}"));
+        }
+        if bytes > 0 {
+            self.ledger
+                .reserve_bytes(bytes)
+                .unwrap_or_else(|refused| panic!("test byte reserve refused: {refused:?}"));
+        }
+        if !trip.is_empty() {
+            self.ledger.record_trip(trip);
+        }
+    }
+
+    /// One more work unit on this root.
+    pub fn try_charge(&self) -> Result<(), PartialReasonSet> {
+        self.ledger.charge()
+    }
+
+    /// Work, construction bytes, and the sticky trip charged on this root.
+    pub fn charges(&self) -> (usize, u64, PartialReasonSet) {
+        (
+            self.ledger.work_used.get(),
+            self.ledger.bytes_used.get(),
+            self.ledger.tripped.get(),
+        )
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl ConnectedDemandLedger<'_> {
+    /// Enter a root and run `body` inside it.
+    pub fn with_root_for_test<R>(
+        &self,
+        query_boundary: bool,
+        body: impl FnOnce(&ComponentMetaDemandRoot<'_>) -> R,
+    ) -> R {
+        let (guard, trip) = self.enter(query_boundary);
+        assert!(
+            trip.is_none(),
+            "component-meta test root tripped on entry: {trip:?}"
+        );
+        body(&ComponentMetaDemandRoot {
+            ledger: self,
+            _guard: guard,
+        })
+    }
+}
+
+/// Note a real divergence certificate on the open component-meta span.
+#[cfg(any(test, feature = "test-support"))]
+pub fn note_component_meta_divergence_for_test() {
+    remember_certificate();
+}
+
+/// Note a schedule cut on the open component-meta span.
+#[cfg(any(test, feature = "test-support"))]
+pub fn note_component_meta_schedule_cut_for_test() {
+    remember_schedule_cut();
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use crate::semantic_query::{LiteralValue, SemanticNodeData, SemanticQueryKey};
+    use crate::semantic_query_memo::graph_fixture::GraphFixture;
+
+    #[test]
+    fn counted_failed_prefix_receipt_retains_its_materialized_operand() {
+        let harness = GraphFixture::new();
+        let receipt = harness.run(|graph| {
+            let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+                crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                    std::sync::atomic::AtomicU64::new(0),
+                )),
+            );
+            let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+            ledger.set_limits_for_tests(1, 8);
+            let (guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([1])));
+            let prefixes = ledger.record_prefixes(1).unwrap();
+            ledger.charge().unwrap();
+            let node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+                "materialized prefix".into(),
+            )));
+            let identity = graph
+                .prepare_rooted_key(SemanticQueryKey::ClassifyTruthinessDomain { subject: node });
+            let receipt = prefixes
+                .seal_prefix(CostIdentity::of_producer(identity.as_task_producer()), None)
+                .unwrap();
+            assert_eq!(receipt.exclusive().work, 1);
+            assert!(ledger
+                .charge()
+                .unwrap_err()
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
+            drop(prefixes);
+            ledger.abandon_cost_scope();
+            drop(guard);
+            receipt
+        });
+        assert_eq!(
+            harness.live_nodes(),
+            1,
+            "only the failed evaluation's returned prefix receipt remains"
+        );
+        drop(receipt);
+        assert_eq!(harness.live_nodes(), 0);
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+    use crate::semantic_query::checker_policy::{INSTANTIATION_COUNT, RELATION_COMPARISONS};
+
+    /// The checker counts relation comparisons and instantiations against
+    /// separate limits, so one demand that spends both allowances in full is
+    /// still one the checker answers: neither operational rail refuses it.
+    #[test]
+    fn a_demand_spending_both_checker_allowances_is_not_refused() {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        let (guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+
+        ledger
+            .charge_units(INSTANTIATION_COUNT as usize * WORK_UNITS_PER_INSTANTIATION)
+            .expect("the instantiation allowance's work is granted");
+        ledger
+            .charge_units(RELATION_COMPARISONS as usize * (RELATION_UNITS_PER_COMPARISON + 1))
+            .expect("the relation allowance's work is granted beside it");
+
+        let reserve =
+            |bytes: u64| ledger.reserve_bytes(usize::try_from(bytes).expect("a 64-bit test host"));
+        reserve(u64::from(INSTANTIATION_COUNT) * CONSTRUCTION_BYTES_PER_INSTANTIATION as u64)
+            .expect("the instantiation allowance's bytes are granted");
+        reserve(u64::from(RELATION_COMPARISONS) * RELATION_PAIR_BYTES as u64)
+            .expect("the relation allowance's bytes are granted beside them");
+        drop(guard);
     }
 }

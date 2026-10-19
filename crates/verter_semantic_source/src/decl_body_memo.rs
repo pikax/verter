@@ -32,7 +32,6 @@ use verter_session_query::source::indexed_call::IndexedFlowCallExpression;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
-use dashmap::DashMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use verter_parser::utils::oxc::script::raw_surface::{
@@ -57,9 +56,9 @@ use verter_session_query::declarations::{
     ValueDeclGroup, ValueDeclKind,
 };
 use verter_session_query::facts::{
-    produce_shallow_route_facts, type_body_fingerprint, value_body_fingerprint, CrossDeclLens,
-    EmptyRouteFactLens, HashOutcome, RouteFactLens, TransientTypeBody, UnresolvedLens,
-    ValueBodyFingerprintInput,
+    compute_class_member_read_hash, compute_semantic_hash, produce_shallow_route_facts,
+    type_body_fingerprint, value_body_fingerprint, CrossDeclLens, EmptyRouteFactLens, HashOutcome,
+    RouteFactLens, TransientTypeBody, UnresolvedLens, ValueBodyFingerprintInput,
 };
 use verter_session_query::source::transient_parts::{TransientTypeParts, TransientValueParts};
 use verter_session_query::type_solver::prepared::{
@@ -174,6 +173,11 @@ enum DemandLower {
     Ready(Option<LoweredStatementBatch>),
     LeaseMiss,
 }
+
+/// What one demanded statement-lowering job hands back: `None` for a fatal
+/// parse, else the lowered statement batch and, when the job was asked to
+/// keep it, the demanded body's transient parts.
+type DemandJobOutput = Option<(LoweredStatementBatch, Option<TransientTypeParts>)>;
 
 /// TRANSIENT per-name retention between `lower_statement_parts` and
 /// `register_statement_parts` inside one demanded lowering: the ordered
@@ -458,10 +462,12 @@ pub struct DeclBodyMemo {
     /// header-membership view) the graph-free route producer classifies
     /// against — installed with the shallow lens at state construction.
     route_lens: OnceLock<Arc<RouteLens>>,
-    type_entries: DashMap<DeclBindingKey, TypeCell>,
-    value_entries: DashMap<DeclBindingKey, ValueCell>,
-    aug_type_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
-    aug_value_entries: DashMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
+    type_entries: crate::per_file_map::PerFileMap<DeclBindingKey, TypeCell>,
+    value_entries: crate::per_file_map::PerFileMap<DeclBindingKey, ValueCell>,
+    aug_type_entries:
+        crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), TypeCell>,
+    aug_value_entries:
+        crate::per_file_map::PerFileMap<(AugmentationScopeKind, DeclBindingKey), ValueCell>,
     whole_env: OnceLock<Arc<EvalEnv>>,
     /// The per-file function program index — a DEMAND product: exact
     /// function identities + body locators, binding/reference inventory,
@@ -470,7 +476,22 @@ pub struct DeclBodyMemo {
     /// Arena-free, no lowered types; built once through the retained
     /// snapshot on first Flow demand.
     function_index: Arc<FunctionIndexDemand>,
-    raw_surfaces: DashMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+    raw_surfaces:
+        crate::per_file_map::PerFileMap<(DeclarationPath, SymbolSpace), Arc<Vec<RawSourceSurface>>>,
+    /// Transient body parts a batched demand ([`prime_type_bodies`]) kept
+    /// from the lowering that registered their facts, waiting for the body
+    /// read that follows it. A read takes its entry; the batch's
+    /// [`PrimedTypeBodies`] guard drops any entry left unread, so nothing
+    /// here outlives the demand that primed it.
+    primed_type_parts: parking_lot::Mutex<Vec<PrimedTypeParts>>,
+}
+
+/// One primed transient body: the demanded declaration, its scope (`None`
+/// for the file scope) and the parts lowered for it.
+struct PrimedTypeParts {
+    scope: Option<AugmentationScopeKind>,
+    key: DeclBindingKey,
+    parts: Arc<TransientTypeParts>,
 }
 
 impl std::fmt::Debug for DeclBodyMemo {
@@ -540,13 +561,14 @@ impl DeclBodyMemo {
             counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
-            type_entries: DashMap::default(),
-            value_entries: DashMap::default(),
-            aug_type_entries: DashMap::default(),
-            aug_value_entries: DashMap::default(),
+            type_entries: crate::per_file_map::per_file_map(),
+            value_entries: crate::per_file_map::per_file_map(),
+            aug_type_entries: crate::per_file_map::per_file_map(),
+            aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
-            raw_surfaces: DashMap::default(),
+            raw_surfaces: crate::per_file_map::per_file_map(),
+            primed_type_parts: parking_lot::Mutex::new(Vec::new()),
         }
     }
 
@@ -601,13 +623,14 @@ impl DeclBodyMemo {
             counters,
             lens: OnceLock::new(),
             route_lens: OnceLock::new(),
-            type_entries: DashMap::default(),
-            value_entries: DashMap::default(),
-            aug_type_entries: DashMap::default(),
-            aug_value_entries: DashMap::default(),
+            type_entries: crate::per_file_map::per_file_map(),
+            value_entries: crate::per_file_map::per_file_map(),
+            aug_type_entries: crate::per_file_map::per_file_map(),
+            aug_value_entries: crate::per_file_map::per_file_map(),
             whole_env: OnceLock::new(),
             function_index,
-            raw_surfaces: DashMap::default(),
+            raw_surfaces: crate::per_file_map::per_file_map(),
+            primed_type_parts: parking_lot::Mutex::new(Vec::new()),
         };
 
         for (name, group) in &env.type_symbols {
@@ -1299,7 +1322,7 @@ impl DeclBodyMemo {
             verter_language::default_parse_identity_for(&self.eval_source, &file_language)
                 .expect("fixture parse identity");
         verter_session_query::flow::bundle::FlowSliceFunctionKey {
-            canonical_id: Arc::clone(&self.key.canonical),
+            canonical_id: (&self.key.canonical).into(),
             function: entry.key().clone(),
             flow_body_stable_hash: entry.flow_body_stable_hash(),
             flow_body_exact_hash: entry.flow_body_exact_hash().expect("fixture exact body"),
@@ -1694,16 +1717,41 @@ impl DeclBodyMemo {
         let Some(service) = self.service.as_ref() else {
             return DemandLower::Ready(None);
         };
+        let job = self.demanded_job(key, contributors, jsdoc_typedef, None);
+        let outcome = service.run_leased(&job.key, job.run);
+        self.finish_demanded(outcome).0
+    }
+
+    /// The pure statement-lowering job of one demanded declaration: it
+    /// lowers each contributing statement once, registering its facts, and
+    /// — when `transient` names the demanded body's scope — keeps that
+    /// body's transient parts from the SAME lowering, so a body demanded
+    /// right after its facts is not lowered a second time.
+    fn demanded_job(
+        &self,
+        key: &DeclBindingKey,
+        contributors: &[verter_session_query::declarations::header_index::DeclHeaderContributor],
+        jsdoc_typedef: Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+        transient: Option<Option<AugmentationScopeKind>>,
+    ) -> crate::decl_lowering::LeasedJob<DemandJobOutput> {
         self.ensure_lease();
         // Several declarations in ONE statement (the overloads of a function
         // inside one `declare global` block) share its anchor: the statement
         // is lowered and registered once, which registers every one of them.
         let mut lowered_statements = rustc_hash::FxHashSet::default();
-        let contributors: Vec<_> = contributors
+        let deduplicated: Vec<_> = contributors
             .iter()
             .filter(|contributor| lowered_statements.insert(contributor.anchor.contributor_index))
             .cloned()
             .collect();
+        // The transient re-borrow reads every contributor (statement-shared
+        // ones included) through the plain statement lowering: keep its
+        // parts only when this lowering visits exactly those statements the
+        // same way.
+        let transient = transient.filter(|_| {
+            deduplicated.len() == contributors.len() && !self.svelte_component_runes_mode
+        });
+        let contributors = deduplicated;
         let key = key.clone();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let lens = self.shallow_lens();
@@ -1711,10 +1759,12 @@ impl DeclBodyMemo {
         let header_index = Arc::clone(&self.header_index);
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let class_fields = Arc::clone(&self.header_index.class_field_values);
-        let outcome = service.run_leased(&self.key, move |program| {
+        let counters = Arc::clone(&self.counters);
+        let run = move |program: Option<&crate::parsed_eval_program::ParsedEvalProgram>| {
             let program = program?;
             let source = program.source_str();
             let program = program.borrow_dependent();
+            let mut transient_parts = transient.as_ref().map(|_| TransientTypeParts::default());
 
             let mut scratch = EvalEnv::new();
             // TRANSIENT lowered TYPE bodies + type-parameter headers, retained
@@ -1763,6 +1813,12 @@ impl DeclBodyMemo {
                         &class_fields,
                     )
                 };
+                counters
+                    .decl_statements_lowered
+                    .fetch_add(1, Ordering::Relaxed);
+                if let (Some(out), Some(scope)) = (transient_parts.as_mut(), transient.as_ref()) {
+                    accumulate_transient_type_parts(&parts, &key, scope.as_ref(), out);
+                }
                 for decl in &parts.type_decls {
                     retained_types
                         .entry(DeclBindingKey::new(owner, decl.name.as_str()))
@@ -1842,6 +1898,10 @@ impl DeclBodyMemo {
                         .entry(key.clone())
                         .or_default()
                         .extend(typedef.dependencies);
+                    if let (Some(out), Some(None)) = (transient_parts.as_mut(), transient.as_ref())
+                    {
+                        out.bodies.push(typedef.body.clone());
+                    }
                     let retained = retained_types.entry(key.clone()).or_default();
                     retained.bodies.push(typedef.body);
                     // A JSDoc `@typedef` payload is comment-derived — not
@@ -1941,8 +2001,20 @@ impl DeclBodyMemo {
                     ),
                 ));
             }
-            Some(batch)
-        });
+            Some((batch, transient_parts))
+        };
+        crate::decl_lowering::LeasedJob {
+            key: self.key.clone(),
+            run: Box::new(run),
+        }
+    }
+
+    /// Account one demanded lowering's outcome: its lowered statement batch
+    /// and the demanded body's transient parts when the job kept them.
+    fn finish_demanded(
+        &self,
+        outcome: Option<DemandJobOutput>,
+    ) -> (DemandLower, Option<TransientTypeParts>) {
         // Outer `None` = a broken lease pin (the lease-only run missed the
         // retained snapshot; the job did NOT run). Fail CLOSED via ReturnOnly:
         // this must NEVER be memoized as a body-less warm entry, in DEBUG *or*
@@ -1957,14 +2029,15 @@ impl DeclBodyMemo {
                 "decl-body lease pin broken: the demanded lowering's lease-only run \
                  missed the retained snapshot; failing closed to ReturnOnly (uncached)"
             );
-            return DemandLower::LeaseMiss;
+            return (DemandLower::LeaseMiss, None);
         };
-        if let Some(batch) = inner.as_ref() {
-            self.counters
-                .decl_bodies_lowered
-                .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
-        }
-        DemandLower::Ready(inner)
+        let Some((batch, transient)) = inner else {
+            return (DemandLower::Ready(None), None);
+        };
+        self.counters
+            .decl_bodies_lowered
+            .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);
+        (DemandLower::Ready(Some(batch)), transient)
     }
 
     /// Get-or-compute a per-symbol cell under `get_or_init` single-flight, with
@@ -2131,6 +2204,208 @@ impl DeclBodyMemo {
     }
 }
 
+/// Fold one lowered contributing statement into the demanded body's
+/// transient parts: its declarations of `key` in `aug_scope` (the file scope
+/// when `None`), plus — for a file-scope `default` — the declaration an
+/// `export default interface I` / `export default class C` mirrors under
+/// `default`, with the header type parameters unioned the same way.
+fn accumulate_transient_type_parts(
+    parts: &verter_semantic::analysis::type_eval_build::LoweredStatementParts,
+    key: &DeclBindingKey,
+    aug_scope: Option<&AugmentationScopeKind>,
+    out: &mut TransientTypeParts,
+) {
+    match aug_scope {
+        Some(scope) => {
+            for (part_scope, decl) in &parts.aug_type_decls {
+                if part_scope == scope && decl.name == key.name.as_ref() {
+                    out.bodies.push(decl.body.clone());
+                    union_type_params_first_seen(&mut out.type_parameters, &decl.type_parameters);
+                }
+            }
+        }
+        None => {
+            for decl in &parts.type_decls {
+                if decl.name == key.name.as_ref() {
+                    out.bodies.push(decl.body.clone());
+                    union_type_params_first_seen(&mut out.type_parameters, &decl.type_parameters);
+                }
+            }
+            if key.name.as_ref() == "default" {
+                if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
+                    for decl in &parts.type_decls {
+                        if decl.name == alias_from {
+                            out.bodies.push(decl.body.clone());
+                            union_type_params_first_seen(
+                                &mut out.type_parameters,
+                                &decl.type_parameters,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One type declaration a batched demand ([`prime_type_bodies`]) lowers:
+/// `name` declared by `owner` in `memo`'s file, in the augmentation `scope`
+/// or the file scope when `None`.
+pub struct TypeBodyDemand<'a> {
+    pub memo: &'a Arc<DeclBodyMemo>,
+    pub owner: TopLevelOwnerId,
+    pub name: &'a str,
+    pub scope: Option<&'a AugmentationScopeKind>,
+}
+
+/// The transient bodies a [`prime_type_bodies`] call kept. Dropping it
+/// releases every one no body read has taken yet.
+#[must_use = "dropping the guard releases the primed bodies before they are read"]
+pub struct PrimedTypeBodies {
+    kept: Vec<(
+        Arc<DeclBodyMemo>,
+        Option<AugmentationScopeKind>,
+        DeclBindingKey,
+    )>,
+}
+
+impl Drop for PrimedTypeBodies {
+    fn drop(&mut self) {
+        for (memo, scope, key) in self.kept.drain(..) {
+            let _ = memo.take_primed_type_parts(&key, scope.as_ref());
+        }
+    }
+}
+
+/// Lower every not-yet-lowered declaration of `demands` in one batch: the
+/// statement-lowering jobs of all of them go to the lowering service
+/// together — one worker rendezvous per occupied shard, not one per
+/// declaration — and each job registers its declaration's facts exactly as
+/// a single demand would. The lowering that registered a declaration's
+/// facts also keeps that declaration's transient body parts, so the body
+/// read that follows (the locator deref) takes them instead of lowering the
+/// statement again; the returned guard releases any that are not read.
+///
+/// A declaration whose facts are already lowered, or whose demand misses
+/// its lease, is left to the single-demand path, which owns those outcomes.
+pub fn prime_type_bodies(demands: &[TypeBodyDemand<'_>]) -> PrimedTypeBodies {
+    struct Pending<'a> {
+        memo: &'a Arc<DeclBodyMemo>,
+        scope: Option<AugmentationScopeKind>,
+        key: DeclBindingKey,
+        contributors: Vec<verter_session_query::declarations::header_index::DeclHeaderContributor>,
+        cell: TypeCell,
+    }
+    let mut kept = Vec::new();
+    // Group by service so each batch goes to the workers that retain its
+    // snapshots (one service per host in production).
+    /// The demands one lowering service answers, beside their jobs.
+    struct ServiceBatch<'a> {
+        service: Arc<DeclLoweringService>,
+        pendings: Vec<Pending<'a>>,
+        jobs: Vec<crate::decl_lowering::LeasedJob<DemandJobOutput>>,
+    }
+    let mut groups: Vec<ServiceBatch<'_>> = Vec::new();
+    for demand in demands {
+        let Some(service) = demand.memo.service.as_ref() else {
+            continue;
+        };
+        let key = DeclBindingKey::new(demand.owner, demand.name);
+        let Some((contributors, jsdoc_typedef, cell)) =
+            demand.memo.type_demand_target(&key, demand.scope)
+        else {
+            continue;
+        };
+        if cell.get().is_some() {
+            continue;
+        }
+        let job = demand.memo.demanded_job(
+            &key,
+            &contributors,
+            jsdoc_typedef,
+            Some(demand.scope.cloned()),
+        );
+        let pending = Pending {
+            memo: demand.memo,
+            scope: demand.scope.cloned(),
+            key,
+            contributors,
+            cell,
+        };
+        match groups
+            .iter_mut()
+            .find(|batch| Arc::ptr_eq(&batch.service, service))
+        {
+            Some(batch) => {
+                batch.pendings.push(pending);
+                batch.jobs.push(job);
+            }
+            None => groups.push(ServiceBatch {
+                service: Arc::clone(service),
+                pendings: vec![pending],
+                jobs: vec![job],
+            }),
+        }
+    }
+    for ServiceBatch {
+        service,
+        pendings,
+        jobs,
+    } in groups
+    {
+        let outcomes = service.run_leased_batch(jobs);
+        for (pending, outcome) in pendings.into_iter().zip(outcomes) {
+            let (lowered, transient) = pending.memo.finish_demanded(outcome);
+            let DemandLower::Ready(batch) = lowered else {
+                continue;
+            };
+            let decl = batch
+                .as_ref()
+                .and_then(|batch| match pending.scope.as_ref() {
+                    None => batch
+                        .types
+                        .iter()
+                        .find(|(candidate, _)| candidate == &pending.key)
+                        .map(|(_, decl)| Arc::new(decl.clone())),
+                    Some(scope) => batch
+                        .aug_types
+                        .iter()
+                        .find(|(candidate_scope, candidate, _)| {
+                            candidate_scope == scope && candidate == &pending.key
+                        })
+                        .map(|(_, _, decl)| Arc::new(decl.clone())),
+                });
+            if pending.cell.set(DemandCell::Ready(decl)).is_ok() {
+                if let Some(batch) = batch {
+                    match pending.scope.as_ref() {
+                        None => pending.memo.backfill(
+                            batch,
+                            &pending.contributors,
+                            Some((SymbolSpace::Type, &pending.key)),
+                            None,
+                        ),
+                        Some(scope) => pending.memo.backfill(
+                            batch,
+                            &pending.contributors,
+                            None,
+                            Some((scope, SymbolSpace::Type, &pending.key)),
+                        ),
+                    }
+                }
+            }
+            if let Some(parts) = transient {
+                pending.memo.primed_type_parts.lock().push(PrimedTypeParts {
+                    scope: pending.scope.clone(),
+                    key: pending.key.clone(),
+                    parts: Arc::new(parts),
+                });
+                kept.push((Arc::clone(pending.memo), pending.scope, pending.key));
+            }
+        }
+    }
+    PrimedTypeBodies { kept }
+}
+
 /// Union one contributor's header type parameters into the transient list,
 /// first-seen by name — the shared fold the file-scope, augmentation, and
 /// `export default` alias branches all apply so the re-borrowed union can
@@ -2144,6 +2419,56 @@ fn union_type_params_first_seen(type_parameters: &mut Vec<TypeParam>, params: &[
 }
 
 impl DeclBodyMemo {
+    /// Take the transient parts a batched demand kept for `key` in
+    /// `scope`, if any are waiting.
+    fn take_primed_type_parts(
+        &self,
+        key: &DeclBindingKey,
+        scope: Option<&AugmentationScopeKind>,
+    ) -> Option<Arc<TransientTypeParts>> {
+        let mut primed = self.primed_type_parts.lock();
+        let position = primed
+            .iter()
+            .position(|entry| &entry.key == key && entry.scope.as_ref() == scope)?;
+        Some(primed.swap_remove(position).parts)
+    }
+
+    /// The header contributors (and JSDoc typedef, file scope only) of the
+    /// type declaration `key` in `scope`, and its demand cell.
+    fn type_demand_target(
+        &self,
+        key: &DeclBindingKey,
+        scope: Option<&AugmentationScopeKind>,
+    ) -> Option<(
+        Vec<verter_session_query::declarations::header_index::DeclHeaderContributor>,
+        Option<verter_session_query::declarations::header_index::JsdocTypedefHeader>,
+        TypeCell,
+    )> {
+        match scope {
+            None => {
+                let header = self
+                    .header_index
+                    .type_header_in(key.owner, key.name.as_ref())?;
+                let target = (header.contributors.clone(), header.jsdoc_typedef);
+                let cell = self.type_entries.entry(key.clone()).or_default().clone();
+                Some((target.0, target.1, cell))
+            }
+            Some(scope) => {
+                let contributors = self
+                    .header_index
+                    .augmentation_type_header_in(scope, key.owner, key.name.as_ref())?
+                    .contributors
+                    .clone();
+                let cell = self
+                    .aug_type_entries
+                    .entry((scope.clone(), key.clone()))
+                    .or_default()
+                    .clone();
+                Some((contributors, None, cell))
+            }
+        }
+    }
+
     /// TYPE-space transient contributor parts of one demanded file-scope
     /// symbol (bodies in source order — a JSDoc-`@typedef` name appends its
     /// re-derived payload body — plus the unioned header type parameters),
@@ -2216,11 +2541,15 @@ impl DeclBodyMemo {
             // re-borrow — a genuine, cacheable body-less miss.
             return DemandOutcome::Ready(None);
         };
+        if let Some(parts) = self.take_primed_type_parts(&key, aug_scope) {
+            return DemandOutcome::Ready(Some(parts));
+        }
         self.ensure_lease();
         let contributors = contributors.to_vec();
         let aug_scope = aug_scope.cloned();
         let build_ctx = BuildEvalEnvContext::new(Arc::clone(&self.key.canonical));
         let class_fields = Arc::clone(&self.header_index.class_field_values);
+        let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -2233,54 +2562,16 @@ impl DeclBodyMemo {
                 else {
                     continue;
                 };
+                counters
+                    .decl_statements_lowered
+                    .fetch_add(1, Ordering::Relaxed);
                 let parts = lower_statement_parts(
                     stmt,
                     source,
                     program.source_type.is_typescript_definition(),
                     &class_fields,
                 );
-                match aug_scope.as_ref() {
-                    Some(scope) => {
-                        for (part_scope, decl) in &parts.aug_type_decls {
-                            if part_scope == scope && decl.name == key.name.as_ref() {
-                                parts_out.bodies.push(decl.body.clone());
-                                union_type_params_first_seen(
-                                    &mut parts_out.type_parameters,
-                                    &decl.type_parameters,
-                                );
-                            }
-                        }
-                    }
-                    None => {
-                        for decl in &parts.type_decls {
-                            if decl.name == key.name.as_ref() {
-                                parts_out.bodies.push(decl.body.clone());
-                                union_type_params_first_seen(
-                                    &mut parts_out.type_parameters,
-                                    &decl.type_parameters,
-                                );
-                            }
-                        }
-                        // `export default interface I` / `export default
-                        // class C` mirrors the declared-name symbol under
-                        // `default` — mirror the transient bodies AND the
-                        // unioned header parameters the same way (see the
-                        // demanded-lowering path).
-                        if key.name.as_ref() == "default" {
-                            if let Some(alias_from) = parts.alias_default_type_to.as_deref() {
-                                for decl in &parts.type_decls {
-                                    if decl.name == alias_from {
-                                        parts_out.bodies.push(decl.body.clone());
-                                        union_type_params_first_seen(
-                                            &mut parts_out.type_parameters,
-                                            &decl.type_parameters,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                accumulate_transient_type_parts(&parts, &key, aug_scope.as_ref(), &mut parts_out);
             }
             if let Some(jsdoc_typedef) = jsdoc_typedef {
                 let mut scratch = EvalEnv::new();
@@ -2391,6 +2682,69 @@ impl DeclBodyMemo {
                 DemandOutcome::Ready(Some(Arc::new(selection)))
             }
         }
+    }
+
+    /// The member-read fingerprint of the name `member` of the
+    /// single-statement class `class` — the class `Member` fact a member read
+    /// roots on in place of the file's whole hash
+    /// ([`compute_class_member_read_hash`]): every instance element declaring
+    /// the name (the `ClassMembersNamed` selection, colliding names
+    /// included) and the `extends` reference, each fingerprinted from its
+    /// lease-only re-borrow, so the class's other members are never lowered.
+    /// `None` when the symbol is not a class one top-level statement
+    /// declares: a class that gains a same-name contributor, or stops being
+    /// a class, moves the fact to absence. A broken lease is a refusal.
+    pub fn class_member_read_hash_in(
+        &self,
+        owner: TopLevelOwnerId,
+        class: &str,
+        member: &str,
+    ) -> SourceRead<Option<HashOutcome>> {
+        let refused = || {
+            DemandOutcome::<()>::LeaseMiss
+                .into_source_read()
+                .map(|_| None)
+        };
+        let elements = match self.transient_class_body_selection(
+            owner,
+            class,
+            ClassBodyRequest::MembersNamed(verter_type_expr::locators::class_member_name_hash(
+                member,
+            )),
+        ) {
+            DemandOutcome::LeaseMiss => return refused(),
+            DemandOutcome::Ready(None) => return SourceRead::clean(None),
+            DemandOutcome::Ready(Some(elements)) => elements,
+        };
+        let heritage =
+            match self.transient_class_body_selection(owner, class, ClassBodyRequest::Heritage) {
+                DemandOutcome::LeaseMiss => return refused(),
+                DemandOutcome::Ready(heritage) => heritage,
+            };
+        let lens = self.shallow_lens();
+        let lens = lens.for_owner(owner);
+        let space = verter_session_query::facts::SymbolSpace::Type;
+        // One fingerprint per declaring element, in selection (source) order:
+        // an object-level hash would sort the members and lose which
+        // declaration comes first.
+        let elements: Vec<HashOutcome> = match &elements.body {
+            TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .map(|member| {
+                    let single = TypeExpr::Object(Arc::new(ObjectExpr {
+                        properties: vec![member.clone()],
+                    }));
+                    compute_semantic_hash(&single, space, &lens)
+                })
+                .collect(),
+            other => vec![compute_semantic_hash(other, space, &lens)],
+        };
+        let heritage = heritage.map(|heritage| compute_semantic_hash(&heritage.body, space, &lens));
+        SourceRead::clean(Some(compute_class_member_read_hash(
+            &elements,
+            heritage.as_ref(),
+        )))
     }
 
     /// The re-derived JSDoc-`@typedef` payload body of one demanded typedef
@@ -3329,8 +3683,8 @@ pub fn lowered_value_decl_for_synthesised_default(
             literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
         },
         vec![FunctionSignature {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(Vec::new().into_boxed_slice()),
             return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
             // A synthesised default-export constructor has no authored return
             // annotation at all.
@@ -3457,7 +3811,7 @@ impl IndexedExpressionDemand {
         };
         self.snapshot.ensure_lease();
         let mut refusal = None;
-        let _index = self.function_program_index().absorb_into(&mut refusal);
+        let index = self.function_program_index().absorb_into(&mut refusal);
         let Some(node) = service.run_leased(&self.snapshot.key, move |program| {
             program.map(|parsed| {
                 let source = parsed.source_str();
@@ -3502,7 +3856,35 @@ impl IndexedExpressionDemand {
         };
         WalkedRead::from_program_walk(node)
             .with_prior_refusal(refusal)
-            .map(|node| node.map(Arc::new))
+            .map(|node| node.map(|mut node| {
+                for argument in Arc::make_mut(&mut node.call.args) {
+                    let verter_type_expr::IndexedValueExpression::Value(TypeExpr::Function(function)) =
+                        &argument.expression
+                    else {
+                        continue;
+                    };
+                    let point = verter_type_expr::facts::ProgramExpressionIdentity {
+                        canonical_id: Arc::clone(&self.snapshot.key.canonical),
+                        offset: argument.point,
+                    };
+                    let Some(record) = index.expression(&point) else {
+                        continue;
+                    };
+                    // The actual transient signature and the served source
+                    // must name the same authored callback, not just a nearby point.
+                    if function.spans.signature != Some(record.span) {
+                        continue;
+                    }
+                    if let verter_session_query::function_program::ProgramExpressionSource::FunctionReturn(source) =
+                        &record.source
+                    {
+                        verter_semantic::analysis::function_program::attach_indexed_callback_return_source(
+                            argument, source,
+                        );
+                    }
+                }
+                Arc::new(node)
+            }))
     }
 
     pub fn function_type_param_clause(
@@ -3577,8 +3959,8 @@ impl IndexedExpressionDemand {
         {
             return WalkedRead::clean(None);
         }
-        let skeleton = Arc::clone(bound.bundle().skeleton());
-        let bindings = Arc::clone(bound.bundle().bindings());
+        let skeleton = bound.skeleton_ref();
+        let bindings = bound.bindings_ref();
         let Some(service) = self.snapshot.service.as_ref() else {
             return WalkedRead::clean(None);
         };
@@ -3623,7 +4005,7 @@ impl IndexedExpressionDemand {
                         entry,
                         selection.as_ref(),
                         &skeleton,
-                        Arc::clone(&bindings),
+                        bindings.clone(),
                         carrier_module,
                         &snapshot,
                         context.as_deref(),

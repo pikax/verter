@@ -194,6 +194,14 @@ impl CancellationToken {
         self.state.cancelled.store(true, Ordering::Release);
     }
 
+    /// Whether two handles name the same cancellation source: clones of one
+    /// token agree, independent tokens never do. Identity is content-free —
+    /// it never observes the cancelled flag.
+    #[must_use]
+    pub fn same_source(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Returns whether the token has been cancelled.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
@@ -263,6 +271,15 @@ pub fn current_job_cancellation_token() -> Option<CancellationToken> {
     CURRENT_JOB_CANCELLATION.with(|slot| slot.borrow().clone())
 }
 
+/// Read the aggregate cancellation token of the scheduler job executing on
+/// this thread, if any, without taking a reference to it. A checkpoint that
+/// only asks whether the token is cancelled reads it in place.
+pub fn with_current_job_cancellation_token<R>(
+    read: impl FnOnce(Option<&CancellationToken>) -> R,
+) -> R {
+    CURRENT_JOB_CANCELLATION.with(|slot| read(slot.borrow().as_ref()))
+}
+
 /// Stack-safe TLS guard for one scheduler-owned job cancellation token.
 pub struct JobCancellationGuard {
     previous: Option<CancellationToken>,
@@ -272,7 +289,16 @@ impl JobCancellationGuard {
     /// Install `token` for the current job and restore the prior token on drop.
     #[must_use]
     pub fn install(token: CancellationToken) -> Self {
-        let previous = CURRENT_JOB_CANCELLATION.with(|slot| slot.replace(Some(token)));
+        Self::replace(Some(token))
+    }
+
+    /// Install `token` — or no job token at all — for work this thread runs
+    /// on behalf of a job that began elsewhere, and restore the prior token
+    /// on drop. Work suspended under one job and resumed on another thread
+    /// observes its own job's cancellation, never the thread's.
+    #[must_use]
+    pub fn replace(token: Option<CancellationToken>) -> Self {
+        let previous = CURRENT_JOB_CANCELLATION.with(|slot| slot.replace(token));
         Self { previous }
     }
 }

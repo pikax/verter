@@ -557,7 +557,21 @@ mod tests {
             for admitted in [true, false] {
                 let (facts, pages) = wide_resolution_facts();
                 let own_bytes = 100;
-                let page_bytes: usize = pages.iter().map(|page| page.retained_charge_bytes()).sum();
+                // The pages and the result receipt wrapping them are each
+                // charged; the admission claims them together.
+                let page_bytes: usize = pages
+                    .iter()
+                    .map(|page| page.retained_charge_bytes())
+                    .sum::<usize>()
+                    + facts
+                        .iter()
+                        .map(|fact| match fact {
+                            verter_session_query::facts::fact_cache::FactVersionRef::Receipt(
+                                receipt,
+                            ) => receipt.retained_charge_bytes(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
                 let account = SemanticRetentionAccount::new(RetentionLimits {
                     max_entry_bytes: if admitted {
                         own_bytes + page_bytes

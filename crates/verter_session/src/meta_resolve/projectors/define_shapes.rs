@@ -141,14 +141,9 @@ pub(crate) fn project_define_macro_shapes(
 /// normalized row shadowed the session-resolved member source (the same
 /// competing-producer class the emit-authority rule closed).
 ///
-/// Returns `None` when the macro's type-argument surface does NOT resolve at
-/// all (a genuinely unresolved / missing macro — see [`macro_surface_resolves`]:
-/// SFC not loaded, macro index out of range, type argument that does not project
-/// to an object surface). A RESOLVED surface with no property members (a
-/// call-signature-only `defineProps<{ (): void }>()`) returns `Some(empty
-/// shape)` — present but with no properties — so the consumer observes "the
-/// macro resolved to no props" rather than "no macro". This distinguishes
-/// resolved-but-empty from unresolved/missing.
+/// The DTO's producer-owned guarantee accompanies even an empty shape. A
+/// complete no-surface answer and an unavailable membership demand therefore
+/// remain distinct without a second surface probe or an aggregate summary.
 fn define_props_shape(
     ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
@@ -159,15 +154,6 @@ fn define_props_shape(
     macro_index: usize,
     evaluated_types: &ExpandedComponentTypes,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
-    if !macro_surface_resolves(
-        ctx,
-        dispatch,
-        owner_canonical,
-        macro_index,
-        AnalyzedMacroKind::DefineProps,
-    ) {
-        return None;
-    }
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         dispatch,
@@ -222,6 +208,7 @@ fn define_props_shape(
     );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
+            domain_guarantee: dtos.domain_guarantee.clone(),
             properties,
             index_signatures,
             call_signatures: Vec::new(),
@@ -254,17 +241,7 @@ fn define_emits_shape(
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
-    // Unresolved emits macro → no shape (see `define_props_shape`). A resolved
-    // emits surface with no events is `Some(empty)`.
-    if !macro_surface_resolves(
-        ctx,
-        dispatch,
-        owner_canonical,
-        macro_index,
-        AnalyzedMacroKind::DefineEmits,
-    ) {
-        return None;
-    }
+    // Membership availability travels with the normalized DTO, including empty domains.
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         dispatch,
@@ -308,6 +285,7 @@ fn define_emits_shape(
     );
     Some(ExpansionResult {
         value: ExpandedObjectShape {
+            domain_guarantee: dtos.domain_guarantee.clone(),
             properties,
             index_signatures,
             call_signatures: Vec::new(),
@@ -330,17 +308,7 @@ fn define_slots_shape(
     owner_canonical: &str,
     macro_index: usize,
 ) -> Option<ExpansionResult<ExpandedObjectShape>> {
-    // Unresolved slots macro → no shape (see `define_props_shape`). A resolved
-    // slots surface with no slot members is `Some(empty)`.
-    if !macro_surface_resolves(
-        ctx,
-        dispatch,
-        owner_canonical,
-        macro_index,
-        AnalyzedMacroKind::DefineSlots,
-    ) {
-        return None;
-    }
+    // Membership availability travels with the normalized DTO, including empty domains.
     let dtos_read = crate::typeinfo::framework_surface::vue_exec::vue_macro_dtos_with_ctx(
         ctx,
         dispatch,
@@ -366,39 +334,11 @@ fn define_slots_shape(
         .collect();
 
     Some(ExpansionResult::exact_symbolic(ExpandedObjectShape {
+        domain_guarantee: dtos.domain_guarantee.clone(),
         properties,
         index_signatures: Vec::new(),
         call_signatures: Vec::new(),
     }))
-}
-
-/// Does the macro's type-argument surface RESOLVE under the active `ctx`?
-///
-/// The "resolved vs unresolved/missing" discriminator the `define_*_shape`
-/// helpers use: `resolve_vue_macro_surface_with_ctx` returns `None` exactly for
-/// the genuinely-unresolved cases (SFC not loaded, macro index out of range,
-/// macro not type-based, or a type argument that does not project to an object
-/// surface). A RESOLVED surface — even one with no members (a call-signature-
-/// only `defineProps<{ (): void }>()`) — returns `Some(..)`, so the helper
-/// publishes `Some(empty)` rather than conflating it with "no macro". Resolution
-/// flows through `ctx`, and the underlying dispatch queries are memoised in the
-/// shared `SemanticGraphStore`, so this shares the DTO path's reduction work.
-fn macro_surface_resolves(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
-    dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
-        '_,
-        crate::resolver_core::HostCapabilities,
-    >,
-    owner_canonical: &str,
-    macro_index: usize,
-    macro_kind: AnalyzedMacroKind,
-) -> bool {
-    crate::typeinfo::framework_surface::vue_exec::resolve_vue_macro_surface_with_ctx(
-        ctx,
-        dispatch,
-        &dto_request(owner_canonical, macro_index, macro_kind),
-    )
-    .is_some()
 }
 
 /// FullMetadata DTO request for `(owner, macro_index, kind)`.
@@ -468,8 +408,8 @@ pub(crate) fn slot_field_function_source(
         }]
     };
     SemanticTypeSource::Closed(ClosedTypeFact::Function(FunctionSignatureFact {
-        type_parameters: std::sync::Arc::from(Vec::new().into_boxed_slice()),
-        parameters: std::sync::Arc::from(parameters.into_boxed_slice()),
+        type_parameters: From::from(Vec::new().into_boxed_slice()),
+        parameters: From::from(parameters.into_boxed_slice()),
         // The return position has no addressable authored slot on a
         // payload-less slot — the typed miss, recovered on demand.
         return_source: verter_type_expr::facts::FunctionReturnSource::Absent,

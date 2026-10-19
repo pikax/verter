@@ -28,6 +28,7 @@ fn on_a_small_stack<R: Send + 'static>(
         .spawn(move || {
             let host = VerterHost::new_standalone(HostConfig::default());
             let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
             probe(&dispatch)
         })
         .expect("spawn the probing thread")
@@ -70,19 +71,26 @@ fn tuple_spreads_splice_at_any_depth() {
         let graph = dispatch.graph();
         let (one, two) = (literal(dispatch, "1"), literal(dispatch, "2"));
         let mut tuple = graph.intern_node(SemanticNodeData::Tuple {
-            elements: Arc::from([element(one, false), element(two, false)]),
+            elements: verter_type_engine::semantic_query::PayloadArray::from([
+                element(one, false),
+                element(two, false),
+            ]),
             readonly: false,
         });
         // bounded-loop: a fixed DEPTH-level fixture constructor.
         for _ in 0..DEPTH {
             let alias = graph.intern_node(SemanticNodeData::Alias(tuple));
             tuple = graph.intern_node(SemanticNodeData::Tuple {
-                elements: Arc::from([element(alias, true)]),
+                elements: verter_type_engine::semantic_query::PayloadArray::from([element(
+                    alias, true,
+                )]),
                 readonly: false,
             });
         }
-        let Some(SemanticNodeData::Tuple { elements, .. }) =
-            graph.node_data(tuple).as_deref().cloned()
+        let Some(SemanticNodeData::Tuple { elements, .. }) = graph
+            .node_data(tuple)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             unreachable!("a tuple was interned");
         };
@@ -117,10 +125,34 @@ fn index_key_unions_enumerate_at_any_depth() {
     });
     let keys = keys.expect("a finite key set");
     assert_eq!(keys.len(), DEPTH + 1);
-    assert_eq!(keys[0], IndexKey::String(Arc::from("k0")));
+    assert_eq!(
+        keys[0],
+        IndexKey::String(verter_type_expr::OwnedStr::from("k0"))
+    );
     assert_eq!(
         keys[DEPTH],
-        IndexKey::String(Arc::from(format!("k{DEPTH}")))
+        IndexKey::String(verter_type_expr::OwnedStr::from(format!("k{DEPTH}")))
+    );
+}
+
+#[test]
+fn index_key_intersections_filter_at_any_depth() {
+    let keys = on_a_small_stack(|dispatch| {
+        let graph = dispatch.graph();
+        let string = primitive(dispatch, PrimitiveKind::String);
+        let mut domain = literal(dispatch, "selected");
+        for _ in 0..DEPTH {
+            domain = graph.intern_node(SemanticNodeData::Intersection(
+                CompositeList::test_fixture(Arc::from([domain, string])),
+            ));
+        }
+        dispatch.finite_index_keys_for_tests(domain)
+    });
+    assert_eq!(
+        keys,
+        Some(vec![IndexKey::String(verter_type_expr::OwnedStr::from(
+            "selected"
+        ))])
     );
 }
 

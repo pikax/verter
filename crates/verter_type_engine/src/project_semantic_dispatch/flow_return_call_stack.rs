@@ -20,12 +20,22 @@
 //! the route suspends at too ([`ResolveCallProgress::Function`]): its body
 //! evaluates from the stack of evaluators (`flow_return_nested`), not
 //! inside the route.
+//!
+//! A function-value argument the executor's second pass retypes is typed
+//! while the executor's contextual continuation holds the candidate's
+//! collector. In a flow evaluation that runs as a frame of the continuation
+//! runtime, that typing is a window ([`FlowDemandDriver::open_contextual_window`]):
+//! a read it makes that the frame must produce first stops the run, and the
+//! route is held as it stood before the callback ([`HeldContextualRoute`]),
+//! collector included. The frame's next run asks the call again with the
+//! same key and resumes the held route there instead of the executor: the
+//! callback types over the delivered reads into that same collector.
 
 use std::sync::Arc;
 use verter_session_query::source::demand::ExpressionSourceDemand as _;
 
 use super::super::call_resolve::ResolveCallStep;
-use super::contextual::{FunctionArgumentMark, FunctionArgumentRequest};
+use super::contextual::{CalleeParameters, FunctionArgumentMark, FunctionArgumentRequest};
 use super::FlowDemandDriver;
 use super::*;
 use verter_session_query::flow::slice::{
@@ -81,6 +91,8 @@ pub(super) struct CallFunctionWait<'e> {
     route: RouteAt<'e>,
     mark: FunctionArgumentMark,
     demand: Option<NestedDemand>,
+    /// Whether the argument types in a contextual window.
+    window: bool,
 }
 
 impl CallFunctionWait<'_> {
@@ -111,11 +123,14 @@ pub(super) struct ResolveCallFrame<'e> {
     /// The call's whole span.
     span: verter_span::Span,
     callee: SemanticNodeId,
+    /// Lazily prepared once; only complete discovery results are retained.
+    contextual_parameters: Option<Option<CalleeParameters>>,
     arguments: &'e SliceCallArguments,
     indexed: Arc<verter_session_query::source::indexed_call::IndexedFlowCallExpression>,
     frame_arguments: Option<Arc<[SliceCallArgument]>>,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
+    argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
     /// The binding of the argument whose lowered value is awaited.
     awaiting: Option<FlowIndexedArgumentBinding>,
     /// The typed function value of the argument being typed, once its
@@ -128,15 +143,67 @@ pub(super) struct ResolveCallFrame<'e> {
 /// inference pass retypes.
 pub(super) struct FinishRoute {
     _serve: verter_session_query::inputs::indexed::IndexedInputServe,
+    /// The key the call was asked with first.
+    asked: crate::semantic_query::ResolveCallKey,
     key: crate::semantic_query::ResolveCallKey,
     args: Vec<crate::semantic_query::CallArgKey>,
     function_arguments: Vec<Option<SliceExpr>>,
+    argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
+    step_observations: super::super::flow_return_fact::ObservedRead<()>,
+    /// Relation observations owned by this executor attempt, excluding arguments.
+    undecided_relations: u64,
+    declared_result: Option<super::super::call_resolve::DeclaredCallResult>,
     step: Positional<ResolveCallStep>,
+    contextual: super::super::call_resolve::ContextualCallState,
     retyped: bool,
-    /// The arguments retyped so far.
-    rounds: usize,
     /// The argument being retyped.
     position: usize,
+}
+
+/// A call's executor route held across its flow frame's suspension: the
+/// route as it stood before the round whose callback stopped the run, its
+/// contextual continuation holding the candidate's collector.
+pub(in crate::project_semantic_dispatch) struct HeldContextualRoute {
+    finish: Box<FinishRoute>,
+}
+
+impl HeldContextualRoute {
+    /// The key the call was asked with first: the run that asks it again
+    /// with this key resumes the route.
+    pub(in crate::project_semantic_dispatch) fn asked(
+        &self,
+    ) -> &crate::semantic_query::ResolveCallKey {
+        &self.finish.asked
+    }
+
+    /// Release a route no run resumes: what it observed is dropped and its
+    /// held collector returns to the transaction abandoned.
+    pub(in crate::project_semantic_dispatch) fn release<
+        C: crate::resolver_core::ResolverCapabilities,
+    >(
+        self,
+        dispatch: &super::super::ProjectSemanticDispatch<'_, C>,
+    ) {
+        let FinishRoute {
+            argument_observations,
+            step_observations,
+            mut contextual,
+            ..
+        } = *self.finish;
+        for observation in argument_observations.into_iter().flatten() {
+            let _ = observation.discard();
+        }
+        let _ = step_observations.discard();
+        dispatch.release_contextual_collector(&mut contextual);
+    }
+
+    /// The held collector's session and how many deposits it holds.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::project_semantic_dispatch) fn held_collector_for_tests(
+        &self,
+    ) -> Option<(u64, usize)> {
+        self.finish.contextual.held_collector_for_tests()
+    }
 }
 
 /// One retyping round's outcome: the route's progress, or a
@@ -271,25 +338,52 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             callee,
             route,
             mark,
+            window,
             ..
         } = wait;
-        let progress = self.deliver_resolve_call_function(route, mark, value);
+        if window {
+            self.dispatch.close_contextual_window();
+        }
+        let progress = self.deliver_resolve_call_function(route, mark, value, window);
         self.continue_call_route(flight, callee, progress)
     }
 
+    /// Open the contextual window a function-value argument types in, when
+    /// its route retypes it under the executor's held collector.
+    pub(super) fn open_function_argument_window(&self, at: &RouteAt<'_>) -> bool {
+        matches!(at, RouteAt::Finishing(_)) && self.dispatch.open_contextual_window()
+    }
+
     /// Continue a call's executor route suspended at a function-value
-    /// argument with that argument's evaluated signature.
+    /// argument with that argument's evaluated signature. A callback typed
+    /// in a contextual `window` whose run now waits on a need — one its
+    /// typing read, or one relating it to the held collector's target
+    /// unwraps — holds the route as it stood before it, collector included,
+    /// for the run that resumes it; this run's call goes undecided.
     pub(super) fn deliver_resolve_call_function<'e>(
         &mut self,
         at: RouteAt<'e>,
         mark: FunctionArgumentMark,
         value: Positional<SemanticNodeId>,
+        window: bool,
     ) -> ResolveCallProgress<'e> {
         let typed = self.function_argument_value(mark, value);
         match at {
             RouteAt::Typing(mut route) => {
                 route.delivered_function = Some(typed);
                 self.advance_resolve_call(*route, None)
+            }
+            RouteAt::Finishing(finish)
+                if window
+                    && (self.dispatch.contextual_window_waits()
+                        || typed.is_some_and(|typed| {
+                            self.dispatch
+                                .contextual_delivery_waits(&finish.contextual, typed)
+                        })) =>
+            {
+                self.dispatch
+                    .hold_contextual_route(HeldContextualRoute { finish });
+                ResolveCallProgress::Done(None)
             }
             RouteAt::Finishing(finish) => self.retype_resolve_call(finish, Some(typed)),
         }
@@ -300,7 +394,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// route.
     fn drive_call<'e>(&mut self, mut flight: CallInFlight<'e>) -> CallStep<'e> {
         let enclosing = self.call_drive.replace(flight.drive);
-        let value = self.eval_call_value(flight.call, flight.site, flight.arguments);
+        let driver = self.dispatch;
+        let read = driver
+            .observe_read(|| self.eval_call_value(flight.call, flight.site, flight.arguments));
+        // The call is a required value dependency, including a no-surface
+        // result represented by this position's gap. Selected siblings own
+        // separate value observations and need not adopt this dependency.
+        let value = driver.adopt_read(read).unwrap_or(Positional::Unmodeled);
         flight.drive = std::mem::replace(&mut self.call_drive, enclosing)
             .expect("the call's drive stays installed while its value computes");
         if let Some(callee) = flight.drive.demand.take() {
@@ -329,12 +429,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ResolveCallProgress::Argument(route, lowered) => (route, lowered),
                 ResolveCallProgress::Function(function) => {
                     let RouteFunction { at, request } = *function;
+                    let window = self.open_function_argument_window(&at);
                     return CallStep::Function(Box::new(CallFunctionWait {
                         flight,
                         callee,
                         route: at,
                         mark: request.mark,
                         demand: Some(request.demand),
+                        window,
                     }));
                 }
                 ResolveCallProgress::Done(step) => {
@@ -489,11 +591,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             _serve: serve,
             span: site.span(),
             callee,
+            contextual_parameters: None,
             arguments,
             indexed,
             frame_arguments,
             args: Vec::with_capacity(count),
             function_arguments: Vec::with_capacity(count),
+            argument_observations: (0..count).map(|_| None).collect(),
             awaiting: None,
             delivered_function: None,
         };
@@ -504,7 +608,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// argument it asked for.
     pub(super) fn deliver_resolve_call_argument<'e>(
         &mut self,
-        route: ResolveCallFrame<'e>,
+        mut route: ResolveCallFrame<'e>,
         lowered: &SliceExpr,
         value: Positional<SemanticNodeId>,
     ) -> ResolveCallProgress<'e> {
@@ -514,7 +618,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 fresh_call: self.is_fresh_call_value(lowered, node),
                 const_view: None,
             },
-            Positional::Hold => return ResolveCallProgress::Done(Some(Positional::Hold)),
+            Positional::Hold => {
+                self.adopt_argument_observations(&mut route.argument_observations);
+                return ResolveCallProgress::Done(Some(Positional::Hold));
+            }
             Positional::Unmodeled => TypedArgument {
                 node: None,
                 fresh_call: false,
@@ -546,6 +653,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 ),
                 None => {
                     let Some(root) = indexed.argument_roots.get(ordinal) else {
+                        self.adopt_argument_observations(&mut route.argument_observations);
                         return ResolveCallProgress::Done(None);
                     };
                     let binding = self.indexed_argument_binding(*root);
@@ -597,12 +705,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         None => {
                             let request =
                                 match route.function_arguments.last().and_then(Option::as_ref) {
-                                    Some(expr) if !argument.context_sensitive => self
-                                        .function_argument_request_under_parameter(
-                                            expr,
-                                            route.callee,
-                                            ordinal,
-                                        ),
+                                    Some(
+                                        expr @ SliceExpr::NestedFunctionValue { gap: None, .. },
+                                    ) if !argument.context_sensitive => {
+                                        if route.contextual_parameters.is_none() {
+                                            route.contextual_parameters =
+                                                self.callee_parameter_types(route.callee).ok();
+                                        }
+                                        let parameter = route
+                                            .contextual_parameters
+                                            .as_mut()
+                                            .and_then(Option::as_mut)
+                                            .and_then(|parameters| {
+                                                parameters.at(self.dispatch, ordinal)
+                                            });
+                                        self.function_argument_request_under_parameter(
+                                            expr, parameter,
+                                        )
+                                    }
                                     _ => None,
                                 };
                             if let Some(request) = request {
@@ -621,27 +741,42 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             return ResolveCallProgress::Argument(route, lowered);
                         }
                         (None, None) => {
-                            let frame_value = match (&binding, frame_arguments.as_deref()) {
-                                (
-                                    FlowIndexedArgumentBinding::NonBindingExpression,
-                                    Some(frame_arguments),
-                                ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                    let value =
-                                        self.eval_frame_call_argument(&frame_argument.value)?;
-                                    const_view = frame_argument
-                                        .const_context
-                                        .as_ref()
-                                        .and_then(|expr| self.eval_frame_call_argument(expr));
-                                    Some(value)
-                                }),
-                                _ => None,
+                            let driver = self.dispatch;
+                            let read = driver.observe_read(|| {
+                                let frame_value = match (&binding, frame_arguments.as_deref()) {
+                                    (
+                                        FlowIndexedArgumentBinding::NonBindingExpression,
+                                        Some(frame_arguments),
+                                    ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
+                                        let value =
+                                            self.eval_frame_call_argument(&frame_argument.value)?;
+                                        const_view = frame_argument
+                                            .const_context
+                                            .as_ref()
+                                            .and_then(|expr| self.eval_frame_call_argument(expr));
+                                        Some(value)
+                                    }),
+                                    _ => None,
+                                };
+                                frame_value.or_else(|| {
+                                    let value = self.eval_indexed_call_argument(
+                                        &argument.expression,
+                                        &binding,
+                                    )?;
+                                    fresh_call = value.fresh;
+                                    Some(value.node)
+                                })
+                            });
+                            let Ok((node, observations)) = read.split() else {
+                                self.adopt_argument_observations(&mut route.argument_observations);
+                                return ResolveCallProgress::Done(None);
                             };
-                            frame_value.or_else(|| {
-                                let value = self
-                                    .eval_indexed_call_argument(&argument.expression, &binding)?;
-                                fresh_call = value.fresh;
-                                Some(value.node)
-                            })
+                            if argument.context_sensitive && node.is_some() {
+                                route.argument_observations[ordinal] = Some(observations);
+                            } else {
+                                let _ = self.dispatch.adopt_read(observations);
+                            }
+                            node
                         }
                     };
                     (
@@ -659,6 +794,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // applicability without its evidence: the executor refuses
                 // as surely, and degrading here is the same typed marker
                 // with one less hop.
+                self.adopt_argument_observations(&mut route.argument_observations);
                 return ResolveCallProgress::Done(None);
             };
             // A read of a WIDENING-literal `const` is a FRESH literal source
@@ -695,7 +831,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .and_then(Option::as_ref)
             {
                 Some(SliceExpr::Object { entries, offset }) if argument.context_sensitive => {
-                    match self.eval_object_literal_first_pass(entries, *offset) {
+                    if route.contextual_parameters.is_none() {
+                        route.contextual_parameters =
+                            self.callee_parameter_types(route.callee).ok();
+                    }
+                    let contextual = route
+                        .contextual_parameters
+                        .as_mut()
+                        .and_then(Option::as_mut)
+                        .and_then(|parameters| parameters.at(self.dispatch, ordinal));
+                    match self.eval_object_literal_first_pass(entries, *offset, contextual) {
                         Positional::Value(node) => Some(node),
                         Positional::Hold | Positional::Unmodeled => None,
                     }
@@ -737,17 +882,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             indexed,
             args,
             function_arguments,
+            mut argument_observations,
             ..
         } = route;
         let call = &indexed.call;
         let mut explicit_type_args = Vec::with_capacity(call.explicit_type_args.len());
         for argument in call.explicit_type_args.iter() {
-            let node = self.dispatch.lower_type_expr_in_owner_scope_with_mode(
-                self.canonical,
-                self.owner,
-                argument,
-                crate::semantic_query::ProjectionMode::Navigate,
-            )?;
+            // Explicit arguments belong to the calling body's lexical clause,
+            // including a permutation of that clause's still-generic binders.
+            let node = self.lower_body_type(argument);
             explicit_type_args.push(node);
         }
         // A member call's receiver rides the key: `.call` / `.apply`
@@ -760,12 +903,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let receiver = match call.receiver.as_deref() {
             _ if evaluated_receiver.is_some() => evaluated_receiver,
             Some(receiver) => {
-                let root = indexed.receiver_root?;
+                let Some(root) = indexed.receiver_root else {
+                    self.adopt_argument_observations(&mut argument_observations);
+                    return None;
+                };
                 let receiver_binding = self.indexed_argument_binding(root);
-                Some(
-                    self.eval_indexed_call_argument(receiver, &receiver_binding)?
-                        .node,
-                )
+                let Some(value) = self.eval_indexed_call_argument(receiver, &receiver_binding)
+                else {
+                    self.adopt_argument_observations(&mut argument_observations);
+                    return None;
+                };
+                Some(value.node)
             }
             None => None,
         };
@@ -776,7 +924,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         });
         let key = crate::semantic_query::ResolveCallKey {
             point: crate::semantic_query::ProgramPointId {
-                canonical_id: Arc::from(self.canonical),
+                canonical_id: verter_type_expr::OwnedStr::from(self.canonical),
                 offset: call.point,
             },
             callee,
@@ -794,17 +942,75 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             flow: crate::semantic_query::FlowNarrowingKey::empty(),
             context: self.dispatch.resolve_call_context_for(self.canonical),
         };
-        let step = Positional::Value(self.dispatch.execute_resolve_call(key.clone()));
+        // A route the frame's last run held for this call resumes here, its
+        // collector as it stood: the executor is not asked again.
+        if let Some(held) = self.dispatch.take_held_contextual_route(&key) {
+            return Some(self.resume_held_route(held, argument_observations));
+        }
+        let mut contextual = super::super::call_resolve::ContextualCallState::default();
+        let relations_before = self.dispatch.call_undecided_relations();
+        let read = self.dispatch.observe_read(|| {
+            self.dispatch
+                .execute_contextual_call(key.clone(), &mut contextual)
+        });
+        let undecided_relations = self
+            .dispatch
+            .call_undecided_relations()
+            .saturating_sub(relations_before);
+        let complete = read.observations_are_complete();
+        let Ok(((step, declared_result), step_observations)) = read.split() else {
+            self.adopt_argument_observations(&mut argument_observations);
+            return None;
+        };
+        let step = Positional::Value(step);
         Some(Box::new(FinishRoute {
             _serve,
+            asked: key.clone(),
             key,
             args,
             function_arguments,
+            argument_observations,
+            step_observations,
+            undecided_relations,
+            declared_result: declared_result.filter(|_| complete),
             step,
+            contextual,
             retyped: false,
-            rounds: 0,
             position: 0,
         }))
+    }
+
+    /// A held route resumed by the run that asks its call again. This run
+    /// typed the call's arguments itself, so their observations are this
+    /// run's, but for an argument the held route already retyped; the
+    /// undecided relations its executor attempt observed count again, as
+    /// they would have had the run asked it.
+    fn resume_held_route(
+        &mut self,
+        held: HeldContextualRoute,
+        mut argument_observations: Vec<Option<super::super::flow_return_fact::ObservedRead<()>>>,
+    ) -> Box<FinishRoute> {
+        let mut finish = held.finish;
+        for (held, kept) in finish
+            .argument_observations
+            .iter_mut()
+            .zip(argument_observations.iter_mut())
+        {
+            match held.take() {
+                Some(stale) => {
+                    let _ = stale.discard();
+                    *held = kept.take();
+                }
+                None => {
+                    if let Some(retyped) = kept.take() {
+                        let _ = retyped.discard();
+                    }
+                }
+            }
+        }
+        self.dispatch
+            .restore_call_relation_observations(finish.undecided_relations);
+        finish
     }
 
     /// The checker's second inference pass: a context-sensitive argument
@@ -824,7 +1030,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // A context-sensitive literal retyped in place, under the
                 // contextual type the executor's step names: its value is
                 // the next round's delivery.
-                RetypeRound::InPlace(next) => {
+                RetypeRound::InPlace(mut next) => {
                     let expr = next
                         .function_arguments
                         .get(next.position)
@@ -834,7 +1040,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         Self::contextual_argument_request(&next.step).map(|(_, ty)| ty);
                     delivered = Some(match (expr, contextual) {
                         (Some(expr), Some(contextual)) => {
-                            match self.eval_in_context(&expr, None, contextual) {
+                            match self.eval_contextual_object_argument(
+                                &expr,
+                                contextual,
+                                &mut next.contextual,
+                            ) {
                                 Positional::Value(node) => Some(node),
                                 Positional::Hold | Positional::Unmodeled => None,
                             }
@@ -865,7 +1075,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             });
             let Some((ty, spread)) = retyped else {
                 return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                    Self::settle_retyped_call(*finish),
+                    self.settle_retyped_call(*finish),
                 )));
             };
             finish.retyped = true;
@@ -877,10 +1087,34 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
             };
-            finish.function_arguments[position] = None;
-            finish.key.args = Arc::from(finish.args.clone().into_boxed_slice());
-            finish.step = Positional::Value(self.dispatch.execute_resolve_call(finish.key.clone()));
-            finish.rounds += 1;
+            if let Some(old) = finish.argument_observations[position].take() {
+                let _ = old.discard();
+            }
+            self.dispatch
+                .discard_call_relation_observations(finish.undecided_relations);
+            let relations_before = self.dispatch.call_undecided_relations();
+            let read = self.dispatch.observe_read(|| {
+                self.dispatch.resume_contextual_call(
+                    &mut finish.key,
+                    &finish.args,
+                    position,
+                    &mut finish.contextual,
+                )
+            });
+            finish.undecided_relations = self
+                .dispatch
+                .call_undecided_relations()
+                .saturating_sub(relations_before);
+            let complete = read.observations_are_complete();
+            let Ok(((step, proof), observations)) = read.split() else {
+                return RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
+                    self.settle_retyped_call(*finish),
+                )));
+            };
+            let old = std::mem::replace(&mut finish.step_observations, observations);
+            let _ = old.discard();
+            finish.step = Positional::Value(step);
+            finish.declared_result = proof.filter(|_| complete);
         }
         match self.next_retyped_argument(&finish) {
             Some((position, Some(request))) => {
@@ -897,7 +1131,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 RetypeRound::InPlace(finish)
             }
             None => RetypeRound::Progress(Box::new(ResolveCallProgress::Done(
-                Self::settle_retyped_call(*finish),
+                self.settle_retyped_call(*finish),
             ))),
         }
     }
@@ -910,9 +1144,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         finish: &FinishRoute,
     ) -> Option<(usize, Option<FunctionArgumentRequest>)> {
-        if finish.rounds >= finish.args.len() {
-            return None;
-        }
         let (position, contextual) = Self::contextual_argument_request(&finish.step)?;
         let expr = finish.function_arguments.get(position).cloned().flatten()?;
         if matches!(expr, SliceExpr::Object { .. } | SliceExpr::Array { .. }) {
@@ -927,8 +1158,96 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The executor's step for a call once no argument is retyped again.
-    fn settle_retyped_call(finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
-        let FinishRoute { step, retyped, .. } = finish;
+    fn settle_retyped_call(&mut self, finish: FinishRoute) -> Option<Positional<ResolveCallStep>> {
+        let FinishRoute {
+            step,
+            retyped,
+            mut argument_observations,
+            step_observations,
+            undecided_relations,
+            declared_result,
+            key,
+            ..
+        } = finish;
+        self.adopt_argument_observations(&mut argument_observations);
+        // A declined executor does not own the fixed declared result read by
+        // the direct-call route. Its failed applicability probes are not that
+        // route's evidence; authored argument observations remain adopted.
+        let declined = !retyped
+            && matches!(
+                step,
+                Positional::Value(ResolveCallStep::Degraded(
+                    crate::semantic_query::ResolveCallFailure::Undecidable
+                        | crate::semantic_query::ResolveCallFailure::Budget
+                ))
+            )
+            && !self.undecided_call_return_reads_clause(key.callee);
+        let validity = if declined {
+            self.dispatch
+                .discard_call_relation_observations(undecided_relations);
+            step_observations.discard()
+        } else {
+            self.dispatch.adopt_read(step_observations)
+        };
+        if validity.is_err() {
+            return None;
+        }
+        if let Some(proof) = declared_result {
+            if key.kind == crate::semantic_query::CallKind::Call {
+                if let (
+                    Some((_, result)),
+                    Positional::Value(ResolveCallStep::Complete(
+                        crate::semantic_query::ResolvedCallResult::Selected {
+                            substitution, ..
+                        },
+                    )),
+                ) = (proof.result(&key), &step)
+                {
+                    let sources: Vec<_> = self
+                        .constructive_values
+                        .iter()
+                        .filter_map(|(node, value)| match value {
+                            super::ConstructiveValue::Class {
+                                instance,
+                                declaration,
+                            } => Some((*node, *instance, declaration.clone())),
+                            _ => None,
+                        })
+                        .collect();
+                    for (source, instance, declaration) in sources {
+                        let substituted = self.dispatch.substitute_canonical(source, substitution);
+                        if substituted == result {
+                            let instance =
+                                self.dispatch.substitute_canonical(instance, substitution);
+                            self.heritage_self_roots.extend_from_slice(proof.roots());
+                            self.constructive_values.insert(
+                                result,
+                                super::ConstructiveValue::Class {
+                                    instance,
+                                    declaration,
+                                },
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            if key.kind == crate::semantic_query::CallKind::Construct
+                && key.args.is_empty()
+                && key.explicit_type_args.is_empty()
+            {
+                if let (Some((_, result)), Some(super::ConstructiveValue::Class { instance, .. })) = (
+                    proof.result(&key),
+                    self.constructive_values.get(&key.callee),
+                ) {
+                    if result == *instance {
+                        self.heritage_self_roots.extend_from_slice(proof.roots());
+                        self.constructive_values
+                            .insert(result, super::ConstructiveValue::Instance);
+                    }
+                }
+            }
+        }
         let mut step = step;
         // A call asked again after a retyped argument that still does not
         // decide answers no uninferred parameter's fallback either.
@@ -948,5 +1267,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             ));
         }
         Some(step)
+    }
+
+    fn adopt_argument_observations(
+        &self,
+        observations: &mut [Option<super::super::flow_return_fact::ObservedRead<()>>],
+    ) {
+        for observation in observations.iter_mut().filter_map(Option::take) {
+            let _ = self.dispatch.adopt_read(observation);
+        }
     }
 }

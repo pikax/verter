@@ -1,0 +1,118 @@
+error[E0624]: method `share` is private
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:19:14
+   |
+19 |     elements.share()
+   |              ^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
+   |
+   |     pub(crate) fn share(&self) -> Self {
+   |     ---------------------------------- private method defined here
+
+error[E0277]: the trait bound `PayloadArray<SemanticNodeId>: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:23:18
+   |
+23 |     Clone::clone(args)
+   |     ------------ ^^^^ the trait `Clone` is not implemented for `PayloadArray<SemanticNodeId>`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0277]: the trait bound `verter_type_engine::semantic_query::TupleElement: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:27:18
+   |
+27 |     Clone::clone(&elements[0])
+   |     ------------ ^^^^^^^^^^^^ the trait `Clone` is not implemented for `verter_type_engine::semantic_query::TupleElement`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0277]: the trait bound `FunctionParam: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:31:18
+   |
+31 |     Clone::clone(&params[0])
+   |     ------------ ^^^^^^^^^^ the trait `Clone` is not implemented for `FunctionParam`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0277]: the trait bound `TypeParamDecl: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:35:18
+   |
+35 |     Clone::clone(parameter)
+   |     ------------ ^^^^^^^^^ the trait `Clone` is not implemented for `TypeParamDecl`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0277]: the trait bound `CompositeList<UnionKind>: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:39:18
+   |
+39 |     Clone::clone(arms)
+   |     ------------ ^^^^ the trait `Clone` is not implemented for `CompositeList<UnionKind>`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0624]: method `members_arc` is private
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:43:10
+   |
+43 |     arms.members_arc()
+   |          ^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query/composite.rs
+   |
+   |     pub(crate) fn members_arc(&self) -> Arc<[SemanticNodeId]> {
+   |     --------------------------------------------------------- private method defined here
+
+error[E0277]: the trait bound `verter_type_engine::semantic_query::ObjectSpreadProgram: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:47:18
+   |
+47 |     Clone::clone(program)
+   |     ------------ ^^^^^^^ the trait `Clone` is not implemented for `verter_type_engine::semantic_query::ObjectSpreadProgram`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0277]: the trait bound `ObjectConstructionEffect: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:51:18
+   |
+51 |     Clone::clone(effect)
+   |     ------------ ^^^^^^ the trait `Clone` is not implemented for `ObjectConstructionEffect`
+   |     |
+   |     required by a bound introduced by this call
+
+error[E0624]: method `operands` is private
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:56:55
+   |
+56 |         QueryError::RecursiveRef { args, .. } => args.operands().to_vec(),
+   |                                                       ^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/semantic_query.rs
+   |
+   |     pub(crate) fn operands(&self) -> &[SemanticNodeId] {
+   |     -------------------------------------------------- private method defined here
+
+error[E0624]: associated function `from_view` is private
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:62:22
+   |
+62 |     OneLevelSurface::from_view(graph, view)
+   |                      ^^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/one_level_surface.rs
+   |
+   |     pub(crate) fn from_view(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
+   |     ------------------------------------------------------------------------------- private associated function defined here
+
+error[E0624]: associated function `from_object` is private
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:66:21
+   |
+66 |     ShallowSurface::from_object(view)
+   |                     ^^^^^^^^^^^ private associated function
+   |
+  ::: $WORKSPACE/crates/verter_type_engine/src/project_semantic_dispatch/walk.rs
+   |
+   |     pub(crate) fn from_object(view: &SurfaceView) -> Self {
+   |     ----------------------------------------------------- private associated function defined here
+
+error[E0277]: the trait bound `ShallowSurfaceMember: Clone` is not satisfied
+  --> tests/cases/compile-fail/public_payload_arrays_and_members_cannot_detach.rs:70:18
+   |
+70 |     Clone::clone(member)
+   |     ------------ ^^^^^^ the trait `Clone` is not implemented for `ShallowSurfaceMember`
+   |     |
+   |     required by a bound introduced by this call

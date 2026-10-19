@@ -93,7 +93,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
             Some(BuiltinUtility::Pick | BuiltinUtility::Omit | BuiltinUtility::Record)
         )
     };
-    match graph.node_data(node).as_deref() {
+    match graph.read_in_scope(node).as_deref() {
         Some(SemanticNodeData::Alias(inner)) => {
             node_root_is_explicit_selector_operator(dispatch, *inner)
         }
@@ -111,7 +111,7 @@ pub(crate) fn node_root_is_explicit_selector_operator(
         }
         Some(data) if data.bare_ref_head().is_some() => data
             .bare_ref_head()
-            .is_some_and(|head| is_selector_util(head.0.as_ref())),
+            .is_some_and(|head| is_selector_util(head.0)),
         _ => false,
     }
 }
@@ -179,10 +179,21 @@ mod node_scoring_differential_tests {
         host
     }
 
+    /// Lower `expr`, keeping the node in the caller's construction scope
+    /// once the lowering dispatcher is gone.
     fn lower(host: &VerterHost, expr: &TypeExpr) -> SemanticNodeId {
-        ProjectSemanticDispatch::new(host)
+        let dispatch = ProjectSemanticDispatch::new(host);
+        let node = dispatch
             .lower_type_expr_in_scope_with_mode("/src/m.ts", expr, ProjectionMode::Navigate)
-            .expect("expr must lower")
+            .expect("expr must lower");
+        let roots = host
+            .project_type_store()
+            .semantic_graph()
+            .root_nodes([node])
+            .expect("the lowered node is live");
+        drop(dispatch);
+        roots.retain_for_construction();
+        node
     }
 
     #[test]
@@ -190,6 +201,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         let foo = || TypeExpr::named("Foo");
         let idx = || TypeExpr::IndexedAccess {
@@ -256,6 +268,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         // A symbolic current: a bare `Foo` Ref raises to one symbolic carrier
         // (`symbolic_carriers == 1`), so the pre-fix default-score path returns
@@ -286,6 +299,7 @@ mod node_scoring_differential_tests {
         let host = build_host();
         let dispatch =
             &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
 
         let foo = || TypeExpr::named("Foo");
         // selectors → true

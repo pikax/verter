@@ -40,10 +40,33 @@ use verter_type_engine::intrinsic_registry::IntrinsicRegistry;
 use verter_type_engine::semantic_query::DepVersion;
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
-pub mod semantic_activity;
-pub use semantic_activity::SemanticActivityGuard;
-pub mod guarded_host;
-pub use guarded_host::{GuardedHost, HostRef};
+pub use verter_type_engine::semantic_query_memo::SemanticCloseReport;
+
+/// What document closes have cost: a fixed-size aggregate, no history
+/// (retention observability, read through
+/// [`ProjectTypeStore::close_stats`]).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticCloseStats {
+    /// Closes applied over the store's lifetime.
+    pub closes_applied: u64,
+    /// The slowest single close, and every close added up, in
+    /// microseconds.
+    pub elapsed_max_micros: u64,
+    pub elapsed_total_micros: u64,
+    /// The last close applied, or `None` before the first.
+    pub last: Option<verter_type_engine::semantic_query_memo::SemanticCloseReport>,
+}
+
+impl SemanticCloseStats {
+    fn record(&mut self, report: verter_type_engine::semantic_query_memo::SemanticCloseReport) {
+        self.closes_applied += 1;
+        self.elapsed_max_micros = self.elapsed_max_micros.max(report.elapsed_micros);
+        self.elapsed_total_micros = self
+            .elapsed_total_micros
+            .saturating_add(report.elapsed_micros);
+        self.last = Some(report);
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // ArtifactRequirements — readiness DAG boundary
@@ -180,7 +203,11 @@ pub struct IndexedReady {
     pub script_analysis:
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Cached per-export signatures used by smart dependent invalidation.
-    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
+    pub export_signatures: Option<
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+    >,
     /// File-level analysis snapshot consumed by component-meta / linter
     /// pipelines.
     pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
@@ -391,7 +418,11 @@ pub struct AnalysisReady {
         Option<Arc<verter_session_query::analysis::script_snapshot::ScriptAnalysisSnapshot>>,
     /// Per-export signatures for smart invalidation, when the scope requested
     /// [`AnalysisScope::EXPORT_SIGNATURES`].
-    pub export_signatures: Option<Arc<Vec<verter_session_query::analysis::types::ExportSignature>>>,
+    pub export_signatures: Option<
+        verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+    >,
     /// File-level analysis snapshot used by the existing component-meta and
     /// linter pipelines.
     pub snapshot: Arc<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot>,
@@ -952,6 +983,8 @@ pub struct ProjectTypeStore {
     /// every consumer that resolves a `SemanticQueryKey` through the
     /// shared query API.
     semantic_graph: Arc<SemanticGraphStore>,
+    /// The construction lane of `semantic_graph`, minted with it.
+    construction: verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant,
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version and every downstream stage
     /// reads the same entry.
@@ -1100,9 +1133,8 @@ pub struct ProjectTypeStore {
     /// engine's stores) receive clones of this handle — they share the
     /// account, they never mint one.
     retention_account: verter_session_query::retention::StoreAccount,
-    /// Gate that defers close-time payload releases until no computation is
-    /// in flight (see [`semantic_activity`]).
-    activity_gate: semantic_activity::SemanticActivityGate,
+    /// What document closes have cost so far ([`Self::close_stats`]).
+    close_stats: parking_lot::Mutex<SemanticCloseStats>,
     /// Debug / diagnostic counters.
     pub counters: ProjectTypeStoreCounters,
 }
@@ -1138,6 +1170,7 @@ impl ProjectTypeStore {
             None,
             verter_session_query::retention::StoreAccount::default(),
             verter_execution::tasks::TaskRegistry::default(),
+            verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
         )
         .0
     }
@@ -1155,6 +1188,7 @@ impl ProjectTypeStore {
             None,
             verter_session_query::retention::StoreAccount::new(retention_account),
             verter_execution::tasks::TaskRegistry::default(),
+            verter_type_engine::semantic_query_memo::MemoFamilyBound::Production,
         )
         .0
     }
@@ -1181,7 +1215,8 @@ impl ProjectTypeStore {
     /// [`MetaProvenance`](crate::meta_provenance::MetaProvenance) so the embedded
     /// [`SemanticGraphStore`] reports its contention instrumentation
     /// counters through the shared provenance surface, and to the
-    /// composition root's `task_registry` cycle authority. Returns the
+    /// composition root's `task_registry` cycle authority, with the semantic
+    /// graph's family memo bounded by `memo_family_bound`. Returns the
     /// engine grants beside the store; the store keeps neither. Test-only
     /// `ProjectTypeStore::new()` callers stay uninstrumented
     /// (semantic-graph stats remain visible through their own
@@ -1190,11 +1225,13 @@ impl ProjectTypeStore {
     pub(crate) fn compose(
         provenance: Arc<crate::meta_provenance::MetaProvenance>,
         task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
     ) -> (Self, EngineGrants) {
         Self::build(
             Some(provenance),
             verter_session_query::retention::StoreAccount::default(),
             task_registry,
+            memo_family_bound,
         )
     }
 
@@ -1202,6 +1239,7 @@ impl ProjectTypeStore {
         provenance: Option<Arc<crate::meta_provenance::MetaProvenance>>,
         store_account: verter_session_query::retention::StoreAccount,
         task_registry: verter_execution::tasks::TaskRegistry,
+        memo_family_bound: verter_type_engine::semantic_query_memo::MemoFamilyBound,
     ) -> (Self, EngineGrants) {
         let retention_account = store_account.clone();
         let counters = ProjectTypeStoreCounters::default();
@@ -1227,14 +1265,16 @@ impl ProjectTypeStore {
         // leave as grants for the composition root: the output authority
         // behind its lease.
         let (engine, output_authority, surface_claims) =
-            verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create(
+            verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores::create_with_memo_family_bound(
                 provenance.map(|provenance| Arc::clone(&provenance.engine)),
                 store_account,
                 &counters.component_meta_cache_live,
                 task_registry,
+                memo_family_bound,
             );
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
+            construction,
             flow_slice,
             intrinsics: intrinsic_registry,
             imported_registry: imported_registry_db,
@@ -1256,6 +1296,7 @@ impl ProjectTypeStore {
             routes: Arc::new(RouteDb::new()),
             imported_roots: Arc::new(ImportedRootDb::new()),
             semantic_graph,
+            construction,
             owner_import_surfaces,
             component_meta_results: Arc::new(component_meta_results),
             intrinsic_registry,
@@ -1267,7 +1308,9 @@ impl ProjectTypeStore {
             app_config_no_override_proof: Arc::new(app_config_no_override_proof),
             compile_cache_db: CompileCacheDb::new(),
             compile_output_pure_content:
-                crate::compile_output_node::CompileOutputNodePureContent::new(),
+                crate::compile_output_node::CompileOutputNodePureContent::with_retention_account(
+                    retention_account.clone(),
+                ),
             flow_slice,
             derived_raw_cache_db: DerivedRawCacheDb::new(),
             dependency_cache_db: DependencyCacheDb::new(),
@@ -1285,7 +1328,7 @@ impl ProjectTypeStore {
             identity_interner,
             retention_account,
             counters,
-            activity_gate: semantic_activity::SemanticActivityGate::default(),
+            close_stats: Default::default(),
         };
         let grants = EngineGrants {
             output_lease: crate::output_sinks::OutputLease::new(output_authority),
@@ -1308,6 +1351,7 @@ impl ProjectTypeStore {
             observers,
             macro_mirrors,
             Arc::clone(&self.semantic_graph),
+            self.construction.clone(),
             Arc::clone(&self.flow_slice),
             Arc::clone(&self.intrinsic_registry),
             Arc::clone(&self.imported_registry_db),
@@ -1470,6 +1514,15 @@ impl ProjectTypeStore {
         &self.semantic_graph
     }
 
+    /// The construction lane of [`Self::semantic_graph`]: session producers
+    /// open their construction scopes through it. Holding the graph alone
+    /// grants none.
+    pub(crate) fn construction_grant(
+        &self,
+    ) -> &verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant {
+        &self.construction
+    }
+
     /// Owner direct-import surface cache. Direct owner imports
     /// resolve exactly once per owner version through this cache.
     pub fn owner_import_surfaces(&self) -> &OwnerImportSurfaceDb {
@@ -1607,60 +1660,42 @@ impl ProjectTypeStore {
         DepVersion::WholeHash(whole_hash)
     }
 
-    /// Document-close release of the semantic substrate for `canonical_id`:
-    /// the semantic graph's memo entries, node payloads, per-node sidecars
-    /// and relation proofs the closed document retained
-    /// ([`SemanticGraphStore::release_canonical`]), plus the shape-cache
-    /// entries rooted in it, keyed by one of its released nodes, or
-    /// depending on it ([`ShapeCacheDb::release_canonical`]).
+    /// Document close of the semantic substrate for `canonical_id`: evict
+    /// every semantic-graph cache owner bound to the closed content — memo
+    /// candidates, union views, hash-cons memos, signature-token roots — and
+    /// the shape-cache entries rooted in it, depending on it or keyed by its
+    /// content ([`verter_type_engine::project_semantic_dispatch::memo::close_canonical_with_shapes`]).
+    /// The closed content's nodes are destroyed once no caller holds them;
+    /// a held result is never revoked.
     ///
     /// Deliberately NOT [`Self::evict_canonical`]: that cascade also drops
     /// the file's `FileArtifactStore` artifacts and the other engine caches
     /// keyed on the canonical, which a close keeps for the disk reload.
     /// Called from the host's `evict` (the `did_close` path).
-    pub fn release_canonical(
+    pub fn close_canonical(
         &self,
         canonical_id: &str,
-    ) -> verter_type_engine::semantic_query_memo::SemanticReleaseReport {
+    ) -> verter_type_engine::semantic_query_memo::SemanticCloseReport {
         // Only the semantic graph and the shape cache: both are pure map
         // work. The route-mutation cascade is deliberately NOT run here —
         // a close must not change what the scheduler sees (the other
         // per-canonical caches stay fact-validated and recompute on the
         // reload, exactly as after an edit).
-        let mut report = self.semantic_graph.release_canonical(canonical_id);
-        report.shape_entries_released =
-            verter_type_engine::project_semantic_dispatch::memo::release_shape_canonical(
+        let report =
+            verter_type_engine::project_semantic_dispatch::memo::close_canonical_with_shapes(
+                self.semantic_graph.as_ref(),
                 self.shape_cache_db.as_ref(),
                 canonical_id,
-                self.semantic_graph.as_ref(),
             );
+        self.close_stats.lock().record(report);
         report
     }
 
-    /// The payload half of a close, applied by the activity gate once no
-    /// computation is in flight: release only nodes interned before the
-    /// close (ids below `below`), then the shape entries that named them.
-    /// The memo drain ran at the close itself.
-    pub(crate) fn release_canonical_below(
-        &self,
-        canonical_id: &str,
-        below: u64,
-    ) -> verter_type_engine::semantic_query_memo::SemanticReleaseReport {
-        let mut report = self
-            .semantic_graph
-            .release_canonical_payloads_below(canonical_id, below);
-        report.shape_entries_released =
-            verter_type_engine::project_semantic_dispatch::memo::release_shape_canonical(
-                self.shape_cache_db.as_ref(),
-                canonical_id,
-                self.semantic_graph.as_ref(),
-            );
-        report
-    }
-
-    /// The activity gate (see [`semantic_activity`]).
-    pub(crate) fn activity_gate(&self) -> &semantic_activity::SemanticActivityGate {
-        &self.activity_gate
+    /// What document closes have cost so far: their count, the slowest and
+    /// summed wall time, and the last close's report.
+    #[must_use]
+    pub fn close_stats(&self) -> SemanticCloseStats {
+        *self.close_stats.lock()
     }
 
     /// Targeted invalidation on file content / routing change.
@@ -2136,6 +2171,7 @@ mod tests {
             FallthroughSurface, NoFallthroughReason, RootReachability,
         };
         ComponentMetaAnalysis {
+            domain_guarantees: Default::default(),
             props: Vec::new(),
             events: Vec::new(),
             slots: Vec::new(),
@@ -2387,7 +2423,10 @@ mod tests {
             crate::component_meta_result_db::ComponentMetaResultEntry {
                 payload: Arc::new(
                     crate::component_meta_cached_result::CachedComponentMetaResult {
-                        analysis: empty_component_meta_analysis(),
+                        analysis:
+                            crate::component_meta_cached_result::shared_component_meta_analysis(
+                                empty_component_meta_analysis(),
+                            ),
                         resolution_template:
                             crate::component_meta_cached_result::ResolutionTemplate {
                                 mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
@@ -2400,6 +2439,7 @@ mod tests {
                                 surface_identities: None,
                                 origin_graph: None,
                                 completeness: verter_type_engine::semantic_query::ResultCompleteness::Complete,
+                                synthesis_should_suppress: false,
                             },
                         canonical_id: Arc::from("/w/o.vue"),
                         whole_hash: hash,

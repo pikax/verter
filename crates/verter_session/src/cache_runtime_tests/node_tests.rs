@@ -39,6 +39,14 @@ impl ArtifactNode for CountingArtifactNode {
     type Key = u32;
     type Value = String;
 
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
+
     fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.entries
     }
@@ -119,6 +127,14 @@ impl QueryNode for StaleGenerationQueryNode {
     type Key = u32;
     type Discriminant = FactCandidateDiscriminant;
     type Value = String;
+
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
 
     fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
         &self.inflight
@@ -224,6 +240,14 @@ impl QueryNode for SkewedDiscriminantQueryNode {
     type Key = u32;
     type Discriminant = FactCandidateDiscriminant;
     type Value = String;
+
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
 
     fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
         &self.inflight
@@ -466,6 +490,7 @@ struct WideArtifactNode {
     signature: ReadSetSignature,
     stale_generation: bool,
     strict_root: bool,
+    during_compute: Option<Arc<dyn Fn() + Send + Sync>>,
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
 
@@ -482,6 +507,7 @@ impl WideArtifactNode {
             inflight: InflightTable::new(),
             stale_generation: false,
             strict_root: false,
+            during_compute: None,
             signature: ReadSetSignature::new(
                 verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
             ),
@@ -490,7 +516,16 @@ impl WideArtifactNode {
     }
 
     fn with_valid_signature(mut self, host: &VerterHost) -> Self {
-        let facts = (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
+        self.signature = ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(
+                Self::valid_dependency_facts(host),
+            ),
+        );
+        self
+    }
+
+    fn valid_dependency_facts(host: &VerterHost) -> Vec<FactVersionRef> {
+        (0..2 * verter_session_query::facts::fact_read_set::FACT_PAGE_WIDTH + 3)
             .map(|index| {
                 let canonical_id = format!("/wide/{index:05}.ts");
                 let _ = host
@@ -513,11 +548,7 @@ impl WideArtifactNode {
                     .whole_hash;
                 FactVersionRef::FileWholeHash { canonical_id, hash }
             })
-            .collect();
-        self.signature = ReadSetSignature::new(
-            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts),
-        );
-        self
+            .collect()
     }
 
     fn page_classes(&self) -> Vec<Option<verter_session_query::retention::ChargeClass>> {
@@ -538,6 +569,14 @@ impl ArtifactNode for WideArtifactNode {
     type Key = u32;
     type Value = String;
 
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
+
     fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
         &self.entries
     }
@@ -547,6 +586,9 @@ impl ArtifactNode for WideArtifactNode {
     }
 
     fn compute(&self, key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
+        if let Some(hook) = &self.during_compute {
+            hook();
+        }
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: self.signature.clone(),
@@ -625,8 +667,8 @@ fn cold_publish_claims_wide_signature_pages_and_is_refused_for_them() {
 #[test]
 fn retention_refusal_preserves_artifact_post_compute_validation() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
     for max_entry_bytes in [usize::MAX, 1] {
         for strict_root in [false, true] {
             let mut node = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
@@ -634,7 +676,13 @@ fn retention_refusal_preserves_artifact_post_compute_validation() {
                 ..RetentionLimits::defaults()
             }));
             node.strict_root = strict_root;
-            node.stale_generation = !strict_root;
+            if !strict_root {
+                node = node.with_valid_signature(&host);
+                let host = Arc::clone(&host);
+                node.during_compute = Some(Arc::new(move || {
+                    host.project_type_store().bump_project_generation();
+                }));
+            }
             assert_eq!(
                 lookup(&node, 7, ctx, ctx.request_flags()),
                 None,
@@ -656,6 +704,14 @@ impl QueryNode for WideQueryNode {
     type Key = u32;
     type Value = String;
     type Discriminant = FactCandidateDiscriminant;
+    fn candidate_footprint(
+        &self,
+        _key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_session_query::retention::heap_size::footprint(value)
+    }
+
     fn inflight(&self) -> &InflightTable<QueryFlightKey<u32>> {
         &self.artifact.inflight
     }
@@ -663,6 +719,9 @@ impl QueryNode for WideQueryNode {
         None
     }
     fn compute(&self, key: &u32, cx: &mut ComputeCtx<'_>) -> CacheAdmission<String> {
+        if let Some(hook) = &self.artifact.during_compute {
+            hook();
+        }
         CacheAdmission::Cacheable {
             value: format!("v{key}"),
             signature: self.artifact.signature.clone(),
@@ -707,8 +766,11 @@ impl QueryNode for WideQueryNode {
 #[test]
 fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
     use verter_session_query::retention::{RetentionLimits, SemanticRetentionAccount};
-    let host = VerterHost::new_standalone(HostConfig::default());
-    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = host.as_ref();
+    // Admit the identical dependency files only once. Seal fresh pages for
+    // each case so its retention account owns independent signature storage.
+    let facts = WideArtifactNode::valid_dependency_facts(&host);
     for (limit, stale, lower) in [
         (usize::MAX, false, false),
         (1, false, false),
@@ -717,15 +779,23 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         (usize::MAX, true, true),
         (1, true, true),
     ] {
-        let artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
+        let mut artifact = WideArtifactNode::new(SemanticRetentionAccount::new(RetentionLimits {
             max_entry_bytes: limit,
             ..RetentionLimits::defaults()
-        }))
-        .with_valid_signature(&host);
+        }));
+        artifact.signature = ReadSetSignature::new(
+            verter_session_query::facts::fact_read_set::seal_canonical_signature(facts.clone()),
+        );
+        if stale {
+            let host = Arc::clone(&host);
+            artifact.during_compute = Some(Arc::new(move || {
+                host.project_type_store().bump_project_generation();
+            }));
+        }
         let node = WideQueryNode {
             artifact,
             store: ReverseIndexedCandidateStore::with_counter(Arc::new(AtomicU64::new(0))),
-            stale,
+            stale: false,
             lower,
         };
         let expected = if stale {
@@ -733,13 +803,185 @@ fn query_retention_refusal_preserves_delivery_validation_and_lowering() {
         } else {
             Some("v7")
         };
-        assert_eq!(
-            query::lookup(&node, 7, ctx, ctx.request_flags()).as_deref(),
-            expected
+        let (answer, finalise) = host.with_fact_tracer(
+            verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
+            || query::lookup(&node, 7, ctx, ctx.request_flags()),
         );
+        assert_eq!(answer.as_deref(), expected);
+        if stale && lower {
+            assert!(finalise.non_cacheable_read_observed(),
+                "lowering an invalid candidate must taint its consumer even under retention pressure");
+        } else if !stale {
+            assert!(
+                !finalise.non_cacheable_read_observed(),
+                "valid storage refusals remain family-local"
+            );
+        }
         assert_eq!(
             node.store.slot_len_for_test(&7),
             usize::from(!stale && limit != 1)
         );
+    }
+}
+
+/// An `ArtifactNode` whose value is a self-charged allocation of a large
+/// text: the entry charges its own allocations, the value's cell charges
+/// the text.
+struct TreeArtifactNode {
+    entries: dashmap::DashMap<u32, Arc<CacheEntry<verter_retention::heap_size::OwnedTree<String>>>>,
+    inflight: InflightTable<QueryFlightKey<u32>>,
+    text_len: usize,
+    return_only: bool,
+    account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+}
+
+impl TreeArtifactNode {
+    fn new(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+        text_len: usize,
+    ) -> Self {
+        Self {
+            entries: dashmap::DashMap::new(),
+            inflight: InflightTable::new(),
+            text_len,
+            return_only: false,
+            account,
+        }
+    }
+}
+
+impl ArtifactNode for TreeArtifactNode {
+    type Key = u32;
+    type Value = verter_retention::heap_size::OwnedTree<String>;
+
+    fn entries(&self) -> &dashmap::DashMap<Self::Key, Arc<CacheEntry<Self::Value>>> {
+        &self.entries
+    }
+
+    fn inflight(&self) -> &InflightTable<QueryFlightKey<Self::Key>> {
+        &self.inflight
+    }
+
+    fn compute(&self, _key: &Self::Key, cx: &mut ComputeCtx<'_>) -> CacheAdmission<Self::Value> {
+        let value = verter_retention::heap_size::owned_tree("t".repeat(self.text_len));
+        if self.return_only {
+            return CacheAdmission::ReturnOnly {
+                value,
+                reason: verter_audit::NonAdmissionReason::IntrinsicNonCacheable,
+            };
+        }
+        CacheAdmission::Cacheable {
+            value,
+            signature: ReadSetSignature::empty(),
+            self_root_canonicals: Arc::from(Vec::<Arc<str>>::new()),
+            validated_at_generation: cx.generation(),
+        }
+    }
+
+    fn entry_footprint(
+        &self,
+        key: &Self::Key,
+        value: &Self::Value,
+    ) -> verter_session_query::retention::Footprint {
+        verter_retention::heap_size::footprint(&(key, value))
+    }
+
+    fn validate(
+        &self,
+        _key: &Self::Key,
+        entry: &CacheEntry<Self::Value>,
+        _cx: &ComputeCtx<'_>,
+    ) -> Option<Self::Value> {
+        Some(entry.value.clone())
+    }
+
+    fn retention_account(&self) -> Arc<verter_session_query::retention::SemanticRetentionAccount> {
+        Arc::clone(&self.account)
+    }
+}
+
+/// A published artifact entry charges its own allocations on one retained
+/// reservation, and its value's cell charges the value itself: a read that
+/// outlives the entry keeps exactly the value charged, and the last holder's
+/// drop — in either order — restores the baseline.
+#[test]
+fn an_artifact_entry_charges_its_bookkeeping_and_its_value_cell_outlives_it() {
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    const TEXT: usize = 100_000;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let flags: &RequestFlags = ctx.request_flags();
+    for read_first in [false, true] {
+        let account = SemanticRetentionAccount::new(RetentionLimits::defaults());
+        let node = TreeArtifactNode::new(Arc::clone(&account), TEXT);
+        let read = lookup(&node, 7u32, ctx, flags).expect("delivered");
+        assert_eq!(read.len(), TEXT);
+        let entry = Arc::clone(node.entries.get(&7).expect("published").value());
+        let bookkeeping = entry.charge_bytes_for_tests();
+        let value = read.charge_bytes().expect("the value cell is charged");
+        assert!(
+            (verter_session_query::retention::ENTRY_OVERHEAD_BYTES..TEXT).contains(&bookkeeping),
+            "the entry charges its slot and block, not the value: {bookkeeping}"
+        );
+        assert!(
+            value > TEXT,
+            "the value's cell charges the whole text: {value}"
+        );
+        assert_eq!(read.charge_class(), Some(ChargeClass::Retained));
+        assert_eq!(account.snapshot().retained_bytes, bookkeeping + value);
+        drop(entry);
+        if read_first {
+            drop(read);
+            assert_eq!(account.snapshot().retained_bytes, bookkeeping + value);
+            drop(node);
+        } else {
+            drop(node);
+            let snapshot = account.snapshot();
+            assert_eq!(
+                (snapshot.retained_bytes, snapshot.pinned_bytes),
+                (0, value),
+                "the read alone keeps the value charged"
+            );
+            drop(read);
+        }
+        assert_eq!(account.snapshot().total_bytes(), 0);
+    }
+}
+
+/// With no headroom the entry is refused: the complete value comes back
+/// uncached, charged to its caller, and nothing else stays charged. A value a
+/// compute returns as non-cacheable is charged to its caller the same way.
+#[test]
+fn a_refused_or_return_only_artifact_value_is_charged_to_its_caller() {
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    const TEXT: usize = 50_000;
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities> = &host;
+    let flags: &RequestFlags = ctx.request_flags();
+    for return_only in [false, true] {
+        let account = SemanticRetentionAccount::new(if return_only {
+            RetentionLimits::defaults()
+        } else {
+            RetentionLimits {
+                aggregate_ceiling_bytes: 0,
+                active_ceiling_bytes: 0,
+                max_entry_bytes: 0,
+                pin_threshold_bytes: 0,
+            }
+        });
+        let mut node = TreeArtifactNode::new(Arc::clone(&account), TEXT);
+        node.return_only = return_only;
+        let read = lookup(&node, 7u32, ctx, flags).expect("the complete value");
+        assert_eq!(read.len(), TEXT);
+        assert!(node.entries.is_empty(), "nothing is published");
+        assert_eq!(read.charge_class(), Some(ChargeClass::Pinned));
+        let snapshot = account.snapshot();
+        assert_eq!(
+            (snapshot.retained_bytes, snapshot.pinned_bytes),
+            (0, read.charge_bytes().expect("charged")),
+            "return_only={return_only}: only the caller's value is charged"
+        );
+        drop(read);
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 }

@@ -137,8 +137,10 @@ defineProps<Props>()
             [VueMacroDependencyFailure::UnresolvedSurfaceArm {
                 macro_index: 0,
                 macro_owner: verter_type_expr::TopLevelOwnerId::instance(0),
-                name: Arc::from("MissingBase"),
-                owner_canonical: Arc::from("/src/types.ts"),
+                name: verter_session_query::retention::owned::OwnedStr::from("MissingBase"),
+                owner_canonical: verter_session_query::retention::owned::OwnedStr::from(
+                    "/src/types.ts"
+                ),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             }],
             "the dropped surface arm must ride as one typed, deterministic failure"
@@ -378,6 +380,7 @@ defineProps<Props>()
 
     let fixture_dispatch_0 =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host);
+    let _builder = fixture_dispatch_0.enter_construction_scope();
     let resolved =
         verter_type_engine::resolver_core::bare_name_resolve::resolve_bare_name_in_scope(
             &host,
@@ -411,7 +414,7 @@ defineProps<Props>()
     let (name, scope) = data
         .bare_ref_head()
         .expect("defineProps<Props> must preserve its unresolved bare carrier");
-    assert_eq!(name.as_ref(), "Props");
+    assert_eq!(name, "Props");
     assert!(matches!(
         scope,
         verter_type_engine::semantic_query::NodeScopeId::File {
@@ -805,6 +808,12 @@ defineProps<Payload>()
 #[test]
 fn tsc_class_inference_budget_is_exact_partial_and_non_cacheable() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     // A leaf the flow lowering infers whole (a `satisfies` over a
     // conditional holding a 5,000-element array literal) exceeds that
     // inference's work budget.
@@ -862,6 +871,12 @@ defineProps<Payload>()
 #[test]
 fn tsc_inference_partial_is_entry_scoped_and_complete_sibling_continues() {
     let host = VerterHost::new_standalone(HostConfig::default());
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
     // A leaf the flow lowering infers whole (a `satisfies` over a
     // conditional holding a 5,000-element array literal) exceeds that
     // inference's work budget.
@@ -914,6 +929,120 @@ defineModel<string>('selected')
     assert_eq!(model.value_type.as_str(), "string");
     assert!(output.completeness.is_partial());
     assert!(!output.facts_cacheable());
+}
+
+#[test]
+fn authored_splice_and_exact_sibling_survive_a_refused_member() {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    host.project_type_store().flow_slice().set_budget_for_test(
+        verter_session_query::flow::peeker::FlowSliceBudget {
+            max_selected_nodes: 4096,
+            ..Default::default()
+        },
+    );
+    let inferred = format!(
+        "(true ? [{}] : 0) satisfies unknown",
+        vec!["0"; 5_000].join(", ")
+    );
+    upsert(
+        &host,
+        "/src/RefusedMember.vue",
+        &format!(
+            r#"<script setup lang="ts">
+class Payload {{ method() {{ return {inferred} }} }}
+defineProps<{{ good: string; payload: Payload }}>()
+</script>"#
+        ),
+    );
+    upsert(
+        &host,
+        "/src/Narrowing.vue",
+        r#"<script setup lang="ts">defineProps<string>()</script>"#,
+    );
+
+    // bounded-loop: cold delivery, then the warm repeat of the same demand.
+    for pass in ["cold", "warm"] {
+        let output = produce(
+            &host,
+            "/src/RefusedMember.vue",
+            VueMacroCodegenDemand::RuntimeAndTsc,
+        );
+        let props = props_projection(&output);
+        assert!(
+            matches!(
+                props.public,
+                verter_macro_dto::TscPublicPropsProjection::AuthoredArgument { .. }
+            ),
+            "{pass}: the authored type argument stays a splice: {props:?}"
+        );
+        let good = props
+            .testing_rows
+            .iter()
+            .find(|row| row.name == "good")
+            .expect("exact sibling row");
+        assert_eq!(good.type_text.as_str(), "string");
+        assert!(
+            good.degraded.is_none(),
+            "{pass}: the exact sibling is not the refusal"
+        );
+        let payload = props
+            .scope
+            .dependency_declarations
+            .iter()
+            .find(|dependency| dependency.name == "Payload")
+            .expect("refused member declaration");
+        assert_eq!(
+            payload.declaration_failure,
+            Some(TscDeclarationFailureReason::SemanticInferenceUnavailable(
+                TscSemanticInferenceUnavailableReason::WorkBudgetExceeded,
+            ))
+        );
+        assert!(
+            output
+                .completeness
+                .reasons()
+                .contains(verter_type_engine::semantic_query::PartialReasonSet::BUDGET_EXCEEDED),
+            "{pass}: the refused member's budget stays in the summary, got {:?}",
+            output.completeness.reasons()
+        );
+
+        let runtime = output.runtime.expect("runtime bundle");
+        let MacroRuntimeOutcome::Complete(MacroRuntimeShape::Props(runtime_props)) =
+            &runtime.entries[0].outcome
+        else {
+            panic!("{pass}: an exact sibling keeps the runtime surface: {runtime:?}");
+        };
+        let good_runtime = runtime_props
+            .props
+            .iter()
+            .find(|prop| prop.name == "good")
+            .expect("runtime sibling");
+        assert_eq!(constructors(good_runtime), [RuntimeConstructor::String]);
+    }
+
+    let narrowing = produce(
+        &host,
+        "/src/Narrowing.vue",
+        VueMacroCodegenDemand::RuntimeAndTsc,
+    );
+    let runtime = narrowing.runtime.expect("narrowing runtime");
+    assert!(
+        matches!(
+            runtime.entries[0].outcome,
+            MacroRuntimeOutcome::Invalid(ref failure)
+                if failure.reason == MacroInvalidReason::NonObjectRoot
+        ),
+        "runtime narrowing of a primitive root stays refused: {runtime:?}"
+    );
+    let tsc = narrowing.tsc.expect("narrowing tsc");
+    assert!(
+        matches!(
+            tsc.entries[0].outcome,
+            MacroTscOutcome::Invalid(ref failure)
+                if failure.reason == MacroInvalidReason::NonObjectRoot
+        ),
+        "tsc narrowing of a primitive root stays refused: {tsc:?}"
+    );
 }
 
 #[test]

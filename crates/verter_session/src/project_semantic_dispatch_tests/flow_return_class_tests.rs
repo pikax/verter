@@ -49,6 +49,7 @@ pub(super) fn with_dispatch<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
 }
 
@@ -66,7 +67,7 @@ pub(super) fn flow_key(
             part,
             0,
         ),
-        normalized_type_args: Arc::from(Vec::new().into_boxed_slice()),
+        normalized_type_args: verter_type_expr::OwnedSlice::from(Vec::new().into_boxed_slice()),
         context: dispatch.flow_return_context_for(FILE),
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
         input: verter_type_engine::semantic_query::FlowInputContext::empty(),
@@ -81,7 +82,7 @@ fn clean_result(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     name: &str,
     part: FunctionPartIdentity,
-) -> Arc<FlowReturnResult> {
+) -> verter_session_query::retention::owned::Owned<FlowReturnResult> {
     let key = flow_key(dispatch, name, part);
     let QueryResult::Value(SemanticQueryOutput {
         value: SemanticQueryValue::FlowReturn(result),
@@ -154,8 +155,11 @@ pub(super) fn assert_probes(source: &str, rows: &[(&str, &str)]) {
 #[track_caller]
 fn assert_tuple_probe(source: &str, name: &str, expected: &[(&str, bool, &str)]) {
     with_probe(source, name, |dispatch, node| {
-        let Some(SemanticNodeData::Tuple { elements, .. }) =
-            dispatch.graph().node_data(node).as_deref().cloned()
+        let Some(SemanticNodeData::Tuple { elements, .. }) = dispatch
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!(
                 "{name}: expected a parameter tuple, measured `{}`",
@@ -182,7 +186,10 @@ fn constructor_and_instance(
     SemanticNodeId,
 ) {
     let graph = dispatch.graph();
-    let Some(SemanticNodeData::Object(view)) = graph.node_data(constructor).as_deref().cloned()
+    let Some(SemanticNodeData::Object(view)) = graph
+        .node_data(constructor)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
     else {
         panic!(
             "expected a constructor surface, got `{}`",
@@ -190,11 +197,13 @@ fn constructor_and_instance(
         );
     };
     let signature = *view
-        .construct_signatures
+        .construct_signatures()
         .first()
         .expect("a class constructor has a construct signature");
-    let Some(SemanticNodeData::Signature { return_type, .. }) =
-        graph.node_data(signature).as_deref().cloned()
+    let Some(SemanticNodeData::Signature { return_type, .. }) = graph
+        .node_data(signature)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
     else {
         panic!("a construct signature");
     };
@@ -207,15 +216,21 @@ fn instance_surface(
     instance: SemanticNodeId,
 ) -> verter_type_engine::semantic_query::SurfaceView {
     let graph = dispatch.graph();
-    let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) =
-        graph.node_data(instance).as_deref().cloned()
+    let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) = graph
+        .node_data(instance)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
     else {
         panic!(
             "expected a class-expression instance, got `{}`",
             render_node(dispatch, instance, 0)
         );
     };
-    match graph.node_data(surface).as_deref().cloned() {
+    match graph
+        .node_data(surface)
+        .as_deref()
+        .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
+    {
         Some(SemanticNodeData::Object(view)) => view,
         _ => panic!(
             "expected an own-member surface, got `{}`",
@@ -297,10 +312,14 @@ fn class_expression_type_parameters_make_its_construct_signatures_generic() {
     with_dispatch(GENERICS, |dispatch| {
         let result = clean_result(dispatch, "generic", FunctionPartIdentity::DeclarationBody);
         let (view, _) = constructor_and_instance(dispatch, result.return_type());
-        let signature = view.construct_signatures[0];
+        let signature = view.construct_signatures()[0];
         let Some(SemanticNodeData::Signature {
             type_parameters, ..
-        }) = dispatch.graph().node_data(signature).as_deref().cloned()
+        }) = dispatch
+            .graph()
+            .node_data(signature)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("a construct signature");
         };
@@ -383,8 +402,11 @@ fn class_expression_extends_any_constructor_valued_expression() {
     with_dispatch(HERITAGE, |dispatch| {
         let result = clean_result(dispatch, "fromUnion", FunctionPartIdentity::DeclarationBody);
         let (_, instance) = constructor_and_instance(dispatch, result.return_type());
-        let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) =
-            dispatch.graph().node_data(instance).as_deref().cloned()
+        let Some(SemanticNodeData::ClassExpressionInstance { surface, .. }) = dispatch
+            .graph()
+            .node_data(instance)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("a class-expression instance");
         };
@@ -469,7 +491,7 @@ fn class_expression_literal_computed_keys_name_their_members() {
 fn class_expression_late_bound_keys_index_their_side() {
     with_dispatch(SHAPES, |dispatch| {
         let index = |view: &verter_type_engine::semantic_query::SurfaceView| {
-            view.index_signatures
+            view.index_signatures()
                 .iter()
                 .map(|signature| (signature.key_type, signature.value_type))
                 .collect::<Vec<_>>()
@@ -538,7 +560,7 @@ fn class_expression_index_signatures_and_accessor_properties() {
         let result = clean_result(dispatch, "indexed", FunctionPartIdentity::DeclarationBody);
         let (constructor, instance) = constructor_and_instance(dispatch, result.return_type());
         let own = instance_surface(dispatch, instance);
-        let [instance_index] = &own.index_signatures[..] else {
+        let [instance_index] = own.index_signatures() else {
             panic!("one instance index signature");
         };
         assert_matches(
@@ -553,7 +575,7 @@ fn class_expression_index_signatures_and_accessor_properties() {
             "number",
             "instance index value",
         );
-        let [static_index] = &constructor.index_signatures[..] else {
+        let [static_index] = constructor.index_signatures() else {
             panic!("one static index signature");
         };
         assert_matches(
@@ -597,7 +619,7 @@ fn class_expression_overloads_are_its_visible_signatures() {
         );
         let (constructor, _) = constructor_and_instance(dispatch, result.return_type());
         assert_eq!(
-            constructor.construct_signatures.len(),
+            constructor.construct_signatures().len(),
             2,
             "the two overloads, never the implementation"
         );
@@ -648,9 +670,9 @@ fn class_expression_non_public_constructor_keeps_its_construct_signature() {
         let (constructor, _) = constructor_and_instance(dispatch, result.return_type());
         let Some(SemanticNodeData::Signature { params, .. }) = dispatch
             .graph()
-            .node_data(constructor.construct_signatures[0])
+            .node_data(constructor.construct_signatures()[0])
             .as_deref()
-            .cloned()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!("a construct signature");
         };
@@ -963,7 +985,9 @@ fn class_member_clauses_print_class_then_member() {
                 dispatch,
                 "GHolder",
                 FunctionPartIdentity::Member {
-                    member_path: Arc::from(vec![ordinal].into_boxed_slice()),
+                    member_path: verter_type_expr::OwnedSlice::from(
+                        vec![ordinal].into_boxed_slice(),
+                    ),
                 },
             );
             constructor_and_instance(dispatch, result.return_type()).1
@@ -1063,7 +1087,11 @@ fn bare_factory_return_reads_each_parameter_at_its_constraint() {
             params,
             return_type,
             ..
-        }) = dispatch.graph().node_data(node).as_deref().cloned()
+        }) = dispatch
+            .graph()
+            .node_data(node)
+            .as_deref()
+            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests)
         else {
             panic!(
                 "mixinConstraint: expected a construct signature, measured `{}`",
@@ -1099,18 +1127,22 @@ fn bare_factory_return_reads_each_parameter_at_its_constraint() {
 #[test]
 fn printed_name_qualifies_exactly_the_instantiated_clauses() {
     let identity = verter_type_engine::semantic_query::ClassExpressionIdentity {
-        canonical_id: Arc::from(FILE),
+        canonical_id: verter_type_expr::OwnedStr::from(FILE),
         owner: TopLevelOwnerId::ordinary_file(),
         offset: 0,
-        name: Arc::from("(Anonymous class)"),
-        outer_clauses: Arc::from([
+        name: verter_type_expr::OwnedStr::from("(Anonymous class)"),
+        outer_clauses: verter_type_expr::OwnedSlice::from([
             verter_session_query::flow::policy::ClassExpressionClause {
-                container: Arc::from("outer3"),
-                parameters: Arc::from([Arc::from("U")]),
+                container: verter_type_expr::OwnedStr::from("outer3"),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from(
+                    "U",
+                )]),
             },
             verter_session_query::flow::policy::ClassExpressionClause {
-                container: Arc::from("inner"),
-                parameters: Arc::from([Arc::from("T")]),
+                container: verter_type_expr::OwnedStr::from("inner"),
+                parameters: verter_type_expr::OwnedSlice::from([verter_type_expr::OwnedStr::from(
+                    "T",
+                )]),
             },
         ]),
         own_arity: 0,
@@ -1209,7 +1241,7 @@ fn nested_class_expression_raise(depth: usize) -> (usize, usize) {
         .expect("the nested class expression resolves");
     let before = super::raise::folded_nodes_for_tests();
     let raised = host
-        .project_node_to_type_expr_for_test(node)
+        .project_node_to_type_expr_for_test(node.id())
         .expect("the nested class expression raises");
     let folded = super::raise::folded_nodes_for_tests() - before;
     let bytes = serde_json::to_vec(&raised).expect("serializes").len();

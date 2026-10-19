@@ -168,7 +168,7 @@ impl VerterLanguageServer {
             // corrupts its internal state), and a carrier-less row
             // (`.svelte`) produces no provider sync state at all.
             let Some(file_language) =
-                crate::provider_sync::provider_script_language(&self.documents.host(), &path)
+                crate::provider_sync::provider_script_language(self.documents.host(), &path)
             else {
                 return;
             };

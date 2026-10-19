@@ -30,7 +30,7 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::surface::{TypeInfoSurfaceEntry, TypeInfoSurfaceMember};
 use verter_type_engine::project_semantic_dispatch::callable_view::CallableNodeView;
-use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
     FunctionParam, ProjectionMode, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
 };
@@ -105,6 +105,11 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
         .map(|mac| mac.prop_fields.as_slice())
         .unwrap_or(&[]);
     let type_arg_base = analyzed_macro.and_then(|mac| mac.parsed_type_argument.as_ref());
+    let member_source_base = resolved.member_source_base().cloned().or_else(|| {
+        type_arg_base
+            .cloned()
+            .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload)
+    });
 
     macro_surface
         .surface
@@ -156,7 +161,7 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
             // its Navigate-raised authored form, so an unconditional proof
             // would false-negative the single-contributor classes).
             let member_value_is_merge_capable = matches!(
-                node_data_for(dispatch.graph(), member.value).as_deref(),
+                dispatch.graph().read_in_scope(member.value).as_deref(),
                 Some(
                     SemanticNodeData::Intersection(_)
                         | SemanticNodeData::Union(_)
@@ -223,11 +228,9 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
                         )
                     })
                 })
-                .or_else(|| member_value_source(dispatch, member, type_arg_base))
+                .or_else(|| member_value_source(dispatch, member, member_source_base.as_ref()))
                 .map(verter_type_expr::facts::SourcePosition::Present)
-                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
-                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-                ));
+                .unwrap_or_else(unavailable_required_member_source);
             let (description, tags) = member_jsdoc_from_spans(ctx, member);
             // `declared_in_macro_type_arg`: a member belongs to the macro-T own
             // body iff it is NOT heritage-reached. The terminal
@@ -269,6 +272,20 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
         .collect()
 }
 
+/// Full metadata requires a usable source for each demanded value position.
+/// Preserve the named row, but do not publish or retain the enclosing DTO as
+/// complete when that required source could not be constructed.
+fn unavailable_required_member_source() -> verter_type_expr::facts::SourcePosition {
+    verter_type_engine::request_context::fold_result_completeness(
+        verter_type_engine::semantic_query::ResultCompleteness::partial(
+            verter_type_engine::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
+        ),
+    );
+    verter_type_expr::facts::SourcePosition::Failed(
+        verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
+    )
+}
+
 /// The graph-native member-value SOURCE for a props / expose / options
 /// surface member with no PROVEN single-contributor authored position:
 ///
@@ -290,7 +307,7 @@ pub(crate) fn props_from_typeinfo_surface<C: crate::session_attachment::SessionC
 fn member_value_source<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     member: &TypeInfoSurfaceMember,
-    type_arg_base: Option<&verter_type_expr::locators::MacroPayloadLocator>,
+    member_source_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
 ) -> Option<verter_type_expr::facts::SemanticTypeSource> {
     use verter_type_expr::facts::{ClosedTypeFact, SemanticTypeSource};
     if let Some(leaf) = dispatch.node_leaf_fact(member.value) {
@@ -324,7 +341,7 @@ fn member_value_source<C: verter_type_engine::resolver_core::ResolverCapabilitie
         dispatch,
         member.value,
         &member_key,
-        type_arg_base,
+        member_source_base,
     )
 }
 
@@ -416,7 +433,8 @@ pub(crate) fn exposed_from_typeinfo_surface<
         .map(|serve| serve.indexed)
         .as_ref()
         .and_then(|indexed| indexed.snapshot.macros.get(macro_surface.macro_index))
-        .and_then(|mac| mac.parsed_type_argument.clone());
+        .and_then(|mac| mac.parsed_type_argument.clone())
+        .map(verter_type_expr::locators::AuthoredBodyLocator::MacroPayload);
     macro_surface
         .surface
         .members
@@ -433,21 +451,21 @@ pub(crate) fn exposed_from_typeinfo_surface<
             // success.
             let type_source = member_value_source(dispatch, member, type_arg_base.as_ref())
                 .map(verter_type_expr::facts::SourcePosition::Present)
-                .unwrap_or(verter_type_expr::facts::SourcePosition::Failed(
-                    verter_type_expr::facts::SemanticSourceFailure::UnrepresentableRequiredMemberValue,
-                ));
-            Some(crate::typeinfo::framework_surface::results::ResolvedExposeField {
-                analysis: verter_session_query::analysis::types::AnalyzedExposeField {
-                    name: member_name,
-                    span: None,
-                    payload: None,
-                    type_expr_scope: None,
-                    referenced_binding: None,
-                    description,
-                    tags,
+                .unwrap_or_else(unavailable_required_member_source);
+            Some(
+                crate::typeinfo::framework_surface::results::ResolvedExposeField {
+                    analysis: verter_session_query::analysis::types::AnalyzedExposeField {
+                        name: member_name,
+                        span: None,
+                        payload: None,
+                        type_expr_scope: None,
+                        referenced_binding: None,
+                        description,
+                        tags,
+                    },
+                    type_source,
                 },
-                type_source,
-            })
+            )
         })
         .collect()
 }
@@ -560,10 +578,12 @@ fn index_position_source<C: verter_type_engine::resolver_core::ResolverCapabilit
     // enumerated at publication.
     if let Some(base) = type_arg_base {
         let validated = dispatch
+            .owning()
             .demand_validated_structural_node(
                 node,
                 ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
             )
+            .value()
             .is_some();
         if validated {
             return SourcePosition::Present(SemanticTypeSource::Projected(
@@ -595,7 +615,7 @@ fn closed_tuple_fact<C: verter_type_engine::resolver_core::ResolverCapabilities>
     node: SemanticNodeId,
 ) -> Option<verter_type_expr::facts::TuplePayloadFact> {
     use verter_type_expr::facts::{TupleElementFact, TuplePayloadFact};
-    let data = node_data_for(dispatch.graph(), node)?;
+    let data = dispatch.graph().read_in_scope(node)?;
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
         return None;
     };
@@ -614,7 +634,7 @@ fn closed_tuple_fact<C: verter_type_engine::resolver_core::ResolverCapabilities>
         .collect();
     Some(TuplePayloadFact {
         readonly: *readonly,
-        elements: Arc::from(element_facts?.into_boxed_slice()),
+        elements: From::from(element_facts?.into_boxed_slice()),
     })
 }
 
@@ -796,10 +816,11 @@ pub(crate) fn emits_from_typeinfo_surface<C: crate::session_attachment::SessionC
         // param (`[1..]`), materialized ONCE at the terminal sink. `event_names`
         // above already realized the signature (its `first_param`), so `signature`
         // here is `Some` by construction; the `else continue` is defensive.
-        let Some(signature) = view.signature(context) else {
+        let Some(signature) = view.owning().signature(context) else {
             continue;
         };
-        let raw_params = signature.raw_params();
+        let raw_params_carrier = signature.raw_params();
+        let raw_params = raw_params_carrier.value();
         // Materialize the payload tuple ONCE at the terminal sink for DISPLAY
         // ONLY (the by-name `render_type_expr_display` form — no decision on
         // the materialized value). The tuple is a per-event SYNTHESIS over the
@@ -1161,7 +1182,7 @@ pub(in crate::typeinfo::framework_surface::vue_exec) fn property_style_emit_fiel
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member_name.clone()]),
+                    From::from([member_name.clone()]),
                 ),
                 0,
             ),
@@ -1241,14 +1262,18 @@ fn inherited_emit_payload_source<C: verter_type_engine::resolver_core::ResolverC
         // stable unresolved references remain Complete carriers and replay
         // faithfully beside concrete arms; operational partials and
         // unknown-materializing failures reject the route.
-        dispatch.demand_validated_structural_node(
-            member.value,
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )?;
+        dispatch
+            .owning()
+            .demand_validated_structural_node(
+                member.value,
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+            )
+            .value()
+            .as_ref()?;
         return Some(SemanticTypeSource::Projected(
             ProjectedTypeFact::MemberPath {
                 base: verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(base.clone()),
-                path: std::sync::Arc::from(vec![member.key.cloned_known()?].into_boxed_slice()),
+                path: From::from(vec![member.key.cloned_known()?].into_boxed_slice()),
             },
         ));
     }
@@ -1277,17 +1302,16 @@ fn authored_candidate_matches_call_signature_payload<
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     params: &[FunctionParam],
 ) -> bool {
-    let Some(raised) = dispatch
-        .raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-                .absolutized_against(owner_canonical),
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )
-        .at_optional_boundary()
-    else {
+    // The raised carrier owns the candidate while it is compared.
+    let candidate = dispatch.owning().raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    );
+    let Some(raised) = candidate.value().clone().at_optional_boundary() else {
         return false;
     };
-    let Some(data) = node_data_for(dispatch.graph(), raised.node()) else {
+    let Some(data) = dispatch.graph().read_in_scope(raised.node()) else {
         return false;
     };
     let SemanticNodeData::Tuple { elements, readonly } = data.as_ref() else {
@@ -1336,14 +1360,13 @@ fn authored_candidate_matches_member_value<
     locator: &verter_type_expr::locators::MacroPayloadLocator,
     member_value: SemanticNodeId,
 ) -> bool {
-    let Some(raised) = dispatch
-        .raise_authored_locator_to_hot(
-            &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
-                .absolutized_against(owner_canonical),
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
-        )
-        .at_optional_boundary()
-    else {
+    // The raised carrier owns the candidate while it is compared.
+    let candidate = dispatch.owning().raise_authored_locator_to_hot(
+        &verter_type_expr::locators::AuthoredBodyLocator::MacroPayload(locator.clone())
+            .absolutized_against(owner_canonical),
+        ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate),
+    );
+    let Some(raised) = candidate.value().clone().at_optional_boundary() else {
         return false;
     };
     if verter_type_engine::project_semantic_dispatch::raise::raised_shape_eq_nodes_with_dispatch(
@@ -1359,7 +1382,7 @@ fn authored_candidate_matches_member_value<
     // (an agree-duplicate merge). A single non-matching arm — a different
     // shape or a stable unresolved carrier — fails the proof and therefore
     // selects the graph-native merged replay source.
-    match node_data_for(dispatch.graph(), member_value).as_deref() {
+    match dispatch.graph().read_in_scope(member_value).as_deref() {
         Some(composite @ (SemanticNodeData::Intersection(_) | SemanticNodeData::Union(_))) => {
             let arms = composite.composite_members().expect("composite arm");
             !arms.is_empty()

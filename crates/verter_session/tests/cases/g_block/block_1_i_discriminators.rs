@@ -58,8 +58,8 @@ fn execute_read_cold_build_persists_traced_facts() {
         "shared cold-build helper must exist on ProjectSemanticDispatch"
     );
     assert!(
-        mod_src.contains("install_fact_tracer(&basis_source, || {"),
-        "shared cold-build helper must wrap the cold-build closure with install_fact_tracer, \
+        mod_src.contains("install_delivering_fact_tracer(&basis_source, || {"),
+        "shared cold-build helper must wrap the cold-build closure with its fact tracer, \
          seeded from the request-bound basis source it captured before the closure — a \
          host-only or unbound tracer disarms the cold build's compaction basis"
     );
@@ -69,7 +69,7 @@ fn execute_read_cold_build_persists_traced_facts() {
     )
     .expect("read query_frames.rs");
     assert!(
-        frames_src.contains("FactTracerBasisSource::from_ctx(frame.dispatch.ctx)"),
+        frames_src.contains("FactTracerBasisSource::from_ctx(self.ctx)"),
         "a cold build run as a continuation frame traces its steps from the same \
          request-bound basis source"
     );
@@ -130,14 +130,14 @@ fn semantic_memo_invalidate_drains_fact_canonical_entry() {
     // entirely from the carrier's fact rail.
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: ScopeId {
-            canonical_id: Arc::from("/test/scope.ts"),
+            canonical_id: verter_type_expr::OwnedStr::from("/test/scope.ts"),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
             local_scope: None,
             binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
                 verter_type_expr::TopLevelOwnerId::ordinary_file(),
             ),
         },
-        name: Arc::from("MemoTarget"),
+        name: verter_type_expr::OwnedStr::from("MemoTarget"),
     });
 
     // Intern a placeholder node so we have a `Value` to publish.

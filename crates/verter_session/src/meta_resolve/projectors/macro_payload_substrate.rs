@@ -156,8 +156,12 @@ pub(crate) enum PayloadSurfaceScope {
 /// emit-inheritance carve-out, so a `None` here correctly routes the
 /// (decided / object / union / cyclic) payload to the default
 /// single-dispatch surface.
+///
+/// Every alias body the walk resolves is handed to `builder`, which keeps the
+/// returned root live for as long as the caller holds it open.
 pub(crate) fn resolve_emit_payload_to_conditional_root(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    builder: &verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     node: SemanticNodeId,
     depth: u16,
     visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
@@ -174,9 +178,7 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
     if !visited.insert(node) {
         return None;
     }
-    match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
-        .as_deref()
-    {
+    match dispatch.graph().read_in_scope(node).as_deref() {
         // Already the Conditional — done.
         Some(SemanticNodeData::Conditional { .. }) => Some(node),
         // Navigate-mode carrier for a named alias. Resolve the alias's
@@ -193,7 +195,13 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
             &identity.decl_name,
         )
         .and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(
+                dispatch,
+                builder,
+                resolved.into_value_in(builder),
+                depth + 1,
+                visited,
+            )
         }),
         // A `DeclPlaceholder` deferral (e.g. surfaced by an upstream
         // `ResolveDecl`). Reach its body through the same shared
@@ -206,7 +214,13 @@ pub(crate) fn resolve_emit_payload_to_conditional_root(
                 ..
             },
         )) => lower_decl_body_to_node(dispatch, canonical_id, *owner, name).and_then(|resolved| {
-            resolve_emit_payload_to_conditional_root(dispatch, resolved, depth + 1, visited)
+            resolve_emit_payload_to_conditional_root(
+                dispatch,
+                builder,
+                resolved.into_value_in(builder),
+                depth + 1,
+                visited,
+            )
         }),
         _ => None,
     }
@@ -229,15 +243,16 @@ pub(crate) const EMIT_CARRIER_WALK_FUSE: usize = 1024;
 /// shared `Instantiate` query (the single resolution engine), so the node
 /// stays graph-native and is never materialised back to a `TypeExpr`.
 /// `args` is empty — a bare named-decl demand carries no explicit type
-/// arguments.
+/// arguments. The body node arrives in the carrier that owns it, which the
+/// walk holds while it descends from it.
 fn lower_decl_body_to_node(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
     owner: verter_type_expr::TopLevelOwnerId,
     name: &str,
-) -> Option<SemanticNodeId> {
+) -> Option<verter_type_engine::semantic_query_memo::node_roots::Constructed<SemanticNodeId>> {
     verter_audit::attribute!(DeclBodyLower);
-    let handle = dispatch.decl_body_hot_ref(
+    let handle = dispatch.owning().decl_body_hot_ref(
         canonical_id,
         owner,
         name,
@@ -245,8 +260,9 @@ fn lower_decl_body_to_node(
         verter_type_engine::semantic_query::ProjectionReductionContext::published(
             ProjectionMode::Navigate,
         ),
-    )?;
-    Some(handle.node())
+    );
+    let node = (*handle.value())?.node();
+    Some(handle.map(|_| node))
 }
 
 #[allow(dead_code)]
@@ -257,8 +273,11 @@ pub(crate) fn resolve_payload_surface_with_scope(
     expansion_kind: MacroExpansionKind,
     scope: PayloadSurfaceScope,
     diag_sink: &mut Vec<MacroExpansionDiagnostics>,
-) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<SemanticNodeId> {
+) -> verter_type_engine::semantic_query::surface_resolution::SurfaceResolution<
+    verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+> {
     use verter_type_engine::semantic_query::surface_resolution::NonEmptyReasons;
+    let builder = dispatch.enter_construction_scope();
     let claims = dispatch.host_attachment().surface_claims();
     if matches!(scope, PayloadSurfaceScope::Default) {
         return super::resolve_payload_surface(
@@ -293,8 +312,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // below emit the dep-signature.
     let mut carrier_visited: rustc_hash::FxHashSet<SemanticNodeId> =
         rustc_hash::FxHashSet::default();
-    let conditional_node =
-        resolve_emit_payload_to_conditional_root(dispatch, payload_node, 0, &mut carrier_visited);
+    let conditional_node = resolve_emit_payload_to_conditional_root(
+        dispatch,
+        &builder,
+        payload_node,
+        0,
+        &mut carrier_visited,
+    );
 
     let Some(conditional_node) = conditional_node else {
         // No Conditional reachable — branch-merge is inapplicable.
@@ -317,28 +341,21 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // branches under `Published(Shallow)` and merge their top-level
     // Object members.
     let (true_branch, false_branch) =
-        match verter_type_engine::project_semantic_dispatch::node_data_for(
-            dispatch.graph(),
-            conditional_node,
-        )
-        .as_deref()
-        {
+        match dispatch.graph().read_in_scope(conditional_node).as_deref() {
             Some(SemanticNodeData::Conditional {
                 true_branch_ref,
                 false_branch_ref,
                 pending,
                 ..
             }) => (
-                dispatch.apply_conditional_branch_pending(
-                    *true_branch_ref,
-                    pending.as_deref(),
-                    true,
-                ),
-                dispatch.apply_conditional_branch_pending(
-                    *false_branch_ref,
-                    pending.as_deref(),
-                    false,
-                ),
+                dispatch
+                    .owning()
+                    .apply_conditional_branch_pending(*true_branch_ref, pending.as_deref(), true)
+                    .into_value_in(&builder),
+                dispatch
+                    .owning()
+                    .apply_conditional_branch_pending(*false_branch_ref, pending.as_deref(), false)
+                    .into_value_in(&builder),
             ),
             _ => {
                 // Unreachable per the resolution above, but fall through
@@ -369,28 +386,24 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 ),
             });
             verter_type_engine::request_context::observe_component_meta_read_suppress(&branch_read);
-            emit_dispatch_dep_signature_facts(dispatch, &branch_read.dep_signature);
-            if !branch_read.walker_diagnostics.is_empty() {
+            emit_dispatch_dep_signature_facts(dispatch, branch_read.dep_signature());
+            if !branch_read.walker_diagnostics().is_empty() {
                 diag_sink.push(shallow_diagnostics_to_macro_expansion(
-                    &branch_read.walker_diagnostics,
+                    branch_read.walker_diagnostics(),
                     macro_index,
                     expansion_kind.clone(),
-                    branch_read.cache_suppress,
+                    branch_read.cache_suppress(),
                 ));
             }
             // A branch is OPEN when its read is partial or its terminal stays
             // a construction program (the walker's typed open evidence): its
             // positive members are presence-only, never a closed domain.
-            let open = branch_read.result_is_partial;
-            match branch_read.value {
+            let open = branch_read.result_is_partial();
+            match *branch_read.value() {
                 QueryResult::Value(id) => {
                     let open = open
                         || matches!(
-                            verter_type_engine::project_semantic_dispatch::node_data_for(
-                                dispatch.graph(),
-                                id
-                            )
-                            .as_deref(),
+                            dispatch.graph().read_in_scope(id).as_deref(),
                             Some(SemanticNodeData::ObjectSpreadProgram(_))
                         );
                     Ok((id, open))
@@ -398,7 +411,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 QueryResult::Recursive(_) => Err(NonEmptyReasons::of(
                     verter_type_engine::semantic_query::PartialReason::SamePathRecursion,
                 )),
-                QueryResult::Error(error) => Err(NonEmptyReasons::from_query_error(&error)),
+                QueryResult::Error(ref error) => Err(NonEmptyReasons::from_query_error(error)),
             }
         };
 
@@ -413,12 +426,21 @@ pub(crate) fn resolve_payload_surface_with_scope(
     // survive un-flattened.
     let read_members =
         |surface: SemanticNodeId| -> Result<Option<Vec<SurfaceMember>>, NonEmptyReasons> {
-            match verter_type_engine::project_semantic_dispatch::node_data_for(dispatch.graph(), surface)
+            match dispatch.graph().read_in_scope(surface)
                 .as_deref()
             {
-                Some(SemanticNodeData::Object(view)) => {
-                    Ok(Some(view.closed().complete_members().to_vec()))
-                }
+                Some(SemanticNodeData::Object(view)) => Ok(Some(
+                    view.closed()
+                        .complete_members()
+                        .iter()
+                        .map(|member| {
+                            dispatch
+                                .graph()
+                                .copy_in_scope(member)
+                                .expect("emit branch members are copied inside the payload scope")
+                        })
+                        .collect(),
+                )),
                 // The walker's typed open evidence for an open /
                 // multi-alternative program branch: publish the positive
                 // member names through the correlated query — presence only.
@@ -426,13 +448,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
                 // `OpenSpreadProgram` diagnostic into the macro expansion
                 // envelope (see `project_branch` above).
                 Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
-                    let formula = match dispatch.project_object_spread_for_consumer(
+                    let formula = match dispatch.owning().project_object_spread_for_consumer(
                         surface,
                         verter_type_engine::semantic_query::ObjectProjectionSelector::Surface,
                         verter_type_engine::semantic_query::ProjectionReductionContext::published(
                             ProjectionMode::Shallow,
                         ),
-                    ) {
+                    ).into_value_in(&builder) {
                         QueryResult::Value(formula) => formula,
                         QueryResult::Recursive(_) => {
                             return Err(NonEmptyReasons::of(
@@ -443,16 +465,10 @@ pub(crate) fn resolve_payload_surface_with_scope(
                             return Err(NonEmptyReasons::from_query_error(&error));
                         }
                     };
-                    let mut canonical_evidence =
-                    verter_type_engine::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default(
-                    );
-                    let members =
-                    verter_type_engine::project_semantic_dispatch::walk::spread_formula_positive_members_for_macro(
-                        dispatch.graph(),
-                        &formula,
-                        &mut canonical_evidence,
-                    );
-                    dispatch.deposit_canonical_evidence(canonical_evidence);
+                    let members = dispatch
+                        .owning()
+                        .spread_formula_positive_members_for_macro(&formula)
+                        .into_value_in(&builder);
                     Ok(Some(members))
                 }
                 other => {
@@ -471,7 +487,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
     let false_surface = false_projection
         .and_then(|(node, open)| read_members(node).map(|members| (node, open, members)));
 
-    match (true_surface, false_surface) {
+    let resolution = match (true_surface, false_surface) {
         (Ok((_, true_open, Some(t))), Ok((_, false_open, Some(f)))) => {
             // An OPEN branch contributed presence-only evidence: do NOT
             // intern a closed `Object` from the merge — `SurfaceView`'s
@@ -482,9 +498,14 @@ pub(crate) fn resolve_payload_surface_with_scope(
             // signal into the macro envelope
             // (`OpenSpreadProgram` → `IndeterminateConditional`).
             if true_open || false_open {
-                return claims.open_presence(conditional_node);
+                return claims.open_presence(
+                    dispatch
+                        .graph()
+                        .root_in_scope(conditional_node)
+                        .expect("conditional surface is live"),
+                );
             }
-            let merged = merge_emit_branch_members(&t, &f);
+            let merged = merge_emit_branch_members(t, f);
             let view = verter_type_engine::semantic_query::SurfaceView::from_members(merged, None);
             claims.resolved(dispatch.graph().intern_node(SemanticNodeData::Object(view)))
         }
@@ -540,7 +561,13 @@ pub(crate) fn resolve_payload_surface_with_scope(
             ));
             claims.no_surface()
         }
-    }
+    };
+    resolution.map(|node| {
+        dispatch
+            .graph()
+            .root_in_scope(node)
+            .expect("produced emit surface is live")
+    })
 }
 
 /// Union-merge two conditional-branch member lists by member name: the
@@ -552,14 +579,14 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// merge under element-access collision. Branch member lists are small
 /// (emit rows), so a linear collides scan replaces the strict-key map.
 pub(crate) fn merge_emit_branch_members(
-    true_members: &[SurfaceMember],
-    false_members: &[SurfaceMember],
+    true_members: Vec<SurfaceMember>,
+    false_members: Vec<SurfaceMember>,
 ) -> Vec<SurfaceMember> {
     let mut merged: Vec<SurfaceMember> =
         Vec::with_capacity(true_members.len() + false_members.len());
-    for member in true_members.iter().chain(false_members.iter()) {
+    for member in true_members.into_iter().chain(false_members) {
         let Some(key) = member.key.cloned_known() else {
-            merged.push(member.clone());
+            merged.push(member);
             continue;
         };
         if let Some(existing) = merged.iter_mut().find(|existing| {
@@ -574,7 +601,7 @@ pub(crate) fn merge_emit_branch_members(
             let folded = existing.visibility.most_restrictive(member.visibility);
             existing.visibility = folded;
         } else {
-            merged.push(member.clone());
+            merged.push(member);
         }
     }
     merged

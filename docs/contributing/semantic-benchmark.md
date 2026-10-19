@@ -14,7 +14,7 @@ planned layer.
 
 ## What it measures
 
-Each scenario is one TypeScript module that declares two aliases:
+Each scenario is a TypeScript project whose `scenario.ts` entry declares two aliases:
 
 ```ts
 type __BenchInit = 0;          // absorbs one-time lazy initialisation
@@ -188,17 +188,20 @@ No `cfg(test)` instrumentation is compiled into either probe binary.
 
 Why each probe demands the same work of both tools:
 
-1. **Same source.** One `scenario.ts` per (scenario, setting) is written
-   once; both arms read that file. A `program-*` scenario also has
-   companion files (other modules, scripts and `.d.ts` files of its
-   program), written beside it and listed as root files in its tsconfig,
-   between the library and the scenario: the Verter probe opens each one,
-   and tsc reads them as the project's roots. They test what a demand-driven
-   engine must still know about the whole program — global and module
+1. **Same source.** One `scenario.ts` and the catalog's optional companion
+   `files` per (scenario, setting) are written once; both arms read those
+   bytes. The tsconfig lists the library, then the companion files, then the
+   scenario as roots. Verter opens the companion files during setup, before
+   either alias demand; tsc reads them as the project's roots. The validator
+   checks every root and input digest, including the copies used by
+   whole-program CLI arms and measured references.
+
+   Multi-file scenarios test what a demand-driven engine must still know
+   about the whole program. The `program-*` scenarios cover global and module
    augmentation and global interface merging from files the scenario never
-   imports — and a large type spread across modules. The validator checks
-   the tsc program's root files are exactly that directory's library,
-   companions and scenario, and that every input is the catalog's.
+   imports, and a large type spread across modules; `return-chain-*`,
+   `augment-*` and `mapped-expand-remap-*` cover inferred returns across
+   module chains, many-file declaration merging and imported mapped sources.
 
    The `adv-*` scenarios (family `adversarial`; `--only adv-` runs them
    alone) are built against a demand-driven engine: answers that need a
@@ -298,9 +301,12 @@ in all four `strictNullChecks` × `noImplicitAny` settings, and committed as
 `scripts/benchmark/semantic-perf/expected.json`. Every cell carries its own
 immutable provenance (the method — measuring suffix, library, verified tsc
 executable, platform, limits, launcher — plus the tsconfig and source digests
-and a digest of tsc's output); a cell measured by any other method is
-re-measured, never relabelled, and the validator rejects a cell whose
-provenance disagrees with the file's method. The measurement uses the CLI: the scenario plus
+and a digest of tsc's type output). A scenario may carry its own `method`;
+otherwise it uses the file's default method. A targeted measurement retains
+unselected reference fixtures and records the new scenario's actual method.
+Resume reuses a scenario only when its method, entry source and every supporting
+module match. The validator rejects mismatched method, library, compiler,
+tsconfig or source evidence. The measurement uses the CLI: the scenario plus
 
 ```ts
 type __BenchExpand<T> = T extends unknown ? [T] : never;
@@ -321,7 +327,7 @@ output with neither verdict is an error, never an answer; a print tsc elided
 (bare `any` members among the tuples) is recorded as elided; an `any` beside
 TS2589 / TS2590 is tsc's error-any; a measurement tsc cannot finish inside the
 cap or the deadline is recorded as `killed` ("tsc exhausts resources"), never
-retried with more. Every measured tsc process is contained, and its receipt
+retried with more. Every measured tsc process is contained. A killed measurement's receipt
 keeps the supervisor's termination evidence (backend, containment, cap,
 actual kill threshold, deadline, wall time, termination latency): a kill is
 read as tsc exhausting the resource by the same rule as a benchmark arm
@@ -482,6 +488,38 @@ it observes on any machine, labelled with that machine's provenance, for
 local investigation; those figures are evidence about that machine only.
 An evidence run will apply the rule to its summary's cells (see below).
 
+### Discriminated switches
+
+`switch-discriminated` measures exhaustive switches over 128, 512, 1,000
+and 2,048 object-union members. Each case reads a distinct sibling property;
+the return must contain every member's numeric literal and no `undefined`.
+The existing production release probe and TypeScript API arm read the same
+source and `ReturnType<typeof f>` demand, cold and warm:
+
+```bash
+node scripts/benchmark/evidence-run.mjs --run switch-discriminated
+```
+
+The 1,000-case cold latency and OS peak-memory cells provide the benchmark
+machine's evidence for the 20 ms / 40 MB budget. These absolute figures are
+advisory for landing under the measurement rule above; off `bench-m3`, the
+summary marks them unavailable. The raw harness records retain the worker's
+actual measurements and distinguish request latency from first-type latency.
+
+The machine-independent regression runs in the ordinary session unit-test
+lane:
+
+```bash
+cargo nextest run -p verter_session --lib discriminated_switch_narrowing_work_grows_linearly
+```
+
+It checks complete, reusable answers at 128 / 512 / 2,048 cases under
+production budgets and bounds growth in both connected work and union-leaf
+visits. Leaf visits count the shared flow enumeration boundary, including
+repeated traversal in relation narrowing, so memo hits cannot hide a
+per-clause full-union scan. That counter exists only in test-support builds;
+the production release probe carries no instrumentation overhead from it.
+
 ## Tiers
 
 `--tier` chooses what a run covers; every tier keeps the fairness
@@ -512,6 +550,8 @@ and an ordered script of steps, run in ONE live engine per invocation:
 | `incremental-edits` | INCREMENTAL | demand an alias that depends on a leaf through an intermediate generic; edit the leaf, the intermediate type and an unrelated file, re-requesting after each |
 | `editor-session` | EDITOR SESSION | an InputMenu-equivalent Vue component (props composed from a picked base, events from a tuple map, both imported from a types module): hover-like demands on its types and its component metadata, cold, then across an edit to the types and an edit to the file being hovered |
 | `concurrent-demands` | CONCURRENT | eight demands in eight files issued at once (one thread each for Verter; all in flight together through tsc's asynchronous API), cold, then again |
+| `augment-global-growth`, `augment-module-growth` | AUGMENTATION GROWTH | the `augment-global` and `augment-module` reproductions in one engine (standard tier): the probe answered at 500 contributors, then 1,500 edits each filling in one declaration-free contributor file, then the probe at 2,000; the engine's retention counters after every step feed the retention proof below |
+| `augment-global-baseline`, `augment-module-baseline` | AUGMENTATION GROWTH | the same files with all 2,000 contributors from the start, the probe answered once: the growth session's baseline |
 
 Every demand carries the answer the type system defines at that point of the
 script, derived from the construction: tsc's answer must equal it (a run
@@ -540,10 +580,88 @@ statistics reading must be of the session's own process (the record's pid),
 and every recorded input digest must be the catalog's — the benchmark
 library's included. A session killed after its complete record was written
 keeps its measurement (the kill took nothing from it); a kill inside a step
-counts as the engine's only on the probes' memory-kill evidence. The observe
+counts as the engine's only on the probes' memory-kill evidence. Both runners
+flush each completed step, including its answers and timings, to
+`<out>.steps.jsonl`. The reader uses this journal when the final record is
+absent, discards an unterminated last line, and rejects malformed or reordered
+completed entries. Completed steps remain classifiable after a kill; only
+the step named by the phase marker is killed, and unstarted steps are absent.
+Partial sessions contribute completed step timings but no final statistics
+or retention comparison. Reusing an output path clears the previous run.
+A Verter session record carries the host's retention counters after the
+init request (`initRetention`) and after every step (`stepRetention`), read
+outside every timer. A growth session's **retention proof** compares, for
+every pair of completed measured Verter invocations, what its engine retains
+after the last answer with what its baseline session's engine retains after
+its only answer: live artifacts, superseded artifact versions, parse-snapshot
+leases and pinned bytes must not exceed the baseline's; memo candidates may
+exceed it only by the candidates the first demand added beyond one lowering
+per first-step contributor (its own answers, kept as superseded candidates),
+and retained bytes only by the bytes the first demand added. Every figure is
+a retention-account byte or an object count, so the verdict
+(`passed`/`failed`, or `n/a` with nothing to compare) is the same on every
+worker. It is a finding in the session summary, never a run-validation
+failure; an evidence run that lists the session gates on it. The observe
 arm's REQUIRED-state identity is enforced: a build that retains differently
 fails validation, and a session where an arm has no completed measured
 invocation reports `n/a` with a warning.
+
+Observation accepts JSON answers beyond the decoder's default nesting limit.
+Stack growth covers decoding, TypeExpr conversion, rendering and destruction;
+malformed answers remain decoding errors.
+
+On macOS, CPU columns sum sampled user and kernel counters across process
+lifetimes, with reaped-child accounting deduplicated against those samples.
+The kqueue watcher reports each `NOTE_EXIT`; the supervisor reads the exited
+identity immediately and sweeps before consuming watchdog completion. The
+kernel publishes that exit rusage (`ri_proc_exit_abstime` nonzero) before it
+marks the process a zombie and before it wakes a parent blocked in `waitpid`.
+The same turn also reads every known process before the slower tree walk. A
+child already reaped by a parent that is still alive is attributed from
+that parent's child counters: the workload reaps with `waitpid` as soon as
+the child exits and does not wait for the sampler. A successful exit read
+preserves final descendant counters as a lifetime floor, including a descendant
+first seen on that read when a fresh matching parent identity establishes tree
+membership. It does not prove that the parent
+will reap the child: a living parent can subsequently exit without waiting.
+If both generations disappear before reaping is observed, the supervisor
+retains unavailable totals and bounds that include the exit floor.
+If exit parent metadata is unavailable, the stored parent selects the lifetime
+to verify for membership; a missing, exited or reused parent cannot establish
+membership for a previously unseen child.
+Reaping requires confirmed child lifetime disappearance followed by a fresh
+matching parent start identity with a zero exit timestamp. A sequential
+snapshot's earlier parent reading cannot provide that witness: the parent may
+exit before the child's lookup. An unreadable zombie also cannot count as
+confirmed disappearance. Readable zombies retain their start identities after
+orphaning their surviving children, so an exited parent never certifies reaping.
+When a child disappears while its parent is still alive, cumulative child
+counters retain unsampled tails without adding the child's sampled usage twice.
+Live reparented descendants remain independent, and reused PIDs are separate
+lifetimes. If a descendant and its parent both disappear before the
+descendant's reaping or reparenting was observed, both CPU
+columns are unavailable (`null`) for the rest of the run. Aggregate child counters cannot attribute that usage:
+sampled root/parent/grandchild user counters of 10/20/100 followed by root user
+20 and child-user 150 can represent nested reaping (total 170) or a parent that
+used 150 without reaping its child (retained total 270). An unseen reaped sibling
+can produce the same ambiguity. Neither counter magnitude nor later samples
+resolve it. When an intermediate sample observes the parent accounting for the
+missing grandchild before the parent disappears, the nested subtree remains
+attributable and its CPU is counted once.
+Ambiguous reports retain `cpuUserMs: null` and `cpuKernelMs: null` (the benchmark
+shows `n/a` with its existing warning) and include `cpuUserMsBounds` and
+`cpuKernelMsBounds`, each with `lower` and `upper` in milliseconds. These bound
+the attribution of observed counters, not unobserved CPU after the last read.
+The example above has user bounds 170..270 and, with kernel counters half the
+user counters, kernel bounds 85..135. No point in the interval is published as
+an exact total.
+The watchdog reads the exited leader before reaping it: Apple's
+[proc_pid_rusage API](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.h)
+supports zombies. Own and reaped-child CPU counters are converted from Mach
+absolute-time ticks to nanoseconds using the machine timebase before accounting;
+reported totals and bounds use milliseconds. Descendants whose exit read is
+missed retain sampling uncertainty; Linux and Windows keep their existing
+kernel accounting.
 
 ## Project workload
 

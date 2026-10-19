@@ -461,8 +461,37 @@ fn index_enum(
     ambient: bool,
     index: &mut DeclHeaderIndex,
 ) {
-    let entry = index
-        .enum_headers
+    index_enum_into(
+        enum_decl,
+        name,
+        ctx,
+        ambient,
+        EnumHeaderTables {
+            enums: &mut index.enum_headers,
+            types: &mut index.type_headers,
+            values: &mut index.value_headers,
+        },
+    );
+}
+
+/// The tables one scope's enums index into: the file's own, or one ambient
+/// block scope's.
+struct EnumHeaderTables<'i> {
+    enums: &'i mut DeclMap<EnumDeclHeader>,
+    types: &'i mut DeclMap<TypeDeclHeader>,
+    values: &'i mut DeclMap<ValueDeclHeader>,
+}
+
+/// [`index_enum`] into one scope's `tables`.
+fn index_enum_into(
+    enum_decl: &TSEnumDeclaration<'_>,
+    name: &str,
+    ctx: HeaderStatementContext<'_>,
+    ambient: bool,
+    tables: EnumHeaderTables<'_>,
+) {
+    let entry = tables
+        .enums
         .entry(ctx.key(name))
         .or_insert_with(|| EnumDeclHeader {
             span: verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
@@ -503,7 +532,7 @@ fn index_enum(
     // structurally is
     // (there is no dedicated enum `TypeDeclKind`).
     upsert_type_header(
-        &mut index.type_headers,
+        tables.types,
         name,
         TypeDeclKind::Alias,
         verter_span::Span::new(enum_decl.span.start, enum_decl.span.end),
@@ -513,8 +542,8 @@ fn index_enum(
         &[],
         ctx,
     );
-    let value_entry = index
-        .value_headers
+    let value_entry = tables
+        .values
         .entry(ctx.key(name))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Enum,

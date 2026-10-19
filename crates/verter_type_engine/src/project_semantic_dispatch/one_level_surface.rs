@@ -37,17 +37,24 @@ use crate::semantic_query_memo::SemanticGraphStore;
 /// A graph-only one-level surface: the resolver-owned ordered declaration
 /// stream plus the keyspace / index-signature facts of the surface it was
 /// read from.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// An owning carrier: it roots every graph operand its entries and keyspace
+/// name in the graph that projected it, so the surface stays readable for as
+/// long as any holder keeps it, independently of the payload read, cache or
+/// construction scope it was projected from. Only the engine builds one.
+#[derive(Debug, PartialEq, Eq)]
 pub struct OneLevelSurface {
     entries: SurfaceEntries,
     keyspace: Option<SemanticNodeId>,
     has_index_signature: bool,
+    /// Transport ownership of the operands; never part of equality.
+    roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots,
 }
 
 /// Backing of a [`OneLevelSurface`]'s entry stream: a graph view's stream is
 /// SHARED (no copy); a surface synthesized here (a presence join, a spread
 /// join) OWNS the one vector it was built into.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum SurfaceEntries {
     Shared(Arc<[SurfaceEntry]>),
     Owned(Vec<SurfaceEntry>),
@@ -77,27 +84,88 @@ impl OneLevelSurface {
             entries: SurfaceEntries::Owned(Vec::new()),
             keyspace: None,
             has_index_signature: false,
+            roots: Default::default(),
         }
     }
 
-    /// The one-level surface a graph [`SurfaceView`] carries, verbatim.
-    pub fn from_view(view: &SurfaceView) -> Self {
-        Self {
-            entries: SurfaceEntries::Shared(Arc::clone(&view.entries)),
-            keyspace: view.keyspace,
-            has_index_signature: view.has_known_index_signature(),
+    /// A surface over `entries` owning every operand it names in `graph`.
+    fn owned_in(
+        graph: &SemanticGraphStore,
+        entries: SurfaceEntries,
+        keyspace: Option<SemanticNodeId>,
+        has_index_signature: bool,
+    ) -> Self {
+        let mut operands = Vec::new();
+        for entry in entries.as_slice() {
+            match entry {
+                SurfaceEntry::Member(member) => {
+                    operands.extend(crate::semantic_query::authored_property_key_child(
+                        &member.key,
+                    ));
+                    operands.push(member.value);
+                }
+                SurfaceEntry::CallSignature(node) | SurfaceEntry::ConstructSignature(node) => {
+                    operands.push(*node);
+                }
+                SurfaceEntry::IndexSignature(signature) => {
+                    operands.push(signature.key_type);
+                    operands.push(signature.value_type);
+                }
+            }
         }
+        operands.extend(keyspace);
+        Self {
+            entries,
+            keyspace,
+            has_index_signature,
+            roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
+                graph, operands,
+            ),
+        }
+    }
+
+    /// The one-level surface a graph [`SurfaceView`] of `graph` carries,
+    /// verbatim, owning its operands.
+    pub(crate) fn from_view(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
+        Self::owned_in(
+            graph,
+            SurfaceEntries::Shared(Arc::clone(&view.entries)),
+            view.keyspace,
+            view.has_known_index_signature(),
+        )
+    }
+
+    /// [`Self::from_view`] for a fixture surface.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn from_view_for_tests(graph: &SemanticGraphStore, view: &SurfaceView) -> Self {
+        Self::from_view(graph, view)
     }
 
     /// A presence-only surface of POSITIVE named members gathered from an
     /// open carrier. Signatures / index facts are not recovered from open
     /// carriers.
-    pub(crate) fn from_presence_members(members: Vec<SurfaceMember>) -> Self {
-        Self {
-            entries: SurfaceEntries::Owned(members.into_iter().map(SurfaceEntry::Member).collect()),
-            keyspace: None,
-            has_index_signature: false,
-        }
+    pub(crate) fn from_presence_members(
+        graph: &SemanticGraphStore,
+        members: Vec<SurfaceMember>,
+    ) -> Self {
+        Self::owned_in(
+            graph,
+            SurfaceEntries::Owned(members.into_iter().map(SurfaceEntry::Member).collect()),
+            None,
+            false,
+        )
+    }
+
+    /// Borrow one operand this surface owns.
+    pub fn node(
+        &self,
+        node: SemanticNodeId,
+    ) -> Result<
+        crate::semantic_query_memo::node_roots::NodeRef<'_>,
+        crate::semantic_query::QueryError,
+    > {
+        self.roots.0.node_ref(node)
     }
 
     /// The ordered declaration stream.
@@ -185,7 +253,7 @@ impl OneLevelSurface {
                         crate::semantic_query::PartialReason::SemanticQueryFault,
                     ));
                 };
-                return SurfaceResolution::resolved(Self::from_view(&view));
+                return SurfaceResolution::resolved(Self::from_view(graph, &view));
             }
         }
 
@@ -329,11 +397,12 @@ impl OneLevelSurface {
                 declaration_origin: None,
             }));
         }
-        SurfaceResolution::open_presence(Self {
-            entries: SurfaceEntries::Owned(entries),
-            keyspace: None,
-            has_index_signature: index_count > 0,
-        })
+        SurfaceResolution::open_presence(Self::owned_in(
+            graph,
+            SurfaceEntries::Owned(entries),
+            None,
+            index_count > 0,
+        ))
     }
 }
 
@@ -364,7 +433,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
     ctx: &dyn crate::resolver_core::ResolverContext<C>,
     dispatch: &ProjectSemanticDispatch<'_, C>,
     base: SemanticNodeId,
-    path: Arc<[PathSegment]>,
+    path: verter_type_expr::OwnedSlice<PathSegment>,
     context: ProjectionReductionContext,
     walker_diagnostics: Option<&mut Vec<super::walk::ShallowDiagnostic>>,
 ) -> SurfaceResolution<OneLevelSurface> {
@@ -373,6 +442,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
         ProjectionMode::Shallow,
         "project_one_level_surface synthesises a one-level surface; mode must be Shallow"
     );
+    // One dispatcher operation: what the projection interns is owned until
+    // the returned surface roots its operands.
+    let _operation = dispatch.enter_operation(true);
     // Path-precise `Shallow` projection synthesises the one-level surface
     // (call / construct / index signatures + merged members) without
     // expanding member bodies. An empty `path` projects `base`'s own
@@ -414,7 +486,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     walker_diagnostics,
                 )
@@ -446,9 +520,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
             // producer captured no specific class is a downstream
             // PROPAGATED partial — stated here, at the one conversion
             // site, never normalized inside the claim type.
-            let read_partiality = if surface_read.result_is_partial {
+            let read_partiality = if surface_read.result_is_partial() {
                 Some(
-                    NonEmptyReasons::new(surface_read.partial_reasons).unwrap_or_else(|| {
+                    NonEmptyReasons::new(surface_read.partial_reasons()).unwrap_or_else(|| {
                         NonEmptyReasons::of(crate::semantic_query::PartialReason::Propagated)
                     }),
                 )
@@ -456,7 +530,12 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                 None
             };
             if let Some(sink) = walker_diagnostics {
-                sink.extend(surface_read.walker_diagnostics.iter().cloned());
+                sink.extend(
+                    surface_read
+                        .walker_diagnostics
+                        .iter()
+                        .map(crate::project_semantic_dispatch::walk::ShallowDiagnostic::clone),
+                );
             }
             match surface_read.value {
                 QueryResult::Value(node) => (node, read_partiality),
@@ -486,7 +565,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
         // omission is not absence evidence, and the subset never passes
         // as the complete surface.
         Some(SemanticNodeData::Object(view)) => {
-            SurfaceResolution::resolved(OneLevelSurface::from_view(view))
+            SurfaceResolution::resolved(OneLevelSurface::from_view(graph, view))
         }
         // Open carrier terminal (the walker's open-safe policy returns
         // the compound node when any nested open program contributed):
@@ -498,7 +577,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
             | SemanticNodeData::Intersection(_)
             | SemanticNodeData::Conditional { .. },
         ) => read_positive_surface_members(ctx, dispatch, terminal)
-            .map(OneLevelSurface::from_presence_members)
+            .map(|members| OneLevelSurface::from_presence_members(graph, members))
             .into_open_presence(),
         Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
             let formula = match dispatch.project_object_spread_for_consumer(
@@ -539,7 +618,9 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ctx,
                     dispatch,
                     constraint,
-                    Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+                    verter_type_expr::OwnedSlice::from(
+                        Vec::<PathSegment>::new().into_boxed_slice(),
+                    ),
                     context,
                     None,
                 )
@@ -618,7 +699,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
         for arm in arms {
             match arm {
                 SurfaceResolution::Resolved(members) | SurfaceResolution::OpenPresence(members) => {
-                    per_arm.push((**members).clone())
+                    per_arm.push(
+                        members
+                            .iter()
+                            .map(crate::semantic_query::SurfaceMember::clone)
+                            .collect::<Vec<_>>(),
+                    )
                 }
                 SurfaceResolution::NoSurface(_) => per_arm.push(Vec::new()),
                 SurfaceResolution::Incomplete(inc) => {
@@ -640,9 +726,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
     }
 
     match super::node_data_for(dispatch.graph(), surface_node).as_deref() {
-        Some(SemanticNodeData::Object(view)) => {
-            SurfaceResolution::resolved(view.positive_members().to_vec())
-        }
+        Some(SemanticNodeData::Object(view)) => SurfaceResolution::resolved(
+            view.positive_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect::<Vec<_>>(),
+        ),
         Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
             let formula = match dispatch.project_object_spread_for_consumer(
                 surface_node,
@@ -664,13 +753,7 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                     };
                 }
             };
-            let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-            let members = super::walk::spread_formula_positive_members_for_macro(
-                dispatch.graph(),
-                &formula,
-                &mut canonical_evidence,
-            );
-            dispatch.deposit_canonical_evidence(canonical_evidence);
+            let members = dispatch.spread_formula_positive_members_for_macro(&formula);
             SurfaceResolution::resolved(members)
         }
         Some(SemanticNodeData::Union(arms)) => {
@@ -742,16 +825,16 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedSurfaceArm {
     /// The reference's head name as written (`NotFound` in `extends NotFound`).
-    pub(crate) name: Arc<str>,
+    pub(crate) name: verter_session_query::retention::owned::OwnedStr,
     /// Canonical id of the file whose declaration authored the arm.
-    pub(crate) owner_canonical: Arc<str>,
+    pub(crate) owner_canonical: verter_session_query::retention::owned::OwnedStr,
     /// Exact top-level lexical owner that authored the arm.
     pub(crate) owner: verter_type_expr::TopLevelOwnerId,
 }
 
 /// One macro's graph-only one-level surface, as the macro surface producer
 /// projected it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MacroArgumentSurface {
     /// The macro's one-level surface (the type argument's members / call
     /// signatures / index signatures, or the analyzer-fact runtime-object
@@ -781,20 +864,18 @@ pub struct MacroArgumentSurface {
 /// - a typed failure carrier (`Opaque`), which names its own class through the
 ///   shared query-error classification;
 /// - no interned node at all under the resolved id.
-fn unresolved_macro_root_partiality(
-    base: Option<&SemanticNodeData>,
-) -> Option<crate::semantic_query::PartialReasonSet> {
-    use crate::semantic_query::PartialReasonSet;
+fn unresolved_macro_root_partiality(base: Option<&SemanticNodeData>) -> Option<NonEmptyReasons> {
+    use crate::semantic_query::PartialReason;
 
     match base {
-        None => Some(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA),
+        None => Some(NonEmptyReasons::of(PartialReason::MissingSemanticNodeData)),
         Some(SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)) => {
-            Some(PartialReasonSet::MISSING_DEPENDENCY)
+            Some(NonEmptyReasons::of(PartialReason::MissingDependency))
         }
-        Some(SemanticNodeData::RawFallback { .. }) => Some(PartialReasonSet::SEMANTIC_QUERY_FAULT),
-        Some(SemanticNodeData::Opaque(error)) => {
-            Some(super::symbol_identity::query_error_partial_reasons(error))
+        Some(SemanticNodeData::RawFallback { .. }) => {
+            Some(NonEmptyReasons::of(PartialReason::SemanticQueryFault))
         }
+        Some(SemanticNodeData::Opaque(error)) => Some(NonEmptyReasons::from_query_error(error)),
         Some(_) => None,
     }
 }
@@ -813,8 +894,8 @@ fn unresolved_surface_arms_from_diags(
                 owner_canonical,
                 owner,
             } => Some(UnresolvedSurfaceArm {
-                name: Arc::clone(name),
-                owner_canonical: Arc::clone(owner_canonical),
+                name: name.clone(),
+                owner_canonical: owner_canonical.clone(),
                 owner: *owner,
             }),
             _ => None,
@@ -849,14 +930,37 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     macro_index: usize,
     macro_kind: AnalyzedMacroKind,
 ) -> Option<MacroArgumentSurface> {
+    project_macro_argument_surface_claim(ctx, dispatch, owner_canonical, macro_index, macro_kind)
+        .recorded()
+}
+
+/// The producer-owned membership claim, including unavailable and no-surface answers.
+/// Consumers that publish independent facts must retain this claim through normalization.
+pub fn project_macro_argument_surface_claim<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn crate::resolver_core::ResolverContext<C>,
+    dispatch: &ProjectSemanticDispatch<'_, C>,
+    owner_canonical: &Arc<str>,
+    macro_index: usize,
+    macro_kind: AnalyzedMacroKind,
+) -> SurfaceResolution<MacroArgumentSurface> {
     use crate::semantic_query::SurfaceProvenanceContext;
 
+    // One dispatcher operation: what the projection interns is owned until
+    // the returned surface roots its operands.
+    let _operation = dispatch.enter_operation(true);
     // Structurally read-only: surface resolution runs inside the
     // DTO producer's traced scope; fenced-ness gates admission there.
-    let indexed = ctx
-        .ensure_indexed_ready_serve(owner_canonical.as_ref())?
-        .indexed;
-    let mac = indexed.snapshot.macros.get(macro_index)?;
+    let Some(indexed) = ctx
+        .ensure_indexed_ready_serve(owner_canonical.as_ref())
+        .map(|serve| serve.indexed)
+    else {
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            crate::semantic_query::PartialReason::MissingDependency,
+        ));
+    };
+    let Some(mac) = indexed.snapshot.macros.get(macro_index) else {
+        return SurfaceResolution::no_surface();
+    };
     if !mac.is_type_based {
         // A runtime-object `defineExpose({...})` / `defineProps({...})`
         // has no type argument to lower, but the analyzer already
@@ -868,7 +972,10 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         // `runtime_object_macro_surface` for the structural (not
         // name-string) kind dispatch and the honest-unknown member
         // value policy.
-        return runtime_object_macro_surface(ctx, dispatch, owner_canonical, macro_kind, mac);
+        return match runtime_object_macro_surface(ctx, dispatch, owner_canonical, macro_kind, mac) {
+            Some(surface) => SurfaceResolution::resolved(surface),
+            None => SurfaceResolution::no_surface(),
+        };
     }
 
     // `defineModel` does NOT carry a props OBJECT type argument — its type
@@ -877,7 +984,7 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     // synthesized model prop (`AnalyzedMacro.prop_fields`), so the macro
     // surface is the EMPTY object surface.
     if macro_kind == AnalyzedMacroKind::DefineModel {
-        return Some(MacroArgumentSurface {
+        return SurfaceResolution::resolved(MacroArgumentSurface {
             surface: OneLevelSurface::empty(),
             macro_call_span: mac.span,
             // The empty model surface projects nothing — no arms.
@@ -885,7 +992,9 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         });
     }
 
-    let _ = mac.parsed_type_argument.as_ref()?;
+    if mac.parsed_type_argument.is_none() {
+        return SurfaceResolution::no_surface();
+    }
 
     // Provenance per macro axis. Props request the macro-T own-body
     // provenance on the terminal surface synthesis so the author-declared
@@ -928,7 +1037,12 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     // shared path walker runs intermediate hops in `Navigate` and the
     // TERMINAL hop under `terminal_context` (Shallow). A non-indexed type
     // argument decomposes to `(handle_node, [])`.
-    let product = dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index)?;
+    let Some(product) = dispatch.macro_type_arg_hot_ref(owner_canonical.as_ref(), macro_index)
+    else {
+        return SurfaceResolution::incomplete(NonEmptyReasons::of(
+            crate::semantic_query::PartialReason::MissingDependency,
+        ));
+    };
     let (base_carrier, path) = decompose_indexed_access_chain_node(dispatch, product.hot.node());
     // Resolve the carrier base ONE Navigate hop through the shared dispatch
     // (carrier head resolution — a `BareRef` head routes to its `DeclRef`,
@@ -955,10 +1069,7 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
     let unresolved_root =
         unresolved_macro_root_partiality(super::node_data_for(dispatch.graph(), base).as_deref());
     if let Some(reasons) = unresolved_root {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(reasons),
-        );
-        return None;
+        return SurfaceResolution::incomplete(reasons);
     }
 
     // Collect the walker's side-band diagnostics so unresolvable
@@ -980,22 +1091,18 @@ pub fn project_macro_argument_surface<C: crate::resolver_core::ResolverCapabilit
         path,
         terminal_context,
         Some(&mut walker_diagnostics),
-    )
-    .recorded()?;
+    );
     let unresolved_surface_arms = unresolved_surface_arms_from_diags(&walker_diagnostics);
     // An unresolvable SURFACE-COMPOSITION arm (a heritage / intersection /
     // union contributor the shallow synthesis dropped) makes the published
     // METADATA surface partial: the members behind that arm are missing,
     // so the surface must never publish (or warm) as the complete answer.
     // The codegen lanes keep their own diagnostic channel for these arms.
-    if !unresolved_surface_arms.is_empty() {
-        crate::request_context::fold_result_completeness(
-            crate::semantic_query::ResultCompleteness::partial(
-                crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY,
-            ),
-        );
-    }
-    Some(MacroArgumentSurface {
+    let surface = surface.with_read_partiality(
+        (!unresolved_surface_arms.is_empty())
+            .then(|| NonEmptyReasons::of(crate::semantic_query::PartialReason::MissingDependency)),
+    );
+    surface.map(|surface| MacroArgumentSurface {
         surface,
         macro_call_span: mac.span,
         unresolved_surface_arms,
@@ -1024,13 +1131,15 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
 ) -> Option<MacroArgumentSurface> {
     use crate::semantic_query::{AuthoredPropertyKey, MacroOwnBodyStamp, MergeRoleStamp};
 
-    let declaration_origin = Some(Arc::clone(owner_canonical));
+    let declaration_origin = Some(verter_type_expr::OwnedStr::from(owner_canonical));
     let mut entries: Vec<SurfaceEntry> = Vec::new();
     match macro_kind {
         AnalyzedMacroKind::DefineExpose => {
             for field in &mac.expose_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     // The exposed value's real type is not re-derived
                     // here (see the doc comment above) — `unknown` is
                     // the honest placeholder, never a fabricated shape.
@@ -1053,7 +1162,9 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         AnalyzedMacroKind::DefineProps => {
             for field in &mac.prop_fields {
                 entries.push(SurfaceEntry::Member(SurfaceMember {
-                    key: AuthoredPropertyKey::String(Arc::from(field.name.as_str())),
+                    key: AuthoredPropertyKey::String(verter_type_expr::OwnedStr::from(
+                        field.name.as_str(),
+                    )),
                     value: unknown_member_value_node(dispatch),
                     optional: field.is_optional,
                     readonly: false,
@@ -1090,7 +1201,7 @@ fn runtime_object_macro_surface<C: crate::resolver_core::ResolverCapabilities>(
         ctx,
         dispatch,
         base,
-        Arc::from(Vec::<PathSegment>::new().into_boxed_slice()),
+        verter_type_expr::OwnedSlice::from(Vec::<PathSegment>::new().into_boxed_slice()),
         ProjectionReductionContext::published(ProjectionMode::Shallow),
         None,
     )
@@ -1119,7 +1230,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
     node: crate::semantic_query::SemanticNodeId,
 ) -> (
     crate::semantic_query::SemanticNodeId,
-    Arc<[crate::semantic_query::PathSegment]>,
+    verter_type_expr::OwnedSlice<PathSegment>,
 ) {
     use crate::semantic_query::{IndexKey, PathSegment, SemanticNodeData};
 
@@ -1132,7 +1243,7 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         match data.as_ref() {
             SemanticNodeData::IndexedAccess { object, index } => match index {
                 IndexKey::String(s) => {
-                    rev_path.push(PathSegment::Index(IndexKey::String(Arc::clone(s))));
+                    rev_path.push(PathSegment::Index(IndexKey::String(s.clone())));
                     current = *object;
                 }
                 IndexKey::Number(n) => {
@@ -1147,5 +1258,8 @@ fn decompose_indexed_access_chain_node<C: crate::resolver_core::ResolverCapabili
         }
     }
     rev_path.reverse();
-    (current, Arc::from(rev_path.into_boxed_slice()))
+    (
+        current,
+        verter_type_expr::OwnedSlice::from(rev_path.into_boxed_slice()),
+    )
 }

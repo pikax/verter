@@ -1,4 +1,5 @@
 use crate::semantic_query::{CanonicalTypeSubstitution, SemanticNodeId};
+use crate::semantic_query_memo::test_support::synthetic_operand_graph;
 
 use super::lifetime::SignatureStore;
 use super::records::BinderSpace;
@@ -28,13 +29,19 @@ fn compose_after_applies_first_then_second() {
     let string = SemanticNodeId(3);
     let first = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(x, u)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(x, u)]),
+            ),
             None,
         )
         .unwrap();
     let second = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(u, string)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(u, string)]),
+            ),
             None,
         )
         .unwrap();
@@ -52,8 +59,8 @@ fn canonical_compose_matches_application_law() {
     let x = SemanticNodeId(10);
     let u = SemanticNodeId(11);
     let s = SemanticNodeId(12);
-    let first = CanonicalTypeSubstitution::new(vec![(x, u)]);
-    let second = CanonicalTypeSubstitution::new(vec![(u, s)]);
+    let first = CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(x, u)]);
+    let second = CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(u, s)]);
     let composed = compose_canonical(&first, &second);
     assert_eq!(
         apply_canonical(&composed, x),
@@ -73,7 +80,10 @@ fn identity_map_is_elided() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(x, SemanticNodeId(5))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(x, SemanticNodeId(5))],
+                ),
             ),
             None,
         )
@@ -90,7 +100,10 @@ fn no_double_substitution_on_warm_result_read() {
     let s = SemanticNodeId(9);
     let subst = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(x, s)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(x, s)]),
+            ),
             None,
         )
         .unwrap();
@@ -165,7 +178,10 @@ fn same_spelling_in_another_space_is_not_captured() {
     let string = SemanticNodeId(99);
     let subst = store
         .intern_substitution(
-            CallSubstitution::map(space_a, CanonicalTypeSubstitution::new(vec![(t_a, string)])),
+            CallSubstitution::map(
+                space_a,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(t_a, string)]),
+            ),
             None,
         )
         .unwrap();
@@ -229,7 +245,10 @@ fn chain_depth_flattens_past_the_bound() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(x, SemanticNodeId(2))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(x, SemanticNodeId(2))],
+                ),
             ),
             None,
         )
@@ -240,10 +259,13 @@ fn chain_depth_flattens_past_the_bound() {
             .intern_substitution(
                 CallSubstitution::map(
                     space,
-                    CanonicalTypeSubstitution::new(vec![(
-                        SemanticNodeId(u64::from(i) + 1),
-                        SemanticNodeId(u64::from(i) + 2),
-                    )]),
+                    CanonicalTypeSubstitution::new(
+                        synthetic_operand_graph(),
+                        vec![(
+                            SemanticNodeId(u64::from(i) + 1),
+                            SemanticNodeId(u64::from(i) + 2),
+                        )],
+                    ),
                 ),
                 None,
             )
@@ -269,7 +291,10 @@ fn right_nested_compose_also_flattens() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(20), SemanticNodeId(21))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(SemanticNodeId(20), SemanticNodeId(21))],
+                ),
             ),
             None,
         )
@@ -280,10 +305,13 @@ fn right_nested_compose_also_flattens() {
             .intern_substitution(
                 CallSubstitution::map(
                     space,
-                    CanonicalTypeSubstitution::new(vec![(
-                        SemanticNodeId(u64::from(i) + 30),
-                        SemanticNodeId(u64::from(i) + 31),
-                    )]),
+                    CanonicalTypeSubstitution::new(
+                        synthetic_operand_graph(),
+                        vec![(
+                            SemanticNodeId(u64::from(i) + 30),
+                            SemanticNodeId(u64::from(i) + 31),
+                        )],
+                    ),
                 ),
                 None,
             )
@@ -325,7 +353,7 @@ fn compose_after_cross_binder_space_follows_application_law() {
             CallSubstitution::map_across(
                 decl,
                 residual,
-                CanonicalTypeSubstitution::new(vec![(x, u)]),
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(x, u)]),
             ),
             None,
         )
@@ -335,7 +363,7 @@ fn compose_after_cross_binder_space_follows_application_law() {
             CallSubstitution::map_across(
                 residual,
                 residual,
-                CanonicalTypeSubstitution::new(vec![(u, string)]),
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(u, string)]),
             ),
             None,
         )
@@ -357,13 +385,19 @@ fn constructed_term_obeys_composition_law() {
     let string = SemanticNodeId(3);
     let first = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(x, u)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(x, u)]),
+            ),
             None,
         )
         .unwrap();
     let second = store
         .intern_substitution(
-            CallSubstitution::map(space, CanonicalTypeSubstitution::new(vec![(u, string)])),
+            CallSubstitution::map(
+                space,
+                CanonicalTypeSubstitution::new(synthetic_operand_graph(), vec![(u, string)]),
+            ),
             None,
         )
         .unwrap();
@@ -408,7 +442,10 @@ fn compose_apply_increments_chain_walk_counter() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(x, SemanticNodeId(2))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(x, SemanticNodeId(2))],
+                ),
             ),
             None,
         )
@@ -417,7 +454,10 @@ fn compose_apply_increments_chain_walk_counter() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(vec![(SemanticNodeId(2), SemanticNodeId(3))]),
+                CanonicalTypeSubstitution::new(
+                    synthetic_operand_graph(),
+                    vec![(SemanticNodeId(2), SemanticNodeId(3))],
+                ),
             ),
             None,
         )

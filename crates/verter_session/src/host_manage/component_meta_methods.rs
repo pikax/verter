@@ -424,6 +424,7 @@ impl VerterHost {
                         audit_builder.record_files(files);
                         let footprint = crate::component_meta_audit::mine_footprint(
                             self.project_type_store().semantic_graph(),
+                            self.project_type_store().construction_grant(),
                             state,
                             &ctx,
                             self.config.max_derivation_edges,
@@ -1286,6 +1287,7 @@ impl VerterHost {
                 .then(|| {
                     build_origin_graph(
                         self.project_type_store.semantic_graph(),
+                        self.project_type_store.construction_grant(),
                         surface_identities_for_export.as_ref(),
                     )
                 })
@@ -1351,15 +1353,14 @@ impl VerterHost {
         ) -> bool {
             let locator =
                 verter_type_expr::locators::AuthoredBodyLocator::DeclBody(body.body_slot.clone());
-            match dispatch
-                .raise_authored_locator_to_hot(
+            let raised = dispatch
+                .owning().raise_authored_locator_to_hot(
                     &locator,
                     verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
                         verter_type_engine::semantic_query::ProjectionMode::Navigate,
                     ),
-                )
-                .at_optional_boundary()
-            {
+                );
+            match raised.value().clone().at_optional_boundary() {
                 Some(hot) => crate::meta_resolve::exactness::node_root_should_stay_symbolic(
                     dispatch,
                     hot.node(),
@@ -1457,9 +1458,7 @@ impl VerterHost {
                     );
                 }
             }
-            match verter_type_engine::project_semantic_dispatch::node_data_for(graph, node)
-                .as_deref()
-            {
+            match graph.read_in_scope(node).as_deref() {
                 Some(verter_type_engine::semantic_query::SemanticNodeData::Object(surface)) => {
                     for member in surface.positive_members().iter() {
                         collect_one_filtered_node(
@@ -1474,9 +1473,9 @@ impl VerterHost {
                         );
                     }
                     for signature in surface
-                        .call_signatures
+                        .call_signatures()
                         .iter()
-                        .chain(surface.construct_signatures.iter())
+                        .chain(surface.construct_signatures().iter())
                     {
                         collect_one_filtered_node(
                             ctx,dispatch,
@@ -1489,7 +1488,7 @@ impl VerterHost {
                             cursor,
                         );
                     }
-                    for signature in surface.index_signatures.iter() {
+                    for signature in surface.index_signatures().iter() {
                         collect_one_filtered_node(
                             ctx,dispatch,
                             signature.key_type,
@@ -1757,7 +1756,7 @@ impl VerterHost {
             >,
              producer_scope: &RegistryProducerScope,
              source: &verter_type_expr::facts::SemanticTypeSource| {
-                dispatch.raise_semantic_type_source_to_hot(
+                dispatch.owning().raise_semantic_type_source_to_hot(
                     source,
                     verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                         scope_canonical_id: producer_scope.canonical_id.as_ref(),
@@ -1849,23 +1848,25 @@ impl VerterHost {
                 // Raise ONE input node through the shared dispatch: the
                 // imported declaration's body locator, else the owner
                 // collection locator, else the entry's own published source.
-                let seed_node = match imported_collection_locator
+                // The raised carrier owns the seed node for the collection below.
+                let seed_raised = match imported_collection_locator
                     .as_ref()
                     .or(source_locator.as_ref())
                 {
-                    Some(locator) => seed_dispatch
-                        .raise_authored_locator_to_hot(locator, seed_transit_ctx)
-                        .at_optional_boundary()
-                        .map(|hot| hot.node()),
+                    Some(locator) => Some(
+                        seed_dispatch
+                            .owning()
+                            .raise_authored_locator_to_hot(locator, seed_transit_ctx),
+                    ),
                     None => entry
                         .type_source
                         .present()
-                        .and_then(|source| {
-                            raise_seed_source(seed_dispatch, &producer_scope, source)
-                                .at_optional_boundary()
-                        })
-                        .map(|hot| hot.node()),
+                        .map(|source| raise_seed_source(seed_dispatch, &producer_scope, source)),
                 };
+                let seed_node = seed_raised
+                    .as_ref()
+                    .and_then(|raised| raised.value().clone().at_optional_boundary())
+                    .map(|hot| hot.node());
                 if let Some(node) = seed_node {
                     collect_imported_component_meta_registry_seed_refs_node(
                         query_engine.ctx,
@@ -1935,9 +1936,14 @@ impl VerterHost {
                 };
                 let producer_scope =
                     RegistryProducerScope::explicit(canonical, meta.declaration.owner);
-                if let Some(hot) = entry.type_source.present().and_then(|source| {
-                    raise_seed_source(seed_dispatch, &producer_scope, source).at_optional_boundary()
-                }) {
+                let raised = entry
+                    .type_source
+                    .present()
+                    .map(|source| raise_seed_source(seed_dispatch, &producer_scope, source));
+                if let Some(hot) = raised
+                    .as_ref()
+                    .and_then(|raised| raised.value().clone().at_optional_boundary())
+                {
                     crate::resolver_core::component_meta_registry::collect_node_ref_names(
                         dispatch,
                         hot.node(),
@@ -2281,15 +2287,18 @@ impl VerterHost {
             // the OwnerCollectionDb locator lowers through the ONE shared
             // dispatch and the head classifies off the raised carrier — no
             // materialised `TypeExpr` in the BFS.
+            // `(head name, has type arguments)`, read while the raised
+            // carrier owns the body.
             let owner_collection_ref_head = owner_collection_locator.as_ref().and_then(|locator| {
-                seed_dispatch
-                    .raise_authored_locator_to_hot(locator, seed_transit_ctx)
-                    .at_optional_boundary()
-                    .and_then(|hot| {
-                        verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(dispatch,
-                            hot.node(),
-                        )
-                    })
+                let raised = seed_dispatch
+                    .owning()
+                    .raise_authored_locator_to_hot(locator, seed_transit_ctx);
+                let hot = raised.value().clone().at_optional_boundary()?;
+                verter_type_engine::project_semantic_dispatch::reference_carriers::reference_carrier_head(
+                    dispatch,
+                    hot.node(),
+                )
+                .map(|(name, type_arguments)| (name, !type_arguments.is_empty()))
             });
             // Owner-local type aliases whose body is a generic ref to an
             // imported type should resolve inline via indexed access rather
@@ -2304,8 +2313,10 @@ impl VerterHost {
                 && !pending_route_is_whole_local
                 && !seeded_dependency_names.contains(&type_name)
             {
-                if let Some((body_ref_name, type_arguments)) = owner_collection_ref_head.as_ref() {
-                    if !type_arguments.is_empty() {
+                if let Some((body_ref_name, has_type_arguments)) =
+                    owner_collection_ref_head.as_ref()
+                {
+                    if *has_type_arguments {
                         let body_decl = query_engine.resolve_type_declaration(
                             pending_producer_scope.canonical_id.as_ref(),
                             pending_producer_scope.owner,
@@ -2352,7 +2363,7 @@ impl VerterHost {
                 == owner_canonical
                 && owner_collection_ref_head
                     .as_ref()
-                    .is_some_and(|(_, type_arguments)| !type_arguments.is_empty());
+                    .is_some_and(|(_, has_type_arguments)| *has_type_arguments);
             if pending_route_is_deep_member_path && !owner_local_substituted_whole {
                 // Route-scoped publication: a deep member path selects no
                 // top-level member — never widen the entry with the whole
@@ -2731,7 +2742,7 @@ impl VerterHost {
         // admission rather than caching a phantom-fact entry — the
         // cached state is still returned. The mirror's read guard is
         // released first: the admission updates the mirror itself.
-        let state = Arc::clone(&cached.state);
+        let state = cached.state.clone();
         let fact_versions = cached.fact_versions.to_vec();
         drop(entry);
         let admission = if !fact_versions.is_empty() {
@@ -2739,7 +2750,7 @@ impl VerterHost {
                 canonical,
                 mode,
                 view_fingerprint,
-                Some((Arc::clone(&state), fact_versions)),
+                Some((state.clone(), fact_versions)),
                 None,
             )
         } else {
@@ -2801,7 +2812,7 @@ impl VerterHost {
                 state.evaluated_types.is_some(),
             ),
         );
-        let state = Arc::new(state.clone());
+        let state = crate::resolver_core::CachedValue::new(state.clone());
         // Drop the owner's own non-round-tripping `DerivedFactHash{Route}`
         // fact before admission, mirroring the `ComponentMetaResultDb`
         // publish path (see `component_meta_entry::strip_owner_route_fact`).
@@ -2832,7 +2843,7 @@ impl VerterHost {
         // overwrite the base slot. A later base `resolve_component_meta`
         // (view_fingerprint == 0) does NOT fall through to an overlay-
         // derived entry. The state and its mirror are admitted together.
-        let mirror = self.resolved_meta_mirror_entry(canonical, Arc::clone(&state));
+        let mirror = self.resolved_meta_mirror_entry(canonical, state.clone());
         let admission = self.admit_resolved_meta_view(
             canonical,
             mode,
@@ -2899,14 +2910,18 @@ impl VerterHost {
             canonical,
             &resolved.fact_versions,
         );
-        let replacement = Arc::new(resolved.clone());
-        if !self.resolver_runtime().component_meta.resign_arc_with_kind(
-            &admission.cache_key,
-            &admission.candidate,
-            replacement.clone(),
-            fact_versions.to_vec(),
-            "component_meta.results",
-        ) {
+        let replacement = crate::resolver_core::CachedValue::new(resolved.clone());
+        if !self
+            .resolver_runtime()
+            .component_meta
+            .resign_value_with_kind(
+                &admission.cache_key,
+                &admission.candidate,
+                replacement.clone(),
+                fact_versions.to_vec(),
+                "component_meta.results",
+            )
+        {
             return;
         }
 
@@ -2915,7 +2930,10 @@ impl VerterHost {
                 .cached_resolved_meta
                 .get_mut(&(mode, view_fingerprint))
             {
-                if Arc::ptr_eq(&cached.state, admission.candidate.value()) {
+                if crate::resolver_core::CachedValue::ptr_eq(
+                    &cached.state,
+                    admission.candidate.value(),
+                ) {
                     *cached = crate::types::ResolvedComponentMetaCacheEntry {
                         fact_versions,
                         state: replacement,
@@ -2931,7 +2949,7 @@ impl VerterHost {
         canonical: &str,
         mode: ProjectionMode,
         view_fingerprint: u64,
-        state: Arc<ResolvedComponentMetaState>,
+        state: crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
     ) {
         if let Some(mirror) = self.resolved_meta_mirror_entry(canonical, state) {
             self.admit_resolved_meta_view(canonical, mode, view_fingerprint, None, Some(mirror));
@@ -2952,7 +2970,7 @@ impl VerterHost {
         mode: ProjectionMode,
         view_fingerprint: u64,
         state: Option<(
-            Arc<ResolvedComponentMetaState>,
+            crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
             Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
         )>,
         mirror: Option<crate::types::ResolvedComponentMetaCacheEntry>,
@@ -2990,7 +3008,7 @@ impl VerterHost {
     fn resolved_meta_mirror_entry(
         &self,
         canonical: &str,
-        state: Arc<ResolvedComponentMetaState>,
+        state: crate::resolver_core::CachedValue<ResolvedComponentMetaState>,
     ) -> Option<crate::types::ResolvedComponentMetaCacheEntry> {
         if state.completeness.is_partial() {
             return None;

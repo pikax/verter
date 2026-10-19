@@ -9,6 +9,7 @@
 
 use super::*;
 use crate::fact_tracing::PreparedDeclOutcomeFold;
+use verter_type_expr::OwnedStr;
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     /// The ONE shared binder-frame constructor for declared type-parameter
@@ -89,7 +90,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // type's own `<T>` binders intern, so applying an argument to
             // the declaration's `T` can never rewrite a shadowing inner `T`.
             BinderIdentityMode::DeclHeader { owner_symbol } => (
-                DeclIdentity::from_scope(scope, Arc::clone(owner_symbol)),
+                DeclIdentity::from_scope(scope, verter_type_expr::OwnedStr::clone(owner_symbol)),
                 index as u16,
             ),
             BinderIdentityMode::Signature => (DeclIdentity::from_scope(scope, Arc::clone(name)), 0),
@@ -124,7 +125,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index,
                         constraint: None,
                         default: None,
-                        display_name: Arc::clone(&spec.name),
+                        display_name: OwnedStr::from(&spec.name),
                     },
                     scope.clone(),
                 );
@@ -220,7 +221,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param_index,
                         constraint,
                         default,
-                        display_name: Arc::clone(&spec.name),
+                        display_name: OwnedStr::from(&spec.name),
                     },
                     scope.clone(),
                 )
@@ -277,7 +278,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &LocatorLoweringKey,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
-        let canonical = Arc::clone(&key.slot().defining_canonical);
+        let canonical = key.slot().defining_canonical.clone();
         let Some(serve) = self.ctx.ensure_indexed_ready_serve(canonical.as_ref()) else {
             // The owning file is unknown to the live view — the value
             // cannot be self-rooted; refuse warm admission.
@@ -290,7 +291,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through the graph lowering below.
         let indexed = serve.indexed;
         let observed_self_roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> =
-            vec![(Arc::clone(&canonical), indexed.whole_hash)];
+            vec![(canonical.clone(), indexed.whole_hash)];
 
         let derefed = match self
             .ctx
@@ -322,7 +323,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.project_generation_signature(),
                         )
                             .into();
-                        return output.with_observed_self_roots(observed_self_roots);
+                        return output.with_observed_self_roots(observed_self_roots).with_positional_guarantee();
                     }
                 }
                 let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput = (
@@ -347,16 +348,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             AuthoredBodyLocator::MacroPayload(payload) => &payload.anchor,
         };
         let scope = NodeScopeId::File {
-            canonical_id: Arc::clone(&canonical),
+            canonical_id: canonical.clone(),
             owner: anchor.owner,
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
         let anchor_symbol = match key.locator() {
-            AuthoredBodyLocator::DeclBody(slot) => Arc::clone(&slot.anchor.symbol),
-            AuthoredBodyLocator::AugmentationBody(aug) => Arc::clone(&aug.anchor.symbol),
-            AuthoredBodyLocator::JsdocTypedefBody(typedef) => Arc::clone(&typedef.anchor.symbol),
-            AuthoredBodyLocator::MacroPayload(payload) => Arc::clone(&payload.anchor.symbol),
+            AuthoredBodyLocator::DeclBody(slot) => slot.anchor.symbol.clone(),
+            AuthoredBodyLocator::AugmentationBody(aug) => aug.anchor.symbol.clone(),
+            AuthoredBodyLocator::JsdocTypedefBody(typedef) => typedef.anchor.symbol.clone(),
+            AuthoredBodyLocator::MacroPayload(payload) => payload.anchor.symbol.clone(),
         };
 
         // Anchor-scope IDENTITY-resolution inputs — the SAME sources the
@@ -440,7 +441,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .ok()
                                 .flatten()
                         })
-                        .map(|prepared| AnchorPreparedDecl::Value(Arc::new(prepared))),
+                        .map(|prepared| AnchorPreparedDecl::Value(verter_retention::heap_size::OwnedValue::new(prepared))),
                     _ => bundle
                         .as_ref()
                         .and_then(|bundle| {
@@ -536,7 +537,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect();
                 self.graph().intern_node_with_scope(
                     SemanticNodeData::MergedDecl {
-                        contributors: Arc::from(ids.into_boxed_slice()),
+                        contributors: crate::semantic_query::PayloadArray::from(
+                            ids.into_boxed_slice(),
+                        ),
                     },
                     scope.clone(),
                 )
@@ -556,7 +559,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.project_generation_signature(),
         )
             .into();
-        output.with_observed_self_roots(observed_self_roots)
+        output
+            .with_observed_self_roots(observed_self_roots)
+            .with_positional_guarantee()
     }
 
     /// Empty-path value `DeclBody` locators address the binding's type
@@ -729,8 +734,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // the lowered graph with one is the typed miss.
                 Step::ClassMembersNamed { .. } | Step::ClassHeritage => return None,
                 Step::FunctionParam { ordinal } => match data {
-                    SemanticNodeData::Signature { params, .. } => {
-                        Position::Node(params.get(*ordinal as usize)?.ty)
+                    data if data
+                        .callable_header(
+                            &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                        )
+                        .is_some() =>
+                    {
+                        Position::Node(
+                            data.callable_header(
+                                &crate::semantic_query::ResolveOverloadSetConsumer::witness(),
+                            )?
+                            .params
+                            .get(*ordinal as usize)?
+                            .ty,
+                        )
                     }
                     _ => return None,
                 },
@@ -848,6 +865,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(data) = self.graph().node_data(node) else {
             return node;
         };
+        if let SemanticNodeData::DeferredCallable(callable) = data.as_ref() {
+            return self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::DeferredCallable(callable.clone().with_occurrence(occurrence)),
+            );
+        }
         let mut new_data = (*data).clone();
         let SemanticNodeData::Signature {
             occurrence: slot, ..
@@ -884,7 +907,7 @@ fn signature_occurrence_for_locator(
         ),
         [verter_type_expr::locators::TypeBodyPathStep::Member { ordinal }] => (
             verter_type_expr::facts::FunctionPartIdentity::Member {
-                member_path: Arc::from([*ordinal]),
+                member_path: verter_type_expr::OwnedSlice::from([*ordinal]),
             },
             0,
             0,
@@ -921,12 +944,13 @@ fn locator_with_path_step(
     locator: &AuthoredBodyLocator,
     step: verter_type_expr::locators::TypeBodyPathStep,
 ) -> AuthoredBodyLocator {
-    let append = |path: &Arc<[verter_type_expr::locators::TypeBodyPathStep]>| {
-        let mut next = Vec::with_capacity(path.len() + 1);
-        next.extend_from_slice(path);
-        next.push(step);
-        Arc::from(next.into_boxed_slice())
-    };
+    let append =
+        |path: &verter_type_expr::OwnedSlice<verter_type_expr::locators::TypeBodyPathStep>| {
+            let mut next = Vec::with_capacity(path.len() + 1);
+            next.extend_from_slice(path);
+            next.push(step);
+            verter_type_expr::OwnedSlice::from(next)
+        };
     match locator {
         AuthoredBodyLocator::DeclBody(slot) => {
             AuthoredBodyLocator::DeclBody(verter_type_expr::locators::TypeBodySlot {

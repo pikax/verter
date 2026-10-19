@@ -358,9 +358,9 @@ type Witness = FlowFunctionReturnIdentity;
 fn witness(canonical: &str, symbol: &str) -> Witness {
     FlowFunctionReturnIdentity {
         anchor: AuthoredAnchor {
-            canonical_id: Arc::from(canonical),
+            canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(symbol),
+            symbol: verter_type_expr::OwnedStr::from(symbol),
             space: LocatorSymbolSpace::Value,
         },
         function_part: FunctionPartIdentity::DeclarationBody,
@@ -439,7 +439,7 @@ fn outcome(host: &VerterHost, witness: &Witness) -> String {
 const RENDER_DEPTH: usize = 12;
 
 fn render_type(
-    node_data: &dyn Fn(SemanticNodeId) -> Option<Arc<SemanticNodeData>>,
+    node_data: &dyn Fn(SemanticNodeId) -> Option<verter_type_engine::semantic_query_memo::NodeData>,
     node: SemanticNodeId,
     depth: usize,
     out: &mut String,
@@ -502,13 +502,13 @@ fn render_type(
                 .collect();
             parts.extend(
                 surface
-                    .call_signatures
+                    .call_signatures()
                     .iter()
                     .map(|signature| format!("call {}", child(*signature))),
             );
             parts.extend(
                 surface
-                    .construct_signatures
+                    .construct_signatures()
                     .iter()
                     .map(|signature| format!("new {}", child(*signature))),
             );

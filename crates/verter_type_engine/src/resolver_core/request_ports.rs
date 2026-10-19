@@ -100,7 +100,18 @@ pub trait IndexedInputs {
         &self,
         canonical: &str,
     ) -> Option<verter_session_query::resolution::ProjectId>;
-    fn declaration_sequence_rank(&self, canonical: &str) -> u32;
+    /// The file order of the program the requesting file `anchor` belongs
+    /// to — or, when no configured project owns it, the program of the
+    /// canonically first of `ordered` (the files being ordered) one owns —
+    /// which orders the declarations of a symbol merged across files. A
+    /// reader that orders contributors from two or more files by it
+    /// observes its
+    /// [`ProgramFileOrder::fact`](verter_session_query::inputs::program_order::ProgramFileOrder::fact).
+    fn program_file_order(
+        &self,
+        anchor: &str,
+        ordered: &mut dyn Iterator<Item = &str>,
+    ) -> Arc<verter_session_query::inputs::program_order::ProgramFileOrder>;
     fn engine_policy(&self) -> crate::project_semantic_dispatch::EnginePolicy;
 
     // -------- Identity --------------------------------------------
@@ -123,7 +134,10 @@ pub trait IndexedInputs {
 
     // -------- Cache accessors --------------------------------------
 
-    fn prepared_decl_bundle(&self, canonical_id: &str) -> Option<Arc<PreparedInputRecord>>;
+    fn prepared_decl_bundle(
+        &self,
+        canonical_id: &str,
+    ) -> Option<verter_session_query::inputs::prepared::PreparedInputRef>;
 
     /// Materialise (or warm-read) the canonical post-parse artifact,
     /// with the publication status flowed BY VALUE — see
@@ -292,6 +306,18 @@ pub trait IndexedInputs {
 }
 
 pub trait RouteLookup {
+    /// The module's terminal value exports, with the complete route proof.
+    /// Consumers observe `facts` once, rather than resolving every member
+    /// independently through the barrel graph.
+    fn module_export_table(
+        &self,
+        canonical: &str,
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::declarations::module_exports::ModuleExportTable,
+        >,
+    >;
+
     fn reverse_dependency_canonicals(&self, canonical: &str) -> Vec<String>;
     fn observe_owner_import_route_witness(&self, canonical: &str);
     // -------- Symbol / route resolution ----------------------------
@@ -327,7 +353,7 @@ pub trait RouteLookup {
         imported_name: &str,
     ) -> (
         Option<verter_session_query::type_solver::ResolvedRootIdentity>,
-        Arc<[verter_session_query::facts::fact_cache::FactVersionRef]>,
+        verter_session_query::facts::fact_cache::OwnedFactSignature,
     );
 
     fn resolve_named_type_export_target_shallow(
@@ -410,21 +436,19 @@ impl CancellationCheckpoint {
     pub(crate) const fn new() -> Self {
         Self { _private: () }
     }
-    pub(crate) fn token(self) -> Option<verter_execution::cancellation::CancellationToken> {
-        let job = verter_execution::cancellation::current_job_cancellation_token();
-        if job
-            .as_ref()
-            .is_some_and(|token| token.has_registered_owners())
-        {
-            return job;
-        }
-        crate::request_context::current_request_cancellation_token().or(job)
-    }
     /// Whether the selected cancellation token is cancelled now.
     #[cfg_attr(feature = "test-support", track_caller)]
     #[inline]
     pub fn is_cancelled(self) -> bool {
-        let cancelled = self.token().is_some_and(|token| token.is_cancelled());
+        // A job token that accepted a request owner decides; otherwise the
+        // installed request's token, else the ownerless job token. Each is
+        // read in place.
+        let cancelled =
+            verter_execution::cancellation::with_current_job_cancellation_token(|job| match job {
+                Some(token) if token.has_registered_owners() => token.is_cancelled(),
+                _ => crate::request_context::current_request_cancelled()
+                    .unwrap_or_else(|| job.is_some_and(|token| token.is_cancelled())),
+            });
         #[cfg(feature = "test-support")]
         if cancelled {
             crate::cancel_trace::observed(std::panic::Location::caller());
@@ -467,6 +491,10 @@ pub trait HostAttachmentPort {
     type HostAttachment: ?Sized;
     fn host_attachment(&self) -> &Self::HostAttachment;
 }
+
+/// The relative specifiers an augmentation-index population resolved: per
+/// augmenter canonical, each specifier and the canonical it resolved to.
+pub type AugmenterResolutions = rustc_hash::FxHashMap<Arc<str>, Vec<(Arc<str>, Option<Arc<str>>)>>;
 
 /// A single population read and its owned query result. The all-space shape
 /// fingerprint travels beside the filtered answer, including an empty answer.
@@ -528,7 +556,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -541,7 +569,7 @@ pub trait OwnedLowering {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedTypeDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
         match self.prepared_type_decl(canonical_id, owner, symbol_name) {
             Ok(decl) => decl,
             Err(failure) => {
@@ -564,7 +592,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<PreparedValueDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
 
@@ -581,7 +609,7 @@ pub trait OwnedLowering {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<PreparedValueDecl>> {
+    ) -> Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>> {
         match self.prepared_value_decl(canonical_id, owner, symbol_name) {
             Ok(decl) => decl,
             Err(failure) => {
@@ -604,19 +632,53 @@ pub trait OwnedLowering {
     ) -> (
         verter_session_query::resolution::AugmentationTargetKey,
         Arc<verter_session_query::resolution::AugmenterSet>,
+    ) {
+        let (key, set, _) = self.augmentation_index_with_resolutions(target);
+        (key, set)
+    }
+    /// [`Self::augmentation_index`], with the relative specifiers the read
+    /// resolved while it populated the index: `(augmenter, specifier)` to
+    /// the canonical it resolved to. Empty when the read was served from
+    /// an already populated index.
+    fn augmentation_index_with_resolutions(
+        &self,
+        target: verter_session_query::resolution::AugmentationTargetKind,
+    ) -> (
+        verter_session_query::resolution::AugmentationTargetKey,
+        Arc<verter_session_query::resolution::AugmenterSet>,
+        AugmenterResolutions,
     );
     fn global_contributor_answer(
         &self,
+        demand_canonical: &str,
         name: &str,
         space: verter_session_query::facts::SymbolSpace,
     ) -> ContributorAnswer;
+    /// The contributors of `name` to `target`, read for `anchor`, the
+    /// requesting file: every library among them, for
+    /// [`Self::augmentation_contributor_order`] to keep the ones `anchor`'s
+    /// program loads. The population read already holds every file the
+    /// program's library and file order reached.
     fn contributor_answer(
         &self,
+        anchor: &str,
         target: &verter_session_query::resolution::AugmentationTargetKind,
         name: &str,
-        allow_automatic_libs: bool,
         space: Option<verter_session_query::facts::SymbolSpace>,
     ) -> ContributorAnswer;
+    /// The augmenters and file-scope contributors of `name` in declaration
+    /// precedence order — by the order of `anchor`'s program when they
+    /// include a library or span two or more program files, which the read
+    /// then observes — without the libraries that program does not load.
+    fn augmentation_contributor_order(
+        &self,
+        anchor: &str,
+        key: &verter_session_query::resolution::AugmentationTargetKey,
+        augmenters: &verter_session_query::resolution::AugmenterSet,
+        name: &str,
+        contributors: &verter_session_query::inputs::contributors::SymbolContributors,
+        selection: verter_session_query::inputs::contributors::FileScopeContribution,
+    ) -> Arc<[verter_session_query::inputs::contributors::AugmentationCandidate]>;
     fn augmenter_artifact_answer(
         &self,
         captured: &verter_session_query::source::artifact_key::FileArtifactKey,
@@ -670,7 +732,7 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> Result<
-        Option<Arc<PreparedTypeDecl>>,
+        Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     >;
     fn prepared_type_for_projection(
@@ -679,6 +741,15 @@ pub trait OwnedLowering {
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
+    /// Lower the type declarations of `demands` that are not lowered yet as
+    /// one batch — one lowering-service rendezvous per occupied worker
+    /// shard instead of one per declaration — registering each one's facts
+    /// as a single demand would and keeping its body for the locator read
+    /// that follows while the returned guard lives.
+    fn batch_type_bodies(
+        &self,
+        demands: &[verter_session_query::source::demand::TypeBodyBatchDemand<'_>],
+    ) -> verter_session_query::source::demand::BatchedBodies;
     fn prepare_augmentation_type(
         &self,
         input: &PreparedInputRecord,

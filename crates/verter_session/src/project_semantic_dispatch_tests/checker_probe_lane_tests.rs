@@ -205,9 +205,9 @@ pub(super) fn with_probe_on_host<R>(
     ) -> R,
 ) -> R {
     with_probe_outcome_on_host(host, project, source, probe, |dispatch, outcome| {
-        let node = outcome
-            .into_usable_node()
-            .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+        let node = outcome.into_usable_node().unwrap_or_else(|| {
+            panic!("the probe `{probe}` reduced to a partial demand: {outcome:?}")
+        });
         read(dispatch, node)
     })
 }
@@ -255,6 +255,12 @@ pub(super) fn with_probe_outcome_on_host<R>(
         super::evaluate::StructuralFactDemandOutcome,
     ) -> R,
 ) -> R {
+    // The probe holds what its reads deliver for as long as it inspects
+    // them.
+    let _probe_scope = host
+        .project_type_store()
+        .semantic_graph()
+        .enter_node_root_scope();
     let module = format!(
         "{source}\nexport function __checker_probe() {{ \
             const __probe: {probe} = null as any; \
@@ -273,6 +279,7 @@ pub(super) fn with_probe_outcome_on_host<R>(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
     // A read of a global the ambient library declares is scoped by the
     // probe module's project, as the member access in its body would be.
     let _demand_scope = project.ambient_lib.map(|_| {
@@ -326,23 +333,8 @@ pub(super) fn degradation_in(
         .ok_or(())
 }
 
-/// The typed outcome of the body-derived return of `function` in a module
-/// of `source`, checked in `project`: its degradation when it produced a
-/// value, or the typed [`FlowReturnError`](crate::host_flow_return_audit::FlowReturnError) it
-/// answered instead — a missing function (`Failure(Missing)`) told apart
-/// from a budget or any other incompleteness.
-pub(super) fn flow_return_outcome_in(
-    project: ProbeProject<'_>,
-    source: &str,
-    function: &str,
-) -> Result<
-    Option<verter_type_engine::semantic_query::FlowReturnDegradation>,
-    crate::host_flow_return_audit::FlowReturnError,
-> {
-    flow_return_outcome_on_host(&probe_host(project), source, function)
-}
-
-/// [`flow_return_outcome_in`] on `host`, a probe host the caller configured
+/// The typed outcome of body-derived return inference on a probe host
+/// the caller configured
 /// (a budget set on its stores, say): the probe module is (re)written on it
 /// and `function`'s return read through the audited boundary.
 pub(super) fn flow_return_outcome_on_host(
@@ -377,9 +369,9 @@ pub(super) fn flow_return_audited_on_host(
     );
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -398,9 +390,9 @@ fn flow_return_of(
 ) -> Option<Arc<verter_type_engine::semantic_query::FlowReturnResult>> {
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
-            canonical_id: Arc::from(PROBE_FILE),
+            canonical_id: verter_type_expr::OwnedStr::from(PROBE_FILE),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol: Arc::from(function),
+            symbol: verter_type_expr::OwnedStr::from(function),
             space: verter_type_expr::locators::LocatorSymbolSpace::Value,
         },
         function_part: verter_type_expr::facts::FunctionPartIdentity::DeclarationBody,
@@ -448,16 +440,41 @@ pub(super) fn probe_host(project: ProbeProject<'_>) -> Arc<crate::VerterHost> {
             })
             .expect("the probe's ambient library registers against its project");
     }
-    for (name, file_source) in project.files {
-        let path = format!("{PROBE_ROOT}/{name}");
-        // A sibling is classified by its name, as the host classifies it: a
-        // `.d.ts` sibling is a declaration file.
-        let language = crate::LanguageRegistry::global()
-            .classify_static(&path)
-            .static_resolution();
-        crate::u6_flow_shape_corpus_tests::upsert(&host, &path, file_source, language);
-    }
+    // Materialize the sibling project through the shared atomic upsert
+    // boundary. Every source is ready before the probe; thousands of
+    // singleton scheduler submissions add no semantic coverage.
+    upsert_probe_files(&host, project.files);
     host
+}
+
+pub(super) fn upsert_probe_files(host: &crate::VerterHost, files: &[(&str, &str)]) {
+    let requests = files
+        .iter()
+        .map(|(name, file_source)| {
+            let path = format!("{PROBE_ROOT}/{name}");
+            let file_language = crate::LanguageRegistry::global()
+                .classify_static(&path)
+                .static_resolution();
+            crate::UpsertRequest {
+                canonical_id: Some(path.clone()),
+                input_id: path,
+                source: Arc::from(*file_source),
+                file_language,
+                aliases: Vec::new(),
+            }
+        })
+        .collect();
+    let outcomes =
+        host.upsert_many_with_priority(requests, verter_scheduler::stage::Priority::Interactive);
+    assert_eq!(outcomes.len(), files.len());
+    for outcome in outcomes {
+        let _ = outcome
+            .result
+            .unwrap_or_else(|error| {
+                panic!("fixture {} must upsert: {error:?}", outcome.canonical_id)
+            })
+            .expect("fixture source must be committed");
+    }
 }
 
 /// Every `(probe, checker print)` pair whose live answer does not match the
@@ -617,6 +634,15 @@ pub(super) fn return_failures_in_one_host(
 /// probe is its own function of one probe module, so an answer a row leaves
 /// in the host's shared memo is one the rows after it can read.
 pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
+    mismatches_in_one_host_observing(source, rows, |_| {})
+}
+
+/// Observe each completed read on the same host used for the answer checks.
+pub(super) fn mismatches_in_one_host_observing(
+    source: &str,
+    rows: &[(&str, &str)],
+    mut observe: impl FnMut(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>),
+) -> Vec<String> {
     let host = probe_host(ProbeProject::default());
     let mut module = format!("{source}\n");
     for (index, (probe, _)) in rows.iter().enumerate() {
@@ -645,6 +671,7 @@ pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec
             let host_ctx =
                 crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+            let _builder = dispatch.enter_construction_scope();
             let node = dispatch
                 .normalize_node_keeping_declaration_refs_for_tests(
                     result.return_type(),
@@ -652,6 +679,7 @@ pub(super) fn mismatches_in_one_host(source: &str, rows: &[(&str, &str)]) -> Vec
                 )
                 .into_usable_node()
                 .unwrap_or_else(|| panic!("the probe `{probe}` reduced to a partial demand"));
+            observe(&dispatch);
             (!checker_syntax::matches_node(&dispatch, node, &expected, 0)).then(|| {
                 format!(
                     "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",

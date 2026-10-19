@@ -18,8 +18,6 @@
 //! is a `#[cfg(test)]` parity suite, so its whole reachable PRODUCTION scope is
 //! output-only.
 
-use std::sync::Arc;
-
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// A session-local node-bearing expansion result: the produced
@@ -218,10 +216,18 @@ fn lower_macro_arg_carrier_head(
     owner_canonical: &str,
     macro_index: usize,
     mode: ProjectionMode,
-) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
+) -> Option<
+    verter_type_engine::semantic_query_memo::node_roots::Constructed<
+        verter_type_engine::semantic_query::SemanticNodeId,
+    >,
+> {
     dispatch
         .macro_type_arg_hot_ref(owner_canonical, macro_index)
-        .map(|product| dispatch.resolve_hot_handle_at_mode(product.hot, mode))
+        .map(|product| {
+            dispatch
+                .owning()
+                .resolve_hot_handle_at_mode(product.hot, mode)
+        })
 }
 
 /// Sink-owned demand: expand the `defineModel<T>()` prop/model output.
@@ -248,7 +254,7 @@ pub(crate) fn expand_define_model_output(
     // `Published(Expanded)` projection contexts); the model value publishes as
     // a carrier and consumers re-resolve it on demand. A different DEMAND on
     // the same handle, not a second lowering of the macro arg.
-    let Some(base_id) = lower_macro_arg_carrier_head(
+    let Some(base) = lower_macro_arg_carrier_head(
         dispatch,
         owner_canonical,
         macro_index,
@@ -256,8 +262,12 @@ pub(crate) fn expand_define_model_output(
     ) else {
         return DefineModelOutputExpansion::CarrierMiss;
     };
-    let artifact =
-        AdmittedExpansionNode::new(base_id, Arc::from(Vec::new().into_boxed_slice()), false);
+    let base_id = *base.value();
+    let artifact = AdmittedExpansionNode::new(
+        base_id,
+        verter_type_engine::semantic_query::DepSignature::new(Vec::new().into_boxed_slice()),
+        false,
+    );
     match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
         Some(normalized) => DefineModelOutputExpansion::Materialized {
             produced_node_id: base_id,
@@ -287,17 +297,18 @@ pub(crate) fn expand_generic_project_path_output(
     owner_canonical: &str,
     macro_index: usize,
     carrier_lower_mode: ProjectionMode,
-    terminal_path: Arc<[verter_type_engine::semantic_query::PathSegment]>,
+    terminal_path: verter_type_expr::OwnedSlice<verter_type_engine::semantic_query::PathSegment>,
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use verter_type_engine::semantic_query::{
         QueryResult, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
     };
-    let Some(base_id) =
+    let Some(base) =
         lower_macro_arg_carrier_head(dispatch, owner_canonical, macro_index, carrier_lower_mode)
     else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
+    let base_id = *base.value();
     let projected = dispatch.execute_type_node(SemanticQueryKey::ProjectPath {
         base: base_id,
         path: terminal_path,
@@ -316,7 +327,9 @@ pub(crate) fn expand_generic_project_path_output(
         QueryResult::Value(SemanticQueryOutput { value: node_id, .. }) => {
             let artifact = AdmittedExpansionNode::new(
                 node_id,
-                Arc::from(Vec::new().into_boxed_slice()),
+                verter_type_engine::semantic_query::DepSignature::new(
+                    Vec::new().into_boxed_slice(),
+                ),
                 false,
             );
             match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
@@ -356,23 +369,24 @@ pub(crate) fn expand_slot_binding_output(
     fallback_source: &verter_type_expr::facts::SemanticTypeSource,
 ) -> MacroPathOutputExpansion {
     use verter_type_engine::semantic_query::QueryResult;
-    let Some(base_id) =
+    let Some(base) =
         lower_macro_arg_carrier_head(dispatch, owner_canonical, macro_index, carrier_lower_mode)
     else {
         return MacroPathOutputExpansion::CarrierMiss;
     };
+    let base_id = *base.value();
     let slot_binding = dispatch.project_slot_binding_member_with_terminal_id(
         base_id,
         slot_name,
         binding_name,
         ProjectionMode::Expanded,
     );
-    match slot_binding.value {
+    match *slot_binding.value() {
         QueryResult::Value(terminal_id) => {
             let artifact = AdmittedExpansionNode::new(
                 terminal_id,
-                slot_binding.dep_signature,
-                slot_binding.result_is_partial,
+                slot_binding.dep_signature().clone(),
+                !slot_binding.fact_status().is_complete(),
             );
             match materialize_admitted_expansion_node(dispatch, &artifact, fallback_source) {
                 Some(normalized) => MacroPathOutputExpansion::Materialized {

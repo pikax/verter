@@ -40,6 +40,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use verter_type_expr::OwnedStr;
 
 use verter_type_expr::facts::{EnumPrimitiveDomain, EnumScalar};
 use verter_type_expr::{
@@ -403,6 +404,46 @@ pub fn compute_member_presence_hash(
     buf.extend_from_slice(&kind.tag());
     buf.extend_from_slice(&exporter_qualifier_salt(exporter));
     hash_16(&buf)
+}
+
+/// The member-read fingerprint of one class member name (the `Member`
+/// fact of a class): the fingerprint of every class element declaring the
+/// name, folded one by one in source order (a swap of two declaring
+/// elements moves it), folded with the fingerprint of the class's
+/// `extends` reference (`None` when the class has no `extends` clause).
+///
+/// A read of the name that answers from these elements alone depends on
+/// nothing else the class's file holds, so the fact pins exactly what such
+/// a read observed: an edit to the elements, to their number or to the
+/// `extends` clause moves it; an edit to another member does not.
+#[must_use]
+pub fn compute_class_member_read_hash(
+    elements: &[HashOutcome],
+    heritage: Option<&HashOutcome>,
+) -> HashOutcome {
+    let mut buf: Vec<u8> = Vec::with_capacity(48 + 16 * elements.len());
+    buf.extend_from_slice(b"class-member-read:");
+    buf.extend_from_slice(&(elements.len() as u64).to_le_bytes());
+    for element in elements {
+        buf.extend_from_slice(&element.hash);
+    }
+    match heritage {
+        Some(heritage) => {
+            buf.push(1);
+            buf.extend_from_slice(&heritage.hash);
+        }
+        None => buf.push(0),
+    }
+    HashOutcome {
+        hash: hash_16(&buf),
+        budget_exceeded: elements.iter().any(|element| element.budget_exceeded)
+            || heritage.is_some_and(|heritage| heritage.budget_exceeded),
+        visited_nodes: elements
+            .iter()
+            .map(|element| element.visited_nodes)
+            .sum::<usize>()
+            + heritage.map_or(0, |heritage| heritage.visited_nodes),
+    }
 }
 
 /// Compute the whole-surface fingerprint over an exporter's full
@@ -1100,7 +1141,7 @@ impl<'a> Walker<'a> {
         ty: &TypeExpr,
     ) {
         self.buf.push(0x60);
-        self.write_authored_property_key(&AuthoredPropertyKey::String(Arc::from(name)));
+        self.write_authored_property_key(&AuthoredPropertyKey::String(OwnedStr::from(name)));
         self.buf.push(u8::from(optional));
         self.buf.push(u8::from(readonly));
         self.write_member_visibility(visibility);

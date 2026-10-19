@@ -5,8 +5,112 @@
 //! unannotated parameters, and its body return is read under them.
 
 use super::{FlowDemandDriver, FlowEvaluator, Positional};
-use crate::semantic_query::{SemanticNodeData, SemanticNodeId, SignatureKind};
+use crate::semantic_query::{
+    IncompleteReason, SemanticNodeData, SemanticNodeId, SemanticQueryApi, SignatureKind,
+};
 use verter_session_query::flow::slice::SliceExpr;
+
+impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanticDispatch<'_, C> {
+    /// Expand a contextual alias without erasing marker applications in its body.
+    pub(in crate::project_semantic_dispatch) fn contextual_carrier_view(
+        &self,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let data = self.graph().node_data(node);
+        let Some(SemanticNodeData::InstantiationRef { base, args }) = data.as_deref() else {
+            return self.resolved_reduction_view(node);
+        };
+        let context =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Skeleton,
+            );
+        match self.execute_type_node(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    base.canonical_id.clone(),
+                    base.owner,
+                    base.decl_name.clone(),
+                ),
+                std::sync::Arc::clone(args.as_arc()),
+                self.instantiate_context_for(&base.canonical_id, context),
+            ),
+        )) {
+            crate::semantic_query::QueryResult::Value(output) => output.value,
+            _ => node,
+        }
+    }
+
+    /// Find the global marker through contextual intersections and aliases,
+    /// before its empty interface is reduced to a structural object.
+    pub(in crate::project_semantic_dispatch) fn contextual_object_this_type(
+        &self,
+        contextual: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<SemanticNodeId> {
+        enum Work {
+            Visit(SemanticNodeId),
+            Join(SemanticNodeId, Vec<SemanticNodeId>, bool),
+        }
+        let mut pending = vec![Work::Visit(contextual)];
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut receivers = rustc_hash::FxHashMap::default();
+        while let Some(work) = pending.pop() {
+            let node = match work {
+                Work::Visit(node) => node,
+                Work::Join(node, children, union) => {
+                    let found: Vec<_> = children
+                        .iter()
+                        .filter_map(|child| receivers.get(child).copied())
+                        .collect();
+                    if let Some(&first) = found.first() {
+                        receivers.insert(
+                            node,
+                            if union {
+                                self.intern_normalized_union_or_intersection(&found, true)
+                            } else {
+                                first
+                            },
+                        );
+                    }
+                    continue;
+                }
+            };
+            if !seen.insert(node) {
+                continue;
+            }
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::InstantiationRef { base, args })
+                    if base.decl_name.as_ref() == "ThisType" && args.len() == 1 =>
+                {
+                    if self
+                        .first_global_declaration(canonical, "ThisType")
+                        .is_some_and(|global| {
+                            global.canonical_id == base.canonical_id && global.owner == base.owner
+                        })
+                    {
+                        receivers.insert(node, args[0]);
+                    }
+                }
+                Some(SemanticNodeData::Intersection(members)) => {
+                    pending.push(Work::Join(node, members.to_vec(), false));
+                    pending.extend(members.iter().rev().copied().map(Work::Visit));
+                }
+                Some(SemanticNodeData::Union(members)) => {
+                    pending.push(Work::Join(node, members.to_vec(), true));
+                    pending.extend(members.iter().rev().copied().map(Work::Visit));
+                }
+                _ => {
+                    let resolved = self.contextual_carrier_view(node);
+                    if resolved != node {
+                        pending.push(Work::Join(node, vec![resolved], false));
+                        pending.push(Work::Visit(resolved));
+                    }
+                }
+            }
+        }
+        receivers.get(&contextual).copied()
+    }
+}
 
 /// A function-value argument to type under a contextual signature: the
 /// nested function's demand, and what its outcome is read against.
@@ -26,6 +130,7 @@ pub(super) struct FunctionArgumentMark {
 /// each parameter position and the contextual return type.
 #[derive(Clone)]
 pub(super) struct ContextualSignature {
+    pub(super) receiver: Option<SemanticNodeId>,
     /// The contextual signature's non-rest parameter types, in order.
     parameters: Vec<SemanticNodeId>,
     /// The element type of its rest parameter, when it has one.
@@ -40,6 +145,38 @@ impl ContextualSignature {
     /// `None` past the end of a signature without a rest parameter.
     pub(super) fn parameter_at(&self, position: usize) -> Option<SemanticNodeId> {
         self.parameters.get(position).copied().or(self.rest_element)
+    }
+}
+
+/// The sole callee signature's contextual inputs, prepared once for a call
+/// route. Sibling callbacks share discovery and constraint substitution.
+pub(super) struct CalleeParameters {
+    parameters: std::sync::Arc<[crate::semantic_query::FunctionParam]>,
+    fixed_count: usize,
+    rest_element: Option<SemanticNodeId>,
+    constraints: Vec<(SemanticNodeId, SemanticNodeId)>,
+    substituted: rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+}
+
+impl CalleeParameters {
+    pub(super) fn at<D: FlowDemandDriver>(
+        &mut self,
+        dispatch: &D,
+        ordinal: usize,
+    ) -> Option<SemanticNodeId> {
+        super::super::call_resolve::record_argument_work(1);
+        let parameter = if ordinal < self.fixed_count {
+            self.parameters.get(ordinal).map(|param| param.ty)
+        } else {
+            self.rest_element
+        }?;
+        Some(*self.substituted.entry(parameter).or_insert_with(|| {
+            self.constraints
+                .iter()
+                .fold(parameter, |parameter, &(param, constrained)| {
+                    dispatch.substitute_semantic_type_param(parameter, param, constrained)
+                })
+        }))
     }
 }
 
@@ -77,12 +214,21 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         if !type_parameters.is_empty() {
             return None;
         }
+        let (receiver, params) = crate::semantic_query::split_this_receiver(params);
         let mut parameters = Vec::with_capacity(params.len());
         let mut rest_element = None;
         for param in params.iter() {
             if param.rest {
                 rest_element = match graph.node_data(param.ty).as_deref() {
                     Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+                    Some(SemanticNodeData::Tuple { elements, .. })
+                        if elements
+                            .iter()
+                            .all(|element| !element.optional && !element.rest) =>
+                    {
+                        parameters.extend(elements.iter().map(|element| element.value));
+                        None
+                    }
                     _ => return None,
                 };
                 break;
@@ -90,6 +236,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             parameters.push(param.ty);
         }
         Some(ContextualSignature {
+            receiver: receiver.map(|param| param.ty),
             parameters,
             rest_element,
             return_type: *return_type,
@@ -129,15 +276,12 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
     pub(super) fn function_argument_request_under_parameter(
         &mut self,
         expr: &SliceExpr,
-        callee: SemanticNodeId,
-        ordinal: usize,
+        parameter: Option<SemanticNodeId>,
     ) -> Option<FunctionArgumentRequest> {
         if !matches!(expr, SliceExpr::NestedFunctionValue { gap: None, .. }) {
             return None;
         }
-        let signature = self
-            .callee_parameter_type(callee, ordinal)
-            .and_then(|parameter| self.contextual_signature(parameter));
+        let signature = parameter.and_then(|parameter| self.contextual_signature(parameter));
         self.function_argument_request(expr, signature)
     }
 
@@ -189,16 +333,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         }
     }
 
-    /// The type the callee's one call signature declares for the argument
-    /// at `ordinal` — the parameter there, or its rest parameter's element —
+    /// The types the callee's one call signature declares for its arguments,
     /// with each of the signature's type parameters read with its
     /// constraint, as a contextual type reads an unfixed type parameter.
     /// `None` for a callee with no call signature or several.
-    fn callee_parameter_type(
+    pub(super) fn callee_parameter_types(
         &self,
         callee: SemanticNodeId,
-        ordinal: usize,
-    ) -> Option<SemanticNodeId> {
+    ) -> Result<Option<CalleeParameters>, IncompleteReason> {
         let signatures = match self
             .dispatch
             .shared_signature_nodes(callee, SignatureKind::Call)
@@ -206,58 +348,63 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             super::super::signature_discovery::SharedSignatureNodes::Nodes(signatures) => {
                 signatures
             }
-            super::super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+            super::super::signature_discovery::SharedSignatureNodes::Incomplete(reason) => {
+                return Err(reason)
+            }
         };
         let [signature] = signatures.as_slice() else {
-            return None;
+            return Ok(None);
         };
         let graph = self.dispatch.graph();
-        let data = graph.node_data(*signature)?;
-        let SemanticNodeData::Signature {
-            params,
-            type_parameters,
-            ..
-        } = &*data
-        else {
-            return None;
-        };
-        let mut parameter = None;
+        let data = graph
+            .node_data(*signature)
+            .ok_or(IncompleteReason::UnsettledInput)?;
+        let header = data
+            .callable_header(&crate::semantic_query::ResolveOverloadSetConsumer::witness())
+            .ok_or(IncompleteReason::UnsettledInput)?;
+        let (params, type_parameters) = (header.params, header.type_parameters);
+        let constraints: Vec<_> = type_parameters
+            .iter()
+            .filter_map(|decl| {
+                let constraint = decl.constraint?;
+                let constrained = match graph.node_data(decl.param).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        decl: identity,
+                        param_index,
+                        default,
+                        display_name,
+                        constraint: None,
+                    }) => graph.intern_node(SemanticNodeData::TypeParam {
+                        decl: identity.clone(),
+                        param_index: *param_index,
+                        constraint: Some(constraint),
+                        default: *default,
+                        display_name: (*display_name).clone(),
+                    }),
+                    _ => return None,
+                };
+                Some((decl.param, constrained))
+            })
+            .collect();
+        let mut fixed_count = params.len();
+        let mut rest_element = None;
         for (position, param) in params.iter().enumerate() {
+            super::super::call_resolve::record_argument_work(1);
             if param.rest {
-                parameter = match graph.node_data(param.ty).as_deref() {
+                fixed_count = position;
+                rest_element = match graph.node_data(param.ty).as_deref() {
                     Some(SemanticNodeData::Array { element, .. }) => Some(*element),
                     _ => None,
                 };
                 break;
             }
-            if position == ordinal {
-                parameter = Some(param.ty);
-                break;
-            }
         }
-        let parameter = parameter?;
-        Some(type_parameters.iter().fold(parameter, |parameter, decl| {
-            let Some(constraint) = decl.constraint else {
-                return parameter;
-            };
-            let constrained = match graph.node_data(decl.param).as_deref() {
-                Some(SemanticNodeData::TypeParam {
-                    decl: identity,
-                    param_index,
-                    default,
-                    display_name,
-                    constraint: None,
-                }) => graph.intern_node(SemanticNodeData::TypeParam {
-                    decl: identity.clone(),
-                    param_index: *param_index,
-                    constraint: Some(constraint),
-                    default: *default,
-                    display_name: std::sync::Arc::clone(display_name),
-                }),
-                _ => return parameter,
-            };
-            self.dispatch
-                .substitute_semantic_type_param(parameter, decl.param, constrained)
+        Ok(Some(CalleeParameters {
+            parameters: std::sync::Arc::clone(params),
+            fixed_count,
+            rest_element,
+            constraints,
+            substituted: rustc_hash::FxHashMap::default(),
         }))
     }
 

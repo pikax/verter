@@ -1,19 +1,20 @@
 //! Trait adapters owned by the semantic graph store.
 
-use std::sync::Arc;
-
+#[cfg(test)]
+#[cfg(test)]
 use crate::semantic_query::{QueryError, SemanticGraphRead, SemanticNodeData, SemanticNodeId};
 
 use super::SemanticGraphStore;
 
+#[cfg(test)]
 impl SemanticGraphRead for SemanticGraphStore {
-    fn node_data(&self, node: SemanticNodeId) -> Arc<SemanticNodeData> {
+    fn node_data(&self, node: SemanticNodeId) -> crate::semantic_query_memo::NodeData {
         SemanticGraphStore::node_data(self, node).unwrap_or_else(|| {
             // Missing node id — fabricate an Opaque sentinel rather than
             // panicking. Ids are only handed out by `intern_node`, so this is
             // defensive; in debug builds the arena invariant is expected to
             // be consistent.
-            Arc::new(SemanticNodeData::Opaque(QueryError::Miss))
+            super::NodeData::new(SemanticNodeData::Opaque(QueryError::Miss))
         })
     }
 }

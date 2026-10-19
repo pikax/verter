@@ -85,15 +85,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         let (mut head, mut pending_members, import_type_specifier) = match origin {
             AuthoredReferenceHeadFact::Bare { local_name, .. } => {
-                (Arc::clone(local_name), Vec::new(), None)
+                (Arc::<str>::from(local_name), Vec::new(), None)
             }
             AuthoredReferenceHeadFact::Qualified {
                 local_root,
                 member_path,
                 ..
             } => (
-                Arc::clone(local_root),
-                member_path.iter().cloned().collect(),
+                Arc::<str>::from(local_root),
+                member_path.iter().map(Arc::<str>::from).collect(),
                 None,
             ),
             AuthoredReferenceHeadFact::NotReference => return Ok(None),
@@ -106,9 +106,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     return Err(PropCallableRoleUnresolvedReason::Unsupported);
                 };
                 (
-                    Arc::clone(first),
-                    rest.to_vec(),
-                    Some(Arc::clone(specifier)),
+                    Arc::<str>::from(first),
+                    rest.iter().map(Arc::<str>::from).collect(),
+                    Some(Arc::<str>::from(specifier)),
                 )
             }
             AuthoredReferenceHeadFact::Unavailable => {
@@ -257,9 +257,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .expect("a resolved reference route has an import edge"),
                     local_alias_hops: Arc::from(aliases),
                     terminal: ResolvedSymbolIdentity {
-                        canonical_id: current_canonical,
+                        canonical_id: current_canonical.into(),
                         owner: current_owner,
-                        symbol: head,
+                        symbol: head.into(),
                     },
                     exactness: ResolutionExactness::ExactSymbolic,
                 }));
@@ -280,149 +280,151 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.demand_symbol_identity_subject(IdentitySubject::Node(node), expected)
     }
 
-    /// Resolve an exact expected symbol and retain the terminal
-    /// `InstantiationRef` arguments at the match point.
-    pub fn demand_terminal_symbol_instantiation(
-        &self,
-        node: SemanticNodeId,
-        expected: &[ResolvedSymbolIdentity],
-    ) -> TerminalSymbolInstantiationDemandOutcome {
-        let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
-        if let Some(reasons) = initial_trip {
-            let reason = partial_reason(reasons);
-            self.fold_local_partial_completeness(reason_partial_set(reason));
-            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-        }
+    construction_ordinal_seam! {
+        /// Resolve an exact expected symbol and retain the terminal
+        /// `InstantiationRef` arguments at the match point.
+        fn demand_terminal_symbol_instantiation(
+            &self,
+            node: SemanticNodeId,
+            expected: &[ResolvedSymbolIdentity],
+        ) -> TerminalSymbolInstantiationDemandOutcome {
+            let (_connected_guard, initial_trip) = self.enter_connected_demand(false);
+            if let Some(reasons) = initial_trip {
+                let reason = partial_reason(reasons);
+                self.fold_local_partial_completeness(reason_partial_set(reason));
+                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+            }
 
-        let context =
-            ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
-        let mut subject = IdentitySubject::Node(node);
-        let mut visited_nodes = FxHashSet::default();
-        let mut visited_symbols = FxHashSet::default();
+            let context =
+                ProjectionReductionContext::structural_transit_with_mode(ProjectionMode::Navigate);
+            let mut subject = IdentitySubject::Node(node);
+            let mut visited_nodes = FxHashSet::default();
+            let mut visited_symbols = FxHashSet::default();
 
-        loop {
-            match subject {
-                IdentitySubject::Symbol(symbol) => {
-                    if expected.contains(&symbol) {
-                        return TerminalSymbolInstantiationDemandOutcome::Complete(None);
-                    }
-                    if !visited_symbols.insert(symbol.clone()) {
-                        let reason = PropCallableRoleUnresolvedReason::Cycle;
-                        self.fold_local_partial_completeness(reason_partial_set(reason));
-                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                    }
-                    if let Err(reasons) = self.charge_connected_work() {
-                        let reason = partial_reason(reasons);
-                        self.fold_local_partial_completeness(reason_partial_set(reason));
-                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                    }
-                    let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
-                        name: Arc::clone(&symbol.symbol),
-                    }));
-                    subject = match self.identity_read_subject(read) {
-                        Ok(next) => IdentitySubject::Node(next),
-                        Err(reason) => {
+            loop {
+                match subject {
+                    IdentitySubject::Symbol(symbol) => {
+                        if expected.contains(&symbol) {
+                            return TerminalSymbolInstantiationDemandOutcome::Complete(None);
+                        }
+                        if !visited_symbols.insert(symbol.clone()) {
+                            let reason = PropCallableRoleUnresolvedReason::Cycle;
                             self.fold_local_partial_completeness(reason_partial_set(reason));
                             return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                         }
-                    };
-                }
-                IdentitySubject::Node(current) => {
-                    let Some(data) = self.graph().node_data(current) else {
-                        let reason = PropCallableRoleUnresolvedReason::Fault;
-                        self.fold_local_partial_completeness(reason_partial_set(reason));
-                        return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                    };
-                    match data.as_ref() {
-                        SemanticNodeData::Alias(next) => {
-                            if !visited_nodes.insert(current) {
-                                let reason = PropCallableRoleUnresolvedReason::Cycle;
-                                self.fold_local_partial_completeness(reason_partial_set(reason));
-                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                            }
-                            if let Err(reasons) = self.charge_connected_work() {
-                                let reason = partial_reason(reasons);
-                                self.fold_local_partial_completeness(reason_partial_set(reason));
-                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                            }
-                            subject = IdentitySubject::Node(*next);
+                        if let Err(reasons) = self.charge_connected_work() {
+                            let reason = partial_reason(reasons);
+                            self.fold_local_partial_completeness(reason_partial_set(reason));
+                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                         }
-                        SemanticNodeData::DeclRef { identity } => {
-                            subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(&identity.canonical_id),
-                                owner: identity.owner,
-                                symbol: Arc::clone(&identity.decl_name),
-                            });
-                        }
-                        SemanticNodeData::InstantiationRef { base, args } => {
-                            let symbol = ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(&base.canonical_id),
-                                owner: base.owner,
-                                symbol: Arc::clone(&base.decl_name),
-                            };
-                            if expected.contains(&symbol) {
-                                return TerminalSymbolInstantiationDemandOutcome::Complete(Some(
-                                    TerminalSymbolInstantiation {
-                                        symbol,
-                                        args: Arc::clone(args),
-                                    },
-                                ));
-                            }
-                            if !visited_symbols.insert(symbol.clone()) {
-                                let reason = PropCallableRoleUnresolvedReason::Cycle;
+                        let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                            scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
+                            name: symbol.symbol.clone(),
+                        }));
+                        subject = match self.identity_read_subject(read) {
+                            Ok(next) => IdentitySubject::Node(next),
+                            Err(reason) => {
                                 self.fold_local_partial_completeness(reason_partial_set(reason));
                                 return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                             }
-                            if let Err(reasons) = self.charge_connected_work() {
-                                let reason = partial_reason(reasons);
-                                self.fold_local_partial_completeness(reason_partial_set(reason));
-                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                            }
-                            let slot = self.type_slot_for(
-                                Arc::clone(&base.canonical_id),
-                                base.owner,
-                                Arc::clone(&base.decl_name),
-                            );
-                            let read = self.execute_read(SemanticQueryKey::Instantiate(
-                                crate::semantic_query::InstantiateKey::new(
-                                    slot,
-                                    Arc::clone(args),
-                                    self.instantiate_context_for(&base.canonical_id, context),
-                                ),
-                            ));
-                            subject = match self.identity_read_subject(read) {
-                                Ok(next) if next != current => IdentitySubject::Node(next),
-                                Ok(_) => {
+                        };
+                    }
+                    IdentitySubject::Node(current) => {
+                        let Some(data) = self.graph().node_data(current) else {
+                            let reason = PropCallableRoleUnresolvedReason::Fault;
+                            self.fold_local_partial_completeness(reason_partial_set(reason));
+                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                        };
+                        match data.as_ref() {
+                            SemanticNodeData::Alias(next) => {
+                                if !visited_nodes.insert(current) {
                                     let reason = PropCallableRoleUnresolvedReason::Cycle;
-                                    self.fold_local_partial_completeness(reason_partial_set(
-                                        reason,
-                                    ));
-                                    return TerminalSymbolInstantiationDemandOutcome::Partial(
-                                        reason,
-                                    );
+                                    self.fold_local_partial_completeness(reason_partial_set(reason));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                                 }
-                                Err(reason) => {
-                                    self.fold_local_partial_completeness(reason_partial_set(
-                                        reason,
-                                    ));
-                                    return TerminalSymbolInstantiationDemandOutcome::Partial(
-                                        reason,
-                                    );
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    let reason = partial_reason(reasons);
+                                    self.fold_local_partial_completeness(reason_partial_set(reason));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
                                 }
-                            };
+                                subject = IdentitySubject::Node(*next);
+                            }
+                            SemanticNodeData::DeclRef { identity } => {
+                                subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
+                                    canonical_id: identity.canonical_id.clone(),
+                                    owner: identity.owner,
+                                    symbol: identity.decl_name.clone(),
+                                });
+                            }
+                            SemanticNodeData::InstantiationRef { base, args } => {
+                                let symbol = ResolvedSymbolIdentity {
+                                    canonical_id: base.canonical_id.clone(),
+                                    owner: base.owner,
+                                    symbol: base.decl_name.clone(),
+                                };
+                                if expected.contains(&symbol) {
+                                    return TerminalSymbolInstantiationDemandOutcome::Complete(Some(
+                                        TerminalSymbolInstantiation {
+                                            symbol,
+                                            args: Arc::clone(args.as_arc()),
+                                        },
+                                    ));
+                                }
+                                if !visited_symbols.insert(symbol.clone()) {
+                                    let reason = PropCallableRoleUnresolvedReason::Cycle;
+                                    self.fold_local_partial_completeness(reason_partial_set(reason));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                                }
+                                if let Err(reasons) = self.charge_connected_work() {
+                                    let reason = partial_reason(reasons);
+                                    self.fold_local_partial_completeness(reason_partial_set(reason));
+                                    return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                                }
+                                let slot = self.type_slot_for(
+                                    base.canonical_id.clone(),
+                                    base.owner,
+                                    base.decl_name.clone(),
+                                );
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                    crate::semantic_query::InstantiateKey::new(
+                                        slot,
+                                        Arc::clone(args.as_arc()),
+                                        self.instantiate_context_for(&base.canonical_id, context),
+                                    ),
+                                ));
+                                subject = match self.identity_read_subject(read) {
+                                    Ok(next) if next != current => IdentitySubject::Node(next),
+                                    Ok(_) => {
+                                        let reason = PropCallableRoleUnresolvedReason::Cycle;
+                                        self.fold_local_partial_completeness(reason_partial_set(
+                                            reason,
+                                        ));
+                                        return TerminalSymbolInstantiationDemandOutcome::Partial(
+                                            reason,
+                                        );
+                                    }
+                                    Err(reason) => {
+                                        self.fold_local_partial_completeness(reason_partial_set(
+                                            reason,
+                                        ));
+                                        return TerminalSymbolInstantiationDemandOutcome::Partial(
+                                            reason,
+                                        );
+                                    }
+                                };
+                            }
+                            SemanticNodeData::Opaque(error) => {
+                                let reason = query_error_reason(error);
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            SemanticNodeData::RawFallback { .. } => {
+                                let reason = PropCallableRoleUnresolvedReason::Unsupported;
+                                self.fold_local_partial_completeness(reason_partial_set(reason));
+                                return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
+                            }
+                            _ => return TerminalSymbolInstantiationDemandOutcome::Complete(None),
                         }
-                        SemanticNodeData::Opaque(error) => {
-                            let reason = query_error_reason(error);
-                            self.fold_local_partial_completeness(reason_partial_set(reason));
-                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                        }
-                        SemanticNodeData::RawFallback { .. } => {
-                            let reason = PropCallableRoleUnresolvedReason::Unsupported;
-                            self.fold_local_partial_completeness(reason_partial_set(reason));
-                            return TerminalSymbolInstantiationDemandOutcome::Partial(reason);
-                        }
-                        _ => return TerminalSymbolInstantiationDemandOutcome::Complete(None),
                     }
                 }
             }
@@ -460,8 +462,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                     last_symbol = Some(symbol.clone());
                     let read = self.execute_read(SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                        scope: ScopeId::file(Arc::clone(&symbol.canonical_id), symbol.owner),
-                        name: Arc::clone(&symbol.symbol),
+                        scope: ScopeId::file(symbol.canonical_id.clone(), symbol.owner),
+                        name: symbol.symbol.clone(),
                     }));
                     subject = match self.identity_read_subject(read) {
                         Ok(node) => IdentitySubject::Node(node),
@@ -487,16 +489,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         }
                         SemanticNodeData::DeclRef { identity } => {
                             subject = IdentitySubject::Symbol(ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(&identity.canonical_id),
+                                canonical_id: identity.canonical_id.clone(),
                                 owner: identity.owner,
-                                symbol: Arc::clone(&identity.decl_name),
+                                symbol: identity.decl_name.clone(),
                             });
                         }
                         SemanticNodeData::InstantiationRef { base, args } => {
                             let symbol = ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(&base.canonical_id),
+                                canonical_id: base.canonical_id.clone(),
                                 owner: base.owner,
-                                symbol: Arc::clone(&base.decl_name),
+                                symbol: base.decl_name.clone(),
                             };
                             if expected.contains(&symbol) {
                                 return SymbolIdentityDemandOutcome::Complete(Some(symbol));
@@ -511,14 +513,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             }
                             last_symbol = Some(symbol);
                             let slot = self.type_slot_for(
-                                Arc::clone(&base.canonical_id),
+                                base.canonical_id.clone(),
                                 base.owner,
-                                Arc::clone(&base.decl_name),
+                                base.decl_name.clone(),
                             );
                             let read = self.execute_read(SemanticQueryKey::Instantiate(
                                 crate::semantic_query::InstantiateKey::new(
                                     slot,
-                                    Arc::clone(args),
+                                    Arc::clone(args.as_arc()),
                                     self.instantiate_context_for(&base.canonical_id, context),
                                 ),
                             ));
@@ -560,16 +562,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             }
                             let (resolved, observed, completeness) =
                                 self.resolve_carrier_subject_node_capturing_suppress(node, context);
-                            if observed.result_is_partial {
+                            if observed.result_is_partial || !resolved.status.is_complete() {
                                 let reason = partial_reason(completeness.reasons());
                                 return self.partial_symbol_identity(reason);
                             }
-                            if resolved == node {
+                            if resolved.node == node {
                                 return self.partial_symbol_identity(
                                     PropCallableRoleUnresolvedReason::MissingDependency,
                                 );
                             }
-                            subject = IdentitySubject::Node(resolved);
+                            subject = IdentitySubject::Node(resolved.node);
                         }
                         SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
                             canonical_id,
@@ -578,9 +580,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             ..
                         }) => {
                             let symbol = ResolvedSymbolIdentity {
-                                canonical_id: Arc::clone(canonical_id),
+                                canonical_id: canonical_id.clone(),
                                 owner: *owner,
-                                symbol: Arc::clone(name),
+                                symbol: name.clone(),
                             };
                             if expected.contains(&symbol) {
                                 return SymbolIdentityDemandOutcome::Complete(Some(symbol));
@@ -594,11 +596,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             if let Err(reasons) = self.charge_connected_work() {
                                 return self.partial_symbol_identity(partial_reason(reasons));
                             }
-                            let slot = self.type_slot_for(
-                                Arc::clone(canonical_id),
-                                *owner,
-                                Arc::clone(name),
-                            );
+                            let slot =
+                                self.type_slot_for(canonical_id.clone(), *owner, name.clone());
                             let read = self.execute_read(SemanticQueryKey::Instantiate(
                                 crate::semantic_query::InstantiateKey::new(
                                     slot,
@@ -640,7 +639,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match read.value {
             QueryResult::Recursive(_) => Err(PropCallableRoleUnresolvedReason::Cycle),
             QueryResult::Error(error) => Err(query_error_reason(&error)),
-            QueryResult::Value(_) if read.result_is_partial => {
+            QueryResult::Value(_) if read.result_is_partial() => {
                 Err(PropCallableRoleUnresolvedReason::Fault)
             }
             QueryResult::Value(node) => Ok(node),
@@ -690,6 +689,7 @@ fn partial_reason(reasons: PartialReasonSet) -> PropCallableRoleUnresolvedReason
 #[must_use]
 pub fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
     match error {
+        QueryError::ExecutionAborted(abort) => abort.reason_class(),
         QueryError::Cancelled => PartialReasonSet::CANCELLED,
         QueryError::UnstableState { .. } | QueryError::StaleSemanticOperand => {
             PartialReasonSet::UNSTABLE_STATE
@@ -701,6 +701,7 @@ pub fn query_error_partial_reasons(error: &QueryError) -> PartialReasonSet {
 
 fn query_error_reason(error: &QueryError) -> PropCallableRoleUnresolvedReason {
     match error {
+        QueryError::ExecutionAborted(_) => PropCallableRoleUnresolvedReason::Fault,
         QueryError::Miss | QueryError::DeclPlaceholder { .. } | QueryError::RaiseMiss => {
             PropCallableRoleUnresolvedReason::MissingDependency
         }

@@ -589,6 +589,7 @@ pub(crate) fn extract_component_meta_from_resolved(
 /// Like [`extract_component_meta_from_resolved`] with `include_fallthrough=true`,
 /// but also returns the fallthrough resolution's fact versions (if available).
 /// Used by the payload cache to store Full payloads with the correct fact set.
+#[allow(dead_code)]
 pub(crate) fn extract_component_meta_from_resolved_with_facts(
     host: &VerterHost,
     canonical_or_alias: &str,
