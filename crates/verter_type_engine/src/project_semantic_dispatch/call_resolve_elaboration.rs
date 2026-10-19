@@ -504,6 +504,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let FailedStep::Missing { code, arguments } = self.failed_step(source, target)? {
             return Some(occurrence(span, code, arguments, Vec::new()));
         }
+        if self.weak_target_decides(source, target)? {
+            return None;
+        }
         let mut chain = Vec::new();
         let mut steps = CHAIN_STEP_LIMIT;
         self.explain_failure(source, target, 1, false, &mut chain, &mut steps)?;
@@ -514,6 +517,43 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             head,
             Box::new([source.into_boxed_str(), target.into_boxed_str()]),
             chain.into_boxed_slice(),
+        ))
+    }
+
+    /// Whether the checker's weak-type rule (`isRelatedTo`) decides this
+    /// failure: a target whose properties are all optional, with no
+    /// signatures, and a source with apparent members of its own (a
+    /// primitive, an enum member, an array or a tuple) report TS2559 where
+    /// they share no property with it. Those apparent members are not
+    /// modelled, so the diagnostic is not reported rather than reported as
+    /// the argument head the checker does not print.
+    fn weak_target_decides(&self, source: SemanticNodeId, target: SemanticNodeId) -> Option<bool> {
+        let Some(target_view) = self.object_view(target) else {
+            return Some(false);
+        };
+        let members = target_view.positive_members();
+        if members.is_empty()
+            || !members.iter().all(|member| member.optional)
+            || !target_view.call_signatures().is_empty()
+            || !target_view.construct_signatures().is_empty()
+            || !target_view.index_signatures().is_empty()
+        {
+            return Some(false);
+        }
+        Some(matches!(
+            self.settled_data(source)?.as_ref(),
+            SemanticNodeData::Primitive(
+                PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+            ) | SemanticNodeData::Literal(_)
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::TypeOfNominal(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. }
         ))
     }
 

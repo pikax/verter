@@ -1314,6 +1314,25 @@ export function literals_null() { return nn(an); }
 export function true_undefined() { return nn(tu); }
 export function numbers_undefined() { return nn(e2); }
 export function nested() { return one(one()); }
+declare function ns(x: string): void;
+declare const bl: boolean | "a";
+declare const bn: boolean | 1 | null;
+declare enum E { A, B }
+declare const eb: E.A | boolean;
+declare const w: { a?: string };
+declare function objm(x: { a: string; b?: number }): void;
+declare const sym: unique symbol;
+declare function us(x: typeof sym): void;
+declare function po(x: { a?: number }): void;
+declare const wo: { c: number };
+export function bool_str() { return nn(bl); }
+export function bool_num_null() { return nn(bn); }
+export function bool_enum() { return ns(eb); }
+export function optional_member_read() { return one(w); }
+export function optional_member_missing() { return objm({}); }
+export function unique_symbol() { return us("a"); }
+export function weak_primitive() { return po(1); }
+export function weak_object() { return po(wo); }
 "#;
 
 /// An optional target property or parameter reports against its declared
@@ -1418,6 +1437,48 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
             &["error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
             &[],
         ),
+        (
+            "bool_str",
+            "(48,40)",
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_num_null",
+            "(49,45)",
+            &["error TS2345: Argument of type 'number | boolean | null' is not assignable to parameter of type 'number'.\n  Type 'null' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'number | boolean' is not assignable to parameter of type 'number'.\n  Type 'boolean' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_enum",
+            "(50,41)",
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+        ),
+        (
+            "optional_member_read",
+            "(51,53)",
+            &["error TS2345: Argument of type '{ a?: string | undefined; }' is not assignable to parameter of type 'string'."],
+            &["error TS2345: Argument of type '{ a?: string; }' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "optional_member_missing",
+            "(52,57)",
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number | undefined; }'."],
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number; }'."],
+        ),
+        (
+            "unique_symbol",
+            "(53,45)",
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+        ),
+        // A primitive's apparent members are not modelled, so the weak-type
+        // diagnostic (TS2559) is not reported rather than reported as TS2345.
+        ("weak_primitive", "(54,43)", &[], &[]),
+        // The relation does not model the weak-type rule for an object source, so
+        // the checker's TS2559 is not reported at all.
+        ("weak_object", "(55,43)", &[], &[]),
         (
             "mixed_literals",
             "(24,47)",

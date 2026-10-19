@@ -1616,7 +1616,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             SemanticNodeData::Literal(_)
             | SemanticNodeData::EnumLiteral(_)
             | SemanticNodeData::TemplateLiteral { .. }
-            | SemanticNodeData::IntrinsicApplication { .. } => true,
+            | SemanticNodeData::IntrinsicApplication { .. }
+            | SemanticNodeData::TypeOfNominal(_) => true,
             // Under `strictNullChecks: false` the checker never builds the
             // `null` and `undefined` types, so neither holds a literal.
             SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
@@ -1674,7 +1675,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
                 _ => {}
             }
-            let spelled = base(member)?;
+            // Inside a union the checker holds `boolean` as `true | false`,
+            // two unit types whose base is `boolean`.
+            let spelled = match self.graph().node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "boolean".to_owned(),
+                _ => base(member)?,
+            };
             if !bases.contains(&spelled) {
                 bases.push(spelled);
             }
