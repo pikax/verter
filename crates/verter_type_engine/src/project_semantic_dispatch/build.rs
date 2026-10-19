@@ -13370,8 +13370,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // whose underlying ProjectPath read can be genuinely incomplete
         // (budget / recursion / walker-fatal). Carry that partiality onto
         // the published keyof surface.
-        let mut keyof_is_partial = false;
+        let keyof_is_partial = std::cell::Cell::new(false);
         let enumerated = std::cell::Cell::new(false);
+        // The names a composite's surface publishes. A stopped enumeration
+        // holds only the names it reached, so its keys stay the deferred
+        // `keyof`, never that subset (an empty one would read as `never`).
+        let published_names = || match self.member_names_for_published_projection(base) {
+            Some((_, true)) => {
+                keyof_is_partial.set(true);
+                None
+            }
+            Some((names, false)) => Some(names),
+            None => self.key_names_from_base_node(base),
+        };
         let intern_keys = |names| {
             let node = self.intern_keyspace_keys(base, names, &fence);
             if node.is_some() {
@@ -13436,13 +13447,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         self.graph().intern_node(SemanticNodeData::KeyOf { base })
                     }
-                    None => self
-                        .member_names_for_published_projection(base)
-                        .map(|(names, is_partial)| {
-                            keyof_is_partial |= is_partial;
-                            names
-                        })
-                        .or_else(|| self.key_names_from_base_node(base))
+                    None => published_names()
                         .and_then(&intern_keys)
                         .unwrap_or_else(|| {
                             self.graph().intern_node(SemanticNodeData::KeyOf { base })
@@ -13456,13 +13461,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.key_of_composite(&members.members_arc(), true)
                     .expect("the keys settled")
             }
-            Some(SemanticNodeData::Union(_)) => self
-                .member_names_for_published_projection(base)
-                .map(|(names, is_partial)| {
-                    keyof_is_partial |= is_partial;
-                    names
-                })
-                .or_else(|| self.key_names_from_base_node(base))
+            Some(SemanticNodeData::Union(_)) => published_names()
                 .and_then(&intern_keys)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             // Declaration Merging (CRITICAL): `keyof <merged decl>` routes
@@ -13571,7 +13570,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        keyof_output.fold_partial(keyof_is_partial);
+        keyof_output.fold_partial(keyof_is_partial.get());
         // The enumeration above emitted only keys contributed by the source;
         // an unresolved source retains its addressed keyof continuation.
         keyof_output.approximation = enumerated
@@ -13705,13 +13704,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let read = |base: SemanticNodeId| match self
-            .execute_read(SemanticQueryKey::KeyOf { base, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
-        };
+        let read = |base: SemanticNodeId| self.complete_key_of(base, context);
         let settled_keys = |keys: SemanticNodeId| {
             (!matches!(
                 self.graph().node_data(keys).as_deref(),
@@ -13865,22 +13858,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The `keyof base` query's answer when it is complete. A read that
+    /// stopped short holds no key set — an empty one would read as
+    /// `never` — so its partiality folds into the caller and the answer
+    /// is `None`.
+    fn complete_key_of(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let read = self.execute_read(SemanticQueryKey::KeyOf { base, context });
+        if read.result_is_partial() {
+            self.fold_local_partial_completeness(read.partial_reason_classes());
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        }
+    }
+
     /// The literal keys `keyof base` denotes — the set a relation or a
     /// comparability question reads, whichever `keyof` carrier stands for
-    /// it in print. `None` when the keys do not settle.
+    /// it in print. `None` when the keys do not settle or their read
+    /// stopped short.
     pub(super) fn key_set_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
         let published =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
-        let read = |base: SemanticNodeId| match self
-            .execute_read(SemanticQueryKey::KeyOf {
-                base,
-                context: published,
-            })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
-        };
+        let read = |base: SemanticNodeId| self.complete_key_of(base, published);
         // Each step settles the carrier a `keyof` kept to the type it
         // stands for — a declaration or application to its body, a class
         // expression's instance (which keeps its `keyof` origin) to the
