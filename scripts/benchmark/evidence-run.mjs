@@ -354,7 +354,19 @@ const SOAK_FIELDS = [
   "smoke",
   "controls",
   "binding",
+  "build",
 ];
+/**
+ * The one build the soak runs on, on every worker: the runner binary of
+ * `verter_bench` with its default-off `soak-support` tooling feature and no
+ * other feature (audit/footprint capture and `semantic-observe` stay off).
+ */
+export const SOAK_BUILD = {
+  package: "verter_bench",
+  bin: "verter-soak",
+  profile: "release",
+  features: ["soak-support"],
+};
 const SOAK_COUNTS = [
   "tranches",
   "actionsPerTranche",
@@ -366,6 +378,15 @@ const SOAK_CELL_FIELDS = ["mode", "metrics", "benchM3Only"];
 
 const closedCounts = (r) => r.summary?.samples?.find((s) => s.at === "closed")?.counts ?? null;
 const finalCounts = (r) => r.summary?.samples?.at(-1)?.counts ?? null;
+const surges = (r) => (r.summary?.records ?? []).filter((x) => x.class === "pressure-surge");
+const surgeSum = (r, pick) =>
+  surges(r).length ? surges(r).reduce((sum, s) => sum + (pick(s) ?? 0), 0) : null;
+const surgeMax = (r, pick) => {
+  const values = surges(r)
+    .map(pick)
+    .filter((v) => typeof v === "number");
+  return values.length ? Math.max(...values) : null;
+};
 
 /**
  * The metrics a soak cell may name. `work` metrics are the runner's
@@ -382,10 +403,19 @@ export const SOAK_METRICS = {
   samples: { kind: "work", from: (r) => r.summary?.samples?.length ?? null },
   closedRetainedBytes: { kind: "work", from: (r) => closedCounts(r)?.retainedBytes ?? null },
   finalRetainedBytes: { kind: "work", from: (r) => finalCounts(r)?.retainedBytes ?? null },
-  peakAccountBytes: { kind: "work", from: (r) => closedCounts(r)?.peakTotalBytes ?? null },
-  refusalsPressure: { kind: "work", from: (r) => closedCounts(r)?.refusalsPressure ?? null },
-  refusalsOversized: { kind: "work", from: (r) => closedCounts(r)?.refusalsOversized ?? null },
-  refusalsActive: { kind: "work", from: (r) => closedCounts(r)?.refusalsActive ?? null },
+  // Surge-attributed figures: the deltas each surge recorded while it ran and
+  // the peak its own ACTIVE window attributed to it, never the account's
+  // lifetime counters or total peak.
+  surgeRefusalsPressure: { kind: "work", from: (r) => surgeSum(r, (s) => s.refusalsPressure) },
+  surgeRefusalsOversized: { kind: "work", from: (r) => surgeSum(r, (s) => s.refusalsOversized) },
+  surgeRefusalsActive: {
+    kind: "work",
+    from: (r) => surgeSum(r, (s) => s.pressure?.refusalsActive),
+  },
+  surgeActivePeakBytes: {
+    kind: "work",
+    from: (r) => surgeMax(r, (s) => s.pressure?.active?.attributedPeak),
+  },
   wallMs: { kind: "time", from: (r) => r.wallMs ?? null },
   peakRssBytes: {
     kind: "memory",
@@ -481,6 +511,10 @@ export function validateSoakManifest(manifest, file) {
   if (soak.binding?.smoke !== "targeted-domain" || soak.binding?.full !== BENCH_TAG)
     problems.push(
       `soak.binding must bind the smoke to targeted-domain and the full run to ${BENCH_TAG}`,
+    );
+  if (JSON.stringify(soak.build) !== JSON.stringify(SOAK_BUILD))
+    problems.push(
+      `soak.build must declare the support-feature build ${JSON.stringify(SOAK_BUILD)}`,
     );
   if (!Array.isArray(requiredCells) || !requiredCells.length)
     problems.push("requiredCells must be a non-empty list");
@@ -621,17 +655,21 @@ export function invokeSoakRunner(exe, args, dir) {
   return { read, wallMs, ended };
 }
 
-/** Build the release runner once, then run every mode of the frozen workload. */
+/** Build the declared runner once, then run every mode of the frozen workload. */
 export function defaultSoakRunner(loaded, outDir) {
+  const { package: pkg, bin, profile, features } = loaded.manifest.soak.build;
   const build = spawnSync(
     "cargo",
     [
       "build",
-      "--release",
+      "--profile",
+      profile,
       "-p",
-      "verter_bench",
+      pkg,
       "--bin",
-      "verter-soak",
+      bin,
+      "--features",
+      features.join(","),
       "--message-format",
       "json-render-diagnostics",
     ],

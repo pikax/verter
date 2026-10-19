@@ -70,25 +70,37 @@ exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 
 `rev11-l1-soak` is a soak manifest (`"kind": "soak"`): it registers the
 long-churn soak runner (`crates/verter_bench/src/soak/`, binary
-`verter-soak`) rather than a semantic-perf invocation. Its two workloads,
-`normal` and `pressure`, are 100 tranches of one 100-action template
-(10,000 actions, at least 3,000 distinct query identities, every lifecycle
-class), frozen by the digests under `soak.workloads`; the runner's test
-(`cargo nextest run -p verter_bench -E 'test(soak::)'`) regenerates them and
-compares, and runs the one-tranche smoke manifests (`soak.smoke`) and the
-negative controls on any worker. Each mode's verdict comes from the runner's
-own judgement of its written summary: action and result inventories, the
-per-class answer rules, sampling at least every `sampleEvery` actions, the
-envelope the first `envelopeActions` actions set, and the drain to baseline
-(object counts, content pins and retained account bytes at the host's close
-route; pinned account bytes and store storage once the host is dropped). The
-pressure workload's full manifest also freezes surge tranches that hold
-component-meta results past the account's aggregate ceiling and entry cap,
-and every mode drives a component-meta batch isolation action (a demand
-issued from inside a batch payload callback after the batch spent
-operations, against its cold oracles); the full pressure verdict requires
-positive, surge-attributed aggregate-pressure and oversized refusal deltas
-and complete delivery of every surge answer. `work` cells are read on every
+`verter-soak`) rather than a semantic-perf invocation. The runner exists only
+in the declared `soak.build` (`verter_bench` with its default-off
+`soak-support` feature, which forwards the engine's flight rendezvous and the
+retention account's ACTIVE-occupancy window and nothing else); the driver
+builds exactly that configuration and the validator rejects any other. Its
+two workloads, `normal` and `pressure`, are 100 tranches of one 100-action
+template (10,000 actions, at least 3,000 distinct query identities, every
+lifecycle class, both typed refusal classes), frozen by the digests under
+`soak.workloads`. A digest covers the action list and the digest of the path
+and exact bytes of every publication of every action and of the setup; the
+runner records what it actually published and the verdict fails any action
+whose publications differ, so a fixture the freeze omits fails the run. The
+runner's test (`cargo nextest run -p verter_bench --features soak-support -E
+'test(soak::)'`) regenerates the digests and compares, and runs the
+one-tranche smoke manifests (`soak.smoke`) and the negative controls on any
+worker. Each mode's verdict comes from the runner's own judgement of its
+written summary: action, result and publication inventories, the per-class
+answer rules, sampling at least every `sampleEvery` actions, the envelope the
+first `envelopeActions` actions set, and the drain to baseline (object
+counts, content pins and retained account bytes at the host's close route;
+pinned account bytes and store storage once the host is dropped). Overlapping
+cold demands are scheduled by the flight rendezvous and judged by one shared
+producer, a subscriber registered on its flight and a positive `joined_waits`
+delta. Every pressure manifest runs a bounded surge in its first tranche; the
+full manifest also freezes surges that hold component-meta results past the
+account's aggregate ceiling and entry cap, and its verdict requires positive,
+surge-attributed aggregate-pressure and oversized refusal deltas, an answer
+delivered complete but not retained, complete delivery of every surge answer,
+no ACTIVE refusal, and each full surge's own ACTIVE window reaching the
+former advisory active target. `work` cells (`surge*` cells are the surges'
+own deltas and window peaks, never lifetime counters) are read on every
 worker; wall time, peak RSS and the process-tree peak are `benchM3Only`
 cells. A soak manifest carries `name`, `kind`, `description`, `modes`,
 `noise`, `soak` and `requiredCells` (`mode`, `metrics`, `benchM3Only`).

@@ -376,3 +376,32 @@ fn oracle(
     d.demands.append(&mut twin_driver.demands);
     twin.published()
 }
+
+/// Every `(file, text)` an action of `variant` publishes, in the order
+/// [`run`] publishes it: the initial modules, each edit or supplied input,
+/// and the cold twin's initial modules.
+#[must_use]
+pub fn planned_publications(
+    variant: RefusalVariant,
+    tranche: u32,
+    props: u32,
+) -> Vec<(&'static str, String)> {
+    let tag = format!("t{tranche:03}");
+    let mut out = initial_modules(variant, tranche, props);
+    match variant {
+        RefusalVariant::Sealed | RefusalVariant::DepthSealed => {
+            out.extend(initial_modules(variant, tranche, props));
+        }
+        RefusalVariant::Edited => out
+            .extend((1..=3).map(|edit| (REFUSER, isolation_component_source(&tag, props + edit)))),
+        RefusalVariant::DepthEdited => out.extend([
+            (DEEP, deep_chain_source(&tag, props + 1, false)),
+            (DEEP, deep_chain_source(&tag, SHALLOW_LEVELS, false)),
+        ]),
+        RefusalVariant::DepthMissingInput | RefusalVariant::MissingInput => {
+            out.push((EXTRA, extra_source(&tag)));
+        }
+        RefusalVariant::Concurrent | RefusalVariant::Healing | RefusalVariant::DepthControls => {}
+    }
+    out
+}
