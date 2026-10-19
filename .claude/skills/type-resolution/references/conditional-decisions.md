@@ -33,6 +33,22 @@ Concrete expectations:
 
 ## Operands A Decision Relates
 
+Conditional syntax lowering and graph-native view projection share
+`conditional_operand_context`: both relation operands use `Navigate` mode (or
+`Skeleton` for a skeleton demand), preserving declaration identity and type
+arguments for the shared relation authority. The caller's operator demand stays
+intact so unread indexed values cannot prove a reflexive relation by carrier
+identity. The selected branch retains the caller's publication context. Eagerly
+expanding an operand into its object body would bypass
+same-generic variance: `Cell<'a'> extends Cell<string>` is false for
+`interface Cell<in out T> { get(): T }`, despite the covariant member surface.
+Annotations already flow from the retained syntax through `NarrowTypeParam` to
+prepared declarations; `relation_variance` reads them before measuring any
+unannotated parameters. `authored_variance_annotations_decide_same_generic_relations`
+checks named publication and warm reuse for interfaces, classes and aliases in
+all four strictness settings. Flow-return probes alone do not exercise the
+publication lowering context.
+
 A conditional is decided by relating its operands as the checker relates them; a decision is only as exact as the operands' shapes. The rules below keep the operand shapes a branch selection reads checker-faithful.
 
 - **Accessor pairs are one property.** An interface or type-literal `get value(): T` / `set value(v: S)` pair lowers with its accessor kind (`verter_type_expr_oxc::interface_method_kind`, used by the type-expression lowerer, the shallow declaration lowerer and the member headers), never as two methods. A relation and an inference read the pair as ONE property of the getter's type (the setter's parameter type only when there is no getter), so `Ref<number> extends ShallowRef<infer V, unknown>` infers `number` and a reference whose setter-only argument differs (`Acc<number, number>` against `Acc<number, unknown>`) relates by the getter. A setter read as a method with no return type made every such relation undecided.

@@ -18,8 +18,8 @@ use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
     BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, OriginEdgeKind,
-    OriginMeta, PartialReason, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
+    OriginMeta, PartialReason, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// The free type variables below one semantic node, binder-aware: the type
@@ -424,6 +424,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Both operands keep their generic declaration and arguments until the
+    /// relation authority applies variance or demands their structure.
+    pub(super) fn conditional_operand_context(
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        let mode = if context.mode == ProjectionMode::Skeleton {
+            ProjectionMode::Skeleton
+        } else {
+            ProjectionMode::Navigate
+        };
+        // Operators still answer at the caller's demand: an unread indexed
+        // value must not become a reflexive relation fact merely because its
+        // carrier is identical on both sides.
+        context.with_mode(mode)
+    }
+
     construction_ordinal_seam! {
         /// Conditional type (lazy-block evaluation +
         /// distributive-conditional authority), read from the materialized

@@ -5,8 +5,9 @@
 //! Every expected answer is TypeScript 7.0.2's, measured with
 //! `tsc --ignoreConfig --noEmit --strict` under `strictNullChecks` and
 //! `noImplicitAny` both on, both off and each alone (the settings agree on
-//! every probe) as `const s: "q" = null! as <probe>;` read off the TS2322
-//! message, each probe checked by a checker of its own.
+//! every probe). Flow probes use `const s: "q" = null! as <probe>;` read
+//! off TS2322, each checked by a checker of its own. Named-publication
+//! probes check assignments to the expected literal directly.
 
 use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
 
@@ -14,6 +15,109 @@ use super::checker_probe_lane_tests::{mismatches, mismatches_in_one_host};
 fn assert_answers(source: &str, rows: &[(&str, &str)]) {
     let failures = mismatches(source, rows);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn authored_variance_annotations_decide_same_generic_relations() {
+    assert_named_answers(
+        "type __Flat<T> = [T] extends [infer U] ? U : never;\n\
+         type __D<T> = T extends unknown ? T : never;\n\
+         type __Obj<T> = { [K in keyof T]: T[K] };\n\
+         interface Cell<in out T> { get(): T }\n\
+         interface Cons<in T> { set(x: T): void }\n",
+        &[
+            ("Cell<'a'> extends Cell<string> ? 1 : 0", "0"),
+            ("Cell<string> extends Cell<'a'> ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<'a'> ? 1 : 0", "1"),
+            ("Cons<string> extends Cons<'a'> ? 1 : 0", "1"),
+            ("Cons<'a'> extends Cons<string> ? 1 : 0", "0"),
+        ],
+    );
+    for declaration in [
+        "interface Inv<in out T> { value: T }\n\
+         interface Co<out T> { tag: 0 }\n\
+         interface Contra<in T> { set(x: T): void }\n",
+        "declare class Inv<in out T> { value: T }\n\
+         declare class Co<out T> { tag: 0 }\n\
+         declare class Contra<in T> { set(x: T): void }\n",
+        "type Inv<in out T> = { value: T };\n\
+         type Co<out T> = { tag: 0 };\n\
+         type Contra<in T> = { set(x: T): void };\n",
+    ] {
+        assert_named_answers(
+            declaration,
+            &[
+                ("Inv<'a'> extends Inv<string> ? 1 : 0", "0"),
+                ("Inv<string> extends Inv<'a'> ? 1 : 0", "0"),
+                ("Inv<'a'> extends Inv<'a'> ? 1 : 0", "1"),
+                ("Co<'a'> extends Co<string> ? 1 : 0", "1"),
+                ("Co<string> extends Co<'a'> ? 1 : 0", "0"),
+                ("Contra<string> extends Contra<'a'> ? 1 : 0", "1"),
+                ("Contra<'a'> extends Contra<string> ? 1 : 0", "0"),
+            ],
+        );
+    }
+}
+
+/// Demand aliases through the publication path used by the benchmark. Flow
+/// return probes lower their annotations as carriers and do not exercise the
+/// eager declaration-body lowering used by a named expanded demand.
+#[track_caller]
+fn assert_named_answers(source: &str, rows: &[(&str, &str)]) {
+    use std::sync::Arc;
+    use verter_type_expr::{LiteralValue, TypeExpr};
+
+    const FILE: &str = "/variance/probe.ts";
+    for strict_null_checks in [true, false] {
+        for no_implicit_any in [true, false] {
+            let config = format!(
+                r#"{{"compilerOptions":{{"strict":true,"strictNullChecks":{strict_null_checks},"noImplicitAny":{no_implicit_any}}}}}"#,
+            );
+            let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+                crate::HostConfig::default(),
+                &[("/variance", config.as_str())],
+            );
+            let mut module = format!("type __BenchInit = 0;\n{source}\n");
+            for (index, (probe, _)) in rows.iter().enumerate() {
+                module.push_str(&format!("type __Probe{index} = {probe};\n"));
+            }
+            module.push_str("export {};\n");
+            let _ = host
+                .upsert(crate::UpsertRequest {
+                    canonical_id: Some(FILE.into()),
+                    input_id: FILE.into(),
+                    source: Arc::from(module),
+                    file_language: crate::FileLanguage::script_ts(),
+                    aliases: vec![],
+                })
+                .expect("variance fixture admitted");
+            let _init = host
+                .resolve_named_symbol_with_audit(FILE, "__BenchInit", None)
+                .into_parts()
+                .0
+                .expect("init demand completes")
+                .expect("init exists");
+            for (index, (probe, expected)) in rows.iter().enumerate() {
+                for _ in 0..2 {
+                    let node = host
+                        .resolve_named_symbol_with_audit(FILE, &format!("__Probe{index}"), None)
+                        .into_parts()
+                        .0
+                        .expect("named variance demand completes")
+                        .expect("probe exists");
+                    let bytes = host
+                        .project_node_to_type_expr_json_bytes(&node)
+                        .expect("variance answer projects");
+                    let answer: TypeExpr = serde_json::from_slice(&bytes).expect("typed answer");
+                    assert_eq!(
+                        answer,
+                        TypeExpr::Literal(LiteralValue::Number(expected.parse().unwrap())),
+                        "{probe}; strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}; source={source}",
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// A parameter read only as a property type is covariant.
