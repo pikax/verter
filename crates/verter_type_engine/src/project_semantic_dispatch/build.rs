@@ -9525,6 +9525,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let TypeExpr::Object(ref members) = members else {
             return None;
         };
+        if let Some(node) = self.reference_free_class_member_read(
+            canonical,
+            owner,
+            class,
+            name,
+            members,
+            serve.indexed.whole_hash,
+            &prepared.name_resolution,
+        ) {
+            return Some(ClassMemberStep::Declared(node));
+        }
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(canonical),
             owner,
@@ -9669,6 +9680,129 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => None,
         };
         Some(ClassMemberStep::Inherited { heritage, base })
+    }
+
+    /// The member-precise answer of a read of `name` that the class's own
+    /// elements declare, when every element declaring it is a property
+    /// whose type names nothing: no reference, type parameter, `this`,
+    /// `typeof` or operator — only keywords, literals and unions, arrays
+    /// and tuples of them ([`is_reference_free_member_type`]). Such a type
+    /// is fixed by the elements' own text, so the read roots on the class's
+    /// `Member` fact for the name (the declaring elements and the `extends`
+    /// reference, observed at `observed_hash`) instead of the file's whole
+    /// hash, and lowers to scope-free nodes through no locator query, so
+    /// neither its nodes nor a locator memo entry root the read on the
+    /// class's file: an edit to another member of the class, or anywhere
+    /// else in its file, leaves the read's evidence in place, while an edit
+    /// to an element declaring the name, to how many elements do, or to the
+    /// `extends` clause moves it.
+    ///
+    /// `None` keeps the whole-file read: a method, accessor or a property
+    /// whose type references anything, a carrier-owned (non-file) owner, or
+    /// a fact the observed content cannot produce.
+    #[allow(clippy::too_many_arguments)]
+    fn reference_free_class_member_read(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        class: &str,
+        name: &str,
+        members: &verter_type_expr::ObjectExpr,
+        observed_hash: verter_session_query::analysis::types::Hash16,
+        name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    ) -> Option<SemanticNodeId> {
+        if owner != verter_type_expr::TopLevelOwnerId::ordinary_file() {
+            return None;
+        }
+        let key = crate::semantic_query::PropertyKey::identifier(Arc::from(name));
+        let mut declaring: Vec<&verter_type_expr::ObjectProperty> = Vec::new();
+        for member in members.properties.iter() {
+            match member {
+                ObjectMember::Property(property) => {
+                    if property.key.cloned_known().as_ref() != Some(&key) {
+                        continue;
+                    }
+                    if !is_reference_free_member_type(&property.ty) {
+                        return None;
+                    }
+                    declaring.push(property);
+                }
+                ObjectMember::Method(method)
+                    if method.key.cloned_known().as_ref() == Some(&key) =>
+                {
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if declaring.is_empty() {
+            return None;
+        }
+        // The scope-free nodes carry no declaring file, so a later array
+        // mapping reads the default nullability options; a file compiled
+        // under other options keeps the whole-file read, which lowers with
+        // the file's own scope.
+        let options = self.ctx.semantic_compiler_options_for(canonical);
+        if !options.strict_null_checks || options.exact_optional_property_types {
+            return None;
+        }
+        let fact = self.ctx.parse_fact_for_observed_content(
+            canonical,
+            observed_hash,
+            verter_session_query::facts::FactKey::Member {
+                exporter: verter_session_query::facts::registry::InternedName::from(class),
+                name: verter_type_expr::facts::FactPropertyKey::identifier(name),
+                space: verter_session_query::facts::SymbolSpace::Type,
+            },
+            verter_session_query::facts::FactLane::Semantic,
+        )?;
+        if fact.expected_hash == [0u8; 16] {
+            return None;
+        }
+        crate::resolver_core::resolver_context::observe_fan_out(
+            verter_session_query::facts::fact_cache::FactVersionRef::Parse(fact),
+        );
+        let context = crate::semantic_query::ProjectionReductionContext::published(
+            crate::semantic_query::ProjectionMode::Navigate,
+        )
+        .into_structural_provenance();
+        let shadowing =
+            crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(None);
+        let env: FxHashMap<String, SemanticNodeId> = FxHashMap::default();
+        let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
+        let own: Vec<SurfaceEntry> = declaring
+            .into_iter()
+            .map(|property| {
+                let value = self.shallow_lower_type_expr_with_context(
+                    &property.ty,
+                    &env,
+                    &NodeScopeId::Global,
+                    name_resolution,
+                    None,
+                    &shadowing,
+                    &mut substitutions,
+                    context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                );
+                SurfaceEntry::Member(SurfaceMember {
+                    key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
+                    value,
+                    optional: property.optional,
+                    readonly: property.readonly,
+                    method_kind: None,
+                    has_implementation_body: false,
+                    visibility: property.visibility,
+                    excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                    spans: verter_type_expr::MemberSpans::default(),
+                    declaration_origin: Some(Arc::<str>::from(canonical).into()),
+                    declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::default(),
+                    merge_role: context.stamp_role(crate::semantic_query::MemberMergeRole::OwnBody),
+                })
+            })
+            .collect();
+        Some(self.graph().intern_node_with_scope(
+            SemanticNodeData::Object(SurfaceView::from_entries(own, None, false)),
+            NodeScopeId::Global,
+        ))
     }
 
     /// Whether another module's `declare module` block contributes to the
@@ -19852,6 +19986,37 @@ enum LibStep {
 /// TS2589, and a run entered through a callback union starts with one step
 /// already counted (998 further steps answer, 999 fail).
 const LIB_AWAITED_ENTRY_DEPTH: u32 = 2;
+
+/// Whether a class property's type names nothing outside its own text: a
+/// keyword, a literal, or a union, parenthesised type, array or tuple of
+/// them. Such a type lowers to the same scope-free nodes in every file and
+/// under every binding, so the member's own elements are its only input.
+/// Anything else — a reference, a type parameter, `this`, `typeof`, an
+/// operator, an object or function type (whose members carry declaration
+/// origins) — is not, nor is a type wider than a small fixed number of
+/// nodes.
+fn is_reference_free_member_type(ty: &TypeExpr) -> bool {
+    const MAX_NODES: usize = 64;
+    let mut pending: Vec<&TypeExpr> = vec![ty];
+    let mut visited = 0usize;
+    while let Some(ty) = pending.pop() {
+        visited += 1;
+        if visited > MAX_NODES {
+            return false;
+        }
+        match ty {
+            TypeExpr::Primitive(_) | TypeExpr::Literal(_) => {}
+            TypeExpr::Union(arms) => pending.extend(arms.iter()),
+            TypeExpr::Parenthesized(inner) => pending.push(inner),
+            TypeExpr::Array { element, .. } => pending.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                pending.extend(elements.iter().map(|element| &element.ty));
+            }
+            _ => return false,
+        }
+    }
+    true
+}
 
 /// What one class of an inheritance path answers for a demanded member
 /// read.
