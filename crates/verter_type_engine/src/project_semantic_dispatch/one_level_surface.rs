@@ -219,7 +219,7 @@ impl OneLevelSurface {
     /// empty success.
     pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
+        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
         meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut super::canonical_algebra::CanonicalEvidence,
     ) -> SurfaceResolution<Self> {
@@ -248,7 +248,6 @@ impl OneLevelSurface {
             composite.node
         }
 
-        let alternatives = formula.alternatives();
         if let [only] = alternatives {
             if let Some(closed) = only.closed() {
                 let Some(view) = closed.to_closed_surface_view() else {
@@ -600,10 +599,16 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ));
                 }
             };
+            let alternatives = match dispatch.object_spread_alternatives(&formula) {
+                Ok(alternatives) => alternatives,
+                Err(trip) => {
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_demand_trip(trip));
+                }
+            };
             let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
             let surface = OneLevelSurface::from_spread_projection(
                 graph,
-                &formula,
+                &alternatives,
                 dispatch.construction_meter(),
                 &mut canonical_evidence,
             );
@@ -760,8 +765,10 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                     };
                 }
             };
-            let members = dispatch.spread_formula_positive_members_for_macro(&formula);
-            SurfaceResolution::resolved(members)
+            match dispatch.spread_formula_positive_members_for_macro(&formula) {
+                Ok(members) => SurfaceResolution::resolved(members),
+                Err(trip) => SurfaceResolution::incomplete(NonEmptyReasons::from_demand_trip(trip)),
+            }
         }
         Some(SemanticNodeData::Union(arms)) => {
             let arms = arms.members_arc();

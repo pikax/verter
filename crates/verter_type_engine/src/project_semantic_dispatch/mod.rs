@@ -150,6 +150,7 @@ pub mod inference;
 pub mod callable_view;
 pub mod flow_products;
 pub mod interior_source;
+pub mod object_spread_product;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 pub mod one_level_surface;

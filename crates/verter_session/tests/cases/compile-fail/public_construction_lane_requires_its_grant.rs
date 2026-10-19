@@ -23,8 +23,8 @@ use verter_type_engine::semantic_query::semantic_context::SemanticContext;
 use verter_type_engine::semantic_query::{
     display, keyof_operand_is_type_variable, printed_union_arms, stable_key,
     ClassExpressionIdentity, DepSignature, DisplayNeeds, FlowReturnKey, FlowReturnResult,
-    MapperKind, ObjectProjectionFormula, OriginEdgeKind, OriginMeta, PrimitiveKind, PropertyKey,
-    RelateMemoKey, ResolveCallKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    MapperKind, ObjectProjectionAlternative, OriginEdgeKind, OriginMeta, PrimitiveKind,
+    PropertyKey, RelateMemoKey, ResolveCallKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue, SurfaceView,
 };
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
@@ -145,14 +145,14 @@ fn render_and_judge(graph: &SemanticGraphStore, id: SemanticNodeId, completion: 
 fn merge_caller_surfaces(
     graph: &SemanticGraphStore,
     arms: &[Option<walk::ShallowSurface>],
-    formula: &ObjectProjectionFormula,
+    alternatives: &[ObjectProjectionAlternative],
     evidence: &mut canonical_algebra::CanonicalEvidence,
 ) {
     let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
     let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
     let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);
     let _members =
-        walk::spread_formula_positive_members_for_macro(graph, formula, unmetered, evidence);
+        walk::spread_formula_positive_members_for_macro(graph, alternatives, unmetered, evidence);
 }
 
 fn read_memos_by_key<C: ResolverCapabilities>(
