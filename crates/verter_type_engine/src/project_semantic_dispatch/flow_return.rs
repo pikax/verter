@@ -28427,6 +28427,28 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
     }
 
+    /// Whether the callee type has exactly one call signature and it
+    /// declares no type parameters.
+    fn callee_has_lone_non_generic_signature(&self, callee_node: SemanticNodeId) -> bool {
+        let resolved = self.dispatch.resolve_signature_source_carrier(
+            callee_node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        let super::signature_utility::AuthoredSignatures::Nodes(signatures) = self
+            .dispatch
+            .authored_signatures_of(resolved, crate::semantic_query::SignatureKind::Call)
+        else {
+            return false;
+        };
+        let [only] = signatures.as_slice() else {
+            return false;
+        };
+        matches!(
+            self.dispatch.graph().node_data(*only).as_deref(),
+            Some(SemanticNodeData::Signature { type_parameters, .. }) if type_parameters.is_empty()
+        )
+    }
+
     /// Whether `signature`'s value depends on the receiver it is called
     /// through: a polymorphic `this` in its signature positions
     /// (`self(): this`), or a `this` parameter its own type parameters are
@@ -28814,12 +28836,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         return self.degraded_unrepresentable_callee();
                     };
                     // The checker still checks the call against the annotated
-                    // type: the executor decides applicability first, and an
-                    // undecided executor leaves the declared-return read.
-                    if let Some(value) =
-                        self.eval_call_via_resolve_call(callee_node, site, arguments)
-                    {
-                        return value;
+                    // type: for a lone non-generic signature the executor
+                    // decides applicability first, and an undecided executor
+                    // leaves the declared-return read. A generic callee keeps
+                    // the interim answer (no call-site instantiation here).
+                    if self.callee_has_lone_non_generic_signature(callee_node) {
+                        if let Some(value) =
+                            self.eval_call_via_resolve_call(callee_node, site, arguments)
+                        {
+                            return value;
+                        }
                     }
                     return self.call_return_of_callee_node(callee_node, site);
                 }
