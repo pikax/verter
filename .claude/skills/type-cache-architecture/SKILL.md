@@ -293,7 +293,11 @@ reserve their metadata and hold their owned values.
 `OwnedTree` measures the raw allocations reachable through a plain tree;
 it does not by itself seal independently clonable inner `Arc` fields, so
 an allocation several owners share, or a caller can keep, is its own
-owned cell: a file analysis snapshot's lists (`SharedList`, shared with the
+owned cell. A published type source (`SharedTypeSource`) and a lowered
+flow slice (`SharedFlowSliceIR`) are strict `Owned` cells, not trees:
+every list and name their values keep is an `OwnedSlice` / `OwnedStr`, and
+a debug build fails the `HeapSize` measurement of such a cell that reaches
+a raw `Arc` (`HeapMeter::first`). Further owned cells: a file analysis snapshot's lists (`SharedList`, shared with the
 host analysis lists and the artifact's export signatures), template
 analyses (the raw template slot holds the one it serves, refusably with
 its evidence), module-export names, namespace targets and proofs (a

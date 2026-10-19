@@ -9,12 +9,11 @@
 //! shared in-scope lowerer. Pure node↔fact bridging — no reduction, no
 //! dispatch execution beyond the shared lowerer entries.
 
-use std::sync::Arc;
-
 use verter_type_expr::facts::{
     ClosedTypeFact, FactOrLocator, LeafTypeFact, SemanticTypeSource, TuplePayloadFact,
 };
 use verter_type_expr::locators::SymbolBodyLocator;
+use verter_type_expr::OwnedSlice;
 
 use super::semantic_source::SourceRaiseContext;
 use super::ProjectSemanticDispatch;
@@ -55,7 +54,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// facts are never published). The ONE shared node→closed-union
     /// projection every publication surface reads — never re-derived
     /// per-surface.
-    pub fn node_leaf_union_fact(&self, node: SemanticNodeId) -> Option<Arc<[LeafTypeFact]>> {
+    pub fn node_leaf_union_fact(&self, node: SemanticNodeId) -> Option<OwnedSlice<LeafTypeFact>> {
         let members = match super::node_data_for(self.graph(), node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.share(),
             _ => return None,
@@ -64,7 +63,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .map(|&member| self.node_leaf_fact(member))
             .collect();
-        leaves.map(|leaves| Arc::from(leaves.into_boxed_slice()))
+        leaves.map(OwnedSlice::from)
     }
 
     /// The complete closed element fact for a tuple-element/param position:
@@ -109,7 +108,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(SemanticTypeSource::Closed(ClosedTypeFact::Tuple(
             TuplePayloadFact {
                 readonly: false,
-                elements: Arc::from(elements?.into_boxed_slice()),
+                elements: From::from(elements?.into_boxed_slice()),
             },
         )))
     }

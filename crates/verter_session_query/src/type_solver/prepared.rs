@@ -88,7 +88,7 @@ fn member_span_origin(
     match contributor {
         Some(anchor) if path_prefix.is_empty() => MemberSpansOrigin::Authored {
             anchor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         _ => MemberSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -1916,7 +1916,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 3,
                 },
-                member_path: Arc::from(vec![0u32]),
+                member_path: From::from(vec![0u32]),
             },
             "property span origin must descend [0] from the contributor anchor"
         );
@@ -1938,7 +1938,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 3,
                 },
-                member_path: Arc::from(vec![1u32]),
+                member_path: From::from(vec![1u32]),
             },
         );
         assert_eq!(
@@ -2412,7 +2412,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 0,
                 },
-                member_path: Arc::from(vec![1u32]),
+                member_path: From::from(vec![1u32]),
             },
         );
     }
@@ -2536,7 +2536,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 0,
                 },
-                member_path: Arc::from(vec![0u32]),
+                member_path: From::from(vec![0u32]),
             },
             "a top-level object member keeps the recoverable Authored origin",
         );

@@ -18,9 +18,9 @@ use verter_type_expr::ResolvedSymbolIdentity;
 
 fn expected() -> ResolvedSymbolIdentity {
     ResolvedSymbolIdentity {
-        canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+        canonical_id: "/node_modules/svelte/index.d.ts".into(),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        symbol: Arc::from("Snippet"),
+        symbol: "Snippet".into(),
     }
 }
 

@@ -61,7 +61,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use verter_session_query::flow::flow_ir::{FlowSliceIR, ReturnSlicePlan};
+use verter_session_query::flow::flow_ir::{ReturnSlicePlan, SharedFlowSliceIR};
 use verter_session_query::flow::hashing::FlowSliceHash;
 use verter_session_query::flow::peeker::{FlowSliceBudget, FlowSliceBudgetExceeded};
 #[cfg(any(test, feature = "test-support"))]
@@ -456,10 +456,7 @@ impl FlowSliceHashNode {
 /// the hash node's RETAINED plan (the one cold planning run — it never
 /// re-plans) and NEVER computes a slice hash.
 pub struct FlowSliceLoweredBodyNode {
-    pub(crate) entries: DashMap<
-        FlowSliceLoweredKey,
-        Arc<CacheEntry<verter_session_query::retention::heap_size::OwnedTree<FlowSliceIR>>>,
-    >,
+    pub(crate) entries: DashMap<FlowSliceLoweredKey, Arc<CacheEntry<SharedFlowSliceIR>>>,
     pub(crate) inflight: InflightTable<QueryFlightKey<FlowSliceLoweredKey>>,
 }
 
@@ -520,6 +517,15 @@ impl FlowSliceStores {
         }
         self.retention = account;
         self
+    }
+
+    /// Empty stores whose entries, and the bundles of their graph store, are
+    /// charged to `account`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn charged_to_for_test(
+        account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
+    ) -> Self {
+        Self::new().charged_to(verter_session_query::retention::StoreAccount::new(account))
     }
 
     /// The account the nodes' entries are charged to.
