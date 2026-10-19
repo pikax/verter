@@ -1559,16 +1559,18 @@ fn normalize_object_member_type_params<'e>(
         }
         ObjectMember::Method(method) => {
             let key = normalize_property_key_type_params(&method.key, &mut ty);
-            ObjectMember::Method(
-                MethodSignature::with_key_visibility(
-                    key,
-                    child(NormalizeJob::Function(&method.function)).into_function(),
-                    method.optional,
-                    method.visibility,
-                    method.spans,
-                )
-                .with_excess_origin(method.excess_origin),
-            )
+            let mut normalized = MethodSignature::with_key_visibility(
+                key,
+                child(NormalizeJob::Function(&method.function)).into_function(),
+                method.optional,
+                method.visibility,
+                method.spans,
+            );
+            // A rebuild of an existing member, so its accessor kind and
+            // implementation-body marker carry over unchanged.
+            normalized.method_kind = method.method_kind;
+            normalized.has_implementation_body = method.has_implementation_body;
+            ObjectMember::Method(normalized.with_excess_origin(method.excess_origin))
         }
         ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(ty(&spread.ty))),
     }
@@ -1855,5 +1857,75 @@ mod synthetic_carrier_tests {
             })
             .expect("`pub_field` property must survive normalization");
         assert_eq!(pub_field, MemberVisibility::Public);
+    }
+
+    /// The same member rebuild keeps an accessor's kind: a getter/setter pair
+    /// inside a generic signature (`<T>() => { get value(): T; set value(v: T) }`)
+    /// must still read as accessors after its type-parameter refs are bound,
+    /// or relations see two ordinary methods instead of one property.
+    #[test]
+    fn normalize_object_member_preserves_accessor_kind() {
+        use verter_type_expr::{
+            FunctionExpr, FunctionParam, MemberSpans, MemberVisibility, MethodSignature,
+            ObjectExpr, ObjectMember, ObjectMethodKind,
+        };
+
+        let t_ref = TypeExpr::Ref {
+            name: Arc::from("T"),
+            type_arguments: Arc::from(Vec::new()),
+        };
+        let accessor = |function: FunctionExpr, kind: ObjectMethodKind| {
+            let mut method = MethodSignature::with_key_visibility(
+                "value".into(),
+                function,
+                false,
+                MemberVisibility::Public,
+                MemberSpans::default(),
+            );
+            method.method_kind = kind;
+            ObjectMember::Method(method)
+        };
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                accessor(
+                    FunctionExpr::synthetic(Vec::new(), Some(Arc::new(t_ref.clone())), Vec::new()),
+                    ObjectMethodKind::Get,
+                ),
+                accessor(
+                    FunctionExpr::synthetic(
+                        vec![FunctionParam::synthetic(
+                            Some("v".to_string()),
+                            t_ref.clone(),
+                            false,
+                            false,
+                        )],
+                        None,
+                        Vec::new(),
+                    ),
+                    ObjectMethodKind::Set,
+                ),
+            ],
+        }));
+
+        let mut env = BinderEnv::default();
+        env.introduce(TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        });
+        let normalized = normalize_in_env(&object, &mut env, 0);
+        let TypeExpr::Object(obj) = &normalized else {
+            panic!("expected object, got {normalized:?}");
+        };
+        let kinds: Vec<_> = obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Method(method) => Some(method.method_kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [ObjectMethodKind::Get, ObjectMethodKind::Set]);
     }
 }

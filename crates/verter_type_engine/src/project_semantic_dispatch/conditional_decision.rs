@@ -587,7 +587,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // still belongs to this build.
                 operand_read.preserve_reuse_evidence(self);
                 let _ = operand_read.discard();
-                if arm.adopt(self).is_err() || self.cancellation.is_cancelled() {
+                if let Err(abort) = arm.adopt(self) {
+                    return super::walk::QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                        self.project_generation_signature(),
+                    ));
+                }
+                if self.cancellation.is_cancelled() {
                     return self.cancelled_build_output();
                 }
                 let winner = branches.branch(self, true);
