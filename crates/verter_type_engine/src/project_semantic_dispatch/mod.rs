@@ -644,6 +644,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the evaluation's own identity, a pure function of that identity, so
     /// every admission of it shares one receipt.
     self_evaluation_receipts: SelfEvaluationReceipts,
+    /// Literal target membership shared by the queries of one operation.
+    literal_union_indexes: relation::LiteralUnionIndexes,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -709,6 +711,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
 pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
+    literal_union_indexes: &'g relation::LiteralUnionIndexes,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
@@ -719,6 +722,8 @@ impl Drop for DispatchOperation<'_> {
         let depth = self.depth.get() - 1;
         self.depth.set(depth);
         if depth == 0 {
+            let indexes = std::mem::take(&mut *self.literal_union_indexes.borrow_mut());
+            drop(indexes);
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -1122,6 +1127,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             published_results: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            literal_union_indexes: Default::default(),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
@@ -1186,6 +1192,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             published_results,
             request_local_open,
             self_evaluation_receipts,
+            literal_union_indexes,
             driven_root_traced,
             decision_seam,
             call_seam,
@@ -1228,6 +1235,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         published_results.swap(&other.published_results);
         request_local_open.swap(&other.request_local_open);
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
+        literal_union_indexes.swap(&other.literal_union_indexes);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
@@ -1251,6 +1259,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         DispatchOperation {
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
+            literal_union_indexes: &self.literal_union_indexes,
             demand: &self.connected_demand,
             owner,
         }

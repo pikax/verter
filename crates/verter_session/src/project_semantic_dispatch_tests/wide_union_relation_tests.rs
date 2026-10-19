@@ -1,7 +1,7 @@
 //! A literal related to a union target that holds it answers from the
 //! union's membership, as the checker's `containsType` test does, so
-//! relating a wide literal union to its superset costs one pass per member
-//! rather than one relation per preceding arm.
+//! relating a wide literal union to its superset prepares the target once
+//! and looks up each member by canonical value.
 //!
 //! Every expected answer is TypeScript 7.0.2's, measured on the exact
 //! fixture with `tsc --ignoreConfig --noEmit --strict` under each of
@@ -18,6 +18,190 @@ fn wide_union(width: usize) -> String {
 }
 
 const EXCLUDED_TO_WHOLE: &str = "[Exclude<W, \"m0\">] extends [W] ? 1 : 2";
+
+/// Count physical arm reads: memoized relation counts alone conceal a scan
+/// of the target for every source literal, including failed membership.
+#[test]
+fn literal_union_membership_work_grows_with_input() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    for probe in [
+        "Exclude<W, Most>",
+        "[Most] extends [W] ? 1 : 2",
+        "keyof Omit<{ [K in W]: K }, Most>",
+    ] {
+        let visits = [32, 64, 128].map(|width| {
+            let most = (0..width)
+                .filter(|index| ![3, 5].contains(index))
+                .map(|index| format!("\"m{index}\""))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let source = format!("{}type Most = {most};", wide_union(width));
+            let before = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests();
+            with_probe(&source, probe, |dispatch, node| {
+                let expected = checker_syntax::parse(if probe.starts_with('[') {
+                    "1"
+                } else {
+                    "\"m3\" | \"m5\""
+                }).expect("valid expected type");
+                assert!(checker_syntax::matches_node(dispatch, node, &expected, 0));
+            });
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests() - before
+        });
+        println!("literal membership {probe}: arm visits {visits:?}");
+        for step in 0..2 {
+            assert!(
+                visits[step + 1] * 10 <= visits[step] * 22,
+                "doubling the input at most doubles membership work: {probe}: {visits:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn literal_union_membership_preserves_values_order_and_general_members() {
+    let source = r#"
+        type W = "a" | "b" | "c" | 1 | 2 | true | false | 1n | 2n;
+        enum E { A = "a", B = 1 }
+        enum F { A = "a", B = 1 }
+        type Pattern = `id:${number}`;
+        type Obj = { value: number };
+        type Mixed = "a" | E.A | E.B | Pattern | Obj;
+    "#;
+    let probes = [
+        (
+            "Exclude<W, 'a' | 'c' | 1 | true | 1n | 2n>",
+            "\"b\" | 2 | false",
+        ),
+        (
+            "Extract<W, 'a' | 'c' | 1 | true>",
+            "\"a\" | \"c\" | 1 | true",
+        ),
+        ("Exclude<'a' | 'b' | 'c', 'c'>", "\"b\" | \"a\""),
+        ("Exclude<'id:3' | 'other', Mixed>", "\"other\""),
+        (
+            "[Extract<1n | 2n, 1n>] extends [1n] ? [1n] extends [Extract<1n | 2n, 1n>] ? 1 : 2 : 2",
+            "1",
+        ),
+        (
+            "[Exclude<1n | 2n, 1n>] extends [2n] ? [2n] extends [Exclude<1n | 2n, 1n>] ? 1 : 2 : 2",
+            "1",
+        ),
+        ("[Obj] extends [Mixed] ? 1 : 2", "1"),
+        ("[E.A] extends [Mixed] ? 1 : 2", "1"),
+        ("[F.A] extends [E.A | E.B] ? 1 : 2", "2"),
+        ("['a'] extends [E.A | E.B] ? 1 : 2", "2"),
+        ("[1] extends [E.A | E.B] ? 1 : 2", "1"),
+        ("[boolean] extends [true | false] ? 1 : 2", "1"),
+        ("['1'] extends [1 | 2] ? 1 : 2", "2"),
+        ("[1n] extends [1 | 2] ? 1 : 2", "2"),
+    ];
+    for options in [
+        r#"{"strictNullChecks":true,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":true,"noImplicitAny":false}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":false}"#,
+    ] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                compiler_options: Some(options),
+                ..Default::default()
+            },
+            source,
+            &probes,
+        );
+        assert!(failures.is_empty(), "{options}: {}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn literal_union_membership_keeps_canonical_output_order() {
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    with_probe("", "Exclude<'a' | 'b' | 'c', 'c'>", |dispatch, node| {
+        let data = dispatch.graph().node_data(node).expect("complete union");
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            panic!("expected a union: {data:?}");
+        };
+        let values: Vec<_> = members
+            .iter()
+            .map(
+                |member| match dispatch.graph().node_data(*member).as_deref() {
+                    Some(SemanticNodeData::Literal(LiteralValue::String(value))) => value.clone(),
+                    other => panic!("expected a string literal: {other:?}"),
+                },
+            )
+            .collect();
+        assert_eq!(values, ["b", "a"]);
+    });
+}
+
+#[test]
+fn literal_union_membership_revalidates_imported_values_after_edits() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, upsert_probe_files, with_probe_on_host,
+    };
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    let host = default_probe_host();
+    let source = "import type { Most } from './targets'; type W = 'a' | 'b' | 'c';";
+    for (target, expected) in [
+        ("export type Most = 'a' | 'c';", "b"),
+        ("export type Most = 'a' | 'b';", "c"),
+    ] {
+        upsert_probe_files(&host, &[("targets.ts", target)]);
+        for _ in 0..2 {
+            with_probe_on_host(
+                &host,
+                Default::default(),
+                source,
+                "Exclude<W, Most>",
+                |dispatch, node| {
+                    assert!(matches!(dispatch.graph().node_data(node).as_deref(),
+                    Some(SemanticNodeData::Literal(LiteralValue::String(value))) if value == expected));
+                },
+            );
+        }
+    }
+}
+
+fn check_large_literal_membership(width: usize, probe: &str, expected: &str) {
+    let members: Vec<_> = (0..width).map(|index| format!("'s{index}'")).collect();
+    let most: Vec<_> = members
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| ![3, 5].contains(index))
+        .map(|(_, member)| member.as_str())
+        .collect();
+    let source = format!(
+        "type W = {}; type Most = {};",
+        members.join(" | "),
+        most.join(" | ")
+    );
+    let failures = mismatches(&source, &[(probe, expected)]);
+    assert!(
+        failures.is_empty(),
+        "{width} members: {}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn exclude_near_equal_1000_literals_keeps_the_two_missing_values() {
+    check_large_literal_membership(1000, "Exclude<W, Most>", "\"s3\" | \"s5\"");
+}
+
+#[test]
+fn exclude_near_equal_3000_literals_keeps_the_two_missing_values() {
+    check_large_literal_membership(3000, "Exclude<W, Most>", "\"s3\" | \"s5\"");
+}
+
+#[test]
+fn subset_of_2000_literals_relates_to_the_whole_union() {
+    check_large_literal_membership(2000, "[Most] extends [W] ? 'sub' : 'other'", "\"sub\"");
+}
+
+#[test]
+fn subset_of_5000_literals_relates_to_the_whole_union() {
+    check_large_literal_membership(5000, "[Most] extends [W] ? 'sub' : 'other'", "\"sub\"");
+}
 
 /// Measured on TypeScript 7.0.2 (all four settings): over an 800-member
 /// `W`, `[Exclude<W, "m0">] extends [W] ? 1 : 2` is `1` and `[W] extends
