@@ -26,6 +26,10 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+#[path = "tuple_product.rs"]
+mod tuple_product;
+pub(super) use tuple_product::ExpressionSplice;
+
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
 /// that exceeds it has NOT established its root set and the result it
@@ -902,6 +906,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         self.build_typeof_suspending(value_root, path, context, None)
     }
 
@@ -920,6 +926,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> TypeofStart {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         let mut suspended = None;
         let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
         match suspended {
@@ -1176,6 +1184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: &mut TypeofBuild,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
+        let _site = self.checking_site_scope(build.checking_site());
         let mut delivery = match &mut build.body {
             TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
             TypeofBody::Lowering(_) => {
@@ -12505,176 +12514,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    // (See `NormalizedTupleShape` at module scope below the impl block.)
-
-    construction_ordinal_seam! {
-        /// Spread-normalise a tuple's element list (the shared
-        /// normalize-on-intern rule for every tuple intern site that can
-        /// receive substituted / signature-derived elements):
-        ///
-        /// 1. **Variadic splice** — a `rest: true` element whose value is a
-        ///    settled `Tuple` (through transparent aliases) splices that
-        ///    tuple's elements in place, preserving the inner labels /
-        ///    optional / rest markers. This is what makes a userland
-        ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
-        ///    substitute to concrete tuples — no utility name special-casing.
-        ///    Splicing recurses into the spliced elements under a small depth
-        ///    budget (nested `[...[...T]]` shapes); budget exhaustion keeps
-        ///    the element verbatim.
-        /// 2. **Non-trailing optional reconciliation** — an `optional` marker
-        ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
-        ///    element converts to a REQUIRED `T | undefined` slot.
-        ///    Optional-before-required is unrepresentable TS (TS1257); the
-        ///    pinned tsgo materialises `[...[a?: number], string]` as
-        ///    `[number | undefined, string]` (length 2). A trailing optional
-        ///    run — including one followed only by a rest tail, which IS
-        ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
-        /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
-        ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
-        ///    the `(...args: E[])` parameters surface). The collapsed
-        ///    array's `readonly` mirrors the OUTER tuple (`readonly`
-        ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
-        ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
-        ///    `number[]`), never the inner array's flag.
-        ///
-        /// A rest element whose value is open / unresolved (a generic, a
-        /// carrier, anything not a settled tuple/array) is preserved
-        /// verbatim — normalization never forces materialisation.
-        fn normalize_tuple_spread(
-            &self,
-            elements: &[crate::semantic_query::TupleElement],
-            readonly: bool,
-        ) -> NormalizedTupleShape {
-            let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
-            self.splice_tuple_elements(elements, &mut out);
-            // Non-trailing optional reconciliation (reverse scan: a slot's
-            // conversion depends only on LATER elements; a converted slot is
-            // itself required and forces conversion of earlier optionals).
-            let mut required_follows = false;
-            for index in (0..out.len()).rev() {
-                if out[index].optional && required_follows {
-                    let undefined_node = self.graph().intern_node(SemanticNodeData::Primitive(
-                        crate::semantic_query::PrimitiveKind::Undefined,
-                    ));
-                    let widened = self.intern_normalized_union_or_intersection(
-                        &[out[index].value, undefined_node],
-                        /* is_union */ true,
-                    );
-                    out[index].value = widened;
-                    out[index].optional = false;
-                }
-                if !out[index].optional && !out[index].rest {
-                    required_follows = true;
-                }
-            }
-            if out.len() == 1 && out[0].rest {
-                if let Some(array_node) = self.settled_node_through_aliases(out[0].value, |data| {
-                    matches!(data, SemanticNodeData::Array { .. })
-                }) {
-                    if let Some(SemanticNodeData::Array {
-                        element,
-                        readonly: inner_readonly,
-                    }) = self.graph().node_data(array_node).as_deref()
-                    {
-                        // The collapsed array's readonly mirrors the OUTER
-                        // tuple; reuse the inner node only when the flags
-                        // already agree. The replacement intern preserves the
-                        // inner node's origin scope so `ProjectPath`
-                        // self-rooting over the collapsed base still records
-                        // the origin file's `(canonical, whole_hash)` root.
-                        if *inner_readonly == readonly {
-                            return NormalizedTupleShape::Array(array_node);
-                        }
-                        let element = *element;
-                        return NormalizedTupleShape::Array(self.graph().intern_preserving_scope(
-                            array_node,
-                            SemanticNodeData::Array { element, readonly },
-                        ));
-                    }
-                }
-            }
-            NormalizedTupleShape::Tuple(out)
-        }
-    }
-
-    /// The splice body of [`Self::normalize_tuple_spread`]: every rest
-    /// element whose value settles on a tuple is replaced by that tuple's
-    /// elements, spliced in turn, so `[...[...[1, 2]]]` is `[1, 2]` at any
-    /// nesting. The tuples being spliced are read from a work list; a tuple
-    /// spread into itself (a cycle) keeps its rest element as it is.
-    fn splice_tuple_elements(
-        &self,
-        elements: &[crate::semantic_query::TupleElement],
-        out: &mut Vec<crate::semantic_query::TupleElement>,
-    ) {
-        // Each level: the elements it splices, the next one, and the tuple
-        // it came from (none for the outermost).
-        let mut levels: Vec<(
-            Arc<[crate::semantic_query::TupleElement]>,
-            usize,
-            Option<SemanticNodeId>,
-        )> = vec![(
-            elements
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect(),
-            0,
-            None,
-        )];
-        let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        while let Some((elements, next, _)) = levels.last_mut() {
-            let Some(element) = elements
-                .get(*next)
-                .map(crate::semantic_query::TupleElement::copy)
-            else {
-                if let Some((_, _, Some(tuple))) = levels.pop() {
-                    splicing.remove(&tuple);
-                }
-                continue;
-            };
-            *next += 1;
-            if element.rest {
-                let inner = self
-                    .settled_node_through_aliases(element.value, |data| {
-                        matches!(data, SemanticNodeData::Tuple { .. })
-                    })
-                    .filter(|tuple| !splicing.contains(tuple))
-                    .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
-                        Some(SemanticNodeData::Tuple {
-                            elements: inner, ..
-                        }) => Some((tuple, Arc::clone(inner.as_arc()))),
-                        _ => None,
-                    });
-                if let Some((tuple, inner)) = inner {
-                    splicing.insert(tuple);
-                    levels.push((inner, 0, Some(tuple)));
-                    continue;
-                }
-            }
-            out.push(element);
-        }
-    }
-
-    /// Follow `node`'s transparent `Alias` redirects, however long the
-    /// chain, and return the settled node iff its data matches `predicate`.
-    /// `None` for open / unresolved carriers and for an alias cycle —
-    /// callers preserve those verbatim.
-    fn settled_node_through_aliases(
-        &self,
-        node: SemanticNodeId,
-        predicate: impl Fn(&SemanticNodeData) -> bool,
-    ) -> Option<SemanticNodeId> {
-        let graph = self.graph();
-        match graph.alias_chain_end(node, |_| {}) {
-            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
-                .node_data(settled)
-                .is_some_and(|data| predicate(&data))
-                .then_some(settled),
-            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
-            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
-        }
-    }
-
     /// Build a tuple node whose elements are the function's parameter
     /// types — the surface shape of `Parameters<F>` /
     /// `ConstructorParameters<F>`. Labels carry over from the parameter
@@ -17240,7 +17079,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
-                .is_same_path_claim(&relation.key(operand, context));
+                .is_same_path_claim_at(&relation.key(operand, context), self.checking_site.get());
         if on_path {
             self.fold_into_top_build_local_taint(false, true);
         }
@@ -17878,7 +17717,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
-        if self.graph().is_same_path_claim(&application) {
+        if self
+            .graph()
+            .is_same_path_claim_at(&application, self.checking_site.get())
+        {
             return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {
@@ -19770,8 +19612,10 @@ pub(super) enum GlobalSpace {
 }
 
 /// The result of [`ProjectSemanticDispatch::normalize_tuple_spread`]: either a
-/// (possibly spliced) element list that interns as a `Tuple`, or the array
-/// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
+/// (possibly spliced) element list that interns as a `Tuple`, or the one
+/// node the tuple already is — the array a sole rest-of-array tuple
+/// collapses to (`[...E[]]` ≡ `E[]`), or the checker's error-type recovery
+/// of a splice past its tuple-size limit (TS2799 / TS2800).
 #[derive(Debug)]
 pub enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
@@ -20219,6 +20063,18 @@ pub(super) struct TypeofBuild {
     path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     context: crate::semantic_query::ProjectionReductionContext,
     observed_hash: verter_session_query::analysis::types::Hash16,
+}
+
+impl TypeofBuild {
+    pub(super) fn checking_site(
+        &self,
+    ) -> crate::semantic_query::checker_policy::TupleSplicePosition {
+        use crate::semantic_query::checker_policy::TupleSplicePosition;
+        match self.body {
+            TypeofBody::Expression(_) => TupleSplicePosition::Expression,
+            _ => TupleSplicePosition::Type,
+        }
+    }
 }
 
 /// What a `typeof` build evaluates between its frame's steps.

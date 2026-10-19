@@ -689,6 +689,11 @@ struct CompositeReduction {
     /// whose demand did not complete leaves the composite as written, and
     /// its partial reasons with it.
     completeness: ResultCompleteness,
+    /// Whether a name's demand answered no type while the running decision
+    /// waits on a read. The reduction reads the remaining arms on, to reach
+    /// their reads in this run, and the composite stays as written: no
+    /// reduction is built over a name it could not read.
+    read_past_gap: bool,
 }
 
 /// What a suspended composite reduction waits for.
@@ -3548,6 +3553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             keep_origin,
             waiting: None,
             completeness: ResultCompleteness::Complete,
+            read_past_gap: false,
         })
     }
 
@@ -3600,10 +3606,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             // A conditional decision whose run waits on a
                             // read drops that run: reading on, it reaches
                             // the reads the remaining arms make in this run
-                            // rather than one arm per run.
+                            // rather than one arm per run. The composite
+                            // still stays as written.
                             if !self.decision_waits() {
                                 return self.end_composite(reduction, None);
                             }
+                            reduction.read_past_gap = true;
                             arm
                         }
                     };
@@ -3678,6 +3686,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             reduction.waiting = Some(ArmWait::Resolved(arm));
             return CompositeStep::Demand(arm);
+        }
+        if reduction.read_past_gap {
+            return self.end_composite(reduction, None);
         }
         let reduced = self.reduce_over_resolved_arms(reduction);
         self.end_composite(reduction, reduced)
