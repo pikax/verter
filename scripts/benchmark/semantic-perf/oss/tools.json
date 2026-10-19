@@ -146,8 +146,8 @@
       "name": "ts-rust",
       "project": "pingdotgg/ts-rust",
       "license": "MIT AND Apache-2.0",
-      "pin": "v0.1.0",
-      "commit": "72b339e412f2560549033cea8db337b1bd44c312",
+      "pin": "v0.7.0",
+      "commit": "3644f3244d9a93082c69e6691e8b280a0ccc98d0",
       "format": "tsc",
       "argv": [
         "-p",
@@ -168,39 +168,27 @@
       "platforms": {
         "win32-x64": {
           "source": {
-            "type": "git",
-            "url": "https://github.com/pingdotgg/ts-rust.git",
-            "commit": "72b339e412f2560549033cea8db337b1bd44c312"
+            "type": "archive",
+            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.7.0/tsc-rs-0.7.0-win32-x64.zip",
+            "sha256": "702baece881114e6d1f0f22c170f13eed48b1712243f6123142a77d06583f002"
           },
-          "build": [
-            "cargo",
-            "build",
-            "--profile",
-            "goport",
-            "--locked",
-            "-p",
-            "ts_goport",
-            "--bin",
-            "tsgo",
-            "--no-default-features"
-          ],
-          "binary": "target/goport/tsgo.exe"
+          "binary": "tsc-rs-0.7.0-win32-x64/tsc.exe"
         },
         "darwin-arm64": {
           "source": {
             "type": "archive",
-            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.1.0/tsc-rs-0.1.0-darwin-arm64.tar.gz",
-            "sha256": "96920e12262ebe390dfa4876c3cf8ed03aa594ce99222a00e0f1517e945ba205"
+            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.7.0/tsc-rs-0.7.0-darwin-arm64.tar.gz",
+            "sha256": "05231466be7909a4b51b0c247c4ef14428080a5c44c69fa513f3632661d4b694"
           },
-          "binary": "tsc-rs-0.1.0-darwin-arm64/tsc"
+          "binary": "tsc-rs-0.7.0-darwin-arm64/tsc"
         },
         "linux-x64": {
           "source": {
             "type": "archive",
-            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.1.0/tsc-rs-0.1.0-linux-x64.tar.gz",
-            "sha256": "11dc30c9e69082acc9d9e05cd562e1334d361342b09950da58a6709adef4fda2"
+            "url": "https://github.com/pingdotgg/ts-rust/releases/download/v0.7.0/tsc-rs-0.7.0-linux-x64.tar.gz",
+            "sha256": "393d9ba77b1941808d4a88d108e5b63d6840c4e68f7d45a353509a199b89b7a1"
           },
-          "binary": "tsc-rs-0.1.0-linux-x64/tsc"
+          "binary": "tsc-rs-0.7.0-linux-x64/tsc"
         }
       }
     },
