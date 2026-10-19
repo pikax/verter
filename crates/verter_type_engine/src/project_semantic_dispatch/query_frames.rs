@@ -451,7 +451,18 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> SemanticTask<'p,
         let _spend = self.accounting.spend.install();
         let _refusals = self.accounting.refusals.install();
         let _completeness = self.accounting.completeness.install();
-        self.execution.poll(program, self.root.take(), waker)
+        let poll = self.execution.poll(program, self.root.take(), waker);
+        // Each frame step keeps its partiality to its own frame, reaching a
+        // consumer through the delivery it reads. The lender consumes the
+        // root's: its partiality returns to the lender with the task.
+        if let std::task::Poll::Ready(Ok(delivery)) = &poll {
+            if delivery.read.result_is_partial() {
+                crate::request_context::mark_request_result_partial_from_read_with(
+                    delivery.read.partial_reason_classes(),
+                );
+            }
+        }
+        poll
     }
 
     /// Poll the task to completion on this thread.
