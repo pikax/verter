@@ -7396,17 +7396,41 @@ pub fn indexed_literal_provenance(
                         }
                     }
                 }
-                Expression::ArrayExpression(array) => {
-                    // A spread or an elision leaves no element at its own index.
+                // A spread or an elision makes the literal no tuple: its
+                // elements, and those of each array literal a spread
+                // spreads, are the arms of its one element type.
+                Expression::ArrayExpression(array)
                     if array.elements.iter().any(|element| {
                         matches!(
                             element,
                             oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
                                 | oxc_ast::ast::ArrayExpressionElement::Elision(_)
                         )
-                    }) {
-                        continue;
+                    }) =>
+                {
+                    let mut spread = vec![array];
+                    while let Some(array) = spread.pop() {
+                        for element in &array.elements {
+                            let element = match element {
+                                oxc_ast::ast::ArrayExpressionElement::SpreadElement(element) => {
+                                    if let Expression::ArrayExpression(source) =
+                                        element.argument.without_parentheses()
+                                    {
+                                        spread.push(source);
+                                        continue;
+                                    }
+                                    &element.argument
+                                }
+                                element => match element.as_expression() {
+                                    Some(element) => element,
+                                    None => continue,
+                                },
+                            };
+                            held.push((IndexedLiteralStep::Elements, element));
+                        }
                     }
+                }
+                Expression::ArrayExpression(array) => {
                     for (index, element) in array.elements.iter().enumerate() {
                         if let (Some(element), Ok(index)) =
                             (element.as_expression(), u32::try_from(index))
