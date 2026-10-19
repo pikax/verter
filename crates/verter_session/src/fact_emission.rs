@@ -102,11 +102,12 @@ pub struct ParseFactsEmission {
 /// `tests/cases/g_fact/fact_emission_work_class.rs`.
 ///
 /// Production cost: the counters are always live, and the POINT-LOOKUP
-/// counter bumps once per probe, so the total is `2N + 9` non-atomic
-/// `Cell` updates per file publish — 20_009 at N = 10_000 declarations,
+/// counter bumps once per probe, so the total is `2N + 10` non-atomic
+/// `Cell` updates per file publish — 20_010 at N = 10_000 declarations,
 /// not a handful. (`2N` because the walk probes twice per declaration:
-/// once for the member headers, once for the export target; `9` is the
-/// fixed number of section-level inventory traversals.) That is still
+/// once for the member headers, once for the export target; `10` is the
+/// fixed number of section-level inventory traversals plus the one
+/// module-kind probe the augmentation facts record.) That is still
 /// negligible against the same call's thousands of heap allocations and
 /// its per-member hashing, but it is a per-declaration cost and is
 /// recorded as one rather than rounded to nothing.
@@ -204,6 +205,15 @@ mod inventory_view {
         /// Flattened `(scope, key, header)` triples. Flattened INSIDE the
         /// view on purpose: handing out the per-scope `DeclMap` would let a
         /// caller re-iterate it without the tally noticing.
+        /// Whether the file is a module or a script, read from its
+        /// retained import/export inventory.
+        pub(crate) fn module_kind(
+            &self,
+        ) -> verter_session_query::inputs::contributors::FileModuleKind {
+            self.note_point_lookup();
+            verter_session_query::inputs::contributors::classify_shallow_module_kind(self.shallow)
+        }
+
         pub(crate) fn augmentation_type_headers(
             &self,
         ) -> impl Iterator<
@@ -982,6 +992,7 @@ fn compute_display_hash(semantic: &Hash16) -> Hash16 {
 /// augmentation-sensitive query.
 fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationFact> {
     let mut out: Vec<ModuleAugmentationFact> = Vec::new();
+    let declaring_file = view.module_kind();
 
     // Type-space augmentations (interfaces, type aliases).
     for (scope, key, header) in view.augmentation_type_headers() {
@@ -999,6 +1010,7 @@ fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationF
                 header.member_headers.as_slice(),
                 header.contributors.len(),
             ),
+            declaring_file,
         });
     }
 
@@ -1018,6 +1030,7 @@ fn collect_augmentations(view: &FactEmissionView<'_>) -> Vec<ModuleAugmentationF
                 header.object_member_headers.as_slice(),
                 header.contributors.len(),
             ),
+            declaring_file,
         });
     }
 
@@ -1107,6 +1120,34 @@ mod tests {
             facts[0].owner,
             verter_type_expr::TopLevelOwnerId::ordinary_file()
         );
+    }
+
+    #[test]
+    fn augmentation_fact_records_whether_its_file_is_a_module() {
+        use verter_session_query::inputs::contributors::FileModuleKind;
+        let block = "declare module \"vue\" { interface ComponentCustomProperties { $t: string } }
+";
+        for (source, expected) in [
+            (block.to_string(), FileModuleKind::Script),
+            (
+                format!(
+                    "export {{}}
+{block}"
+                ),
+                FileModuleKind::Module,
+            ),
+            (
+                format!(
+                    "import type {{ Ref }} from \"vue\"
+{block}"
+                ),
+                FileModuleKind::Module,
+            ),
+        ] {
+            let facts = augmentations_for(&source);
+            assert_eq!(facts.len(), 1, "{source}");
+            assert_eq!(facts[0].declaring_file, expected, "{source}");
+        }
     }
 
     #[test]

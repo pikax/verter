@@ -209,10 +209,11 @@ impl FileFacts {
 
 /// Kind of augmentation target.
 ///
-/// Distinguishes external specifiers (`declare module "vue" {}`),
-/// resolved relative paths (`declare module "./local" {}` resolved
-/// against the augmenter), wildcard ambients (`declare module "*.css" {}`),
-/// and the global block (`declare global {}`).
+/// Distinguishes external specifiers (`declare module "vue" {}`), the
+/// module file a relative or package specifier resolves to from the
+/// augmenter (`declare module "./local" {}`, or `declare module "pkg" {}`
+/// in a module), wildcard ambients (`declare module "*.css" {}`), and the
+/// global block (`declare global {}`).
 // Dependency-neutral augmentation key vocabulary shared with the semantic
 // observation boundary. `InternedSpecifier`/`InternedGlobPattern` are fact
 // registry values, and these key types contain no session/host behavior.
@@ -380,7 +381,7 @@ fn base_snapshot_equivalent(prev: &FileArtifacts, next: &FileArtifacts) -> bool 
 /// every call site (an augmenter artifact only ever replaces itself at its own
 /// canonical), so comparing `parse_stable_hash` here is exactly comparing the
 /// per-augmenter fingerprint contribution. The fact compare is order-
-/// INDEPENDENT (a multiset over the five fact dimensions) and CONSERVATIVE:
+/// INDEPENDENT (a multiset over the six fact dimensions) and CONSERVATIVE:
 /// any genuine membership change makes the multisets differ. The lockstep unit
 /// invariant
 /// `file_artifact_store_tests::augmentation_contribution_equivalence_tracks_fingerprint_inputs`
@@ -401,7 +402,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
     if prev_facts.len() != next_facts.len() {
         return false;
     }
-    // Multiset compare keyed by the five fact dimensions (all `Eq + Hash`).
+    // Multiset compare keyed by the six fact dimensions (all `Eq + Hash`).
     // `ModuleAugmentationFact` is not `Eq`, so fold a per-fact count map and
     // confirm `next` exactly drains it.
     type FactKey = (
@@ -410,6 +411,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
         InternedName,
         SymbolSpace,
         Hash16,
+        verter_session_query::inputs::contributors::FileModuleKind,
     );
     let key_of = |fact: &ModuleAugmentationFact| -> FactKey {
         (
@@ -418,6 +420,7 @@ fn augmentation_contribution_equivalent(prev: &FileArtifacts, next: &FileArtifac
             fact.augmented_name.clone(),
             fact.space,
             fact.augmented_member_shape_fingerprint,
+            fact.declaring_file,
         )
     };
     let mut counts: rustc_hash::FxHashMap<FactKey, i64> = rustc_hash::FxHashMap::default();
@@ -3451,11 +3454,11 @@ impl FileArtifactStore {
     /// nothing (matches TypeScript's own augmentation-visibility
     /// rule).
     ///
-    /// `resolve_relative_canonical` is a caller-supplied hook that
-    /// resolves a `(augmenter_canonical, relative_specifier)` pair to
-    /// a canonical when the queried target is `ResolvedRelativeCanonical`.
-    /// `None` means the augmenter's specifier did not resolve to the
-    /// queried canonical and the augmenter is skipped.
+    /// `resolve` is a caller-supplied hook that resolves an
+    /// `(augmenter_canonical, specifier)` pair — a relative specifier, or a
+    /// package specifier declared in a module — to the module file it names
+    /// when the queried target is `ResolvedRelativeCanonical`. `None` means
+    /// the specifier resolved to no file and the augmenter is skipped.
     #[cfg(any(test, feature = "test-support"))]
     pub fn ensure_augmentation_index_populated<R>(
         &self,
@@ -3703,10 +3706,11 @@ impl verter_type_engine::invalidation_domain::InvalidationByCanonical for FileAr
 ///
 /// Exact arms (`ExternalSpecifier` / `WildcardAmbient` / `GlobalAugmentation`)
 /// are decided from the fact's specifier alone — no resolver needed. The
-/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's relative
-/// specifier without a module resolver (the store layer has none), so it
-/// answers CONSERVATIVELY: any relative `declare module "./x"` fact is treated
-/// as a potential contributor to EVERY relative-target entry.
+/// `ResolvedRelativeCanonical` arm cannot resolve the augmenter's specifier
+/// without a module resolver (the store layer has none), so it answers
+/// CONSERVATIVELY: any `declare module` fact augmenting a module file (`"./x"`,
+/// or `"pkg"` declared in a module) is treated as a potential contributor to
+/// EVERY resolved-file entry.
 ///
 /// Over-matching here is correctness-safe: an invalidation only DROPS an index
 /// entry, and the next [`FileArtifactStore::ensure_augmentation_index_populated`]
@@ -3721,11 +3725,10 @@ fn augmenter_fact_could_contribute(
     target_key: &AugmentationTargetKey,
 ) -> bool {
     let specifier: &str = fact.specifier.as_ref();
-    // Same relative class as `augmenter_matches_target` — the exact
-    // matcher and this conservative invalidation variant must agree on
-    // which facts are relative, or a `declare module '..'` fact would
-    // be exact-matched as relative but never invalidate relative-target
-    // entries.
+    // Same relative class as `augmenter_matches_target`'s external arm —
+    // the exact matcher and this conservative invalidation variant must
+    // agree on which facts are relative, or a `declare module '..'` fact
+    // would be exact-matched as relative yet invalidate external entries.
     let is_relative = verter_session_query::resolution::is_relative_specifier(specifier);
     match &target_key.target {
         AugmentationTargetKind::ExternalSpecifier(target_spec) => {
@@ -3733,9 +3736,12 @@ fn augmenter_fact_could_contribute(
             let is_global = specifier == GLOBAL_AUGMENTATION_TAG;
             !is_relative && !is_wildcard && !is_global && specifier == target_spec.as_ref()
         }
-        // Conservative: cannot resolve the relative specifier without a
-        // module resolver, so any relative fact could target this entry.
-        AugmentationTargetKind::ResolvedRelativeCanonical(_) => is_relative,
+        // Conservative: cannot resolve the specifier without a module
+        // resolver, so any fact augmenting a module file could target this
+        // entry.
+        AugmentationTargetKind::ResolvedRelativeCanonical(_) => {
+            verter_session_query::source::augmentation::fact_augments_resolved_module(fact)
+        }
         AugmentationTargetKind::WildcardAmbient(target_pattern) => {
             specifier.contains('*') && specifier == target_pattern.as_ref()
         }

@@ -7163,6 +7163,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut existential_unknown = false;
             let mut accepted = false;
             for target_branch in &target_branches {
+                if !self.charge_relation_work(1) {
+                    return Some(RelationResult::Unknown);
+                }
                 let alternative_checkpoint = self.relation_session_checkpoint();
                 let alternative_bindings_len = bindings.len();
                 match self.relate_projected_object_branch(source_branch, target_branch, bindings) {
@@ -7336,9 +7339,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(formula) => formula,
                     QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
                 };
+                let alternatives = self.object_spread_alternatives(&formula).ok()?;
                 Some(
-                    formula
-                        .alternatives()
+                    alternatives
                         .iter()
                         .map(|alternative| {
                             let mut members = Vec::new();
@@ -8374,7 +8377,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         let _ = concrete_read.adopt(self);
-        if let Some(r) = self.try_object_vs_record_relation(source, target, bindings) {
+        if let Some(r) =
+            self.try_object_vs_record_relation(source, target, bindings, intersection_target_arm)
+        {
             return r;
         }
         // A naked type parameter on the other side takes the operand as it
@@ -9331,6 +9336,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(targets) = self.weak_target_surfaces(target) else {
             return false;
         };
+        self.weak_surfaces_reject(source, target, &targets)
+    }
+
+    /// The weak-type check of `source` against the weak surfaces `targets`
+    /// of `target` ([`Self::weak_target_rejects`]).
+    fn weak_surfaces_reject(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        targets: &[SurfaceView],
+    ) -> bool {
         let Some((keys, has_signatures)) = self.weak_check_source_members(source, target, true)
         else {
             return false;
@@ -9353,15 +9369,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// intersection whose arms are all weak objects. `None` otherwise.
     fn weak_target_surfaces(&self, target: SemanticNodeId) -> Option<Vec<SurfaceView>> {
         let graph = self.graph();
-        let is_weak = |surface: &SurfaceView| {
-            let members = surface.closed().complete_members();
-            !members.is_empty()
-                && members.iter().all(|member| member.optional)
-                && surface.call_signatures.is_empty()
-                && surface.construct_signatures.is_empty()
-                && surface.index_signatures.is_empty()
-                && !surface.closed().has_index_signature()
-        };
+        let is_weak = surface_is_weak;
         match graph.node_data(target).as_deref()? {
             SemanticNodeData::Object(surface) => is_weak(surface).then(|| vec![surface.clone()]),
             SemanticNodeData::Intersection(members) => {
@@ -10118,8 +10126,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // property type it reads (`Box['lit']` IS `2`, and an
                     // optional `opt?: 3` reads `3 | undefined`): the checker
                     // resolves it where it is written, so a relation compares
-                    // that type. One the deferred evaluator cannot read further
-                    // (`T['k']` over an open `T`) stays the operand it is.
+                    // that type — read at `Navigate`, which keeps the member's
+                    // type, never at `Shallow`, whose one-level surface of a
+                    // union member (`Local | { $: number }`) is the empty object
+                    // its arms share. One the deferred evaluator cannot read
+                    // further (`T['k']` over an open `T`) stays the operand it
+                    // is, and so does an access of a type parameter it reads as
+                    // a miss: the checker keeps that access generic, and a
+                    // relation reads it through the parameter's constraint.
                     SemanticNodeData::DeferredCallable(_) => {
                         drop(data);
                         let materialized = self.materialize_returned_callable(current);
@@ -10129,12 +10143,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         current = materialized;
                         continue;
                     }
-                    SemanticNodeData::IndexedAccess { .. } => {
+                    SemanticNodeData::IndexedAccess { object, .. } => {
+                        let mut root = *object;
+                        while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+                            graph.node_data(root).as_deref()
+                        {
+                            root = *object;
+                        }
+                        let of_type_param = matches!(
+                            graph.node_data(root).as_deref(),
+                            Some(SemanticNodeData::TypeParam { .. })
+                        );
                         drop(data);
                         let read = self
-                            .evaluate_deferred_semantic_node_with_context(current, transit)
+                            .evaluate_deferred_semantic_node_with_context(
+                                current,
+                                ProjectionReductionContext::structural_transit_with_mode(
+                                    crate::semantic_query::ProjectionMode::Navigate,
+                                ),
+                            )
                             .into_active_query_build_node(self);
-                        if read == current {
+                        let missed = of_type_param
+                            && matches!(
+                                graph.node_data(read).as_deref(),
+                                Some(SemanticNodeData::Opaque(QueryError::Miss))
+                            );
+                        if read == current || missed {
                             return IdentityCarrierUnwrap::Concrete(current);
                         }
                         current = read;
@@ -10503,6 +10537,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         target: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
+        intersection_target_arm: bool,
     ) -> Option<RelationResult> {
         let graph = self.graph();
         let source_data = graph.node_data(source)?;
@@ -10551,6 +10586,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         Some(match target_record {
+            // A weak target takes no source sharing none of its properties,
+            // checked on the whole target, never on one intersection arm.
+            RecordTargetShape::LiteralKey(target_view)
+                if !intersection_target_arm
+                    && surface_is_weak(&target_view)
+                    && self.weak_surfaces_reject(
+                        unwrapped,
+                        target,
+                        std::slice::from_ref(&target_view),
+                    ) =>
+            {
+                RelationResult::NotAssignable
+            }
             RecordTargetShape::LiteralKey(target_view) => {
                 self.relate_objects(&source_view, &target_view, bindings)
             }
@@ -13517,6 +13565,40 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
         &self.arena
     }
+    /// The type the checker relates an indexed access of a rigid type
+    /// parameter as (`getConstraintOfIndexedAccess`): `T["a"]` is the same
+    /// access of `T`'s constraint, `T["a"]["b"]` the access of that one's,
+    /// and `unknown` when `T` declares none — every access of an
+    /// unconstrained parameter is unconstrained. `None` for any other
+    /// operand, and for a computed index of a constrained parameter, whose
+    /// constraint reads the index's own first.
+    fn rigid_indexed_access_constraint(&self, data: &SemanticNodeData) -> Option<SemanticNodeId> {
+        let SemanticNodeData::IndexedAccess { object, index } = data else {
+            return None;
+        };
+        let graph = self.graph();
+        let object_data = graph.node_data(*object)?;
+        let constraint = match object_data.as_ref() {
+            SemanticNodeData::TypeParam { constraint, .. } => *constraint,
+            access @ SemanticNodeData::IndexedAccess { .. } => {
+                let constraint = self.rigid_indexed_access_constraint(access)?;
+                let unconstrained = matches!(
+                    graph.node_data(constraint).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+                );
+                (!unconstrained).then_some(constraint)
+            }
+            _ => return None,
+        };
+        Some(match (constraint, index) {
+            (None, _) => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown)),
+            (Some(_), IndexKey::Computed(_)) => return None,
+            (Some(constraint), index) => graph.intern_node(SemanticNodeData::IndexedAccess {
+                object: constraint,
+                index: index.clone(),
+            }),
+        })
+    }
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -14494,13 +14576,21 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             SemanticNodeData::Primitive(PrimitiveKind::Never)
         ) && is_settling_carrier(&source_data)
         {
+            let rigid = (!self.relation_session_active())
+                .then(|| self.rigid_indexed_access_constraint(&source_data))
+                .flatten();
             drop(source_data);
             drop(target_data);
             match self.unwrap_identity_carrier_for_relation(source) {
                 IdentityCarrierUnwrap::Concrete(settled) if settled != source => {
                     work.push(same_pair(settled, target));
                 }
-                _ => results.push(RelationResult::Unknown),
+                // An access of a rigid type parameter is `never` only as its
+                // constraint is (an inference session's are not rigid).
+                _ => match rigid {
+                    Some(constraint) => work.push(same_pair(constraint, target)),
+                    None => results.push(RelationResult::Unknown),
+                },
             }
             return;
         }
@@ -14952,6 +15042,51 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         {
             results.push(result);
             return;
+        }
+
+        // ── An indexed access of a rigid type parameter (`T["a"]`) relates
+        //    as its constraint (`structuredTypeRelatedTo` reads a type
+        //    variable source through `getConstraintOfType`, `unknown` when
+        //    there is none), except to another indexed access, which the
+        //    checker relates by its operands. A target the lane leaves
+        //    deferred, or a composite with such an arm, stays undecided; a
+        //    union holding the access itself takes it. An inference
+        //    session's parameters are not rigid. ────────────────────────
+        if !self.relation_session_active() {
+            if let Some(constraint) = self.rigid_indexed_access_constraint(&source_data) {
+                let plain = |data: &SemanticNodeData| {
+                    !is_deferred(data)
+                        && !matches!(
+                            data,
+                            SemanticNodeData::Opaque(_) | SemanticNodeData::TypeParam { .. }
+                        )
+                };
+                let arms = match &*target_data {
+                    SemanticNodeData::Union(members) => Some(members.members_arc()),
+                    SemanticNodeData::Intersection(members) => Some(members.members_arc()),
+                    _ => None,
+                };
+                let holds_source = matches!(&*target_data, SemanticNodeData::Union(_))
+                    && arms.as_ref().is_some_and(|arms| arms.contains(&source));
+                let relates_as_constraint = match &arms {
+                    Some(arms) => arms.iter().all(|arm| {
+                        graph
+                            .node_data(*arm)
+                            .is_some_and(|data| plain(data.as_ref()))
+                    }),
+                    None => plain(&target_data),
+                };
+                if holds_source {
+                    results.push(assignable(bindings));
+                    return;
+                }
+                if relates_as_constraint {
+                    drop(source_data);
+                    drop(target_data);
+                    work.push(same_pair(constraint, target));
+                    return;
+                }
+            }
         }
 
         // ── Deferred shells on either side → Unknown ───────────────────
@@ -15617,4 +15752,16 @@ pub mod reverse_ownership_tests {
             "the accepted aggregate reaches bindings only through session fixation"
         );
     }
+}
+
+/// Whether `surface` is a weak type (`isWeakType`): at least one property,
+/// every property optional, and no call, construct or index signature.
+fn surface_is_weak(surface: &SurfaceView) -> bool {
+    let members = surface.closed().complete_members();
+    !members.is_empty()
+        && members.iter().all(|member| member.optional)
+        && surface.call_signatures.is_empty()
+        && surface.construct_signatures.is_empty()
+        && surface.index_signatures.is_empty()
+        && !surface.closed().has_index_signature()
 }

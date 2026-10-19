@@ -738,7 +738,7 @@ enum ProgramShallowProjection {
     /// Exactly one closed alternative — the only completeness proof.
     SingleClosed(SurfaceView),
     /// Open residual or correlated multi-branch formula.
-    OpenOrCorrelated(crate::semantic_query::ObjectProjectionFormula),
+    OpenOrCorrelated(Vec<crate::semantic_query::ObjectProjectionAlternative>),
     /// The projection re-entered an in-flight query.
     Recursive,
     /// The projection failed with a query error.
@@ -3739,17 +3739,33 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 results.push(node);
                                 return;
                             }
-                            QueryResult::Error(_) => {
+                            QueryResult::Error(error) => {
                                 self.cache_suppress = true;
                                 self.mark_partial_with(crate::semantic_query::PartialReasonSet::empty());
-                                results.push(self.dispatch.opaque(QueryError::OpenSurface));
+                                // A refused construction reads as its
+                                // checker recovery, as the checker reads a
+                                // member of its error type.
+                                let terminal = match error {
+                                    QueryError::CheckerRecovery { .. } => error,
+                                    _ => QueryError::OpenSurface,
+                                };
+                                results.push(self.dispatch.opaque(terminal));
                                 return;
                             }
                         };
-                        let mut projected = Vec::with_capacity(formula.alternatives().len());
+                        let mut projected = Vec::new();
                         let mut definitely_absent = 0usize;
                         let mut open_evidence = false;
-                        for alternative in formula.alternatives() {
+                        for alternative in self.dispatch.object_spread_cursor(&formula) {
+                            let alternative = match alternative {
+                                Ok(alternative) => alternative,
+                                Err(reasons) => {
+                                    self.cache_suppress = true;
+                                    self.mark_partial_with(reasons);
+                                    results.push(self.dispatch.opaque(QueryError::OpenSurface));
+                                    return;
+                                }
+                            };
                             match alternative.selected_key(candidate) {
                                 crate::semantic_query::OpenSafeKeyEvidence::Positive(fact) => {
                                     match fact.value() {
@@ -6143,40 +6159,92 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// every other member value is untouched. Non-owning normalization:
     /// names resolve to declaration identities through the existing shared
     /// routes; nothing lowers, nothing instantiates.
+    ///
+    /// Nested inline surfaces are presented from an explicit stack, so a
+    /// terminal of any nesting depth presents every level; each surface node
+    /// is presented once per terminal (a revisit keeps the node as is).
     fn present_terminal_member_carriers(&mut self, node: SemanticNodeId) -> SemanticNodeId {
+        /// One inline surface being presented: its members presented so far.
+        struct Presenting {
+            node: SemanticNodeId,
+            view: SurfaceView,
+            values: Vec<SemanticNodeId>,
+            changed: bool,
+        }
         let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-        self.present_terminal_surface_carriers(node, &mut visited, 0)
+        let mut enter = |this: &Self, node: SemanticNodeId| -> Option<Presenting> {
+            if !visited.insert(node) {
+                return None;
+            }
+            match this.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Object(view)) => Some(Presenting {
+                    node,
+                    view: view.clone(),
+                    values: Vec::with_capacity(view.positive_members().len()),
+                    changed: false,
+                }),
+                _ => None,
+            }
+        };
+        let Some(root) = enter(self, node) else {
+            return node;
+        };
+        let mut stack = vec![root];
+        loop {
+            let top = stack.last_mut().expect("a surface is being presented");
+            if let Some(member) = top.view.positive_members().get(top.values.len()) {
+                let value = member.value;
+                let inline = matches!(
+                    self.graph().node_data(value).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                );
+                if inline {
+                    if let Some(nested) = enter(self, value) {
+                        stack.push(nested);
+                        continue;
+                    }
+                    let top = stack.last_mut().expect("a surface is being presented");
+                    top.values.push(value);
+                    continue;
+                }
+                let presented = self.present_terminal_member_value(value);
+                let top = stack.last_mut().expect("a surface is being presented");
+                top.changed |= presented != value;
+                top.values.push(presented);
+                continue;
+            }
+            let done = stack.pop().expect("a surface is being presented");
+            let presented =
+                self.rebuild_presented_surface(done.node, &done.view, done.values, done.changed);
+            let Some(parent) = stack.last_mut() else {
+                return presented;
+            };
+            let original = parent.view.positive_members()[parent.values.len()].value;
+            parent.changed |= presented != original;
+            parent.values.push(presented);
+        }
     }
 
-    fn present_terminal_surface_carriers(
+    /// `node`'s Object surface with its members' values replaced by
+    /// `values`, or `node` itself when none changed.
+    fn rebuild_presented_surface(
         &mut self,
         node: SemanticNodeId,
-        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
-        depth: usize,
+        view: &SurfaceView,
+        values: Vec<SemanticNodeId>,
+        changed: bool,
     ) -> SemanticNodeId {
-        if depth >= 8 || !visited.insert(node) {
-            return node;
-        }
-        let view = match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::Object(view)) => view.clone(),
-            _ => return node,
-        };
-        let mut changed = false;
-        let mut members: Vec<SurfaceMember> = Vec::with_capacity(view.positive_members().len());
-        for member in view.positive_members().iter() {
-            let value = self.present_terminal_member_value(member.value, visited, depth);
-            if value != member.value {
-                changed = true;
-            }
-            members.push(SurfaceMember {
-                value,
-                ..member.clone()
-            });
-        }
         if !changed {
             return node;
         }
-        let mut members = members.into_iter();
+        let mut members = view
+            .positive_members()
+            .iter()
+            .zip(values)
+            .map(|(member, value)| SurfaceMember {
+                value,
+                ..member.clone()
+            });
         let entries = view
             .entries
             .iter()
@@ -6197,15 +6265,11 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         )
     }
 
-    fn present_terminal_member_value(
-        &mut self,
-        value: SemanticNodeId,
-        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
-        depth: usize,
-    ) -> SemanticNodeId {
+    /// A non-inline member value presented: an imported synthesized
+    /// component default as its instance-identity `DeclRef` carrier, any
+    /// other value as is.
+    fn present_terminal_member_value(&mut self, value: SemanticNodeId) -> SemanticNodeId {
         enum MemberShape {
-            /// Inline structural interior — recurse.
-            Inline,
             /// An unresolved bare reference — identity-resolve; adopt only a
             /// synthesized-component-default target.
             Unresolved,
@@ -6214,7 +6278,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             InstanceTypeOf(crate::semantic_query::ValueRootKey),
         }
         let shape = match self.graph().node_data(value).as_deref() {
-            Some(SemanticNodeData::Object(_)) => MemberShape::Inline,
             Some(data @ (SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_))) => {
                 let head_name = data.bare_ref_head().map(|(name, _)| Arc::<str>::from(name));
                 let args = data.carrier_type_args();
@@ -6263,9 +6326,6 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             _ => return value,
         };
         match shape {
-            MemberShape::Inline => {
-                self.present_terminal_surface_carriers(value, visited, depth + 1)
-            }
             MemberShape::Unresolved => {
                 let resolved = self.resolve_carrier_subject(
                     value,
@@ -7524,8 +7584,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             ProgramShallowProjection::SingleClosed(view) => {
                 self.graph().intern_node(SemanticNodeData::Object(view))
             }
-            ProgramShallowProjection::OpenOrCorrelated(formula) => {
-                match self.closed_merge_of_formula(&formula) {
+            ProgramShallowProjection::OpenOrCorrelated(alternatives) => {
+                match self.closed_merge_of_formula(&alternatives) {
                     Some(merged) => self
                         .graph()
                         .intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged))),
@@ -7551,7 +7611,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             self.context,
         ) {
             QueryResult::Value(formula) => {
-                if let [only] = formula.alternatives() {
+                let Ok(alternatives) = self.dispatch.object_spread_alternatives(&formula) else {
+                    return ProgramShallowProjection::Failed;
+                };
+                if let [only] = alternatives.as_slice() {
                     if let Some(view) = only
                         .closed()
                         .and_then(|closed| closed.to_closed_surface_view())
@@ -7559,7 +7622,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         return ProgramShallowProjection::SingleClosed(view);
                     }
                 }
-                ProgramShallowProjection::OpenOrCorrelated(formula)
+                ProgramShallowProjection::OpenOrCorrelated(alternatives)
             }
             QueryResult::Recursive(_) => ProgramShallowProjection::Recursive,
             QueryResult::Error(_) => ProgramShallowProjection::Failed,
@@ -7584,10 +7647,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// never claim a closed domain for an open branch.
     fn closed_merge_of_formula(
         &self,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
+        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
     ) -> Option<ShallowSurface> {
-        let arms: Option<Vec<ShallowSurface>> = formula
-            .alternatives()
+        let arms: Option<Vec<ShallowSurface>> = alternatives
             .iter()
             .map(|alternative| {
                 // The alternative is closed, so every member's evidence is
@@ -8539,8 +8601,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             Some(surface),
                         );
                     }
-                    ProgramShallowProjection::OpenOrCorrelated(formula) => {
-                        if let Some(closed_merge) = self.closed_merge_of_formula(&formula) {
+                    ProgramShallowProjection::OpenOrCorrelated(alternatives) => {
+                        if let Some(closed_merge) = self.closed_merge_of_formula(&alternatives) {
                             self.contribute_surface(
                                 target,
                                 root_contribution,
@@ -8551,8 +8613,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             return;
                         }
                         self.mark_open_spread_partial(cur);
-                        let arm_surfaces: Vec<Option<ShallowSurface>> = formula
-                            .alternatives()
+                        let arm_surfaces: Vec<Option<ShallowSurface>> = alternatives
                             .iter()
                             .map(|alternative| {
                                 Some(shallow_surface_from_projection_alternative(
@@ -10783,10 +10844,10 @@ construction_ordinal_seam! {
     #[must_use]
     fn spread_formula_positive_members_for_macro(
         graph: &SemanticGraphStore,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
+        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Vec<crate::semantic_query::SurfaceMember> {
-        if let [only] = formula.alternatives() {
+        if let [only] = alternatives {
             let surface = shallow_surface_from_projection_alternative(graph, only);
             return surface_view_from_shallow(&surface)
                 .positive_members()
@@ -10794,8 +10855,7 @@ construction_ordinal_seam! {
                 .map(crate::semantic_query::SurfaceMember::clone)
                 .collect();
         }
-        let arm_surfaces: Vec<Option<ShallowSurface>> = formula
-            .alternatives()
+        let arm_surfaces: Vec<Option<ShallowSurface>> = alternatives
             .iter()
             .map(|alternative| {
                 Some(shallow_surface_from_projection_alternative(
@@ -11051,20 +11111,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// surface consumers (see [`spread_formula_positive_members_for_macro`]),
         /// computed in this dispatcher's construction lane. The members' value
         /// operands are this graph's; the canonical evidence the union merge
-        /// gathers is deposited on this dispatcher.
-        #[must_use]
+        /// gathers is deposited on this dispatcher. `Err` with the connected
+        /// demand's trip when it cannot pay to read the alternatives.
         fn spread_formula_positive_members_for_macro(
             &self,
             formula: &crate::semantic_query::ObjectProjectionFormula,
-        ) -> Vec<crate::semantic_query::SurfaceMember> {
+        ) -> Result<Vec<crate::semantic_query::SurfaceMember>, crate::semantic_query::PartialReasonSet>
+        {
+            let alternatives = self.object_spread_alternatives(formula)?;
             let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
             let members = spread_formula_positive_members_for_macro(
                 self.graph(),
-                formula,
+                &alternatives,
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
-            members
+            Ok(members)
         }
     }
 

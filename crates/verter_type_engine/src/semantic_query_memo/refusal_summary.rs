@@ -131,7 +131,11 @@ impl RefusalSummary {
     }
 }
 
-type RefusalKey = (PreparedKeyHandle, BudgetProfile);
+type RefusalKey = (
+    PreparedKeyHandle,
+    BudgetProfile,
+    crate::semantic_query::checker_policy::TupleSplicePosition,
+);
 
 /// The store's bounded refusal-summary table.
 #[derive(Default)]
@@ -173,6 +177,7 @@ impl SemanticGraphStore {
         key: &SemanticQueryKey,
         profile: &BudgetProfileSpec,
         request: Option<&crate::request_budget::RequestBudget>,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
     ) -> Option<Arc<RefusalSummary>> {
         if self.refusal_summaries.len.load(Ordering::Acquire) == 0 {
             return None;
@@ -180,6 +185,7 @@ impl SemanticGraphStore {
         let refusal_key = (
             self.prepare_rooted_key(key.clone()),
             BudgetProfile::intern(*profile),
+            site,
         );
         let summary = self
             .refusal_summaries
@@ -223,6 +229,7 @@ impl SemanticGraphStore {
         key: SemanticQueryKey,
         profile: BudgetProfile,
         entered: RefusalEntryState,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
         mut summary: RefusalSummary,
     ) -> bool {
         let refuse = |refusal: verter_session_query::retention::RetentionRefusal| {
@@ -251,7 +258,7 @@ impl SemanticGraphStore {
             }
             RetentionAdmission::Refused(refusal) => return refuse(refusal),
         }
-        let key = (self.prepare_rooted_key(key), profile);
+        let key = (self.prepare_rooted_key(key), profile, site);
         let flags = ctx.request_flags();
         let evicted = {
             let mut summaries = self.refusal_summaries.table.lock();
@@ -355,6 +362,7 @@ impl SemanticGraphStore {
             key,
             profile,
             entered,
+            Default::default(),
             RefusalSummary::new(
                 read,
                 carrier,
@@ -378,7 +386,7 @@ impl SemanticGraphStore {
         key: crate::semantic_query::SemanticQueryKey,
         profile: &BudgetProfile,
     ) -> bool {
-        self.sealed_refusal(ctx, &key, profile.spec(), None)
+        self.sealed_refusal(ctx, &key, profile.spec(), None, Default::default())
             .is_some()
     }
 }

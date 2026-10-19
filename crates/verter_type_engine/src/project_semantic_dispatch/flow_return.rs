@@ -1867,10 +1867,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         suspend: bool,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> IndexedValuePoll {
+        let _site = self.checking_site_scope(
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+        );
         use verter_type_expr::IndexedValueExpression;
         enum Phase {
             Enter,
             Deliver(Option<IndexedValue>),
+            CheckCall(Option<IndexedValue>),
         }
         let IndexedValueRun {
             path,
@@ -1901,9 +1905,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .node,
                 fresh: false,
             })),
-            IndexedNext::AwaitCall => Phase::Deliver(self.indexed_call_delivered(
+            IndexedNext::AwaitCall => Phase::CheckCall(self.indexed_call_delivered(
                 delivery.expect("a run waiting on a call resumes with its resolution"),
             )),
+            IndexedNext::AwaitReturn { mut original } => {
+                let read = self.read_frame_delivery(
+                    delivery.expect("a checked return resumes with its demand"),
+                );
+                if let QueryResult::Value(crate::semantic_query::SemanticQueryValue::TypeNode(
+                    node,
+                )) = read.value
+                {
+                    if self.declared_return_is_recovery(read.partial_reasons(), node) {
+                        original.node = node;
+                    }
+                }
+                Phase::Deliver(Some(original))
+            }
             IndexedNext::Finished => unreachable!("a finished run is not drained again"),
         };
         loop {
@@ -1943,6 +1961,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     continue;
                 }
+                // A call's lazy declared return is checked before its value
+                // is delivered: a continuation awaits the check as a frame
+                // of its own, an inline run reads it in place.
+                Phase::CheckCall(value) => match value
+                    .map(|original| (original, self.indexed_call_return_key(original.node)))
+                {
+                    Some((original, Some(key))) if suspend => {
+                        *next = IndexedNext::AwaitReturn { original };
+                        return IndexedValuePoll::Need(key);
+                    }
+                    Some((original, Some(key))) => {
+                        Some(self.checked_declared_call_return(original, key))
+                    }
+                    checked => checked.map(|(original, _)| original),
+                },
                 Phase::Deliver(value) => value,
             };
             // `value` is the evaluated expression's: deliver it to the
@@ -2060,10 +2093,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         crate::semantic_query::SemanticQueryKey::ResolveCall(Box::new(key)),
                     );
                 }
-                phase = Phase::Deliver(self.resolve_indexed_call_key(key, hold_flow_result));
+                phase = Phase::CheckCall(self.resolve_indexed_call_key(key, hold_flow_result));
                 continue;
             }
-            phase = Phase::Deliver(self.resolve_indexed_call(
+            phase = Phase::CheckCall(self.resolve_indexed_call(
                 canonical,
                 owner,
                 call,
@@ -2073,6 +2106,121 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 hold_flow_result,
             ));
         }
+    }
+
+    /// The shared instantiation demand of a call's lazy return. The indexed
+    /// continuation awaits it as an expression demand, so an alias chain
+    /// grows heap frames rather than nested native calls. Complete returns
+    /// retain their authored carrier; a refused return delivers its recovery.
+    ///
+    /// The check instantiates the return only as deep as the checker's call
+    /// instantiation constructs it: a structural-transit (`Shallow`) demand
+    /// builds the alias body — its tuples and their splices — and keeps
+    /// member values as carriers, which the checker defers and never
+    /// instantiates at the call. It is never a publication demand.
+    fn indexed_call_return_key(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::SemanticQueryKey> {
+        let data = self.graph().node_data(node)?;
+        let (base, args) = match data.as_ref() {
+            SemanticNodeData::InstantiationRef { base, args } => (base, Arc::clone(args.as_arc())),
+            SemanticNodeData::DeclRef { identity } => (identity, Arc::from([])),
+            _ => return None,
+        };
+        // A named interface or class is already the return's structural
+        // carrier. Materializing its members cannot construct a tuple at
+        // this call, and can introduce unrelated recursive member reads.
+        if matches!(
+            self.prepared_decl_kind(base),
+            Some(
+                verter_session_query::declarations::TypeDeclKind::Interface
+                    | verter_session_query::declarations::TypeDeclKind::Class
+            )
+        ) {
+            return None;
+        }
+        let slot = self.type_slot_for(
+            base.canonical_id.clone(),
+            base.owner,
+            base.decl_name.clone(),
+        );
+        Some(crate::semantic_query::SemanticQueryKey::Instantiate(
+            crate::semantic_query::InstantiateKey::new(
+                slot,
+                args,
+                self.instantiate_context_for(
+                    &base.canonical_id,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                ),
+            ),
+        ))
+    }
+
+    /// Read a lazy declared return's instantiation demand in place: an
+    /// operand of the flow frame whose own body makes the call, or a drive
+    /// of its own outside any. Anywhere else inside a running drive — a
+    /// body a signature probe evaluates inline beneath a decision, a
+    /// callee evaluated inline — the read would start that return's work
+    /// natively beneath the call, one native level per declared return a
+    /// chain of calls reaches, so it is not made there and the call keeps
+    /// its lazy carrier for the demand that reads it.
+    ///
+    /// An evaluation that keeps an unchecked carrier answers for this
+    /// context alone: the same evaluation where the check runs may be the
+    /// checker's recovery instead. Its build is therefore never admitted,
+    /// so the next demand that can check the return computes it — the
+    /// shared result never depends on which demand evaluated it first.
+    fn read_declared_call_return(
+        &self,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        if crate::semantic_execution::drive_running() && !self.flow_seam_reads_here() {
+            self.fold_into_top_build_local_taint_with(
+                false,
+                true,
+                crate::semantic_query::PartialReasonSet::empty(),
+            );
+            return None;
+        }
+        Some(self.execute_read(key))
+    }
+
+    /// A call's value once its lazy declared return (`key`) is checked in
+    /// place: a refused return is its recovery, a complete one keeps the
+    /// authored carrier — what [`IndexedNext::AwaitReturn`] delivers.
+    fn checked_declared_call_return(
+        &self,
+        original: IndexedValue,
+        key: crate::semantic_query::SemanticQueryKey,
+    ) -> IndexedValue {
+        let Some(read) = self.read_declared_call_return(key) else {
+            return original;
+        };
+        match read.value {
+            QueryResult::Value(node)
+                if self.declared_return_is_recovery(read.partial_reasons(), node) =>
+            {
+                IndexedValue { node, ..original }
+            }
+            _ => original,
+        }
+    }
+
+    /// Whether a checked declared return read is the checker's recovery for
+    /// a refused construction, which replaces the authored carrier. Any
+    /// other partial read keeps the lazy carrier: an incomplete value never
+    /// stands in for it.
+    fn declared_return_is_recovery(
+        &self,
+        reasons: crate::semantic_query::PartialReasonSet,
+        node: SemanticNodeId,
+    ) -> bool {
+        reasons.contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)
+            || matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+            )
     }
 
     /// The value a call's resolution, resolved by a frame of its own,
@@ -2242,18 +2390,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         args: Vec<crate::semantic_query::CallArgKey>,
     ) -> Option<crate::semantic_query::ResolveCallKey> {
         use verter_type_expr::IndexedValueCallKind;
-        let explicit_type_args = call
-            .explicit_type_args
-            .iter()
-            .map(|argument| {
-                self.lower_type_expr_in_owner_scope_with_mode(
-                    canonical,
-                    owner,
-                    argument,
-                    crate::semantic_query::ProjectionMode::Navigate,
-                )
-            })
-            .collect::<Option<Vec<_>>>()?;
+        // Explicit type arguments are type nodes inside the checked
+        // expression: a splice they refuse is the type site's TS2799.
+        let explicit_type_args = {
+            let _type_node = self.checking_site_scope(
+                crate::semantic_query::checker_policy::TupleSplicePosition::Type,
+            );
+            call.explicit_type_args
+                .iter()
+                .map(|argument| {
+                    self.lower_type_expr_in_owner_scope_with_mode(
+                        canonical,
+                        owner,
+                        argument,
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    )
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
         // The callee's polymorphic `this` is the receiver it is read
         // through.
         let callee = receiver.map_or(callee, |receiver| {
@@ -6898,6 +7052,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             });
         let flow_cx = FlowCx::new(self);
+        // What the evaluator demands is demanded while an expression is
+        // checked — save the type nodes it lowers: a tuple splice it
+        // refuses is the checker's TS2800.
+        let _expression_site = self.checking_site_scope(
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression,
+        );
         let value_observations = crate::request_context::ColdComputeCompletenessScope::enter();
         let mut evaluator = FlowEvaluator {
             dispatch: &flow_cx,
@@ -9443,6 +9603,9 @@ enum IndexedNext {
     AwaitReference,
     /// Take the delivered resolution as the value of the call it resolves.
     AwaitCall,
+    /// The declared return is checked by its own instantiation frame; its
+    /// original carrier is retained when the check completes.
+    AwaitReturn { original: IndexedValue },
     /// Nothing: the run finished.
     Finished,
 }
@@ -10164,8 +10327,12 @@ use contextual::ContextualSignature;
 mod correlation;
 #[path = "flow_return_destructure.rs"]
 mod destructure;
+#[path = "flow_return_disjunction.rs"]
+mod disjunction;
 #[path = "flow_return_footprint.rs"]
 mod footprint;
+#[cfg(any(test, feature = "semantic-observe"))]
+pub use disjunction::{disjunction_work_observed, DisjunctionWork};
 
 #[path = "flow_return_schedule.rs"]
 pub mod schedule;
@@ -10437,11 +10604,24 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> StructuralFactDemandOutcome;
-    fn normalize_tuple_spread(
+    /// Demand a lazy declared return through its continuation-capable query.
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>>;
+    /// Spread-normalise the tuple an array literal produces.
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape;
+    /// Weigh and pay for an array literal splicing a tuple of `incoming`
+    /// elements after the `prefix` its tuple holds.
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice;
     fn opaque(&self, err: QueryError) -> SemanticNodeId;
     fn receiver_this_types(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn contextual_object_this_type(
@@ -10994,6 +11174,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         expr: &verter_type_expr::TypeExpr,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::lower_type_expr_in_owner_scope_with_context(
             self,
             scope_canonical_id,
@@ -11018,12 +11200,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> StructuralFactDemandOutcome {
         ProjectSemanticDispatch::normalize_node_for_structural_fact_demand(self, node, context)
     }
-    fn normalize_tuple_spread(
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        self.indexed_call_return_key(node)
+            .and_then(|key| self.read_declared_call_return(key))
+    }
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        ProjectSemanticDispatch::normalize_tuple_spread(self, elements, readonly)
+        ProjectSemanticDispatch::normalize_expression_tuple_spread(self, elements, readonly)
+    }
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice {
+        ProjectSemanticDispatch::admit_expression_tuple_splice(self, prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
         ProjectSemanticDispatch::opaque(self, err)
@@ -11122,6 +11318,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         reduction_context: ProjectionReductionContext,
     ) -> SemanticNodeId {
+        let _type_node = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         ProjectSemanticDispatch::shallow_lower_type_expr_with_context(
             self,
             expr,
@@ -11712,12 +11910,26 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         self.driver
             .normalize_node_for_structural_fact_demand(node, context)
     }
-    fn normalize_tuple_spread(
+    fn declared_call_return_read(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
+        self.driver.declared_call_return_read(node)
+    }
+    fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
         readonly: bool,
     ) -> NormalizedTupleShape {
-        self.driver.normalize_tuple_spread(elements, readonly)
+        self.driver
+            .normalize_expression_tuple_spread(elements, readonly)
+    }
+    fn admit_expression_tuple_splice(
+        &self,
+        prefix: usize,
+        incoming: usize,
+    ) -> super::build::ExpressionSplice {
+        self.driver.admit_expression_tuple_splice(prefix, incoming)
     }
     fn opaque(&self, err: QueryError) -> SemanticNodeId {
         self.driver.opaque(err)
@@ -12790,45 +13002,6 @@ pub fn standing_narrowings(
         .collect()
 }
 
-/// Fold a ledger `window` into `standing`, the facts standing one per
-/// subject: a fact about a subject already standing replaces it where it
-/// stands, and a kill drops what it names. Per subject, the newest fact and
-/// the place the subject first stood are those of [`standing_narrowings`]
-/// over the same entries.
-fn fold_standing_narrowings(
-    standing: &mut Vec<(
-        FlowProductSubject,
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )>,
-    window: &[NarrowingLedgerEntry],
-) {
-    for entry in window {
-        match entry {
-            NarrowingLedgerEntry::Established {
-                root,
-                subject,
-                node,
-            } => match standing
-                .iter_mut()
-                .find(|(_, candidate, _)| candidate == subject)
-            {
-                Some(fact) => *fact = (root.clone(), subject.clone(), *node),
-                None => standing.push((root.clone(), subject.clone(), *node)),
-            },
-            NarrowingLedgerEntry::Cleared { root } => {
-                standing.retain(|(candidate, _, _)| candidate != root);
-            }
-            NarrowingLedgerEntry::ClearedBelow { root, path } => {
-                standing.retain(|(candidate, subject, _)| {
-                    candidate != root
-                        || !(subject.path.len() > path.len() && subject.path.starts_with(path))
-                });
-            }
-        }
-    }
-}
-
 /// Parameter initialization also establishes its hoisted declaration aliases.
 /// Each selected declaration receives its own evidence, with the original
 /// parameter input as definition provenance; no later initializer is claimed.
@@ -13299,6 +13472,9 @@ struct ArrayEvalFrame<'e> {
     /// The holds before the element the literal waits on.
     holds_before: usize,
     certified_elements: bool,
+    /// The checker's recovery for the first spread the tuple could not
+    /// splice: the literal's value once its remaining elements evaluated.
+    refused: Option<SemanticNodeId>,
 }
 
 /// What an array literal's evaluation needs next.
@@ -15361,6 +15537,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             next: 0,
             holds_before: 0,
             certified_elements: true,
+            refused: None,
         }
     }
 
@@ -15479,14 +15656,43 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 frame.tuple_view.push(element.copy());
                                 frame.tuple.push(element);
                             }
+                            // The tuple is already the recovery: a later
+                            // spread is evaluated for its effects only.
+                            Some(SemanticNodeData::Tuple { .. }) if frame.refused.is_some() => {}
                             Some(SemanticNodeData::Tuple { elements, .. }) => {
-                                for element in elements.iter() {
-                                    let mut element = element.copy();
-                                    if element.optional && self.nullability.is_strict() {
-                                        element.value = self.union(&[element.value, undefined]);
+                                match self.dispatch.admit_expression_tuple_splice(
+                                    frame.tuple.len(),
+                                    elements.len(),
+                                ) {
+                                    super::build::ExpressionSplice::Copy => {
+                                        for element in elements.iter() {
+                                            let mut element = element.copy();
+                                            if element.optional && self.nullability.is_strict() {
+                                                element.value =
+                                                    self.union(&[element.value, undefined]);
+                                            }
+                                            frame.tuple_view.push(element.copy());
+                                            frame.tuple.push(element);
+                                        }
                                     }
-                                    frame.tuple_view.push(element.copy());
-                                    frame.tuple.push(element);
+                                    // The checker still checks every later
+                                    // element before it reports the splice.
+                                    super::build::ExpressionSplice::Refused(recovery) => {
+                                        frame.refused = Some(recovery);
+                                    }
+                                    // The spread stays in place, never a
+                                    // truncated tuple: the trip is the
+                                    // literal's partial.
+                                    super::build::ExpressionSplice::Unpaid => {
+                                        let element = crate::semantic_query::TupleElement {
+                                            label: None,
+                                            value: source,
+                                            optional: false,
+                                            rest: true,
+                                        };
+                                        frame.tuple_view.push(element.copy());
+                                        frame.tuple.push(element);
+                                    }
                                 }
                             }
                             _ => return ArrayEvalStep::Done(Positional::Unmodeled),
@@ -15516,13 +15722,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let undefined = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
         let const_asserted = frame.const_asserted;
         let tupled = frame.tupled;
+        if let Some(recovery) = frame.refused.take() {
+            return Positional::Value(recovery);
+        }
         let tuple = std::mem::take(&mut frame.tuple);
         let tuple_view = std::mem::take(&mut frame.tuple_view);
         let mut parts = std::mem::take(&mut frame.parts);
         if tupled {
             let intern_tuple = |elements: &[crate::semantic_query::TupleElement]| match self
                 .dispatch
-                .normalize_tuple_spread(elements, const_asserted)
+                .normalize_expression_tuple_spread(elements, const_asserted)
             {
                 super::build::NormalizedTupleShape::Array(array) => array,
                 super::build::NormalizedTupleShape::Tuple(elements) => {
@@ -19570,131 +19779,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
             )),
         }
-    }
-
-    /// The union-of-facts reading of a disjunction: each disjunct's
-    /// narrow is computed against the starting overlay as the operands
-    /// before it LEFT it — `a || b` is true through `a`, or through `b`
-    /// once `a` is false, exactly as the checker narrows the right operand
-    /// by the left's other edge — and a subject narrowed by every disjunct
-    /// lands the union of the per-disjunct narrows. A subject some
-    /// disjunct leaves unnarrowed contributes its ORIGINAL type to that
-    /// union — which is the original type, so no narrow is established
-    /// for it.
-    fn apply_guard_union(
-        &mut self,
-        parts: &[verter_session_query::flow::slice::SliceGuard],
-        positive: bool,
-    ) {
-        let mut alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        > = Vec::with_capacity(parts.len());
-        // Each alternative reads every earlier part the other way, then its
-        // own part. The earlier parts' readings are applied once, as a
-        // prefix that grows by one part per alternative, and the prefix's
-        // standing facts are kept one per subject (the newest, where the
-        // subject first stood — all the union reads), so a chain of `n`
-        // conjuncts costs `n` applications here rather than `n²`.
-        let base = self.narrowing_snapshot();
-        let mut prefix_standing = Vec::new();
-        for (index, part) in parts.iter().enumerate() {
-            let prefix = self.narrowing_snapshot();
-            self.apply_guard_scoped(part, positive);
-            let mut alternative = prefix_standing.clone();
-            fold_standing_narrowings(
-                &mut alternative,
-                &self.narrowing_writes[prefix.writes.min(self.narrowing_writes.len())..],
-            );
-            alternatives.push(
-                alternative
-                    .into_iter()
-                    .map(|(_, subject, node)| (subject, node))
-                    .collect(),
-            );
-            self.restore_narrowings(prefix);
-            if index + 1 < parts.len() {
-                let extension = self.narrowing_writes.len();
-                self.apply_guard_scoped(part, !positive);
-                fold_standing_narrowings(&mut prefix_standing, &self.narrowing_writes[extension..]);
-            }
-        }
-        self.restore_narrowings(base);
-        for (subject, node) in self.union_of_alternatives(alternatives) {
-            self.push_narrowing(&subject, node);
-        }
-    }
-
-    /// The per-reference union over `alternatives`, each the facts one
-    /// path established in write order (the newest fact about a reference
-    /// is the one standing at its end): a reference every alternative
-    /// narrowed, with the union of its per-alternative narrows. A
-    /// reference some alternative leaves unnarrowed has its original type
-    /// on that path, which the union would be, so it is left out.
-    fn union_of_alternatives(
-        &mut self,
-        alternatives: Vec<
-            Vec<(
-                verter_session_query::flow::slice::SliceNarrowSubject,
-                SemanticNodeId,
-            )>,
-        >,
-    ) -> Vec<(
-        verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
-    )> {
-        let alternatives: Vec<Vec<_>> = alternatives
-            .into_iter()
-            .map(|applied| {
-                let mut final_overlay: Vec<(
-                    verter_session_query::flow::slice::SliceNarrowSubject,
-                    SemanticNodeId,
-                )> = Vec::with_capacity(applied.len());
-                for (subject, node) in applied {
-                    match final_overlay
-                        .iter_mut()
-                        .find(|(candidate, _)| *candidate == subject)
-                    {
-                        Some((_, current)) => *current = node,
-                        None => final_overlay.push((subject, node)),
-                    }
-                }
-                final_overlay
-            })
-            .collect();
-        let mut unions = Vec::new();
-        let mut subjects: Vec<verter_session_query::flow::slice::SliceNarrowSubject> = Vec::new();
-        for alternative in &alternatives {
-            for (subject, _) in alternative {
-                if !subjects.contains(subject) {
-                    subjects.push(subject.clone());
-                }
-            }
-        }
-        for subject in subjects {
-            let narrowed_in_all = alternatives.iter().all(|alternative| {
-                alternative
-                    .iter()
-                    .any(|(candidate, _)| *candidate == subject)
-            });
-            if !narrowed_in_all {
-                continue;
-            }
-            let nodes: Vec<SemanticNodeId> = alternatives
-                .iter()
-                .flat_map(|alternative| {
-                    alternative
-                        .iter()
-                        .filter(|(candidate, _)| *candidate == subject)
-                        .map(|(_, node)| *node)
-                })
-                .collect();
-            let node = self.union(&nodes);
-            unions.push((subject, node));
-        }
-        unions
     }
 
     /// Read the type predicate the function's single return establishes
@@ -28546,9 +28630,42 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         });
                     }
                 }
+                let mut returned = super::return_equation::resolved_call_return_type(&result);
+                // Check this expression's lazy declared return before a type
+                // assertion or a later type demand can change its checking
+                // site. Keep a complete carrier's authored display identity.
+                // Only the checker's recovery replaces the carrier: any other
+                // partial read keeps it.
+                if let Some(read) = self.dispatch.declared_call_return_read(returned) {
+                    let budget = read
+                        .partial_reasons()
+                        .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET);
+                    if let QueryResult::Value(node) = read.value {
+                        let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
+                            match data.as_ref() {
+                                SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                                    diagnostic,
+                                    ..
+                                }) => Some(*diagnostic),
+                                _ => None,
+                            }
+                        });
+                        if budget {
+                            self.record_degradation(
+                                crate::semantic_query::FlowReturnDegradation::OperationBudget,
+                            );
+                        }
+                        if let Some(diagnostic) = diagnostic {
+                            self.record_checker_diagnostic(diagnostic);
+                        }
+                        if budget || diagnostic.is_some() {
+                            returned = node;
+                        }
+                    }
+                }
                 Some(Positional::Value(CallValue::of_resolved_call(
                     self.dispatch,
-                    super::return_equation::resolved_call_return_type(&result),
+                    returned,
                 )))
             }
             // An SCC back-edge through the executor: the close discharges
