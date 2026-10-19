@@ -7,12 +7,14 @@
 //! Readers a caller still holds survive the close, stay valid and keep their
 //! own charges until their last handle drops.
 
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
 use verter_session::{HostConfig, HostRetentionSnapshot, UpsertRequest, VerterHost};
+use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::SemanticNodeId;
+use verter_type_engine::semantic_query::SignatureKind;
 use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
-use verter_type_engine::signature_kernel::SemanticReadView;
+use verter_type_engine::signature_kernel::{BorrowedSet, SemanticReadView, SignatureSetRef};
 
 /// Every host charges the one process account, so tests comparing account
 /// figures run one at a time.
@@ -229,6 +231,57 @@ fn spare_text(artifact: &verter_session::project_type_store::IndexedReady, cycle
     )
 }
 
+/// The call-signature set the workload's `Run` alias settles to: a handle
+/// the signature store issued for a real published signature. The value that
+/// carried it is dropped, so the handle is the only thing a reader keeps.
+fn issued_signature_set(host: &VerterHost, cycle: usize) -> SignatureSetRef {
+    let (canonical, ..) = document(cycle);
+    let run = host
+        .resolve_named_symbol(&canonical, &format!("Run{cycle}"), None)
+        .expect("the call alias resolves");
+    let value = ProjectSemanticDispatch::new(host)
+        .signature_set_value(run.id(), SignatureKind::Call)
+        .expect("the alias has a call signature set");
+    value.set()
+}
+
+/// The signature records `set` names, read through `view`.
+fn read_signatures(view: &SemanticReadView, set: SignatureSetRef) -> String {
+    match view.read_set(set).expect("the issued set reads") {
+        BorrowedSet::Empty => panic!("the alias publishes a call signature"),
+        BorrowedSet::One {
+            candidate,
+            descriptor,
+            provenance,
+        } => format!("{candidate:?} {descriptor:?} {provenance:?}"),
+        BorrowedSet::Many(candidates) => format!("{candidates:?}"),
+    }
+}
+
+/// The pinned growth of a live (never closed) workload plus what lowering
+/// an undemanded declaration adds: an upper bound, established without any
+/// close, on what a held parse artifact may keep charged.
+fn live_artifact_bound(cycle: usize) -> usize {
+    let host = VerterHost::new_standalone(HostConfig::default());
+    let base = total(&host);
+    let base_pinned = host.retention_snapshot().pinned_bytes;
+    let (answer, _) = demand(&host, cycle);
+    let artifact = host
+        .project_type_store()
+        .indexed()
+        .get_any(&document(cycle).0)
+        .expect("the demanded document has a live artifact");
+    let pinned = host.retention_snapshot().pinned_bytes - base_pinned;
+    let before_lowering = total(&host);
+    let _ = spare_text(&artifact, cycle);
+    let lowering = total(&host) - before_lowering;
+    drop((answer, artifact));
+    host.close();
+    drain(&host);
+    assert_eq!(total(&host), base, "the live probe returns to its baseline");
+    pinned + lowering
+}
+
 /// The charge a set of readers keeps alive across a close: a control
 /// host runs the same workload, holds exactly the readers in `held` (bit 0
 /// result, bit 1 signature view, bit 2 parse artifact), closes, and reports
@@ -238,6 +291,7 @@ fn held_set_charge(held: u8) -> usize {
     let baseline = retained(&host.retention_snapshot());
     let base_total = baseline.active_bytes + baseline.retained_bytes + baseline.pinned_bytes;
     let (answer, _) = demand(&host, 3);
+    let _ = issued_signature_set(&host, 3);
     let graph = host.project_type_store().semantic_graph();
     let view = SemanticReadView::pin(graph.signature_store());
     let artifact = host
@@ -380,9 +434,11 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
         let baseline = retained(&host.retention_snapshot());
         let (answer, rendered) = demand(&host, 3);
         let canonical = document(3).0;
+        let issued = issued_signature_set(&host, 3);
         let graph = host.project_type_store().semantic_graph();
         let view = SemanticReadView::pin(graph.signature_store());
         let held_epoch = view.epoch();
+        let signatures_before = read_signatures(&view, issued);
         let artifact = host
             .project_type_store()
             .indexed()
@@ -436,9 +492,9 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 "{order}: the held result reads the same after the close"
             );
             assert_eq!(
-                view.epoch(),
-                held_epoch,
-                "{order}: the held signature view keeps its epoch after the close"
+                read_signatures(&view, issued),
+                signatures_before,
+                "{order}: the issued signature set reads the same records after the close"
             );
             assert_ne!(
                 SemanticReadView::pin(graph.signature_store()).epoch(),
@@ -449,6 +505,18 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
                 retained(&host.retention_snapshot()).snapshot_leases,
                 baseline.snapshot_leases + 1,
                 "{order}: the close revokes no lease a reader holds"
+            );
+            // Bounds established on a live host that never closed, so a close
+            // that charged a reader again cannot hide behind a control that
+            // closes the same way.
+            let lone_artifact = held_set_charge(0b100);
+            assert!(
+                lone_artifact > 0 && lone_artifact <= live_artifact_bound(3),
+                "{order}: a lone held artifact keeps a charge no larger than its live one"
+            );
+            assert!(
+                held_set_charge(0b111) <= total_before_close - base_total,
+                "{order}: no reader is charged more than the live workload held"
             );
             // Each release leaves exactly the charge of the readers still held.
             for (name, remaining, release) in [
@@ -508,22 +576,46 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
     }
 }
 
-/// A close racing a request on another thread never leaves residue: once
-/// both settle, a final close returns the host to its baseline and the host
-/// answers again.
+/// A close issued while a request is parked inside a cold build never
+/// leaves residue: the close runs at an observed rendezvous inside the
+/// publishing producer, the request is then released, and once it settles a
+/// final close returns the host to its baseline and the host answers again.
 #[test]
 fn a_close_racing_a_publication_settles_to_the_baseline() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
     let _serial = serial();
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     let baseline = retained(&host.retention_snapshot());
+    let graph = host.project_type_store().semantic_graph();
+    struct HookGuard<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+    impl Drop for HookGuard<'_> {
+        fn drop(&mut self) {
+            self.0.set_produce_hook_for_tests(None);
+        }
+    }
     for round in 0..4 {
-        let start = Arc::new(Barrier::new(2));
+        let (canonical, symbols, source) = document(20 + round);
+        upsert(&host, &canonical, &source);
+        let (ready_tx, ready_rx) = channel::<()>();
+        let (release_tx, release_rx) = channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let park_once = AtomicBool::new(true);
+        graph.set_produce_hook_for_tests(Some(Arc::new(move |_key, _nested| {
+            if park_once.swap(false, Ordering::SeqCst) {
+                let _ = ready_tx.send(());
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+            }
+        })));
+        let _hook = HookGuard(graph);
         let requester = {
-            let (host, start) = (Arc::clone(&host), Arc::clone(&start));
+            let host = Arc::clone(&host);
             std::thread::spawn(move || {
-                start.wait();
-                let (canonical, symbols, source) = document(20 + round);
-                upsert(&host, &canonical, &source);
                 let answers: Option<Vec<NodeRoot>> = symbols
                     .iter()
                     .map(|symbol| host.resolve_named_symbol(&canonical, symbol, None))
@@ -531,12 +623,19 @@ fn a_close_racing_a_publication_settles_to_the_baseline() {
                 answers.map(|answers| render(&host, &answers))
             })
         };
-        start.wait();
+        let parked = ready_rx.recv_timeout(Duration::from_secs(10));
+        if parked.is_err() {
+            let _ = release_tx.send(());
+            let _ = requester.join();
+            panic!("round {round}: the request must park inside its cold build");
+        }
         host.close();
+        let _ = release_tx.send(());
         let answered = requester.join().expect("the request completes");
         if let Some(rendered) = answered {
             assert_eq!(rendered, fresh_answer(20 + round), "round {round}");
         }
+        graph.set_produce_hook_for_tests(None);
         host.close();
         drain(&host);
         assert_at_baseline(&host, &baseline, &format!("after racing round {round}"));

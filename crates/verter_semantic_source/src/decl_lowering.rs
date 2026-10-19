@@ -660,6 +660,17 @@ impl ParseReleaseCompletion {
         }
     }
 
+    /// Block until `shard`'s marker answered, then stop tracking that shard:
+    /// the observation of one worker's acknowledgment, with no job sent.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn wait_shard(&mut self, shard: usize) -> Result<(), ParseReleaseError> {
+        if let Some(at) = self.pending.iter().position(|part| part.shard == shard) {
+            self.pending[at].wait()?;
+            self.pending.remove(at);
+        }
+        Ok(())
+    }
+
     /// Block until every participating shard has applied the releases
     /// recorded before the boundary opened. Waits on each worker's answer
     /// (cooperative blocking, no polling).

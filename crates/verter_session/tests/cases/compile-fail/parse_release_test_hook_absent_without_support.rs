@@ -1,6 +1,6 @@
 //! The out-of-band parse release is a test coordination hook: it breaks the
-//! lease invariant on purpose. A build without `test-support` — every
-//! production build, the soak runner's included — cannot reach it.
+//! lease invariant on purpose. A build without `test-support` — this
+//! feature-less lane — cannot reach it.
 
 use verter_semantic_source::decl_lowering::DeclLoweringService;
 use verter_session_query::source::snapshot::SnapshotKey;

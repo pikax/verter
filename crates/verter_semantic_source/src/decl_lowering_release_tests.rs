@@ -138,9 +138,11 @@ fn the_boundary_completes_only_after_every_shard_applied_its_releases() {
                 continue;
             }
             worker.release();
-            // Queued behind the marker on the same shard: once this answers,
-            // the marker has run.
-            assert!(service.run_leased(&busy[shard], |_| ()).is_some());
+            // The shard's own marker acknowledgment: no other job is sent to
+            // it, so only the marker can have applied the release.
+            boundary
+                .wait_shard(shard)
+                .expect("the released shard answers its marker");
             expected -= released_pins[shard];
             assert_eq!(
                 account.snapshot().pinned_bytes,
