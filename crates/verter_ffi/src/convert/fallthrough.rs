@@ -295,7 +295,8 @@ pub(super) fn fallthrough_branch_to_ffi(
             .collect(),
         root_chain: branch
             .root_chain
-            .into_iter()
+            .iter()
+            .cloned()
             .map(resolved_root_step_to_ffi)
             .collect(),
         status: branch_status_to_ffi(branch.status),
