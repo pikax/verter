@@ -340,6 +340,9 @@ pub struct SemanticGraphStore {
     /// the prepared `(family, slot)` projection, so invalidation sweeps
     /// read it instead of re-running `family_and_slot` per entry.
     inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>>,
+    /// Expression demands share flights only with expression demands. Complete
+    /// products publish to the same site-independent family memo.
+    expression_inflight: Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>>,
     /// Generation-qualified execution tasks and the wait-for graph between
     /// them. A task owns the producers it claimed; a subscriber registers a
     /// temporary edge to the producing task before it parks.
@@ -817,6 +820,7 @@ impl SemanticGraphStore {
             signatures,
             entries: Default::default(),
             inflight: Default::default(),
+            expression_inflight: Default::default(),
             task_registry: Default::default(),
             independent_inflight: Default::default(),
             derivation: Arc::new(release::SidecarMutex::new(DerivationStore::charged(
@@ -1050,7 +1054,10 @@ impl SemanticGraphStore {
     ) -> T {
         use tasks::SemanticProducers as _;
         let execution = self.enter_execution();
-        let _open = execution.task().open_producer(self.prepare_rooted_key(key));
+        let _open = execution.task().open_producer(
+            self.prepare_rooted_key(key),
+            crate::semantic_query::checker_policy::TupleSplicePosition::Type,
+        );
         body()
     }
 
@@ -1599,25 +1606,27 @@ impl SemanticGraphStore {
             // the publish-after-invalidation window because both store-owned
             // publish paths re-check `aborted` under this same lock.
             let aborted_entries: Vec<Arc<FlightCell>> = {
-                let mut table = self.inflight.lock();
                 let mut collected: Vec<Arc<FlightCell>> = Vec::new();
-                table.retain(|handle, inflight| {
-                    // The prepared handle carries its `(family, slot)`
-                    // projection — no per-entry `family_and_slot`
-                    // rebuild, no owned-`FamilyKey` allocation. The
-                    // slot compares first (a cheap discriminant) so
-                    // most non-matching pairs reject before the family
-                    // comparison.
-                    let affected = affected_pairs
-                        .iter()
-                        .any(|(family, slot)| *slot == handle.slot() && family == handle.family());
-                    if affected {
-                        collected.push(Arc::clone(inflight));
-                        false // remove — this entry's slot was swept
-                    } else {
-                        true // keep — unrelated in-flight build
-                    }
-                });
+                for registry in [&self.inflight, &self.expression_inflight] {
+                    let mut table = registry.lock();
+                    table.retain(|handle, inflight| {
+                        // The prepared handle carries its `(family, slot)`
+                        // projection — no per-entry `family_and_slot`
+                        // rebuild, no owned-`FamilyKey` allocation. The
+                        // slot compares first (a cheap discriminant) so
+                        // most non-matching pairs reject before the family
+                        // comparison.
+                        let affected = affected_pairs.iter().any(|(family, slot)| {
+                            *slot == handle.slot() && family == handle.family()
+                        });
+                        if affected {
+                            collected.push(Arc::clone(inflight));
+                            false // remove — this entry's slot was swept
+                        } else {
+                            true // keep — unrelated in-flight build
+                        }
+                    });
+                }
                 collected
             };
             let independent_aborted_entries: Vec<Arc<FlightCell>> = {
@@ -1803,9 +1812,12 @@ impl SemanticGraphStore {
             // `state`. Global rule: `state` is never taken while the
             // `inflight` table lock is held.
             let aborted_entries: Vec<Arc<FlightCell>> = {
-                let mut table = self.inflight.lock();
-                let collected: Vec<Arc<FlightCell>> = table.values().map(Arc::clone).collect();
-                table.clear();
+                let mut collected = Vec::new();
+                for registry in [&self.inflight, &self.expression_inflight] {
+                    let mut table = registry.lock();
+                    collected.extend(table.values().map(Arc::clone));
+                    table.clear();
+                }
                 collected
             };
             let independent_aborted_entries: Vec<Arc<FlightCell>> = {
@@ -2514,6 +2526,18 @@ impl SemanticGraphStore {
         self.retire_inflight(prepared, inflight, independent_owner);
     }
 
+    fn site_inflight(
+        &self,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
+    ) -> &Mutex<FxHashMap<PreparedKeyHandle, Arc<FlightCell>>> {
+        match site {
+            crate::semantic_query::checker_policy::TupleSplicePosition::Type => &self.inflight,
+            crate::semantic_query::checker_policy::TupleSplicePosition::Expression => {
+                &self.expression_inflight
+            }
+        }
+    }
+
     fn retire_inflight(
         &self,
         prepared: &PreparedKeyHandle,
@@ -2529,7 +2553,7 @@ impl SemanticGraphStore {
                 }
             }
         } else {
-            let mut table = self.inflight.lock();
+            let mut table = self.site_inflight(inflight.site).lock();
             if table
                 .get(prepared)
                 .is_some_and(|entry| Arc::ptr_eq(entry, inflight))
@@ -2851,7 +2875,9 @@ impl SemanticGraphStore {
                 return false;
             }
         }
-        if self.inflight.lock().contains_key(&prepared) {
+        if self.inflight.lock().contains_key(&prepared)
+            || self.expression_inflight.lock().contains_key(&prepared)
+        {
             return false;
         }
         // Past both early-outs: this backfill genuinely clones the broader

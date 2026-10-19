@@ -330,6 +330,7 @@ fn a_resource_recovery_is_a_partial_error_type() {
         CheckerDiagnosticCode::ExcessivelyDeepInstantiation,
         CheckerDiagnosticCode::UnionTooComplex,
         CheckerDiagnosticCode::TupleTooLarge,
+        CheckerDiagnosticCode::ExpressionTupleTooLarge,
         CheckerDiagnosticCode::RelationTooComplex,
     ] {
         let err = QueryError::CheckerRecovery {
