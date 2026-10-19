@@ -7337,19 +7337,18 @@ pub fn indexed_literal_provenance(
                     Expression::NullLiteral(_)
                     | Expression::FunctionExpression(_)
                     | Expression::ArrowFunctionExpression(_) => {}
-                    Expression::Identifier(identifier) => {
-                        regular.push(IndexedRegularLiteralSource::Read(ValueRef {
-                            path: vec![identifier.name.to_string()],
-                            type_args: Vec::new(),
-                        }));
+                    Expression::Identifier(_) | Expression::StaticMemberExpression(_) => {
+                        match indexed_read_path(branch) {
+                            Some((path, root)) => regular.push(IndexedRegularLiteralSource::Read {
+                                value: ValueRef {
+                                    path,
+                                    type_args: Vec::new(),
+                                },
+                                root,
+                            }),
+                            None => mixed = true,
+                        }
                     }
-                    Expression::StaticMemberExpression(_) => match indexed_read_path(branch) {
-                        Some(path) => regular.push(IndexedRegularLiteralSource::Read(ValueRef {
-                            path,
-                            type_args: Vec::new(),
-                        })),
-                        None => mixed = true,
-                    },
                     branch => match scalar_literal_type(branch) {
                         Some(literal) if pinned => {
                             regular.push(IndexedRegularLiteralSource::Pinned(literal));
@@ -7478,8 +7477,10 @@ pub fn indexed_literal_provenance(
     })
 }
 
-/// The dotted path of a member read off a chain of identifiers (`o.a.b`).
-fn indexed_read_path(expr: &Expression<'_>) -> Option<Vec<String>> {
+/// The dotted path of an identifier read (`o`) or a member read off a
+/// chain of identifiers (`o.a.b`), and the span of the identifier it
+/// starts from.
+fn indexed_read_path(expr: &Expression<'_>) -> Option<(Vec<String>, verter_span::Span)> {
     let mut path = Vec::new();
     let mut cursor = expr;
     loop {
@@ -7491,7 +7492,10 @@ fn indexed_read_path(expr: &Expression<'_>) -> Option<Vec<String>> {
             Expression::Identifier(identifier) => {
                 path.push(identifier.name.to_string());
                 path.reverse();
-                return Some(path);
+                return Some((
+                    path,
+                    verter_span::Span::new(identifier.span.start, identifier.span.end),
+                ));
             }
             _ => return None,
         }
