@@ -1143,7 +1143,7 @@ fn annotation_source(
 fn shape_member_span_origin(contributor: DeclContributorAnchor, ordinal: u32) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: contributor,
-        member_path: Arc::from(vec![ordinal]),
+        member_path: From::from(vec![ordinal]),
     }
 }
 
@@ -1159,7 +1159,7 @@ fn signature_spans_origin(
         },
         LoweredSignatureOrigin::ShapeMember { ordinal } => FunctionSpansOrigin::Member {
             anchor: contributor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         LoweredSignatureOrigin::Synthetic => FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -1421,7 +1421,7 @@ fn object_shape_fact(
                         readonly: index_sig.readonly,
                         span_origin: IndexSignatureSpansOrigin::Authored {
                             anchor: contributor,
-                            member_path: Arc::from(vec![ordinal]),
+                            member_path: From::from(vec![ordinal]),
                         },
                     })
                 }

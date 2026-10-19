@@ -1167,7 +1167,7 @@ fn svelte_snippet_slots_from_typeinfo_surface(
                                 occurrence:
                                     verter_type_expr::facts::CallableOccurrenceHandle::member(
                                         member.value.0,
-                                        Arc::from([name.clone()]),
+                                        From::from([name.clone()]),
                                     ),
                                 projection:
                                     verter_type_expr::facts::CallableOccurrenceProjection::Return,
@@ -1740,7 +1740,7 @@ fn callback_events_from_props_surface(
                             base: return_base.clone(),
                             occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                                 member.value.0,
-                                Arc::from([member_name.to_string()]),
+                                From::from([member_name.to_string()]),
                             ),
                             projection:
                                 verter_type_expr::facts::CallableOccurrenceProjection::Parameters {
@@ -1760,7 +1760,7 @@ fn callback_events_from_props_surface(
                     base: return_base.clone(),
                     occurrence: verter_type_expr::facts::CallableOccurrenceHandle::member(
                         member.value.0,
-                        Arc::from([member_name.to_string()]),
+                        From::from([member_name.to_string()]),
                     ),
                     projection: verter_type_expr::facts::CallableOccurrenceProjection::Return,
                 },
@@ -1781,7 +1781,7 @@ fn callback_events_from_props_surface(
             id: verter_type_expr::facts::ResolvedEmitOccurrenceId::new(
                 verter_type_expr::facts::CallableOccurrenceHandle::member(
                     member.value.0,
-                    Arc::from([member_name.to_string()]),
+                    From::from([member_name.to_string()]),
                 ),
                 0,
             ),

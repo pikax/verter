@@ -286,7 +286,7 @@ pub(crate) fn upsert_component_meta_registry_entry(
                         }
                     }
                     let union = verter_type_expr::facts::ProjectedSurfaceFact {
-                        members: std::sync::Arc::from(members.into_boxed_slice()),
+                        members: From::from(members.into_boxed_slice()),
                         call_signatures: current.call_signatures.clone(),
                         construct_signatures: current.construct_signatures.clone(),
                         index_signatures: current.index_signatures.clone(),

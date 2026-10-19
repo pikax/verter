@@ -3624,8 +3624,8 @@ pub fn lowered_value_decl_for_synthesised_default(
             literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
         },
         vec![FunctionSignature {
-            type_parameters: Arc::from(Vec::new().into_boxed_slice()),
-            parameters: Arc::from(Vec::new().into_boxed_slice()),
+            type_parameters: From::from(Vec::new().into_boxed_slice()),
+            parameters: From::from(Vec::new().into_boxed_slice()),
             return_source: verter_type_expr::facts::FunctionReturnSource::Absent,
             // A synthesised default-export constructor has no authored return
             // annotation at all.
