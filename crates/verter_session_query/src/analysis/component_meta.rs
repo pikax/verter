@@ -810,6 +810,235 @@ pub enum ResolvedRootStep {
     },
 }
 
+/// The ordered chain of root steps a fallthrough branch traversed, outermost
+/// step first.
+///
+/// A persistent list: a parent that reaches a child's branch through one more
+/// component hop prepends that hop to the child's chain and SHARES the rest,
+/// so composing a `n`-hop chain writes one step per hop instead of copying
+/// every suffix into every ancestor. Order, multiplicity and every step are
+/// preserved exactly; equality compares the steps in order.
+#[derive(Clone, Default)]
+pub struct RootChain {
+    head: Option<std::sync::Arc<RootChainLink>>,
+}
+
+/// One step of a [`RootChain`] and the chain after it.
+struct RootChainLink {
+    step: ResolvedRootStep,
+    len: usize,
+    rest: RootChain,
+    /// The chain's innermost link, shared, when it is not this one.
+    terminal: Option<std::sync::Arc<RootChainLink>>,
+}
+
+impl RootChain {
+    /// The chain holding only `step`.
+    #[must_use]
+    pub fn single(step: ResolvedRootStep) -> Self {
+        Self::prepend(step, &Self::default())
+    }
+
+    /// `step` followed by `rest`, sharing `rest`.
+    #[must_use]
+    pub fn prepend(step: ResolvedRootStep, rest: &Self) -> Self {
+        let terminal = rest
+            .head
+            .as_ref()
+            .map(|link| link.terminal.as_ref().unwrap_or(link).clone());
+        Self {
+            head: Some(std::sync::Arc::new(RootChainLink {
+                step,
+                len: rest.len() + 1,
+                rest: rest.clone(),
+                terminal,
+            })),
+        }
+    }
+
+    /// How many steps the chain holds.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.head.as_ref().map_or(0, |link| link.len)
+    }
+
+    /// Whether the chain holds no step.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    /// The steps, outermost first.
+    pub fn iter(&self) -> RootChainIter<'_> {
+        RootChainIter {
+            next: self.head.as_deref(),
+        }
+    }
+
+    /// The outermost step.
+    #[must_use]
+    pub fn first(&self) -> Option<&ResolvedRootStep> {
+        self.head.as_deref().map(|link| &link.step)
+    }
+
+    /// The innermost step: the target the chain ends at.
+    #[must_use]
+    pub fn last(&self) -> Option<&ResolvedRootStep> {
+        self.head
+            .as_deref()
+            .map(|link| &link.terminal.as_deref().unwrap_or(link).step)
+    }
+
+    /// Each link's shared allocation address with its step, outermost
+    /// first, so a footprint measurement can count a link shared by several
+    /// chains once.
+    pub fn links(&self) -> impl Iterator<Item = (*const (), &ResolvedRootStep)> + '_ {
+        std::iter::successors(self.head.as_ref(), |link| link.rest.head.as_ref())
+            .map(|link| (std::sync::Arc::as_ptr(link).cast::<()>(), &link.step))
+    }
+
+    /// Heap the chain's links keep reachable under a measurement whose
+    /// link admission is `first_link`: each link block and its step's heap
+    /// count the first time the link's shared allocation address is
+    /// admitted. An already-admitted link ends the walk, because its whole
+    /// rest was counted with it, so chains sharing a tail cost that tail once
+    /// and the innermost link reached through the terminal shortcut is never
+    /// counted twice. Walked in a loop: a long chain costs no stack.
+    pub fn unique_link_heap<'a, M: ?Sized>(
+        &'a self,
+        meter: &mut M,
+        mut first_link: impl FnMut(&mut M, *const ()) -> bool,
+        step_heap: impl FnMut(&mut M, &'a ResolvedRootStep) -> usize,
+    ) -> usize {
+        self.walk_unique_links(
+            meter,
+            |meter, link| first_link(meter, std::sync::Arc::as_ptr(link).cast::<()>()),
+            step_heap,
+        )
+    }
+
+    /// [`Self::unique_link_heap`] over the links' shared handles.
+    fn walk_unique_links<'a, M: ?Sized>(
+        &'a self,
+        meter: &mut M,
+        mut first_link: impl FnMut(&mut M, &'a std::sync::Arc<RootChainLink>) -> bool,
+        mut step_heap: impl FnMut(&mut M, &'a ResolvedRootStep) -> usize,
+    ) -> usize {
+        let mut bytes = 0;
+        let mut next = self.head.as_ref();
+        while let Some(link) = next {
+            if !first_link(meter, link) {
+                break;
+            }
+            bytes += verter_retention::allocation::arc_block_bytes(std::mem::size_of::<
+                RootChainLink,
+            >()) + step_heap(meter, &link.step);
+            next = link.rest.head.as_ref();
+        }
+        bytes
+    }
+
+    /// Whether two chains share one head allocation.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.head, &other.head) {
+            (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+/// The steps of a [`RootChain`], outermost first.
+pub struct RootChainIter<'a> {
+    next: Option<&'a RootChainLink>,
+}
+
+impl<'a> Iterator for RootChainIter<'a> {
+    type Item = &'a ResolvedRootStep;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let link = self.next?;
+        self.next = link.rest.head.as_deref();
+        Some(&link.step)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.next.map_or(0, |link| link.len);
+        (len, Some(len))
+    }
+}
+
+impl ExactSizeIterator for RootChainIter<'_> {}
+
+impl<'a> IntoIterator for &'a RootChain {
+    type Item = &'a ResolvedRootStep;
+    type IntoIter = RootChainIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl FromIterator<ResolvedRootStep> for RootChain {
+    fn from_iter<I: IntoIterator<Item = ResolvedRootStep>>(steps: I) -> Self {
+        let steps: Vec<ResolvedRootStep> = steps.into_iter().collect();
+        steps
+            .into_iter()
+            .rev()
+            .fold(Self::default(), |rest, step| Self::prepend(step, &rest))
+    }
+}
+
+impl From<Vec<ResolvedRootStep>> for RootChain {
+    fn from(steps: Vec<ResolvedRootStep>) -> Self {
+        steps.into_iter().collect()
+    }
+}
+
+impl PartialEq for RootChain {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && (self.ptr_eq(other) || self.iter().zip(other.iter()).all(|(a, b)| a == b))
+    }
+}
+
+impl std::fmt::Debug for RootChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+/// Each link's shared block once per measurement, through the meter's raw
+/// allocation set, so chains of different branches sharing a tail pay for
+/// it once.
+impl verter_retention::heap_size::HeapSize for RootChain {
+    fn heap_size<'t>(
+        &'t self,
+        meter: &mut verter_retention::heap_size::HeapMeter<'_, 't>,
+    ) -> usize {
+        self.walk_unique_links(
+            meter,
+            |meter, link| meter.first(link),
+            |meter, step| step.heap_size(meter),
+        )
+    }
+}
+
+/// Dropped from a loop: a long chain whose links each own the next would
+/// otherwise drop one native frame per step.
+impl Drop for RootChain {
+    fn drop(&mut self) {
+        let mut next = self.head.take();
+        while let Some(link) = next {
+            next = match std::sync::Arc::try_unwrap(link) {
+                Ok(mut link) => link.rest.head.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
 /// A single branch in the fallthrough surface.
 #[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct FallthroughBranch {
@@ -822,7 +1051,116 @@ pub struct FallthroughBranch {
     /// Inherited events in this branch (after subtraction).
     pub events: Vec<FallthroughEventEntry>,
     /// Chain of root steps traversed to produce this branch.
-    pub root_chain: Vec<ResolvedRootStep>,
+    pub root_chain: RootChain,
     /// Resolution status of this branch.
     pub status: BranchStatus,
+}
+
+#[cfg(test)]
+mod root_chain_tests {
+    use super::{ResolvedRootStep, RootChain};
+    use verter_retention::allocation::{arc_block_bytes, heap_block_bytes};
+    use verter_retention::heap_size::footprint;
+
+    fn tag(name: &str) -> ResolvedRootStep {
+        ResolvedRootStep::NativeTag {
+            tag: name.to_string(),
+        }
+    }
+
+    /// A prepended hop shares its child's chain: the parent writes one link,
+    /// keeps the child's steps in order after it, and a chain held by the
+    /// child alone survives the parent being dropped.
+    #[test]
+    fn prepend_shares_the_child_chain_in_order() {
+        let child = RootChain::from(vec![tag("b"), tag("c")]);
+        let parent = RootChain::prepend(tag("a"), &child);
+
+        assert_eq!(parent.len(), 3);
+        assert_eq!(
+            parent.iter().cloned().collect::<Vec<_>>(),
+            vec![tag("a"), tag("b"), tag("c")]
+        );
+        assert_eq!(parent.first(), Some(&tag("a")));
+        assert_eq!(parent.last(), Some(&tag("c")));
+        assert_eq!(child.last(), Some(&tag("c")));
+        assert_eq!(RootChain::single(tag("x")).last(), Some(&tag("x")));
+        assert_eq!(RootChain::default().last(), None);
+        let parent_links: Vec<_> = parent.links().map(|(link, _)| link).collect();
+        let child_links: Vec<_> = child.links().map(|(link, _)| link).collect();
+        assert_eq!(&parent_links[1..], &child_links[..], "the tail is shared");
+
+        assert_eq!(parent, RootChain::from(vec![tag("a"), tag("b"), tag("c")]));
+        assert_ne!(parent, RootChain::from(vec![tag("a"), tag("c"), tag("b")]));
+        assert_ne!(parent, child);
+
+        drop(parent);
+        assert_eq!(
+            child.iter().cloned().collect::<Vec<_>>(),
+            vec![tag("b"), tag("c")]
+        );
+    }
+
+    /// Dropping a very long chain runs in a loop: a recursive drop of one
+    /// native frame per link overflows the test thread's stack here.
+    #[test]
+    fn a_long_chain_drops_without_native_recursion() {
+        let mut chain = RootChain::default();
+        for _ in 0..300_000 {
+            chain = RootChain::prepend(tag(""), &chain);
+        }
+        assert_eq!(chain.len(), 300_000);
+        drop(chain);
+    }
+
+    fn link_bytes() -> usize {
+        arc_block_bytes(std::mem::size_of::<super::RootChainLink>())
+    }
+
+    /// Two chains sharing a tail cost the tail once in one measurement, and
+    /// the innermost link the terminal shortcut also reaches is never
+    /// counted twice: every link block and every step string exactly once.
+    #[test]
+    fn shared_tail_chains_measure_each_link_once() {
+        let tail = RootChain::from(vec![tag("c"), tag("d")]);
+        let left = RootChain::prepend(tag("a"), &tail);
+        let right = RootChain::prepend(tag("b"), &tail);
+        let step = heap_block_bytes(1);
+
+        assert_eq!(footprint(&tail).bytes, 2 * (link_bytes() + step));
+        assert_eq!(footprint(&left).bytes, 3 * (link_bytes() + step));
+        assert_eq!(
+            footprint(&(&left, &right)).bytes,
+            4 * (link_bytes() + step),
+            "the shared tail counts once"
+        );
+        assert_eq!(
+            footprint(&(&left, &left)).bytes,
+            3 * (link_bytes() + step),
+            "a chain held twice counts once"
+        );
+        assert_eq!(footprint(&RootChain::default()).bytes, 0);
+    }
+
+    /// A chain far deeper than a small stack could recurse through measures
+    /// exactly, from a loop.
+    #[test]
+    fn a_long_chain_measures_without_native_recursion() {
+        const DEPTH: usize = 300_000;
+        let measured = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(64 * 1024)
+                .spawn_scoped(scope, || {
+                    let mut chain = RootChain::default();
+                    for _ in 0..DEPTH {
+                        chain = RootChain::prepend(tag("x"), &chain);
+                    }
+                    footprint(&chain).bytes
+                })
+                .expect("spawned")
+                .join()
+                .expect("measured without overflowing")
+        });
+        assert_eq!(measured, DEPTH * (link_bytes() + heap_block_bytes(1)));
+    }
 }

@@ -392,6 +392,7 @@ mod literal_provenance_tests {
         // A hash is only a candidate filter. Force the rare collision without
         // relying on particular hash output or a source fingerprint.
         right.semantic_hash = left.semantic_hash;
+        #[allow(clippy::mutable_key_type)]
         let distinct: FxHashSet<_> = [left, right].into_iter().collect();
         assert_eq!(distinct.len(), 2);
     }
@@ -653,6 +654,8 @@ fn inspect_literal_provenance_with_budget(
     }
     let mut inspected: FxHashMap<SemanticNodeId, InspectedPayload> = FxHashMap::default();
     let mut visited_roles = FxHashSet::default();
+    // Eq/Hash read only the immutable literal payload; the interior-mutable release cell is never part of the key.
+    #[allow(clippy::mutable_key_type)]
     let mut literals: FxHashMap<(LiteralValueIdentity, usize), u8> = FxHashMap::default();
     let mut representatives = Vec::new();
     let mut visits = 0usize;
@@ -716,6 +719,7 @@ fn inspect_literal_provenance_with_budget(
     if evidence.incomplete {
         return (LiteralProvenanceResult::None, evidence);
     }
+    #[allow(clippy::mutable_key_type)]
     let mut states: FxHashMap<LiteralValueIdentity, u8> = FxHashMap::default();
     for ((identity, _), flags) in literals {
         if flags & PRESENT != 0 {
