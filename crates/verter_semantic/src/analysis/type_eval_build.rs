@@ -7238,6 +7238,13 @@ pub fn indexed_literal_provenance(
                 {
                     branches.push((&assertion.expression, true));
                 }
+                Expression::TSTypeAssertion(assertion)
+                    if verter_type_expr_oxc::is_const_assertion_type(
+                        &assertion.type_annotation,
+                    ) =>
+                {
+                    branches.push((&assertion.expression, true));
+                }
                 Expression::TSAsExpression(assertion) => {
                     regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
                         &assertion.type_annotation,

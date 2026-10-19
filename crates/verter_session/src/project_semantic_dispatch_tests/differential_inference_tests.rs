@@ -2101,6 +2101,9 @@ export function n31() { return pu({ v: ["a"] as const }); }
 export function n32() { return id({ v: "a" as "a", w: "b" }); }
 export function n33() { return pu({ v: { w: sl } }); }
 export function n34() { return pa([sl, "b"]); }
+export function n35() { return pu({ v: c ? <const>"a" : "a" }); }
+export function n36() { return pu({ v: <const>["a"] }); }
+export function n37() { return id({ v: <const>"a", w: "b" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2366,6 +2369,27 @@ fn nested_regular_literals_keep_their_type() {
             r#"string"#,
             r#"string"#,
             r#"string"#,
+        ),
+        (
+            Read::Return(r#"n35"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n36"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n37"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
