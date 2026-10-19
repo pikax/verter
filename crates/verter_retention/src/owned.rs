@@ -419,7 +419,7 @@ impl OwnedHandles {
         if self.0.is_empty() {
             return other;
         }
-        let address = |node: &Arc<dyn Node>| Arc::as_ptr(node).cast::<()>() as usize;
+        let address = |node: &Arc<dyn Node>| Arc::as_ptr(node).cast::<()>() as u64;
         let mut merged = self.0;
         merged.reserve(other.0.len());
         // Short lists are deduplicated by scanning; a long merge keeps a set,

@@ -411,8 +411,13 @@ fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
     let live_chunks = inner.chunks.len();
     assert!(live_chunks <= 2, "{live_chunks} chunks stayed live");
     assert!(
-        inner.chunks.held_entries() <= 2 * live_chunks + CHUNK_WINDOW_SLACK,
-        "{} table entries held for {live_chunks} live chunks after {churned_chunks} released ones",
+        inner.chunks.entries_in_use() <= 2 * live_chunks + CHUNK_WINDOW_SLACK,
+        "{} table entries in use for {live_chunks} live chunks after {churned_chunks} released ones",
+        inner.chunks.entries_in_use()
+    );
+    assert!(
+        inner.chunks.held_entries() <= 4 * (2 * live_chunks + CHUNK_WINDOW_SLACK),
+        "{} table entries held, headroom included, for {live_chunks} live chunks",
         inner.chunks.held_entries()
     );
     assert_eq!(
@@ -426,6 +431,33 @@ fn chunk_table_storage_follows_live_chunks_not_allocation_history() {
         Some(&SemanticNodeData::Literal(LiteralValue::String(
             "pinned".into()
         )))
+    );
+}
+
+/// Chunk numbers only grow, so nearly every new chunk lands past the
+/// window's end. The window must grow geometrically: adding chunks one past
+/// the end reallocates it a logarithmic number of times, not once per chunk.
+#[test]
+fn chunk_window_grows_geometrically_as_chunks_are_added() {
+    let mut table = ChunkTable::default();
+    let chunks = 512u64;
+    let mut reallocations = 0;
+    let mut capacity = table.held_entries();
+    for key in 0..chunks {
+        table.get_or_insert_empty(key);
+        if table.held_entries() != capacity {
+            capacity = table.held_entries();
+            reallocations += 1;
+        }
+    }
+    assert_eq!(table.len(), chunks as usize);
+    assert!(
+        reallocations <= 8,
+        "{reallocations} window reallocations while adding {chunks} chunks"
+    );
+    assert_eq!(
+        table.keys().collect::<Vec<_>>(),
+        (0..chunks).collect::<Vec<_>>()
     );
 }
 

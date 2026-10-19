@@ -127,7 +127,7 @@ pub const fn box_bytes<T>() -> usize {
 pub struct AliasSet {
     /// The first [`ALIAS_INLINE`] keys, `inline[..inline_len]`; a plain
     /// array scanned by index, which costs a debug build no call per key.
-    inline: [usize; ALIAS_INLINE],
+    inline: [u64; ALIAS_INLINE],
     inline_len: usize,
     spilled: Option<WordSet>,
     /// When collecting leaves, the distinct leaf names the measurement
@@ -269,7 +269,7 @@ impl AliasSet {
 
     /// [`Self::first`] for an owned cell's own allocation.
     pub(crate) fn first_allocation<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
-        let key = Arc::as_ptr(arc).cast::<()>() as usize;
+        let key = Arc::as_ptr(arc).cast::<()>() as u64;
         if let Some(spilled) = self.spilled.as_mut() {
             return spilled.insert(key);
         }

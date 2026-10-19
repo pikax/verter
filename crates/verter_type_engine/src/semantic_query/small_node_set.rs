@@ -34,7 +34,7 @@ impl SmallNodeSet {
     /// Record `node`; `false` when it was already recorded.
     pub(crate) fn insert(&mut self, node: SemanticNodeId) -> bool {
         if let Some(spilled) = self.spilled.as_mut() {
-            return spilled.insert(word(node));
+            return spilled.insert(node.0);
         }
         if self.inline_contains(node) {
             return false;
@@ -44,8 +44,8 @@ impl SmallNodeSet {
             self.len += 1;
             return true;
         }
-        let mut spilled: WordSet = self.inline.iter().map(|held| word(*held)).collect();
-        spilled.insert(word(node));
+        let mut spilled: WordSet = self.inline.iter().map(|held| held.0).collect();
+        spilled.insert(node.0);
         self.spilled = Some(spilled);
         true
     }
@@ -62,11 +62,6 @@ impl SmallNodeSet {
     }
 }
 
-/// A node ordinal as the word the spilled set keys it by.
-fn word(node: SemanticNodeId) -> usize {
-    usize::try_from(node.0).expect("node ordinals fit the address space")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,6 +74,25 @@ mod tests {
             for seen in 0..=id {
                 assert!(!set.insert(SemanticNodeId(seen)), "{seen} after {id}");
             }
+        }
+    }
+
+    /// Operands above `u32::MAX` — the high-bit binder tokens a walk may
+    /// meet beside arena ordinals — are distinct full-width keys after the
+    /// spill, on 32-bit targets too.
+    #[test]
+    fn full_width_operands_stay_distinct_after_the_spill() {
+        let mut set = SmallNodeSet::default();
+        let low = (0..INLINE as u64).map(SemanticNodeId);
+        let high = [1u64 << 32, (1 << 32) | 1, 1 << 63, (1 << 63) | 7, u64::MAX];
+        for node in low.clone().chain(high.map(SemanticNodeId)) {
+            assert!(set.insert(node), "first insert of {}", node.0);
+        }
+        // Each high operand truncates to a low ordinal already held; it
+        // must still read as its own key.
+        assert!(set.insert(SemanticNodeId((1 << 32) | 2)));
+        for node in low.chain(high.map(SemanticNodeId)) {
+            assert!(!set.insert(node), "repeat insert of {}", node.0);
         }
     }
 }

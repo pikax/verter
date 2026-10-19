@@ -762,8 +762,7 @@ impl CanonicalEvidence {
     }
 
     fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
-        let word = usize::try_from(node.0).expect("node ordinals fit the address space");
-        if !self.seen_nodes.insert(word) {
+        if !self.seen_nodes.insert(node.0) {
             return;
         }
         if let Some(NodeScopeId::File {

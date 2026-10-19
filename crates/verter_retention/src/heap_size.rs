@@ -79,7 +79,7 @@ impl<'h, 't> HeapMeter<'h, 't> {
              delivered value must be an owned handle charged by itself",
             std::any::type_name::<T>()
         );
-        self.raw.insert(Arc::as_ptr(arc).cast::<()>() as usize)
+        self.raw.insert(Arc::as_ptr(arc).cast::<()>() as u64)
     }
 
     /// The handle set owned allocations are offered to.

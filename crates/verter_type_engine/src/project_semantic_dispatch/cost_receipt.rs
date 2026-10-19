@@ -583,7 +583,7 @@ impl DemandCostReceipt {
                 }
                 continue;
             }
-            if !visited.insert(std::ptr::from_ref(next) as usize) {
+            if !visited.insert(std::ptr::from_ref(next) as u64) {
                 continue;
             }
             stack.push((next, true));

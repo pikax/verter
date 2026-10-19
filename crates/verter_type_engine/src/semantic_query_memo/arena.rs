@@ -642,9 +642,13 @@ struct ChunkTable {
     base: u64,
     /// A boxed slice rather than a `Vec`: a read indexes it in place, with
     /// no slice conversion, which a debug build would otherwise call out
-    /// for on every node read. It is resized only when a chunk is added
-    /// past its end or the window compacts.
+    /// for on every node read. `window[window_len..]` is empty headroom:
+    /// the slice grows geometrically when a chunk lands past its end, so
+    /// adding a chunk costs amortised constant time, and shrinks only once
+    /// the headroom exceeds the entries in use several times over.
     window: Box<[Option<Box<Chunk>>]>,
+    /// Entries of `window` in use: every live window chunk sits below it.
+    window_len: usize,
     /// Live chunks in `window`.
     window_live: usize,
 }
@@ -694,10 +698,12 @@ impl ChunkTable {
         };
         let index = usize::try_from(offset).expect("chunk number fits the address space");
         if self.window.len() <= index {
-            let mut grown = std::mem::take(&mut self.window).into_vec();
-            grown.resize_with(index + 1, || None);
-            self.window = grown.into_boxed_slice();
+            let capacity = (index + 1)
+                .max(self.window.len() * 2)
+                .max(CHUNK_WINDOW_SLACK);
+            self.resize_window(capacity);
         }
+        self.window_len = self.window_len.max(index + 1);
         let slot = &mut self.window[index];
         if slot.is_none() {
             self.window_live += 1;
@@ -723,15 +729,15 @@ impl ChunkTable {
     }
 
     /// Move the window's leading entries out while it is sparse: an empty
-    /// entry is dropped, a live chunk moves to `older`. One drain per
-    /// compaction, and a compaction runs only once the empty entries exceed
-    /// the live ones, so its cost is amortised over the releases that made
-    /// the window sparse.
+    /// entry is dropped, a live chunk moves to `older`. One in-place
+    /// rotation per compaction, and a compaction runs only once the empty
+    /// entries exceed the live ones, so its cost is amortised over the
+    /// releases that made the window sparse.
     fn compact_window(&mut self) {
-        if self.window.len() <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
+        if self.window_len <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
             return;
         }
-        let len = self.window.len();
+        let len = self.window_len;
         let mut leading = 0;
         let mut live_left = self.window_live;
         while len - leading > 2 * live_left + CHUNK_WINDOW_SLACK / 2 {
@@ -741,18 +747,30 @@ impl ChunkTable {
             }
             leading += 1;
         }
-        let mut kept = std::mem::take(&mut self.window).into_vec();
-        kept.drain(..leading);
-        self.window = kept.into_boxed_slice();
+        // The leading entries are all empty now: rotating them to the end
+        // turns them into headroom.
+        self.window[..len].rotate_left(leading);
+        self.window_len = len - leading;
         self.base += leading as u64;
         self.window_live = live_left;
+        let wanted = 2 * self.window_len.max(CHUNK_WINDOW_SLACK);
+        if self.window.len() > 2 * wanted {
+            self.resize_window(wanted);
+        }
+    }
+
+    /// Reallocate the window to `capacity` entries, keeping the ones in use.
+    fn resize_window(&mut self, capacity: usize) {
+        let mut resized = std::mem::take(&mut self.window).into_vec();
+        resized.resize_with(capacity, || None);
+        self.window = resized.into_boxed_slice();
     }
 
     /// Live chunk numbers in ascending order.
     fn keys(&self) -> impl Iterator<Item = u64> + '_ {
         let base = self.base;
         self.older.keys().copied().chain(
-            self.window
+            self.window[..self.window_len]
                 .iter()
                 .enumerate()
                 .filter(|(_, chunk)| chunk.is_some())
@@ -761,20 +779,28 @@ impl ChunkTable {
     }
 
     fn values(&self) -> impl Iterator<Item = &Chunk> {
-        self.older
-            .values()
-            .map(Box::as_ref)
-            .chain(self.window.iter().filter_map(Option::as_deref))
+        self.older.values().map(Box::as_ref).chain(
+            self.window[..self.window_len]
+                .iter()
+                .filter_map(Option::as_deref),
+        )
     }
 
     fn len(&self) -> usize {
         self.older.len() + self.window_live
     }
 
-    /// Entries the table holds, live or empty: what it costs to keep.
+    /// Entries the table holds, live, empty or headroom: what it costs to
+    /// keep.
     #[cfg(test)]
     fn held_entries(&self) -> usize {
         self.older.len() + self.window.len()
+    }
+
+    /// Entries the table addresses, live or empty, headroom excluded.
+    #[cfg(test)]
+    fn entries_in_use(&self) -> usize {
+        self.older.len() + self.window_len
     }
 
     #[cfg(test)]

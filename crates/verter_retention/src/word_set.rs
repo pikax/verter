@@ -9,13 +9,15 @@
 //! process allocates, never input-controlled, so a fixed multiplier cannot
 //! be steered into collisions.
 
-/// A set of `usize` words: open addressing over a power-of-two table
-/// with linear probing, kept at most half full.
+/// A set of `u64` words: open addressing over a power-of-two table with
+/// linear probing, kept at most half full. Keys are full width on every
+/// target — a node ordinal or token above `u32::MAX` is a distinct key on
+/// a 32-bit target too — and an address widens into one losslessly.
 #[derive(Default)]
 pub struct WordSet {
     /// The table; `0` marks an empty slot. Empty until the first non-zero
     /// insert.
-    slots: Box<[usize]>,
+    slots: Box<[u64]>,
     /// Non-zero keys held.
     len: usize,
     /// Whether `0`, which marks an empty slot, is held.
@@ -41,7 +43,7 @@ impl WordSet {
 
     /// Record `key`; `true` the first time it is offered, `false` after.
     #[inline]
-    pub fn insert(&mut self, key: usize) -> bool {
+    pub fn insert(&mut self, key: u64) -> bool {
         if key == 0 {
             let first = !self.zero;
             self.zero = true;
@@ -68,7 +70,7 @@ impl WordSet {
 
     /// Whether `key` is held.
     #[must_use]
-    pub fn contains(&self, key: usize) -> bool {
+    pub fn contains(&self, key: u64) -> bool {
         if key == 0 {
             return self.zero;
         }
@@ -102,7 +104,7 @@ impl WordSet {
     }
 
     /// The held words, in no particular order.
-    pub fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         self.zero
             .then_some(0)
             .into_iter()
@@ -110,8 +112,8 @@ impl WordSet {
     }
 
     #[inline]
-    fn slot_of(&self, key: usize) -> usize {
-        ((key as u64).wrapping_mul(MIX) >> self.shift) as usize
+    fn slot_of(&self, key: u64) -> usize {
+        (key.wrapping_mul(MIX) >> self.shift) as usize
     }
 
     /// Double the table (or allocate the first) and re-place every key.
@@ -146,8 +148,8 @@ impl std::fmt::Debug for WordSet {
     }
 }
 
-impl FromIterator<usize> for WordSet {
-    fn from_iter<I: IntoIterator<Item = usize>>(keys: I) -> Self {
+impl FromIterator<u64> for WordSet {
+    fn from_iter<I: IntoIterator<Item = u64>>(keys: I) -> Self {
         let mut set = Self::new();
         for key in keys {
             set.insert(key);
@@ -294,9 +296,9 @@ mod tests {
         let mut set = WordSet::new();
         let mut reference = std::collections::HashSet::new();
         // Aligned addresses (low bits zero), a run sharing high bits, and 0.
-        let keys: Vec<usize> = (0..5000usize)
+        let keys: Vec<u64> = (0..5000u64)
             .map(|i| (i * 7919 % 4099) * 64)
-            .chain((0..64).map(|i| (1usize << 40) + i * 8))
+            .chain((0..64).map(|i| (1u64 << 40) + i * 8))
             .collect();
         for &key in &keys {
             assert_eq!(
@@ -310,14 +312,35 @@ mod tests {
             assert!(!set.insert(key), "repeat offer of {key}");
         }
         assert_eq!(set.len(), reference.len());
-        let mut held: Vec<usize> = set.iter().collect();
+        let mut held: Vec<u64> = set.iter().collect();
         held.sort_unstable();
-        let mut expected: Vec<usize> = reference.into_iter().collect();
+        let mut expected: Vec<u64> = reference.into_iter().collect();
         expected.sort_unstable();
         assert_eq!(held, expected);
         assert!(!set.contains(3));
         assert!(!WordSet::new().contains(0));
         assert!(!WordSet::new().contains(64));
+    }
+}
+
+#[cfg(test)]
+mod full_width_tests {
+    use super::WordSet;
+
+    /// Keys that agree in their low 32 bits are distinct on every target,
+    /// 32-bit ones included: a key is never narrowed to the address width.
+    #[test]
+    fn keys_sharing_low_bits_stay_distinct() {
+        let mut set = WordSet::new();
+        let keys = [5u64, (1 << 32) | 5, (1 << 63) | 5, u64::MAX, 0xFFFF_FFFF];
+        for key in keys {
+            assert!(set.insert(key), "first offer of {key:#x}");
+        }
+        for key in keys {
+            assert!(set.contains(key) && !set.insert(key), "{key:#x}");
+        }
+        assert!(!set.contains(1 << 32));
+        assert_eq!(set.len(), keys.len());
     }
 }
 

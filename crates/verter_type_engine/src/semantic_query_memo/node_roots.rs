@@ -553,7 +553,7 @@ impl DeliveredOwners {
     /// Record `owner`; `false` when it was already recorded.
     fn insert(&mut self, owner: usize) -> bool {
         if let Some(set) = self.spilled.as_mut() {
-            return set.insert(owner);
+            return set.insert(owner as u64);
         }
         let mut index = 0;
         while index < self.inline_len {
@@ -567,8 +567,9 @@ impl DeliveredOwners {
             self.inline_len += 1;
             return true;
         }
-        let mut set: verter_retention::word_set::WordSet = self.inline.iter().copied().collect();
-        set.insert(owner);
+        let mut set: verter_retention::word_set::WordSet =
+            self.inline.iter().map(|&held| held as u64).collect();
+        set.insert(owner as u64);
         self.spilled = Some(set);
         true
     }
