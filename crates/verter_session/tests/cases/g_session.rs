@@ -4,6 +4,8 @@
 mod committed_input_basis;
 #[path = "g_session/cooperative_drive_seam.rs"]
 mod cooperative_drive_seam;
+#[path = "g_session/flight_rendezvous.rs"]
+mod flight_rendezvous;
 #[path = "g_session/inline_execute_clears_all_install_tls_slots.rs"]
 mod inline_execute_clears_all_install_tls_slots;
 #[path = "g_session/module_augmentation_body_rekey.rs"]

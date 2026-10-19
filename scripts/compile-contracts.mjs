@@ -101,4 +101,20 @@ if (sessionVariants.error) {
   failed = true;
 }
 
+process.stderr.write("\nCOMPILE CONTRACTS: session-soak\n");
+const sessionSoak = spawnSync(
+  "cargo",
+  ["run", "--locked", "-p", "verter_compile_contracts_session_soak"],
+  { stdio: "inherit", windowsHide: true },
+);
+if (sessionSoak.error) {
+  process.stderr.write(`COMPILE CONTRACTS: could not start cargo: ${sessionSoak.error.message}\n`);
+  failed = true;
+} else if (sessionSoak.signal) {
+  process.stderr.write(`COMPILE CONTRACTS: cargo was killed by ${sessionSoak.signal}\n`);
+  failed = true;
+} else if (sessionSoak.status !== 0) {
+  failed = true;
+}
+
 process.exitCode = failed ? 1 : 0;

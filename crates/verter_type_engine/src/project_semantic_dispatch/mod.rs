@@ -5032,6 +5032,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // receipt is what every later read of the result pays.
                         let request = crate::request_context::current_request_budget();
                         let recording = self.connected_demand.record_cost(lease.cost_identity());
+                        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+                        lease.hold_for_flight_rendezvous(flags);
                         let output = traced_build();
                         if isolated_root {
                             refusal_carrier = TracedFacts::of_output(&output, rooting.take());

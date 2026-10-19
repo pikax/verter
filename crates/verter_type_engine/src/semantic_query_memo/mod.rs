@@ -63,6 +63,8 @@ mod flow_return_memo;
 pub mod graph_fixture;
 mod hash_cons_memos;
 pub mod inflight;
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub use inflight::{FlightRendezvous, FlightRendezvousMiss, FlightRendezvousObservation};
 pub(crate) mod intern_table;
 pub mod interner;
 pub(crate) mod member_index;
@@ -753,6 +755,17 @@ pub struct SemanticGraphStore {
     #[cfg(any(test, feature = "test-support"))]
     exhausted_join_abort:
         parking_lot::Mutex<Option<(SemanticQueryKey, test_support::ExhaustedJoinAbortForTests)>>,
+    /// The rendezvous scopes armed on this store, outermost first — see
+    /// [`Self::arm_flight_rendezvous`]. A guard's drop removes exactly its
+    /// own registration, so overlapping scopes may end in any order.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    flight_rendezvous: parking_lot::Mutex<Vec<Arc<inflight::FlightRendezvousShared>>>,
+    /// How many rendezvous guards are live on this store right now — the
+    /// lock-free miss path of [`Self::armed_flight_rendezvous`], so a store
+    /// with nothing armed never takes the table's mutex from a cold build
+    /// or a joined wait.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    flight_rendezvous_armed: std::sync::atomic::AtomicUsize,
 }
 
 /// The family memo's retention bound, chosen when a store is constructed
@@ -867,6 +880,10 @@ impl SemanticGraphStore {
             produce_hook: Default::default(),
             #[cfg(any(test, feature = "test-support"))]
             exhausted_join_abort: Default::default(),
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            flight_rendezvous: Default::default(),
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            flight_rendezvous_armed: Default::default(),
         };
         store.bind_destroyed_sidecar_sink();
         store
