@@ -7330,7 +7330,8 @@ fn an_unnameable_root_component_zeroes_its_whole_arm() {
             ResolvedRootStep::NativeTag {
                 tag: "div".to_string(),
             },
-        ],
+        ]
+        .into(),
         status: BranchStatus::Resolved,
     };
     let resolution = crate::types::FallthroughResolution {
@@ -8034,7 +8035,7 @@ defineSlots<{ header(props: { meta: { label: { text: string } } }): any }>()
     // is not a live arena ordinal; the same-generation seed gate refuses it,
     // and the raise arm falls back to the shallow carrier — the refusal.)
     let stale = std::sync::Arc::new(verter_type_expr::SyntheticCarrierKey {
-        binding_name: std::sync::Arc::from("neverPublishedBinding"),
+        binding_name: From::from("neverPublishedBinding"),
         value_node: u64::MAX,
         ..(**key).clone()
     });

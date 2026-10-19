@@ -25,7 +25,11 @@ pub trait ImportedRuntimeValueResolver {
     fn prepared_value_decl(
         &self,
         _source: &ValueDeclIdentity,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    > {
         None
     }
 
@@ -225,6 +229,7 @@ mod tests {
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
             literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         }
     }
 
@@ -249,8 +254,12 @@ mod tests {
     #[derive(Default)]
     struct TestResolver {
         dep_envs: FxHashMap<String, Arc<EvalEnv>>,
-        prepared_values:
-            FxHashMap<ValueDeclIdentity, Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        prepared_values: FxHashMap<
+            ValueDeclIdentity,
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         lookup_counts: RefCell<FxHashMap<String, usize>>,
         value_export_targets: FxHashMap<ValueDeclIdentity, ValueDeclIdentity>,
     }
@@ -284,7 +293,11 @@ mod tests {
         fn prepared_value_decl(
             &self,
             source: &ValueDeclIdentity,
-        ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+        ) -> Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        > {
             self.prepared_values.get(source).cloned()
         }
 
@@ -387,7 +400,7 @@ mod tests {
                 );
                 decl.exported_name = Some("theme".to_string());
                 decl.type_annotation = string_literal_annotation("dark");
-                Arc::new(decl)
+                crate::resolver_core::CachedValue::new(decl)
             },
         );
 
@@ -704,6 +717,7 @@ mod tests {
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
                 literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+                defers_read_widening: false,
             },
             signatures: Vec::new(),
             object_shape: None,

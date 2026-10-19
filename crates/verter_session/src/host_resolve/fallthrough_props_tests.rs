@@ -33,7 +33,7 @@ fn branch(
         condition_text: None,
         props: Vec::new(),
         events: Vec::new(),
-        root_chain,
+        root_chain: root_chain.into(),
         status,
     }
 }

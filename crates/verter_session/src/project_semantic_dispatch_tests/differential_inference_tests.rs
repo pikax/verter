@@ -1600,6 +1600,28 @@ declare function ng(x: { v: "a" | "b" }): 1;
 export function l44() { return pu(c ? { v: "a" } : { v: "b" }); }
 export function l45() { return fa(c ? "a" : "b"); }
 export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
+declare function tq<T extends { v: "a" | "b" }>(x: T): T;
+declare function tqf<T extends { v: "a" | "b"; f: (n: number) => void }>(x: T): T;
+declare function tqm<T extends { v: "a" | "b" }>(x: { o: T; f: (n: number) => void }): T;
+declare function tqk<T extends { "1": "a" | "b" }>(x: T): T;
+declare function nk<T extends string>(x: { "1": T }): T;
+export function l47() { return tq({ v: "a" }); }
+export function l48() { return tqf({ v: "a", f: (n) => {} }); }
+export function l49() { return tqm({ o: { v: "a" }, f: (n) => {} }); }
+export function l50() { return tqk({ 1: "a" }); }
+export function l51() { return nk({ 1: "x" }); }
+declare function tqs<T extends { v: string; f: (n: number) => void }>(x: T): T;
+export function l52() { return tqs({ v: "a", f: (n) => {} }); }
+declare function tqo<T extends { v: string; f: (n: number) => void }>(o?: T): T;
+declare function tqu<T, U>(x: T | { extra: U; f: (n: number) => void }): U;
+export function l53() { return tqo({ v: "a", f: (n) => {} }); }
+export function l54() { return tqu({ extra: 1, f: (n) => {} }); }
+declare function tt2<T extends string>(x: [...string[], T]): T;
+declare function tup<T extends [string, "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+declare function tup2<T extends [...string[], "a" | "b"]>(x: { t: T; f: (n: number) => void }): T;
+export function l55() { return tt2(["x", "a"]); }
+export function l56() { return tup({ t: ["x", "a"], f: (n) => {} }); }
+export function l57() { return tup2({ t: ["x", "a"], f: (n) => {} }); }
 "##;
 
 /// Each candidate evaluates a nested argument literal under its own type
@@ -1622,7 +1644,14 @@ export function l46() { return ng(c ? { v: "a" } : { v: "b" }); }
 /// nested. A member's contextual type falls
 /// back to an applicable index signature; a string mapping is a string
 /// literal context; and an acyclic constraint chain is read to its end,
-/// however long.
+/// however long. A type parameter types an object argument's members
+/// through its constraint, whether the argument is deposited whole or read
+/// by a context-sensitive literal's first pass, which deposits nothing
+/// into a naked type parameter, so a callback member is typed by the
+/// constraint; a numeric key names the member its string spelling names.
+/// A contextual tuple types an element counted from the end by its
+/// trailing fixed element, and a constraint that is a tuple makes the
+/// literal it types a tuple.
 #[test]
 fn candidate_literal_contexts() {
     let failures = Matrix::new(CANDIDATE_LITERAL_CONTEXTS).four(&[
@@ -1942,6 +1971,83 @@ fn candidate_literal_contexts() {
             r#"string[]"#,
         ),
         (Read::Return(r#"l46"#), r#"1"#, r#"1"#, r#"1"#, r#"1"#),
+        (
+            Read::Return(r#"l47"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l48"#),
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+            r#"{ v: "a"; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l49"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l50"#),
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+            r#"{ 1: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"l51"#),
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+            r#""x""#,
+        ),
+        (
+            Read::Return(r#"l52"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l53"#),
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+            r#"{ v: string; f: (n: number) => void; }"#,
+        ),
+        (
+            Read::Return(r#"l54"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"l55"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"l56"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+        ),
+        (
+            Read::Return(r#"l57"#),
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+            r#"[string, "a"]"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -1981,6 +2087,23 @@ export function n19() { return id(c ? { a: 1 } : { a: 2 }); }
 export function n20() { return id(c ? { a: 2 } : { a: 1 }); }
 export function n21() { return id(c ? { a: 1 } : { a: "s" }); }
 export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
+declare function fa<T>(x: T): T[];
+export function n23() { return pu({ v: c ? -1 : 2 }); }
+export function n24() { return fa(-1); }
+export function n25() { return fa(c ? -1 : 2); }
+export function n26() { return pa([c ? -1n : 2n]); }
+let sb: "b" = "b";
+export function n27() { return id({ v: sl }); }
+export function n28() { return pu({ v: c ? "a" : sb }); }
+export function n29() { return pu({ v: so }); }
+export function n30() { return pa(["a" as "a"]); }
+export function n31() { return pu({ v: ["a"] as const }); }
+export function n32() { return id({ v: "a" as "a", w: "b" }); }
+export function n33() { return pu({ v: { w: sl } }); }
+export function n34() { return pa([sl, "b"]); }
+export function n35() { return pu({ v: c ? <const>"a" : "a" }); }
+export function n36() { return pu({ v: <const>["a"] }); }
+export function n37() { return id({ v: <const>"a", w: "b" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -1990,7 +2113,8 @@ export function n22() { return id(c ? { a: 1 } : { a: 2, b: "x" }); }
 /// argument keeps its literal, and a `const` type parameter keeps every
 /// nested literal readonly. A conditional's object arms the widening makes
 /// alike are one type in either order, while arms that stay unlike keep
-/// both.
+/// both. A signed numeric or negated bigint literal is as fresh as an
+/// unsigned one, alone or as a conditional arm.
 #[test]
 fn authored_literal_occurrences() {
     let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
@@ -2127,16 +2251,46 @@ fn authored_literal_occurrences() {
             r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
             r#"{ a: number; b?: undefined; } | { a: number; b: string; }"#,
         ),
+        (
+            Read::Return(r#"n23"#),
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+            r#"number"#,
+        ),
+        (
+            Read::Return(r#"n24"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n25"#),
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+            r#"number[]"#,
+        ),
+        (
+            Read::Return(r#"n26"#),
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
+            r#"bigint"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// An asserted or stored literal nested in an object literal argument is
-/// not fresh: it keeps its literal type where the checker keeps it
-/// (`pu({ v: "a" as "a" })` is `"a"`), and a conditional of a fresh and a
-/// stored arm of one literal keeps it (`c ? "a" : sl` with `sl: "a"`).
+/// An asserted, const-asserted or stored literal nested in an object or
+/// array literal argument is not fresh: it keeps its literal type where
+/// the checker keeps it (`pu({ v: "a" as "a" })` is `"a"`), at any depth
+/// and in a whole argument a naked parameter infers from, beside a fresh
+/// sibling that widens. A conditional of a fresh and a stored arm of one
+/// literal keeps it (`c ? "a" : sl` with `sl: "a"`), and one of a fresh
+/// and a stored arm of different literals widens (`c ? "a" : sb`).
 #[test]
-#[ignore = "typed gap in the lane: value lowering keeps no per-occurrence literal freshness, so a nested asserted or stored literal reads as a fresh one"]
 fn nested_regular_literals_keep_their_type() {
     let failures = Matrix::new(AUTHORED_LITERAL_OCCURRENCES).four(&[
         (
@@ -2160,7 +2314,254 @@ fn nested_regular_literals_keep_their_type() {
             r#""a""#,
             r#""a""#,
         ),
+        (
+            Read::Return(r#"n27"#),
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+            r#"{ v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n28"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n29"#),
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+            r#"{ readonly v: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n30"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n31"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n32"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+        ),
+        (
+            Read::Return(r#"n33"#),
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+            r#"{ w: "a"; }"#,
+        ),
+        (
+            Read::Return(r#"n34"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Return(r#"n35"#),
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+            r#""a""#,
+        ),
+        (
+            Read::Return(r#"n36"#),
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+            r#"readonly ["a"]"#,
+        ),
+        (
+            Read::Return(r#"n37"#),
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+            r#"{ v: "a"; w: string; }"#,
+        ),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_LITERAL_OCCURRENCES: &str = r##"
+declare const c: boolean;
+let sl: "a" = "a";
+const s = "a";
+let d1 = { v: "a" as "a", w: "b" };
+const d2 = { v: "a" as "a", w: "b" };
+let d3 = { o: { v: sl, w: "b" } };
+const d4 = { o: { v: sl, w: "b" } };
+let d5 = ["a" as "a"];
+let d6 = ["a" as "a", "b"];
+let d7 = { v: c ? "a" : sl };
+let d8 = { v: [sl, "b"] };
+let d9 = { v: [sl] };
+let d10 = "a" as "a";
+let d11 = c ? "a" : sl;
+let d12 = { v: s };
+const d13 = [{ v: sl, w: 1 }];
+let d14 = { v: c ? "a" : ("b" as "b") };
+let d15 = { v: { w: sl } };
+let d16 = s;
+let d17 = c ? s : 1;
+let d18 = [s];
+const d19 = { v: s };
+let d20 = { o: { v: "a" as "a", w: "b" } };
+let d21 = ["a"] as const;
+let d22 = { m: () => "a" };
+let d23 = { v: "a" } satisfies { v: string };
+let d24 = { v: ["a", 1] as const, w: [1] };
+let d25 = c ? "a" : ("a" as "a");
+declare const c2: boolean;
+let d26 = c ? (c2 ? "a" : "b") : ("a" as "a");
+let d27 = c ? (c2 ? "a" : "b") : "c";
+let d28 = { v: c ? (c2 ? "a" : sl) : "b" };
+let d29 = [s, "x" as "x"];
+let d30 = { v: s, w: { u: c ? s : sl } };
+"##;
+
+/// A declaration's initializer keeps each literal's freshness per authored
+/// occurrence: a mutable declaration widens only the fresh literals it
+/// writes, so an asserted, const-asserted or stored literal keeps its type
+/// beside a fresh sibling that widens — as a member at any depth, as an
+/// array element, at the top level — and a union of a fresh literal and
+/// its regular counterpart is the regular one. A fresh literal widens
+/// wherever its position closes: a member, an element, an arrow's body,
+/// and through a conditional nested in a conditional's branch.
+#[test]
+fn declared_literal_occurrences() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d1"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d2"), r#"{ v: "a"; w: string; }"#),
+        (Read::Type("typeof d3"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d4"), r#"{ o: { v: "a"; w: string; }; }"#),
+        (Read::Type("typeof d5"), r#""a"[]"#),
+        (Read::Type("typeof d6"), r#"string[]"#),
+        (Read::Type("typeof d8"), r#"{ v: string[]; }"#),
+        (Read::Type("typeof d9"), r#"{ v: "a"[]; }"#),
+        (Read::Type("typeof d10"), r#""a""#),
+        (Read::Type("typeof d13"), r#"{ v: "a"; w: number; }[]"#),
+        (Read::Type("typeof d14"), r#"{ v: string; }"#),
+        (Read::Type("typeof d15"), r#"{ v: { w: "a"; }; }"#),
+        (
+            Read::Type("typeof d20"),
+            r#"{ o: { v: "a"; w: string; }; }"#,
+        ),
+        (Read::Type("typeof d21"), r#"readonly ["a"]"#),
+        (Read::Type("typeof d22"), r#"{ m: () => string; }"#),
+        (Read::Type("typeof d23"), r#"{ v: string; }"#),
+        (
+            Read::Type("typeof d24"),
+            r#"{ v: readonly ["a", 1]; w: number[]; }"#,
+        ),
+        (Read::Type("typeof d25"), r#""a""#),
+        (Read::Type("typeof d26"), r#"string"#),
+        (Read::Type("typeof d27"), r#"string"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A read in a declaration's mutable location is as fresh as its binding:
+/// a `const` holding a widening literal reads as that fresh literal, so a
+/// member, an element or a mutable declaration of it widens, and a
+/// conditional of a fresh literal and a stored read of the same literal is
+/// the regular one — through a nested conditional, beside an asserted
+/// element, and through a member read of the declaration.
+#[test]
+fn declared_reads_follow_their_binding_freshness() {
+    let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
+        (Read::Type("typeof d7"), r#"{ v: "a"; }"#),
+        (Read::Type("typeof d11"), r#""a""#),
+        (Read::Type("typeof d12"), r#"{ v: string; }"#),
+        (Read::Type("typeof d16"), r#"string"#),
+        (Read::Type("typeof d17"), r#"string | number"#),
+        (Read::Type("typeof d18"), r#"string[]"#),
+        (Read::Type("typeof d19"), r#"{ v: string; }"#),
+        (Read::Type("typeof d28"), r#"{ v: string; }"#),
+        (Read::Type("typeof d29"), r#"string[]"#),
+        (
+            Read::Type("typeof d30"),
+            r#"{ v: string; w: { u: "a"; }; }"#,
+        ),
+        (Read::Type("typeof d30.w"), r#"{ u: "a"; }"#),
+        (Read::Type("typeof d30.v"), r#"string"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+const DECLARED_READ_USES: &str = r##"
+declare const c: boolean;
+declare function pu<T>(x: { v: T }): T;
+declare function id<T>(x: T): T;
+declare function fa<T>(x: T): T[];
+let sl: "a" = "a";
+const s = "a";
+let e1 = s;
+const e2 = { v: s };
+let e3 = c ? "a" : sl;
+let e4 = { v: c ? "a" : sl };
+const e5 = [s];
+let e6 = c ? s : 1;
+const e7 = { o: { v: s, w: sl } };
+let e8 = c ? ("b" as "b") : s;
+let e9 = { v: [s, sl] };
+let e10 = c ? { v: s } : null;
+let e11 = [c ? "a" : sl, "x" as "x"];
+export function m1() { return pu({ v: e1 }); }
+export function m2() { return id(e2); }
+export function m3() { return pu({ v: e3 }); }
+export function m4() { return id(e4); }
+export function m5() { return fa(e5); }
+export function m6() { return pu({ v: e6 }); }
+export function m7() { return id(e7.o); }
+export function m8() { return id(e8); }
+export function m9() { return pu(e4); }
+export function m10() { return id(e9); }
+export function m11() { return id(e10); }
+export function m12() { return id(e7.o.v); }
+export function m13() { return id(e11); }
+"##;
+
+/// A declaration's type, widened by the freshness of the bindings its
+/// initializer reads, is what a later read of it stores: as a call
+/// argument, whole or nested, and through a member read. Each element of an
+/// array literal widens its own reads before the elements join, so a fresh
+/// read beside an equal regular one in another element still widens.
+#[test]
+fn declared_reads_reach_their_stored_uses() {
+    let mut failures = Matrix::new(DECLARED_READ_USES).same(&[
+        (Read::Return(r#"m1"#), r#"string"#),
+        (Read::Return(r#"m2"#), r#"{ v: string; }"#),
+        (Read::Return(r#"m3"#), r#""a""#),
+        (Read::Return(r#"m4"#), r#"{ v: "a"; }"#),
+        (Read::Return(r#"m5"#), r#"string[][]"#),
+        (Read::Return(r#"m6"#), r#"string | number"#),
+        (Read::Return(r#"m7"#), r#"{ v: string; w: "a"; }"#),
+        (Read::Return(r#"m8"#), r#"string"#),
+        (Read::Return(r#"m9"#), r#""a""#),
+        (Read::Return(r#"m10"#), r#"{ v: string[]; }"#),
+        (Read::Return(r#"m12"#), r#"string"#),
+        (Read::Return(r#"m13"#), r#"("a" | "x")[]"#),
+    ]);
+    failures.extend(Matrix::new(DECLARED_READ_USES).four(&[(
+        Read::Return(r#"m11"#),
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+        r#"{ v: string; } | null"#,
+        r#"{ v: string; }"#,
+    )]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

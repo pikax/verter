@@ -1530,7 +1530,7 @@ fn static_class_method_return_inference_normal_control_is_exact() {
                 owner: TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 0,
             },
-            member_path: Arc::from(vec![1]),
+            member_path: From::from(vec![1]),
         }
     );
 }
@@ -1575,7 +1575,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
             owner: TopLevelOwnerId::ordinary_file(),
             owner_local_ordinal: 0,
         },
-        member_path: Arc::from(vec![1]),
+        member_path: From::from(vec![1]),
     };
 
     let static_fact = static_class_method_fact(&env, "Collision", "collide");
@@ -1608,7 +1608,7 @@ fn static_class_method_return_inference_same_name_instance_collision_stays_surfa
     assert_eq!(&decoded, shape);
 
     let mut changed = shape.clone();
-    let ObjectMemberFact::Method(method) = Arc::make_mut(&mut changed.members)
+    let ObjectMemberFact::Method(method) = verter_type_expr::OwnedSlice::make_mut(&mut changed.members)
         .iter_mut()
         .find(
             |member| matches!(member, ObjectMemberFact::Method(method) if method.string_name().expect("string-key fixture") == "collide"),
@@ -2389,22 +2389,12 @@ fn var_widens_string_literal_initializer() {
 }
 
 /// A `let` whose initializer is a constructor-type assertion
-/// (`value as new () => { kind: "x" }`) must widen the literal members
-/// of the constructor's return type EXACTLY as the function-type
-/// equivalent does — and must PRESERVE the `ConstructorType` variant
-/// (not flatten it to `Function`).
-///
-/// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
-/// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
-/// interns the kind-preserving `SemanticNodeData::Signature` carrier
-/// (`TypeExpr::Function` ⇒ `Call`, `TypeExpr::ConstructorType` ⇒
-/// `Construct`). A catch-all `_ => expr` arm would forward the whole
-/// `ConstructorType` untouched, so the inner `kind: "x"` literal would
-/// silently NOT widen.
-/// Discriminator: the inner `kind` member must be `string`, never the `"x"`
-/// literal — and the outer node must remain a `ConstructorType`.
+/// (`value as new () => { kind: "x" }`) is typed as the asserted type: a
+/// literal written in a type is regular, so the constructor's return keeps
+/// its `"x"` member as the checker does (`new () => { kind: "x"; }`), and
+/// the node stays a `ConstructorType` (never flattened to `Function`).
 #[test]
-fn let_widens_constructor_type_return_literal_members() {
+fn let_keeps_asserted_constructor_type_return_literal_members() {
     let parts = lowered(r#"let C = value as new () => { kind: "x" }"#);
     let decl = parts.value_decl("C").expect("lowered C");
 
@@ -2433,24 +2423,17 @@ fn let_widens_constructor_type_return_literal_members() {
     });
     assert_eq!(
         kind_ty,
-        Some(&TypeExpr::Primitive(PrimitiveName::String)),
-        "let-bound constructor-return literal member must widen to `string`"
-    );
-    assert_ne!(
-        kind_ty,
         Some(&TypeExpr::string_literal("x")),
-        "let-bound constructor-return literal member must NOT stay the `\"x\"` literal"
+        "an asserted constructor-return literal member is regular and keeps its literal"
     );
 }
 
-/// Parity guard: the FUNCTION-type equivalent of
-/// `let_widens_constructor_type_return_literal_members` must widen the
-/// same return literal identically. The two carry the same `FunctionExpr`
-/// payload; only the variant tag differs, so widening behaviour must be
-/// identical. This pins that the ConstructorType arm mirrors the Function
-/// arm rather than diverging.
+/// The FUNCTION-type equivalent of
+/// `let_keeps_asserted_constructor_type_return_literal_members`: an
+/// asserted function type keeps its return's literal member
+/// (`() => { kind: "x"; }`).
 #[test]
-fn let_widens_function_type_return_literal_members_parity() {
+fn let_keeps_asserted_function_type_return_literal_members() {
     let parts = lowered(r#"let F = value as () => { kind: "x" }"#);
     let decl = parts.value_decl("F").expect("lowered F");
 
@@ -2474,8 +2457,8 @@ fn let_widens_function_type_return_literal_members_parity() {
     });
     assert_eq!(
         kind_ty,
-        Some(&TypeExpr::Primitive(PrimitiveName::String)),
-        "let-bound function-return literal member must widen to `string`"
+        Some(&TypeExpr::string_literal("x")),
+        "an asserted function-return literal member is regular and keeps its literal"
     );
 }
 
@@ -2883,6 +2866,37 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
         &call.args[0].expression,
         crate::analysis::type_eval_build::IndexedValueExpression::Call(nested)
             if nested.point == 45
+    ));
+}
+
+/// An angle-bracket const assertion (`<const>"a"`) pins the literal it
+/// asserts exactly as `"a" as const` does: a call argument's nested
+/// position records the asserted literal as a regular contributor, never
+/// the lowered `const` type name.
+#[test]
+fn angle_bracket_const_assertion_pins_an_argument_literal_like_as_const() {
+    fn provenance(source: &str) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
+        let allocator = oxc_allocator::Allocator::default();
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
+        let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) =
+            crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source)
+        else {
+            panic!("a direct call lowers to indexed call IR");
+        };
+        call.args[0].literal_provenance.clone()
+    }
+    let angle = provenance(r#"f({ v: c ? <const>"a" : "a" })"#);
+    let as_const = provenance(r#"f({ v: c ? "a" as const : "a" })"#);
+    assert_eq!(angle, as_const);
+    let angle = angle.expect("the member records its regular contributor");
+    assert!(matches!(
+        angle.positions[0].regular.as_ref(),
+        [verter_type_expr::IndexedRegularLiteralSource::Pinned(TypeExpr::Literal(
+            verter_type_expr::LiteralValue::String(value)
+        ))] if &**value == "a"
     ));
 }
 

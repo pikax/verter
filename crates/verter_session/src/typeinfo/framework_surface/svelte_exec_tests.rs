@@ -19,9 +19,9 @@ fn retain_test_snippet_members(surface: &TypeInfoSurface, names: &[&str]) -> Typ
         {
             verter_type_expr::PropCallableRole::SvelteSnippet {
                 symbol: verter_type_expr::ResolvedSymbolIdentity {
-                    canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                    canonical_id: "/node_modules/svelte/index.d.ts".into(),
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    symbol: Arc::from("Snippet"),
+                    symbol: "Snippet".into(),
                 },
                 exactness: ResolutionExactness::ExactSymbolic,
                 provenance: ResolutionProvenance::FrameworkSurface,
@@ -1025,6 +1025,7 @@ fn snippet_carrier_params_tuple_expands_to_ordered_dto_bindings() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let item_ty = nprim(
@@ -1100,6 +1101,7 @@ fn snippet_carrier_empty_params_tuple_yields_present_bindingless_slot() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let snippet = nsnippet(&graph, vec![ntuple(&graph, Vec::new())]);
@@ -1130,6 +1132,7 @@ fn snippet_carrier_open_generic_params_is_present_bindingless() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let open = graph.intern_node(
@@ -1160,6 +1163,7 @@ fn snippet_function_fallback_skips_this_and_expands_rest_tuple_to_dto_bindings()
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let item_ty = nprim(
@@ -1226,6 +1230,7 @@ fn snippet_function_empty_rest_tuple_yields_no_dto_bindings() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let callable = nsnippet_function(&graph, ntuple(&graph, Vec::new()));
@@ -1256,6 +1261,7 @@ fn snippet_unlabelled_tuple_elements_fall_back_to_arg_index_names() {
     use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let a = nprim(
@@ -1299,6 +1305,7 @@ fn snippet_union_arms_combine_by_index_into_intersection_binding() {
     use verter_type_engine::project_semantic_dispatch::{node_data_for, ProjectSemanticDispatch};
     let host = VerterHost::new_standalone(crate::types::HostConfig::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = snippet_graph(&host);
 
     let a_ty = nprim(
@@ -2696,6 +2703,7 @@ fn svelte_sink_degraded_output_and_fold_none_are_non_cacheable_not_partial() {
     let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let absent = SemanticNodeId(u64::MAX);
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let cap = super::TypeinfoSvelteSurfaceOutputCap::new(&dispatch);
 
     // Degraded output: an object whose member value is unraisable degrades

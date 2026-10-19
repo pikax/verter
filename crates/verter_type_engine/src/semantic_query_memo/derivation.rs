@@ -423,10 +423,10 @@ impl DerivationStore {
     /// node arena itself is append-only and is not reset — `clear` only
     /// drops this store's own cached provenance.
     pub(super) fn clear(&mut self) {
-        self.edges.clear();
-        self.signature_pool.clear();
+        self.edges = FxHashMap::default();
+        self.signature_pool = FxHashMap::default();
         self.pool_entries = 0;
-        self.edge_budget.clear();
+        self.edge_budget = GlobalRetentionBudget::new(self.edge_budget.cap());
         self.total_edges = 0;
         self.settle_in_full();
     }
@@ -456,11 +456,31 @@ impl DerivationStore {
         }
         for key in &victims {
             self.edges.remove(key);
-            // Sound under the exclusive `&mut self` borrow — see `record`.
-            self.edge_budget.forget_key_under_exclusive_lock(key);
         }
         self.total_edges -= dropped_edges;
-        self.settle_in_full();
+        if self.edges.is_empty() {
+            self.clear();
+        } else {
+            // The exclusive borrow covers every admission. Retiring a
+            // batch visits the ledger once, not once per removed bucket.
+            self.edge_budget
+                .retain_keys_under_exclusive_lock(|key| self.edges.contains_key(key));
+            if self.edges.capacity() > self.edges.len().saturating_mul(4) {
+                self.edges.shrink_to(self.edges.len().saturating_mul(2));
+            }
+            if self.pool_entries > 2 * self.total_edges + DERIVATION_EDGE_BUCKET_CAP {
+                self.signature_pool.retain(|_, bucket| {
+                    bucket.retain(|weak| weak.strong_count() > 0);
+                    !bucket.is_empty()
+                });
+                self.pool_entries = self.signature_pool.values().map(Vec::len).sum();
+            }
+            if self.signature_pool.capacity() > self.signature_pool.len().saturating_mul(4) {
+                self.signature_pool
+                    .shrink_to(self.signature_pool.len().saturating_mul(2));
+            }
+            self.settle_in_full();
+        }
         victims.len()
     }
 

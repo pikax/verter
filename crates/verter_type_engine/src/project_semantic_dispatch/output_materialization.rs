@@ -174,7 +174,15 @@ mod carrier {
             /// never warm-admitted as complete, and the observation never
             /// faults the enclosing compute's completeness (a contained
             /// member-level degradation stays entry-local).
+            ///
+            /// The tree leaves its self-charged cell here. When this carrier is
+            /// the cell's only holder the tree moves out and the cell's charge
+            /// is released with it; when a cache or another carrier still
+            /// shares the cell, the caller gets an unshared deep copy, so no
+            /// raw allocation the cell's charge covers outlives that charge in
+            /// the caller's hands.
             pub(super) fn into_type_expr(self, authority: &OutputAuthority) -> TypeExpr {
+                use verter_session_query::retention::unshared::Unshared;
                 // The payload opens only for the authority of the engine that
                 // produced it.
                 authority.verify_carrier(&self.engine);
@@ -183,7 +191,10 @@ mod carrier {
                         verter_session_query::facts::reuse::NonCacheableReadReason::OutputMaterializationLoss,
                     );
                 }
-                self.tree.type_expr.clone()
+                match verter_session_query::retention::owned::Owned::try_unwrap(self.tree) {
+                    Ok(tree) => tree.into_inner().type_expr,
+                    Err(shared) => shared.type_expr.unshared(),
+                }
             }
 
             /// Test-only borrow of the inner [`TypeExpr`] (no capability). The
@@ -494,4 +505,78 @@ pub fn wrap_degraded_output(
         authority,
         crate::project_semantic_dispatch::raise::MaterializedTypeExpr::degraded(reason),
     )
+}
+
+#[cfg(test)]
+mod unwrap_tests {
+    use std::sync::atomic::AtomicU64;
+    use std::sync::Arc;
+
+    use verter_type_expr::TypeExpr;
+
+    use super::{wrap_output_type_expr, MaterializedOutputTypeExpr};
+    use crate::project_semantic_dispatch::engine_resources::EngineStores;
+    use crate::semantic_query::DepSignature;
+
+    fn union_list(expr: &TypeExpr) -> usize {
+        match expr {
+            TypeExpr::Union(members) => Arc::as_ptr(members).cast::<()>() as usize,
+            other => panic!("expected the authored union, got {other:?}"),
+        }
+    }
+
+    fn first_name(expr: &TypeExpr) -> usize {
+        match expr {
+            TypeExpr::Union(members) => match &members[0] {
+                TypeExpr::Ref { name, .. } => Arc::as_ptr(name).cast::<()>() as usize,
+                other => panic!("expected a reference, got {other:?}"),
+            },
+            other => panic!("expected the authored union, got {other:?}"),
+        }
+    }
+
+    /// A payload a cache still shares unwraps to an unshared copy: the
+    /// caller's `TypeExpr` reaches none of the cached tree's raw
+    /// allocations, which stay the cache cell's alone. The cell's last
+    /// holder unwraps by moving its own tree out instead.
+    #[test]
+    fn an_unwrapped_shared_payload_aliases_none_of_the_cached_tree() {
+        let (_stores, authority, _claims) = EngineStores::create(
+            None,
+            verter_session_query::retention::StoreAccount::default(),
+            &Arc::new(AtomicU64::new(0)),
+            verter_execution::tasks::TaskRegistry::default(),
+        );
+        let authored = TypeExpr::Union(Arc::from([
+            TypeExpr::Ref {
+                name: Arc::from("SharedName"),
+                type_arguments: Arc::from([]),
+            },
+            TypeExpr::Primitive(verter_type_expr::PrimitiveName::String),
+        ]));
+        let delivered = MaterializedOutputTypeExpr::from_parts(
+            None,
+            wrap_output_type_expr(&authority, authored.clone()),
+            DepSignature::default(),
+            false,
+        );
+        let cached = delivered.clone();
+        let (cached_list, cached_name) = (
+            union_list(cached.type_expr_for_test()),
+            first_name(cached.type_expr_for_test()),
+        );
+
+        let unwrapped = delivered.into_type_expr(&authority);
+        assert_eq!(unwrapped, authored);
+        assert_ne!(union_list(&unwrapped), cached_list, "a fresh list");
+        assert_ne!(first_name(&unwrapped), cached_name, "a fresh name");
+
+        let last = cached.into_type_expr(&authority);
+        assert_eq!(last, authored);
+        assert_eq!(
+            union_list(&last),
+            cached_list,
+            "the last holder moves its own tree out, copying nothing"
+        );
+    }
 }

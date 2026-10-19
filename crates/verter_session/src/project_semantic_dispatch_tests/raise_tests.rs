@@ -482,6 +482,7 @@ fn utility_enumeration_domain_open_for_unbound_generic_closed_for_concrete() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {
@@ -658,6 +659,7 @@ fn utility_enumeration_domain_open_via_indexed_access_and_mapped_keyspace() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {
@@ -775,6 +777,7 @@ fn utility_enumeration_domain_mapped_name_remap_binder_bound_outer_open() {
 
     let host = VerterHost::new_standalone(Default::default());
     let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = Arc::clone(host.project_type_store().semantic_graph());
 
     let builtin_pick = DeclIdentity {

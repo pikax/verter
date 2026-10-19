@@ -589,18 +589,21 @@ pub(crate) fn navigate_param_to_object_surface<
     // one-level object surface. An undeferenceable locator is an INCOMPLETE
     // resolution with a named reason — never a fabricated stand-in node and
     // never a silent "no surface".
-    let Some(base) = dispatch
-        .raise_semantic_type_source_to_hot(
-            &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
-            verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
-                scope_canonical_id: scope_canonical,
-                scope_owner,
-                context: ProjectionReductionContext::structural_transit_with_mode(
-                    ProjectionMode::Navigate,
-                ),
-                interior_failures: None,
-            },
-        )
+    // The raised carrier owns the base for the projection below.
+    let raised = dispatch.owning().raise_semantic_type_source_to_hot(
+        &verter_type_expr::facts::SemanticTypeSource::Authored(payload.locator.clone()),
+        verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
+            scope_canonical_id: scope_canonical,
+            scope_owner,
+            context: ProjectionReductionContext::structural_transit_with_mode(
+                ProjectionMode::Navigate,
+            ),
+            interior_failures: None,
+        },
+    );
+    let Some(base) = raised
+        .value()
+        .clone()
         .at_optional_boundary()
         .map(|raised| raised.node())
     else {
@@ -941,6 +944,10 @@ pub(crate) fn vue_macro_dtos_with_ctx<C: crate::session_attachment::SessionCapab
     let (dtos, finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
         &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
         || {
+            // The cold compute resolves the surface and then normalizes its
+            // member labels in later operations, so it holds an explicit
+            // builder owner for them; the DTO bundle it yields is graph-free.
+            let _builder = dispatch.enter_construction_scope();
             let fact = resolve_vue_macro_surface_fact_with_ctx(ctx, dispatch, &validated_request);
             let (surface, domain_guarantee) = adopt_macro_surface_fact(fact);
             match surface {
@@ -1323,6 +1330,7 @@ mod partial_admission_tests {
         let str_id = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let absent = SemanticNodeId(u64::MAX);
         let dispatch = ProjectSemanticDispatch::new(&host);
+        let _builder = dispatch.enter_construction_scope();
         let cap = TypeinfoVueSurfaceOutputCap::new(&dispatch);
 
         // Degraded output: an object whose member value is unraisable

@@ -173,10 +173,10 @@ impl VerterHost {
             crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
-            std::sync::Arc::clone(key),
+            verter_retention::owned::Owned::new((**key).clone()),
         );
-        let hot = dispatch
-            .raise_semantic_type_source_to_hot(
+        let raised = dispatch
+            .owning().raise_semantic_type_source_to_hot(
                 &source,
                 verter_type_engine::project_semantic_dispatch::semantic_source::SourceRaiseContext {
                     scope_canonical_id,
@@ -186,8 +186,8 @@ impl VerterHost {
                     ),
                     interior_failures: None,
                 },
-            )
-            .at_optional_boundary()?;
+            ).map(|outcome| outcome.at_optional_boundary());
+        let hot = (*raised.value())?;
         // The raise arm's honest degraded answer is the shallow carrier NODE
         // itself — a refusal to deepen, not a deepened view. Decided on the
         // NODE-DOMAIN fact (never on a reverse-materialized `TypeExpr` — the

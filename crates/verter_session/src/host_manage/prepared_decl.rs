@@ -89,7 +89,9 @@ enum BundleMaterialization {
     /// was built from a FENCED (ReturnOnly) serve and served WITHOUT
     /// admission.
     Built {
-        bundle: Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+        bundle: crate::resolver_core::CachedValue<
+            crate::resolver_core::prepared_decl::PreparedDeclBundle,
+        >,
         admitted: bool,
     },
     /// The consumed serve's surface was empty — no bundle to build.
@@ -113,8 +115,9 @@ enum BundleMaterialization {
 /// non-cacheable, never why.
 #[cfg(test)]
 pub(crate) struct BundleReuseOutcome {
-    pub(crate) bundle:
-        Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
+    pub(crate) bundle: Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    >,
     pub(crate) reuse: verter_session_query::facts::reuse::ReuseClass,
 }
 
@@ -230,7 +233,9 @@ impl VerterHost {
     pub(crate) fn prepared_decl_bundle(
         &self,
         canonical_id: &str,
-    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    > {
         // Route through a cold-seed `HostResolverContext` so the warm-cache
         // probe reads through the cold-seed-aware `RequestStoreView`: a
         // known-stale (`ReturnOnly`) read fails the warm validation closed
@@ -339,7 +344,9 @@ impl VerterHost {
         view: &dyn verter_session_query::facts::store_view::StoreView,
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
-    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    > {
         self.prepared_decl_bundle_classified(view, memo, canonical_id)
             .0
     }
@@ -380,7 +387,11 @@ impl VerterHost {
         memo: Option<&crate::resolver_core::request_store_view::RequestBundleMemo>,
         canonical_id: &str,
     ) -> (
-        Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>>,
+        Option<
+            crate::resolver_core::CachedValue<
+                crate::resolver_core::prepared_decl::PreparedDeclBundle,
+            >,
+        >,
         verter_session_query::facts::reuse::ReuseClass,
     ) {
         use crate::resolver_core::request_store_view::BundleMemoWorld;
@@ -437,7 +448,7 @@ impl VerterHost {
                         BundleMemoWorld::Base,
                         token,
                         ReuseClass::Shared,
-                        std::sync::Arc::clone(&bundle),
+                        bundle.clone(),
                     );
                 }
                 return (Some(bundle), ReuseClass::Shared);
@@ -464,7 +475,7 @@ impl VerterHost {
             // miss attribution would double-count the same logical rejection.
             if let Some(bundle) = bundles.get_if_valid_self_rooted(&key, view, &[canonical_id]) {
                 return Ok(crate::resolver_core::StableExecutionValue {
-                    value: Some((*bundle).clone()),
+                    value: Some(bundle),
                     stable: true,
                     // Served from the bundle cache inside the flight — no
                     // cold materialisation performed.
@@ -558,7 +569,7 @@ impl VerterHost {
                     // separate axis — it governs the SHARED rendezvous,
                     // not request-scoped reuse.
                     let reuse = classify_reuse(observed, true);
-                    (Some((*arc).clone()), admitted, reuse)
+                    (Some(arc), admitted, reuse)
                 }
                 None => {
                     // A MISS is only as reusable as it is reproducible: a
@@ -600,7 +611,11 @@ impl VerterHost {
         // ensure ran on the leader's thread, not this one).
         const MAX_FLIGHT_ATTEMPTS: usize = 3;
         let mut last_unpublished: Option<(
-            Option<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+            Option<
+                crate::resolver_core::CachedValue<
+                    crate::resolver_core::prepared_decl::PreparedDeclBundle,
+                >,
+            >,
             ReuseClass,
         )> = None;
         for _attempt in 0..MAX_FLIGHT_ATTEMPTS {
@@ -619,14 +634,14 @@ impl VerterHost {
                 // keeps the taint attached to the value it describes.
                 let flight = &run_result.value;
                 verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.reuse);
-                let bundle = flight.value.clone().map(std::sync::Arc::new);
+                let bundle = flight.value.clone();
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
                         canonical_id,
                         BundleMemoWorld::Base,
                         token,
                         flight.reuse,
-                        std::sync::Arc::clone(bundle),
+                        bundle.clone(),
                     );
                 }
                 return (bundle, flight.reuse);
@@ -641,14 +656,14 @@ impl VerterHost {
                 // return path uniform across roles.
                 let flight = &run_result.value;
                 verter_type_engine::fact_tracing::replay_reuse_refusal(&flight.reuse);
-                let bundle = flight.value.clone().map(std::sync::Arc::new);
+                let bundle = flight.value.clone();
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
                         canonical_id,
                         BundleMemoWorld::Base,
                         token,
                         flight.reuse,
-                        std::sync::Arc::clone(bundle),
+                        bundle.clone(),
                     );
                 }
                 return (bundle, flight.reuse);
@@ -665,14 +680,13 @@ impl VerterHost {
         match last_unpublished {
             Some((bundle, reuse)) if bundle.is_some() => {
                 verter_type_engine::fact_tracing::replay_reuse_refusal(&reuse);
-                let bundle = bundle.map(std::sync::Arc::new);
                 if let (Some(memo), Some(bundle)) = (memo, bundle.as_ref()) {
                     memo.insert(
                         canonical_id,
                         BundleMemoWorld::Base,
                         token,
                         reuse,
-                        std::sync::Arc::clone(bundle),
+                        bundle.clone(),
                     );
                 }
                 (bundle, reuse)
@@ -703,7 +717,9 @@ impl VerterHost {
         >,
         services: SourceRequestServices<'_>,
         canonical_id: &str,
-    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    > {
         use crate::resolver_core::request_store_view::BundleMemoWorld;
         use verter_session_query::facts::reuse::{classify_reuse, ObservedRefusal};
         // Two-identity split. `canonical_id` is the RAW requested
@@ -810,13 +826,7 @@ impl VerterHost {
                     // `insert` is the structural gate: a non-reusable
                     // class is refused inside the memo, not by this
                     // caller's convention.
-                    memo.insert(
-                        canonical_id,
-                        world,
-                        token,
-                        reuse,
-                        std::sync::Arc::clone(&bundle),
-                    );
+                    memo.insert(canonical_id, world, token, reuse, bundle.clone());
                 }
                 return Some(bundle);
             }
@@ -873,7 +883,9 @@ impl VerterHost {
         >,
         services: SourceRequestServices<'_>,
         identity: &crate::host_manage::overlay_materialize::OverlayArtifactIdentity,
-    ) -> Option<std::sync::Arc<crate::resolver_core::prepared_decl::PreparedDeclBundle>> {
+    ) -> Option<
+        crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
+    > {
         // Drive the overlay-aware `ensure_indexed_ready_serve` on the
         // RAW owner — the overlay-detection gate inside
         // `ensure_indexed_ready_serve_with_view` keys on the raw
@@ -945,7 +957,7 @@ impl VerterHost {
         let import_canonicalization =
             self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
 
-        let bundle = std::sync::Arc::new(
+        let bundle = crate::resolver_core::CachedValue::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 bundle_canonical_id,
                 std::sync::Arc::clone(state),
@@ -1185,7 +1197,7 @@ impl VerterHost {
         // read-set at decl-prepare demand, never pinned on the bundle rail).
         let import_canonicalization =
             self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
-        let bundle = std::sync::Arc::new(
+        let bundle = crate::resolver_core::CachedValue::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
                 std::sync::Arc::clone(&state),
@@ -1210,7 +1222,7 @@ impl VerterHost {
         // would serve pre-appearance dependency edges forever: the
         // owner's bytes never move when a dependency appears or
         // retargets. `decline_import_route_witness` has already marked
-        // the enclosing compute non-cacheable, but `insert_arc_with_kind`
+        // the enclosing compute non-cacheable, but `insert_value_with_kind`
         // does not consult that flag — a lone `FileWholeHash` is a
         // perfectly well-formed signature — so the producer must refuse
         // here, exactly as the sibling `resolved_import_facts_witness`
@@ -1286,9 +1298,9 @@ impl VerterHost {
             self.resolver
                 .runtime
                 .prepared_decl_bundles
-                .insert_arc_with_kind(
+                .insert_value_with_kind(
                     canonical_id.to_string(),
-                    std::sync::Arc::clone(&bundle),
+                    bundle.clone(),
                     facts,
                     "prepared_decl_bundles",
                 );
@@ -1393,7 +1405,7 @@ impl VerterHost {
             self.build_prepared_import_canonicalization(state.as_ref(), &dep_edges);
 
         // 5. Build the bundle atomically.
-        let bundle = std::sync::Arc::new(
+        let bundle = crate::resolver_core::CachedValue::new(
             crate::resolver_core::prepared_decl::build_prepared_decl_bundle(
                 canonical_id,
                 std::sync::Arc::clone(state),
@@ -1457,9 +1469,9 @@ impl VerterHost {
             self.resolver
                 .runtime
                 .prepared_decl_bundles
-                .insert_arc_with_kind(
+                .insert_value_with_kind(
                     canonical_id.to_string(),
-                    std::sync::Arc::clone(&bundle),
+                    bundle.clone(),
                     fact_versions,
                     "prepared_decl_bundles",
                 );
@@ -1506,7 +1518,11 @@ impl VerterHost {
         &self,
         canonical_id: &str,
         symbol_name: &str,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedTypeDecl,
+        >,
+    > {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
@@ -1538,7 +1554,11 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedTypeDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
@@ -1568,7 +1588,11 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedTypeDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedTypeDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
@@ -1589,7 +1613,11 @@ impl VerterHost {
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
-    ) -> Option<Arc<verter_session_query::type_solver::PreparedValueDecl>> {
+    ) -> Option<
+        verter_retention::heap_size::OwnedValue<
+            verter_session_query::type_solver::PreparedValueDecl,
+        >,
+    > {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
         let view = self.resolver_store_view_read().into_cold_seed_view();
@@ -1622,7 +1650,11 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_store_view(view, memo, canonical_id)
@@ -1642,7 +1674,11 @@ impl VerterHost {
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
     ) -> Result<
-        Option<Arc<verter_session_query::type_solver::PreparedValueDecl>>,
+        Option<
+            verter_retention::heap_size::OwnedValue<
+                verter_session_query::type_solver::PreparedValueDecl,
+            >,
+        >,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         let Some(bundle) = self.prepared_decl_bundle_with_context(ctx, services, canonical_id)
@@ -1905,30 +1941,36 @@ impl VerterHost {
     /// generation; otherwise `None`.
     fn source_bound_file_analysis_snapshot(
         parse: &crate::ParseSnapshot,
-        export_signatures: Arc<Vec<verter_session_query::analysis::types::ExportSignature>>,
-        template: Option<Arc<verter_session_query::analysis::template::TemplateAnalysisSnapshot>>,
+        export_signatures: verter_session_query::analysis::file_analysis::SharedList<
+            verter_session_query::analysis::types::ExportSignature,
+        >,
+        template: Option<
+            verter_session_query::retention::heap_size::OwnedValue<
+                verter_session_query::analysis::template::TemplateAnalysisSnapshot,
+            >,
+        >,
     ) -> verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
         let sa = parse.script_analysis.as_ref();
         verter_session_query::analysis::file_analysis::FileAnalysisSnapshot {
             imports: sa.imports.clone(),
             bindings: sa.bindings.clone(),
-            module_references: Arc::new(sa.module_references.clone()),
-            macros: Arc::new(sa.macros.clone()),
-            macro_type_deps: Arc::new(sa.macro_type_deps.clone()),
+            module_references: verter_session_query::analysis::file_analysis::SharedList::new(sa.module_references.clone()),
+            macros: verter_session_query::analysis::file_analysis::SharedList::new(sa.macros.clone()),
+            macro_type_deps: verter_session_query::analysis::file_analysis::SharedList::new(sa.macro_type_deps.clone()),
             script_flags: sa.flags.bits(),
-            styles: Arc::new(parse.style_analyses.clone()),
+            styles: verter_session_query::analysis::file_analysis::SharedList::new(parse.style_analyses.clone()),
             template,
-            vue_api_calls: Arc::new(sa.vue_api_calls.clone()),
-            dom_query_calls: Arc::new(sa.dom_query_calls.clone()),
-            css_var_manipulations: Arc::new(sa.css_var_manipulations.clone()),
-            script_binding_occurrences: Arc::new(sa.script_binding_occurrences.clone()),
+            vue_api_calls: verter_session_query::analysis::file_analysis::SharedList::new(sa.vue_api_calls.clone()),
+            dom_query_calls: verter_session_query::analysis::file_analysis::SharedList::new(sa.dom_query_calls.clone()),
+            css_var_manipulations: verter_session_query::analysis::file_analysis::SharedList::new(sa.css_var_manipulations.clone()),
+            script_binding_occurrences: verter_session_query::analysis::file_analysis::SharedList::new(sa.script_binding_occurrences.clone()),
             macro_usage: sa.macro_usage.clone(),
             style_vbind_roots: sa.style_vbind_roots.clone(),
-            markup_class_tokens: Arc::new(parse.markup_class_tokens.clone()),
+            markup_class_tokens: verter_session_query::analysis::file_analysis::SharedList::new(parse.markup_class_tokens.clone()),
             export_signatures,
             options_api: sa.options_api.clone(),
-            store_usages: Arc::new(sa.store_usages.clone()),
-            store_definitions: Arc::new(sa.store_definitions.clone()),
+            store_usages: verter_session_query::analysis::file_analysis::SharedList::new(sa.store_usages.clone()),
+            store_definitions: verter_session_query::analysis::file_analysis::SharedList::new(sa.store_definitions.clone()),
             is_typescript: sa.is_typescript,
             anchor_revision: verter_session_query::analysis::file_analysis::AnalysisSourceRevision::from_whole_hash(
                 parse.whole_hash,
@@ -2528,12 +2570,14 @@ impl VerterHost {
             self.provenance
                 .indexed_ready_scheduler_snapshot_reuse
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let export_signatures = Arc::new(hd.parse.export_signatures.clone());
+            let export_signatures = verter_session_query::analysis::file_analysis::SharedList::new(
+                hd.parse.export_signatures.clone(),
+            );
             let template =
                 self.validated_raw_template_analysis(canonical_id, source_snap.version());
             let snapshot = Arc::new(Self::source_bound_file_analysis_snapshot(
                 &hd.parse,
-                Arc::clone(&export_signatures),
+                export_signatures.clone(),
                 template,
             ));
 

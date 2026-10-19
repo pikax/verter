@@ -231,9 +231,9 @@ fn prop_callable_role_defaults_fail_closed_and_round_trips() {
 
     let role = PropCallableRole::SvelteSnippet {
         symbol: ResolvedSymbolIdentity {
-            canonical_id: std::sync::Arc::from("/node_modules/svelte/index.d.ts"),
+            canonical_id: "/node_modules/svelte/index.d.ts".into(),
             owner: TopLevelOwnerId::ordinary_file(),
-            symbol: std::sync::Arc::from("Snippet"),
+            symbol: "Snippet".into(),
         },
         exactness: ResolutionExactness::ExactSymbolic,
         provenance: ResolutionProvenance::FrameworkSurface,
@@ -270,9 +270,9 @@ fn template_class_roles_round_trip_without_display_authority() {
     );
     let route = ReactiveWrapperImportProvenance {
         authored_head: AuthoredReferenceHeadFact::Qualified {
-            local_root: std::sync::Arc::from("Vue"),
-            member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
-            args: std::sync::Arc::from([]),
+            local_root: From::from("Vue"),
+            member_path: From::from([OwnedStr::new("Ref")]),
+            args: From::from([]),
         },
         package: std::sync::Arc::from("vue"),
         import_source: std::sync::Arc::from("vue"),
@@ -370,7 +370,7 @@ fn member_origin(ordinal: u32) -> MemberSpansOrigin {
             owner: crate::TopLevelOwnerId::ordinary_file(),
             owner_local_ordinal: 0,
         },
-        member_path: std::sync::Arc::from(vec![ordinal].into_boxed_slice()),
+        member_path: From::from(vec![ordinal].into_boxed_slice()),
     }
 }
 
@@ -387,8 +387,8 @@ fn prop(name: &str, optional: bool, visibility: MemberVisibility) -> ObjectPrope
 
 fn empty_fn() -> FunctionSignatureFact {
     FunctionSignatureFact {
-        type_parameters: std::sync::Arc::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
-        parameters: std::sync::Arc::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
+        type_parameters: From::from(Vec::<NarrowTypeParam>::new().into_boxed_slice()),
+        parameters: From::from(Vec::<FunctionParamFact>::new().into_boxed_slice()),
         return_source: crate::facts::FunctionReturnSource::Absent,
         return_reference_head: AuthoredReferenceHeadFact::Unavailable,
         has_implementation_body: false,
@@ -425,7 +425,7 @@ fn index_sig(key: KeyTypeShape) -> IndexSignatureFact {
                 owner: crate::TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 0,
             },
-            member_path: std::sync::Arc::from(vec![0u32].into_boxed_slice()),
+            member_path: From::from(vec![0u32].into_boxed_slice()),
         },
     }
 }
@@ -551,10 +551,8 @@ fn member_visibility_participates_in_fact_identity() {
 fn return_reference_head_participates_in_signature_fact_identity() {
     let with_head = |local_name: &str| FunctionSignatureFact {
         return_reference_head: AuthoredReferenceHeadFact::Bare {
-            local_name: std::sync::Arc::from(local_name),
-            args: std::sync::Arc::from(
-                Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice(),
-            ),
+            local_name: From::from(local_name),
+            args: From::from(Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice()),
         },
         ..empty_fn()
     };
@@ -617,8 +615,8 @@ fn prepared_member_reference_head_participates_in_member_fact_identity() {
         reference_head: head,
     };
     let bare = |local_name: &str| AuthoredReferenceHeadFact::Bare {
-        local_name: std::sync::Arc::from(local_name),
-        args: std::sync::Arc::from(Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice()),
+        local_name: From::from(local_name),
+        args: From::from(Vec::<AuthoredReferenceArgLocator>::new().into_boxed_slice()),
     };
     let referenced = with_head(bare("Ref"));
     let shallow = with_head(bare("ShallowRef"));
@@ -701,8 +699,8 @@ fn authored_reference_head_absolutizes_producer_local_arg_anchors() {
     };
     let signature = FunctionSignatureFact {
         return_reference_head: AuthoredReferenceHeadFact::Bare {
-            local_name: std::sync::Arc::from("Ref"),
-            args: std::sync::Arc::from(vec![arg(""), arg("/lib/keep.ts")].into_boxed_slice()),
+            local_name: From::from("Ref"),
+            args: From::from(vec![arg(""), arg("/lib/keep.ts")].into_boxed_slice()),
         },
         ..empty_fn()
     };
@@ -765,8 +763,8 @@ fn authored_reference_head_absolutizes_producer_local_arg_anchors() {
 #[test]
 fn function_fact_scope_relative_sees_a_scope_relative_return_head() {
     let head_with = |canonical: &str| AuthoredReferenceHeadFact::Bare {
-        local_name: std::sync::Arc::from("Ref"),
-        args: std::sync::Arc::from(
+        local_name: From::from("Ref"),
+        args: From::from(
             vec![AuthoredReferenceArgLocator::Value(TypeArgLocator {
                 anchor: AuthoredAnchor {
                     canonical_id: OwnedStr::from(std::sync::Arc::from(canonical)),
@@ -815,7 +813,7 @@ fn index_key_shape_participates_in_fact_identity() {
 #[test]
 fn fact_or_locator_leaf_union_is_a_closed_ordered_carrier() {
     let leaves = |kinds: &[PrimitiveName]| -> FactOrLocator {
-        FactOrLocator::LeafUnion(std::sync::Arc::from(
+        FactOrLocator::LeafUnion(From::from(
             kinds
                 .iter()
                 .map(|kind| LeafTypeFact::Primitive(*kind))
@@ -1010,16 +1008,10 @@ fn closedness_recipe_all_arms_is_structurally_recursive() {
 
 fn empty_projected_surface() -> ProjectedSurfaceFact {
     ProjectedSurfaceFact {
-        members: std::sync::Arc::from(Vec::<ProjectedMemberFact>::new().into_boxed_slice()),
-        call_signatures: std::sync::Arc::from(
-            Vec::<FunctionSignatureFact>::new().into_boxed_slice(),
-        ),
-        construct_signatures: std::sync::Arc::from(
-            Vec::<FunctionSignatureFact>::new().into_boxed_slice(),
-        ),
-        index_signatures: std::sync::Arc::from(
-            Vec::<ProjectedIndexSignatureFact>::new().into_boxed_slice(),
-        ),
+        members: From::from(Vec::<ProjectedMemberFact>::new().into_boxed_slice()),
+        call_signatures: From::from(Vec::<FunctionSignatureFact>::new().into_boxed_slice()),
+        construct_signatures: From::from(Vec::<FunctionSignatureFact>::new().into_boxed_slice()),
+        index_signatures: From::from(Vec::<ProjectedIndexSignatureFact>::new().into_boxed_slice()),
         has_index_signature: false,
     }
 }
@@ -1555,7 +1547,7 @@ fn fact_carriers_round_trip_through_serde() {
                 owner: crate::TopLevelOwnerId::ordinary_file(),
                 owner_local_ordinal: 3,
             },
-            member_path: std::sync::Arc::from(vec![2u32]),
+            member_path: From::from(vec![2u32]),
         },
     }));
     let json = serde_json::to_string(&deep).expect("serialize");
@@ -1775,6 +1767,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     // An authored TS annotation rides the SAME field under the `Authored` source
     // — proving the field widened to accept BOTH authored locators and closed
@@ -1791,6 +1784,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     assert_ne!(
         inferred, authored,
@@ -1813,6 +1807,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());
@@ -1826,7 +1821,7 @@ fn object_shape_fact_preserves_accessor_kinds_and_duplicate_order() {
     setter.method_kind = ObjectMethodKind::Set;
     let ordinary = method("value", false);
     let shape = ObjectShapeFact {
-        members: std::sync::Arc::from([
+        members: From::from([
             ObjectMemberFact::Method(getter),
             ObjectMemberFact::Method(setter),
             ObjectMemberFact::Method(ordinary),
@@ -1850,18 +1845,18 @@ fn object_shape_fact_preserves_accessor_kinds_and_duplicate_order() {
 #[test]
 fn authored_reference_head_fact_discriminates_exact_route_and_arguments() {
     let first = AuthoredReferenceHeadFact::Qualified {
-        local_root: std::sync::Arc::from("Vue"),
-        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
-        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+        local_root: From::from("Vue"),
+        member_path: From::from([OwnedStr::new("Ref")]),
+        args: From::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor(),
             path: OwnedSlice::from([]),
             arg_index: 0,
         })]),
     };
     let other_root = AuthoredReferenceHeadFact::Qualified {
-        local_root: std::sync::Arc::from("Other"),
-        member_path: std::sync::Arc::from([std::sync::Arc::from("Ref")]),
-        args: std::sync::Arc::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
+        local_root: From::from("Other"),
+        member_path: From::from([OwnedStr::new("Ref")]),
+        args: From::from([AuthoredReferenceArgLocator::Value(TypeArgLocator {
             anchor: anchor(),
             path: OwnedSlice::from([]),
             arg_index: 0,

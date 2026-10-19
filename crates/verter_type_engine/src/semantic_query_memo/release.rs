@@ -55,6 +55,40 @@ use super::*;
 /// release drains it.
 pub(super) const DESTROYED_DRAIN_THRESHOLD: usize = 1024;
 
+/// Retire one destroyed batch and settle backing under the same locks on
+/// close and on final release. No live semantic payload is visited.
+fn retire_sidecars(
+    reach: &mut super::unresolved_reach::StructureBits,
+    memo: &DashMap<SemanticNodeId, Arc<super::member_index::MemberOrdinalIndex>>,
+    fifo: &mut std::collections::VecDeque<SemanticNodeId>,
+    derivation: &mut DerivationStore,
+    classes: &mut crate::semantic_query::stable_key::KeyClasses,
+    destroyed: &[SemanticNodeId],
+) -> usize {
+    if destroyed.is_empty() {
+        return 0;
+    }
+    let mut dropped = 0;
+    for id in destroyed {
+        dropped += usize::from(reach.remove(id));
+        // Index shards are leaf-held, never across a node release.
+        dropped += usize::from(memo.remove(id).is_some());
+    }
+    let dead: rustc_hash::FxHashSet<_> = destroyed.iter().copied().collect();
+    fifo.retain(|id| !dead.contains(id));
+    if fifo.is_empty() {
+        *fifo = std::collections::VecDeque::new();
+    } else if fifo.capacity() > fifo.len().saturating_mul(4) {
+        fifo.shrink_to(fifo.len().saturating_mul(2));
+    }
+    if memo.is_empty() || memo.capacity() > memo.len().saturating_mul(4) {
+        memo.shrink_to_fit();
+    }
+    dropped += derivation.release_nodes(&|id| dead.contains(&id));
+    dropped += classes.release_nodes(|id| dead.contains(&id));
+    dropped
+}
+
 /// A per-node sidecar's lock. Its guard settles any cleanup a release
 /// could not run because a sidecar lock was held: the release records the
 /// obligation ([`SidecarSink::settle`]) and the holder that blocked it
@@ -156,9 +190,7 @@ impl<T> Drop for SidecarGuard<'_, T> {
 /// [`DESTROYED_DRAIN_THRESHOLD`] drains it itself, and the cleanup
 /// obligation a held sidecar lock leaves to its holder.
 pub(super) struct SidecarSink {
-    unresolved_reach: std::sync::Weak<
-        SidecarMutex<FxHashMap<SemanticNodeId, super::unresolved_reach::NodeStructureBits>>,
-    >,
+    unresolved_reach: std::sync::Weak<SidecarMutex<super::unresolved_reach::StructureBits>>,
     member_ordinal_index_memo:
         std::sync::Weak<DashMap<SemanticNodeId, Arc<super::member_index::MemberOrdinalIndex>>>,
     member_ordinal_index_fifo:
@@ -255,16 +287,14 @@ impl SidecarSink {
         };
         self.owed.store(false, std::sync::atomic::Ordering::SeqCst);
         let destroyed = arena.drain_destroyed();
-        for id in &destroyed {
-            reach.remove(id);
-            // A member-index shard is held only to read or write one entry,
-            // never across a release, so waiting for it cannot deadlock.
-            memo.remove(id);
-        }
-        let dead: rustc_hash::FxHashSet<SemanticNodeId> = destroyed.into_iter().collect();
-        fifo.retain(|id| !dead.contains(id));
-        derivation.release_nodes(&|id| dead.contains(&id));
-        classes.release_nodes(|id| dead.contains(&id));
+        retire_sidecars(
+            &mut reach,
+            &memo,
+            &mut fifo,
+            &mut derivation,
+            &mut classes,
+            &destroyed,
+        );
         true
     }
 }
@@ -449,32 +479,14 @@ impl SemanticGraphStore {
         if destroyed.is_empty() {
             return 0;
         }
-        let dead: rustc_hash::FxHashSet<SemanticNodeId> = destroyed.into_iter().collect();
-        let mut dropped = 0usize;
-        {
-            let mut reach = self.unresolved_reach.lock();
-            let before = reach.len();
-            reach.retain(|id, _| !dead.contains(id));
-            dropped += before - reach.len();
-        }
-        {
-            let before = self.member_ordinal_index_memo.len();
-            self.member_ordinal_index_memo
-                .retain(|id, _| !dead.contains(id));
-            dropped += before - self.member_ordinal_index_memo.len();
-            self.member_ordinal_index_fifo
-                .lock()
-                .retain(|id| !dead.contains(id));
-        }
-        dropped += self
-            .derivation
-            .lock()
-            .release_nodes(&|id| dead.contains(&id));
-        dropped += self
-            .key_classes
-            .lock()
-            .release_nodes(|id| dead.contains(&id));
-        dropped
+        retire_sidecars(
+            &mut self.unresolved_reach.lock(),
+            &self.member_ordinal_index_memo,
+            &mut self.member_ordinal_index_fifo.lock(),
+            &mut self.derivation.lock(),
+            &mut self.key_classes.lock(),
+            &destroyed,
+        )
     }
 
     /// Mark `node` as described by a sidecar entry just written, draining

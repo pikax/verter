@@ -58,6 +58,7 @@ use verter_no_typeexpr::NoTypeExpr;
     NoTypeExpr,
     NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum CompilerIntrinsicTypeOp {

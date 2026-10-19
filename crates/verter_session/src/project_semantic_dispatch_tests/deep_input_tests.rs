@@ -462,6 +462,7 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
     let dispatch = super::ProjectSemanticDispatch::new(&ctx);
+    let _builder = dispatch.enter_construction_scope();
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     // Keep the callee as a source carrier: ReturnType itself must demand
     // the signature and body, rather than receive an eagerly settled header.

@@ -88,7 +88,7 @@ fn member_span_origin(
     match contributor {
         Some(anchor) if path_prefix.is_empty() => MemberSpansOrigin::Authored {
             anchor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         _ => MemberSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -102,11 +102,11 @@ fn member_span_origin(
 /// a freshly constructed prepared decl does not allocate a private empty map
 /// (the prepared-decl builder assigns the real per-file shared table right
 /// after construction; anchor-style consumers keep the empty table).
-fn empty_name_resolution() -> Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>> {
-    static EMPTY: std::sync::OnceLock<
-        Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
-    > = std::sync::OnceLock::new();
-    Arc::clone(EMPTY.get_or_init(|| Arc::new(FxHashMap::default())))
+/// A table of no names: its own cell, so it is charged like any other table
+/// by the owner that keeps it, never a process static a cache could pin
+/// for the process's life.
+fn empty_name_resolution() -> NameResolutionTable {
+    NameResolutionTable::default()
 }
 
 /// Solver-facing prepared type declaration.
@@ -118,7 +118,15 @@ fn empty_name_resolution() -> Arc<FxHashMap<verter_type_expr::OwnedStr, Resolved
 /// snapshot.
 ///
 /// Keyed by `(canonical_id, symbol_name, source_hash)` in the host cache.
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+/// A declaration's bare-name resolution table: one self-charged cell, so
+/// the per-file base every non-namespaced declaration of a file shares is
+/// charged once, by itself, and every declaration or reader keeping it
+/// shares that charge.
+pub type NameResolutionTable = verter_retention::heap_size::OwnedValue<
+    FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+>;
+
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct PreparedTypeDecl {
     /// Canonical identity of the defining file + symbol name.
     pub root_identity: ResolvedRootIdentity,
@@ -176,7 +184,7 @@ pub struct PreparedTypeDecl {
     /// namespaced declaration (whose direct-sibling bindings are
     /// declaration-scoped) carries its own private table. Keys are interned
     /// `Arc<str>` names minted through the store-owned identity pool.
-    pub name_resolution: Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
+    pub name_resolution: NameResolutionTable,
 
     /// Declaration provenance metadata.
     pub provenance: DeclProvenance,
@@ -243,6 +251,7 @@ pub struct PreparedTypeDecl {
     serde::Serialize,
     serde::Deserialize,
     verter_no_typeexpr::NoTypeExpr,
+    verter_retention::heap_size::HeapSize,
 )]
 pub struct PreparedExternalDep {
     pub local_name: String,
@@ -346,7 +355,9 @@ mod prepared_external_dep_owner_tests {
 }
 
 /// Provenance metadata for a prepared declaration.
-#[derive(Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct DeclProvenance {
     /// Route kind that resolved this declaration (direct, alias, wildcard).
     pub route_kind: Option<String>,
@@ -393,7 +404,7 @@ impl From<TypeDeclKind> for PreparedDeclKind {
 /// - `typeof x`
 /// - dotted paths: `typeof ns.foo.bar`
 /// - class/constructor/static-member queries
-#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr)]
+#[derive(Debug, Clone, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize)]
 pub struct PreparedValueDecl {
     /// Canonical identity.
     pub root_identity: ResolvedRootIdentity,
@@ -440,7 +451,7 @@ pub struct PreparedValueDecl {
     /// `PreparedTypeDecl::name_resolution`; the value-space table has no
     /// per-declaration bindings at all, so every prepared value decl of a
     /// defining file shares one base table.
-    pub name_resolution: Arc<FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>>,
+    pub name_resolution: NameResolutionTable,
 
     /// Cache dependency contract for invalidation.
     pub cache_deps: PreparedCacheDeps,
@@ -480,7 +491,9 @@ impl From<ValueDeclKind> for PreparedValueDeclKind {
 
 /// Records the full dependency/provenance set used to build a prepared
 /// declaration. Used for invalidation.
-#[derive(Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr)]
+#[derive(
+    Debug, Clone, Default, verter_no_typeexpr::NoTypeExpr, verter_retention::heap_size::HeapSize,
+)]
 pub struct PreparedCacheDeps {
     /// Defining file canonical id + hash.
     pub defining_file: Option<(String, u64)>,
@@ -1440,6 +1453,7 @@ impl PreparedValueDecl {
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
                 literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+                defers_read_widening: false,
             },
             signatures: Vec::new(),
             object_shape: None,
@@ -1903,7 +1917,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 3,
                 },
-                member_path: Arc::from(vec![0u32]),
+                member_path: From::from(vec![0u32]),
             },
             "property span origin must descend [0] from the contributor anchor"
         );
@@ -1925,7 +1939,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 3,
                 },
-                member_path: Arc::from(vec![1u32]),
+                member_path: From::from(vec![1u32]),
             },
         );
         assert_eq!(
@@ -2399,7 +2413,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 0,
                 },
-                member_path: Arc::from(vec![1u32]),
+                member_path: From::from(vec![1u32]),
             },
         );
     }
@@ -2523,7 +2537,7 @@ mod tests {
                     owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
                     owner_local_ordinal: 0,
                 },
-                member_path: Arc::from(vec![0u32]),
+                member_path: From::from(vec![0u32]),
             },
             "a top-level object member keeps the recoverable Authored origin",
         );

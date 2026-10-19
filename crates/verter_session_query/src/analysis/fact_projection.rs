@@ -103,6 +103,7 @@ pub fn value_type_annotation_fact(
             reference_head: AuthoredReferenceHeadFact::Unavailable,
             expression_source: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         };
     }
     let Some(annotation) = annotation else {
@@ -117,6 +118,7 @@ pub fn value_type_annotation_fact(
                 reference_head: AuthoredReferenceHeadFact::NotReference,
                 expression_source,
                 literal_freshness: DeclaredLiteralFreshness::Regular,
+                defers_read_widening: false,
             };
         }
         verter_debug_assert!(
@@ -132,6 +134,7 @@ pub fn value_type_annotation_fact(
             reference_head: AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         };
     };
 
@@ -173,6 +176,7 @@ pub fn value_type_annotation_fact(
         }),
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     }
 }
 
@@ -260,11 +264,8 @@ fn authored_reference_head_fact_with(
         }
         other => other,
     };
-    let args = |len: usize| -> Option<Arc<[AuthoredReferenceArgLocator]>> {
-        (0..len)
-            .map(arg_locator)
-            .collect::<Option<Vec<_>>>()
-            .map(Arc::from)
+    let args = |len: usize| -> Option<OwnedSlice<AuthoredReferenceArgLocator>> {
+        (0..len).map(arg_locator).collect::<Option<OwnedSlice<_>>>()
     };
     match annotation {
         TypeExpr::Ref {
@@ -274,7 +275,7 @@ fn authored_reference_head_fact_with(
             let Some(args) = args(type_arguments.len()) else {
                 return AuthoredReferenceHeadFact::Unavailable;
             };
-            let mut parts = name.split('.').map(Arc::<str>::from);
+            let mut parts = name.split('.').map(OwnedStr::from);
             let Some(root) = parts.next() else {
                 return AuthoredReferenceHeadFact::Unavailable;
             };
@@ -287,7 +288,7 @@ fn authored_reference_head_fact_with(
             } else {
                 AuthoredReferenceHeadFact::Qualified {
                     local_root: root,
-                    member_path: Arc::from(members),
+                    member_path: OwnedSlice::from(members),
                     args,
                 }
             }
@@ -299,8 +300,8 @@ fn authored_reference_head_fact_with(
             ..
         } => args(type_arguments.len()).map_or(AuthoredReferenceHeadFact::Unavailable, |args| {
             AuthoredReferenceHeadFact::ImportType {
-                specifier: Arc::clone(specifier),
-                member_path: Arc::clone(qualifier),
+                specifier: OwnedStr::from(specifier),
+                member_path: OwnedSlice::from(&**qualifier),
                 args,
             }
         }),

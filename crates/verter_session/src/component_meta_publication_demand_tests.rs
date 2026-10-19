@@ -1022,6 +1022,7 @@ fn relation_oracle_record_target_normalisation_records_no_published_context() {
     let host = build_host(&[("/workspace/src/schema.ts", ORACLE_SCHEMA_TS)]);
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
     let graph = std::sync::Arc::clone(host.project_type_store().semantic_graph());
 
     // Pre-capture setup: index the file and resolve the AppConfig
@@ -1178,6 +1179,7 @@ fn root_conditional_still_distributes() {
     ]);
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&*host);
+    let _builder = dispatch.enter_construction_scope();
     // The Skeleton instantiation supplies the unbound-`TypeParam`
     // check / extends pair; the branch anchors come from ResolveDecl
     // (the declaration-anchor shape the seed's eager payload lowering

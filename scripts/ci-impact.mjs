@@ -664,6 +664,7 @@ export const LANE_ROOTS = Object.freeze({
     "verter_compile_contracts",
     "verter_compile_contracts_bench",
     "verter_compile_contracts_session_variants",
+    "verter_compile_contracts_session_soak",
     ...new Set(Object.values(COMPILE_CONTRACT_OWNER_CRATES)),
   ],
   // The feature-gated BF2 inventory is verter_session's lib under a feature.
@@ -845,7 +846,9 @@ function readInertPaths(root) {
     const globs = readInertEntries(root, file);
     const dir = resolve(root, INERT_PATHS_DIR);
     const fragments = existsSync(dir)
-      ? readdirSync(dir).filter((name) => name.endsWith(".json")).sort()
+      ? readdirSync(dir)
+          .filter((name) => name.endsWith(".json"))
+          .sort()
       : [];
     for (const name of fragments) {
       file = `${INERT_PATHS_DIR}/${name}`;

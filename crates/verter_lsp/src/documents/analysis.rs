@@ -354,7 +354,7 @@ impl DocumentRegistry {
                             &mut template.prop_definitions,
                             semantic_props,
                         );
-                        analysis.template = Some(Arc::new(template));
+                        analysis.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(template));
                     }
                 }
                 let semantic_structure = is_framework_carrier
@@ -820,7 +820,9 @@ impl DocumentRegistry {
                     template.prop_definitions.push(prop);
                 }
             }
-            result.template = Some(Arc::new(template));
+            result.template = Some(verter_session_query::retention::heap_size::OwnedValue::new(
+                template,
+            ));
         }
 
         (!result.imports.is_empty()
@@ -957,9 +959,9 @@ mod tests {
         ];
         let role = verter_type_expr::PropCallableRole::SvelteSnippet {
             symbol: verter_type_expr::ResolvedSymbolIdentity {
-                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                canonical_id: "/node_modules/svelte/index.d.ts".into(),
                 owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Snippet"),
+                symbol: "Snippet".into(),
             },
             exactness: verter_type_expr::ResolutionExactness::ExactSymbolic,
             provenance: verter_type_expr::ResolutionProvenance::FrameworkSurface,

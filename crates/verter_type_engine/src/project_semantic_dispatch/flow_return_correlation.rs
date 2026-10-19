@@ -267,7 +267,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
         let name = self
             .products
             .identity(binding)
-            .map(|identity| identity.name)
+            .map(|identity| Arc::<str>::from(identity.name))
             .unwrap_or_else(|| Arc::from(""));
         let binding = match binding {
             FlowProductSubject::Local(binding) => {

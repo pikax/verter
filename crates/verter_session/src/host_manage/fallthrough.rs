@@ -337,12 +337,12 @@ impl VerterHost {
                         condition_text: None,
                         props: Vec::new(),
                         events: Vec::new(),
-                        root_chain: vec![ResolvedRootStep::Unresolved {
+                        root_chain: RootChain::single(ResolvedRootStep::Unresolved {
                             tag: "component".to_string(),
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),
                             },
-                        }],
+                        }),
                         status: BranchStatus::Unresolved {
                             reason: UnresolvedBranchReason::Cycle {
                                 canonical_id: canonical_id.to_string(),
@@ -984,7 +984,13 @@ impl VerterHost {
         if entries.is_empty() {
             None
         } else {
-            Some(crate::resolver_core::FallthroughPropOverrideSet { entries })
+            // The engine's builder still owns every entry node; the set takes
+            // its own roots before the engine closes.
+            let roots = engine
+                .builder()
+                .root_nodes(entries.iter().map(|entry| entry.node))
+                .ok()?;
+            Some(crate::resolver_core::FallthroughPropOverrideSet { entries, roots })
         }
     }
 

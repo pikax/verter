@@ -360,7 +360,7 @@ fn cached_resolved_state(
     project: &MetaProject,
     canonical: &str,
     mode: verter_type_engine::semantic_query::ProjectionMode,
-) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
+) -> Option<crate::resolver_core::CachedValue<crate::meta_resolve::ResolvedComponentMetaState>> {
     // The slot key is `(mode, view_fingerprint)`. Test fixtures
     // exercise a single session at a time; the helper prefers the
     // overlay-bearing slot (view_fingerprint != 0) if present and
@@ -375,7 +375,8 @@ fn cached_resolved_state(
             ),
         >,
         mode: verter_type_engine::semantic_query::ProjectionMode,
-    ) -> Option<Arc<crate::meta_resolve::ResolvedComponentMetaState>> {
+    ) -> Option<crate::resolver_core::CachedValue<crate::meta_resolve::ResolvedComponentMetaState>>
+    {
         let mut base = None;
         let mut overlay = None;
         for ((slot_mode, view_fp), cached) in entries {
@@ -383,9 +384,9 @@ fn cached_resolved_state(
                 continue;
             }
             if *view_fp == 0 {
-                base = Some(Arc::clone(&cached.state));
+                base = Some(cached.state.clone());
             } else if overlay.is_none() {
-                overlay = Some(Arc::clone(&cached.state));
+                overlay = Some(cached.state.clone());
             }
         }
         overlay.or(base)
@@ -908,7 +909,29 @@ fn get_meta(
         .get_component_meta(canonical_id)
         .unwrap()
         .expect("get_component_meta should return metadata")
-        .into_analysis()
+        .analysis()
+        .clone()
+}
+
+/// Every non-receipt fact a fact list reaches, shared receipts walked.
+fn evidence_leaves(
+    facts: &[verter_session_query::facts::fact_cache::FactVersionRef],
+) -> Vec<verter_session_query::facts::fact_cache::FactVersionRef> {
+    use verter_session_query::facts::fact_cache::FactVersionRef;
+    let mut walk = verter_session_query::facts::receipt::ReceiptWalk::default();
+    let mut leaves = Vec::new();
+    for fact in facts {
+        match fact {
+            FactVersionRef::Receipt(receipt) => {
+                walk.leaves(receipt, |leaf| {
+                    leaves.push(leaf.clone());
+                    true
+                });
+            }
+            leaf => leaves.push(leaf.clone()),
+        }
+    }
+    leaves
 }
 
 /// Every root-chain step reachable from a resolved fallthrough surface.

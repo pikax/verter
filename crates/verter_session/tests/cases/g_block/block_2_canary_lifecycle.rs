@@ -201,7 +201,8 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("cold get_component_meta must resolve");
     let a_pre = pre
-        .into_analysis()
+        .analysis()
+        .clone()
         .props
         .into_iter()
         .find(|p| p.name == "a")
@@ -233,7 +234,8 @@ fn evicted_owner_reloads_to_authoritative_state_after_dep_edit() {
         .get_component_meta("/workspace/src/Comp.vue")
         .expect("get_component_meta on an evicted owner must reload and resolve");
     let a_post = post
-        .into_analysis()
+        .analysis()
+        .clone()
         .props
         .into_iter()
         .find(|p| p.name == "a")

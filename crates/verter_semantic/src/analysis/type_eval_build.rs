@@ -26,8 +26,8 @@ use oxc_ast::ast::{
     Statement, TSAccessibility, TSEnumDeclaration, TSExternalModuleDeclaration,
     TSInterfaceDeclaration, TSModuleBlock, TSNamespaceDeclaration, TSNamespaceDeclarationBody,
     TSSignature, TSThisParameter, TSType, TSTypeAliasDeclaration, TSTypeName,
-    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryOperator, VariableDeclarationKind,
-    VariableDeclarator,
+    TSTypeOperatorOperator, TSTypeParameterDeclaration, UnaryExpression, UnaryOperator,
+    VariableDeclarationKind, VariableDeclarator,
 };
 use oxc_ast_visit::Visit;
 use verter_session_query::analysis::fact_projection::{
@@ -351,6 +351,9 @@ pub struct LoweredValueDeclParts {
     /// Whether the declared type is a widening literal type (a `const`
     /// initialized with a literal, see [`DeclaredLiteralFreshness`]).
     pub literal_freshness: DeclaredLiteralFreshness,
+    /// The positions of the initializer-inferred annotation whose widening
+    /// waits on the bindings they read; `None` when it has none.
+    pub read_provenance: Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
 }
 
 /// The TRANSIENT lowered parts one top-level statement contributes, routed to
@@ -1143,7 +1146,7 @@ fn annotation_source(
 fn shape_member_span_origin(contributor: DeclContributorAnchor, ordinal: u32) -> MemberSpansOrigin {
     MemberSpansOrigin::Authored {
         anchor: contributor,
-        member_path: Arc::from(vec![ordinal]),
+        member_path: From::from(vec![ordinal]),
     }
 }
 
@@ -1159,7 +1162,7 @@ fn signature_spans_origin(
         },
         LoweredSignatureOrigin::ShapeMember { ordinal } => FunctionSpansOrigin::Member {
             anchor: contributor,
-            member_path: Arc::from(vec![ordinal]),
+            member_path: From::from(vec![ordinal]),
         },
         LoweredSignatureOrigin::Synthetic => FunctionSpansOrigin::Synthetic(SourceSynthetic),
     }
@@ -1421,7 +1424,7 @@ fn object_shape_fact(
                         readonly: index_sig.readonly,
                         span_origin: IndexSignatureSpansOrigin::Authored {
                             anchor: contributor,
-                            member_path: Arc::from(vec![ordinal]),
+                            member_path: From::from(vec![ordinal]),
                         },
                     })
                 }
@@ -1502,6 +1505,7 @@ fn mint_value_decl(
         parts.inference_unavailable,
     );
     type_annotation.literal_freshness = parts.literal_freshness.clone();
+    type_annotation.defers_read_widening = parts.read_provenance.is_some();
     let signatures = parts
         .signatures
         .iter()
@@ -3113,6 +3117,7 @@ fn collect_named_class_selecting(
                             enum_members: None,
                             enum_member_names: None,
                             literal_freshness: DeclaredLiteralFreshness::Regular,
+                            read_provenance: None,
                         });
                         TypeExpr::TypeOf(ValueRef {
                             path: vec![field_name],
@@ -3447,6 +3452,7 @@ fn collect_named_class_selecting(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         });
     }
     let base_name = match decl.heritage.as_ref().map(|heritage| &heritage.expression) {
@@ -3575,6 +3581,7 @@ fn collect_named_class_selecting(
                 instance: Arc::from(instance_widening_members.into_boxed_slice()),
             }
         },
+        read_provenance: None,
     });
 }
 
@@ -3721,6 +3728,7 @@ fn collect_enum(
         enum_members: Some(members),
         enum_member_names: Some(enum_member_names),
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     });
 
     // Type-space: the enum used AS A TYPE is the union of its members'
@@ -3880,6 +3888,7 @@ fn lower_function_parts_in(
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     })
 }
 
@@ -4482,6 +4491,7 @@ fn lower_destructured_variable_parts(
             enum_members: None,
             enum_member_names: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            read_provenance: None,
         })
         .collect()
 }
@@ -4704,6 +4714,7 @@ fn lower_identifier_variable_parts(
     let mut object_shape = None;
     let mut inference_unavailable = None;
     let mut expression_source_offset = None;
+    let mut read_provenance = None;
 
     if let Some(ref init) = decl.init {
         function_signature = extract_initializer_function_signature(init, source);
@@ -4737,17 +4748,16 @@ fn lower_identifier_variable_parts(
             expression_source_offset = Some(init.span().start);
             inference_unavailable = None;
         } else if type_annotation.is_none() {
-            let inferred =
-                infer_declaration_expression_type(init, source, TopLevelLiteralPolicy::Preserve)
-                    .map(|inferred| {
-                        if matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var) {
-                            shallow::widen_literal_type(inferred)
-                        } else {
-                            inferred
-                        }
-                    });
+            let inferred = infer_declarator_initializer_type(
+                init,
+                source,
+                matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var),
+            );
             let mut inferred = match inferred {
-                Ok(inferred) => inferred,
+                Ok((inferred, provenance)) => {
+                    read_provenance = provenance;
+                    inferred
+                }
                 Err(reason) => {
                     inference_unavailable = Some(reason);
                     TypeExpr::Primitive(PrimitiveName::Any)
@@ -4796,6 +4806,9 @@ fn lower_identifier_variable_parts(
 
     // A `const` without an annotation declares the fresh literal type of
     // its initializer; every other declaration declares a regular type.
+    // The positions are the inferred annotation's.
+    let read_provenance =
+        read_provenance.filter(|_| !annotation_is_authored && type_annotation.is_some());
     let literal_freshness = match (&decl.init, var_kind, annotation_is_authored) {
         (Some(init), _, false) if expr_is_widening_nullish(init) => {
             DeclaredLiteralFreshness::WideningNullish
@@ -4834,6 +4847,7 @@ fn lower_identifier_variable_parts(
         enum_members: None,
         enum_member_names: None,
         literal_freshness,
+        read_provenance,
     })
 }
 
@@ -4948,15 +4962,7 @@ fn initializer_literal_freshness(init: &Expression<'_>) -> DeclaredLiteralFreshn
         Expression::TemplateLiteral(template) if template.expressions.is_empty() => {
             DeclaredLiteralFreshness::Widening
         }
-        Expression::UnaryExpression(unary)
-            if matches!(
-                (unary.operator, &unary.argument),
-                (
-                    UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
-                    Expression::NumericLiteral(_)
-                ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
-            ) =>
-        {
+        Expression::UnaryExpression(unary) if signed_literal(unary) => {
             DeclaredLiteralFreshness::Widening
         }
         Expression::ConditionalExpression(conditional) => {
@@ -5042,6 +5048,7 @@ fn lower_default_expression_parts(expr: &Expression<'_>, source: &str) -> Lowere
         enum_members: None,
         enum_member_names: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        read_provenance: None,
     }
 }
 
@@ -5268,6 +5275,16 @@ struct InferenceState {
     /// position is typed for this whole inference (see
     /// [`NestedNullishLiterals`]).
     nested_nullish: NestedNullishLiterals,
+    /// Whether every position this inference closes — an object member,
+    /// an array element, an arrow's expression body — is a mutable
+    /// location that widens the fresh literals it holds: the initializer
+    /// of a `let` / `var` declaration.
+    widen_fresh_positions: bool,
+    /// Whether a position this inference closes in a mutable location
+    /// leaves the widening of what it reads to the bindings' resolution:
+    /// the type of a variable declaration's initializer, whose
+    /// [`verter_type_expr::DeclaredReadProvenance`] its `typeof` reads.
+    defer_read_widening: bool,
 }
 
 impl Default for InferenceState {
@@ -5275,6 +5292,8 @@ impl Default for InferenceState {
         Self {
             used_unmodeled_fallback: false,
             nested_nullish: NestedNullishLiterals::Keep,
+            widen_fresh_positions: false,
+            defer_read_widening: false,
         }
     }
 }
@@ -5451,6 +5470,50 @@ pub fn infer_declaration_expression_type(
 ) -> InferenceResult<TypeExpr> {
     let mut budget = InferenceState::default();
     infer_declaration_expression_type_with_budget(expr, source, policy, &mut budget)
+}
+
+/// The type of a variable declaration's initializer, and the positions it
+/// closes in a mutable location whose widening waits on the bindings they
+/// read. A `let` / `var` initializer (`mutable`) widens every fresh
+/// literal it writes where its position closes — the top level, an object
+/// member, an array element, an arrow's expression body — while an
+/// asserted or const-context literal keeps its type (`let x = { v: "a" as
+/// "a", w: "b" }` is `{ v: "a"; w: string }`); a `const` initializer
+/// keeps its top level as written.
+fn infer_declarator_initializer_type(
+    expr: &Expression<'_>,
+    source: &str,
+    mutable: bool,
+) -> InferenceResult<(
+    TypeExpr,
+    Option<Arc<verter_type_expr::DeclaredReadProvenance>>,
+)> {
+    let mut budget = InferenceState {
+        widen_fresh_positions: mutable,
+        defer_read_widening: true,
+        ..InferenceState::default()
+    };
+    let policy = if mutable {
+        TopLevelLiteralPolicy::Widen
+    } else {
+        TopLevelLiteralPolicy::Preserve
+    };
+    let (ty, positions) = shallow::run(
+        shallow::Task::Declaration(expr, policy),
+        source,
+        &mut budget,
+        None,
+    )?
+    .into_typed()
+    .into_declared();
+    Ok((
+        ty,
+        (!positions.is_empty()).then(|| {
+            Arc::new(verter_type_expr::DeclaredReadProvenance {
+                positions: Arc::from(positions.into_boxed_slice()),
+            })
+        }),
+    ))
 }
 
 #[repr(u8)]
@@ -5695,6 +5758,33 @@ fn append_union_members(into: &mut Vec<TypeExpr>, ty: TypeExpr) {
     } else {
         into.push(ty);
     }
+}
+
+/// `members` without each literal its primitive also among them holds
+/// (`"a" | string` is `string`): the checker's literal union reduction,
+/// which a union a widening built must apply itself.
+fn absorb_literals_into_primitives(members: Vec<TypeExpr>) -> Vec<TypeExpr> {
+    let holds = |primitive: PrimitiveName| {
+        members
+            .iter()
+            .any(|member| matches!(member, TypeExpr::Primitive(name) if *name == primitive))
+    };
+    let absorbed = |member: &TypeExpr| match member {
+        TypeExpr::Literal(LiteralValue::String(_)) => holds(PrimitiveName::String),
+        TypeExpr::Literal(LiteralValue::Number(_)) => holds(PrimitiveName::Number),
+        TypeExpr::Literal(LiteralValue::Boolean(_)) => holds(PrimitiveName::Boolean),
+        TypeExpr::Literal(LiteralValue::BigInt(_)) => holds(PrimitiveName::BigInt),
+        _ => false,
+    };
+    if !members.iter().any(absorbed) {
+        return members;
+    }
+    let keep: Vec<bool> = members.iter().map(|member| !absorbed(member)).collect();
+    members
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(member, keep)| keep.then_some(member))
+        .collect()
 }
 
 fn dedupe_type_exprs(types: Vec<TypeExpr>) -> Vec<TypeExpr> {
@@ -6142,15 +6232,14 @@ fn expanded_field_authority(
     exactness: verter_session_query::analysis::type_expand::ExpansionExactness,
     diagnostics: &[verter_session_query::analysis::type_expand::ExpansionDiagnostic],
 ) -> verter_type_expr::ResolvedTypeAuthority {
-    let diagnostics: Arc<[verter_type_expr::ResolutionDiagnostic]> = diagnostics
+    let diagnostics: verter_type_expr::ResolutionDiagnostics = diagnostics
         .iter()
         .map(|diagnostic| verter_type_expr::ResolutionDiagnostic {
             kind: publication_diagnostic_kind(diagnostic.reason),
-            context: Arc::from(diagnostic.context.as_str()),
-            property_name: diagnostic.property_name.as_deref().map(Arc::from),
+            context: diagnostic.context.as_str().into(),
+            property_name: diagnostic.property_name.as_deref().map(Into::into),
         })
-        .collect::<Vec<_>>()
-        .into();
+        .collect();
     verter_type_expr::ResolvedTypeAuthority::present(
         source,
         publication_exactness(exactness),
@@ -6854,6 +6943,7 @@ fn build_indexed_call(
         point: expression.span().start,
         spread,
         literal_mode: indexed_literal_mode(Some(expression)),
+        literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
     };
@@ -6903,6 +6993,7 @@ fn build_indexed_call(
                 point: tagged.quasi.span.start,
                 spread: false,
                 literal_mode: IndexedValueLiteralMode::Literal,
+                literal_provenance: None,
                 context_sensitive: false,
                 function_return_source: None,
             });
@@ -7075,19 +7166,260 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
     }
 }
 
-/// Whether one unwrapped expression is a bare literal — a scalar literal, a
-/// template, an object literal or an array literal.
+/// Whether one unwrapped expression is a bare literal — a scalar literal
+/// (a signed numeric or negated bigint literal among them), a template, an
+/// object literal or an array literal.
 fn bare_literal_expression(expr: &Expression<'_>) -> bool {
-    matches!(
-        expr,
+    match expr {
         Expression::StringLiteral(_)
-            | Expression::NumericLiteral(_)
-            | Expression::BooleanLiteral(_)
-            | Expression::BigIntLiteral(_)
-            | Expression::TemplateLiteral(_)
-            | Expression::ObjectExpression(_)
-            | Expression::ArrayExpression(_)
+        | Expression::NumericLiteral(_)
+        | Expression::BooleanLiteral(_)
+        | Expression::BigIntLiteral(_)
+        | Expression::TemplateLiteral(_)
+        | Expression::ObjectExpression(_)
+        | Expression::ArrayExpression(_) => true,
+        Expression::UnaryExpression(unary) => signed_literal(unary),
+        _ => false,
+    }
+}
+
+/// Whether a unary expression spells a literal of its own value: a signed
+/// numeric literal (`-1`, `+1`) or a negated bigint literal (`-1n`). The
+/// checker types it as the fresh literal it spells
+/// (`checkPrefixUnaryExpression`).
+fn signed_literal(unary: &UnaryExpression<'_>) -> bool {
+    matches!(
+        (unary.operator, &unary.argument),
+        (
+            UnaryOperator::UnaryNegation | UnaryOperator::UnaryPlus,
+            Expression::NumericLiteral(_)
+        ) | (UnaryOperator::UnaryNegation, Expression::BigIntLiteral(_))
     )
+}
+
+/// The type of a scalar literal expression a const context keeps as
+/// written: a string, numeric, boolean or bigint literal, a template with
+/// no holes, or a signed numeric or negated bigint literal.
+fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
+    Some(match expr {
+        Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
+        Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+        Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
+        Expression::BigIntLiteral(b) => {
+            TypeExpr::Literal(LiteralValue::BigInt(b.value.to_string()))
+        }
+        Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => TypeExpr::string_literal(
+            tpl.quasis
+                .iter()
+                .map(|quasi| verter_type_expr_oxc::template_element_text(&quasi.value))
+                .collect::<String>(),
+        ),
+        Expression::UnaryExpression(unary) if signed_literal(unary) => match &unary.argument {
+            Expression::NumericLiteral(n) if unary.operator == UnaryOperator::UnaryNegation => {
+                TypeExpr::number_literal(-n.value)
+            }
+            Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
+            Expression::BigIntLiteral(b) => {
+                TypeExpr::Literal(LiteralValue::BigInt(format!("-{}", b.value)))
+            }
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// The regular literals a call argument nests at its authored positions:
+/// each object-literal member and array-literal element (reached through
+/// parentheses, `satisfies`, non-null assertions and the branches of a
+/// conditional) whose value is, or has a branch that is, a type assertion,
+/// a literal or composite inside a const assertion, or a read of a value
+/// binding. The
+/// checker types such a contributor as the literal it already is, so a
+/// mutable location keeps it where it widens a fresh literal
+/// (`pu({ v: "a" as "a" })` infers `"a"`, `pu({ v: "a" })` `string`). The
+/// argument's own top level is its [`indexed_literal_mode`]'s. A
+/// conditional with more than one object or array branch is read no
+/// further: its branches are separate composites whose equal members do
+/// not share one freshness.
+pub fn indexed_literal_provenance(
+    expr: &Expression<'_>,
+    source: &str,
+) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
+    use verter_type_expr::{IndexedLiteralStep, IndexedRegularLiteralSource};
+    struct Pending<'a> {
+        expr: &'a Expression<'a>,
+        path: Vec<IndexedLiteralStep>,
+        /// Whether the position is inside a const assertion, whose literals
+        /// are written as they are.
+        pinned: bool,
+    }
+    let mut positions = Vec::new();
+    let mut pending = vec![Pending {
+        expr,
+        path: Vec::new(),
+        pinned: false,
+    }];
+    while let Some(Pending { expr, path, pinned }) = pending.pop() {
+        let mut regular = Vec::new();
+        let mut mixed = false;
+        let mut composites: Vec<(&Expression<'_>, bool)> = Vec::new();
+        let mut branches = vec![(expr, pinned)];
+        while let Some((branch, pinned)) = branches.pop() {
+            match branch {
+                Expression::ParenthesizedExpression(parenthesized) => {
+                    branches.push((&parenthesized.expression, pinned));
+                }
+                Expression::TSSatisfiesExpression(satisfies) => {
+                    branches.push((&satisfies.expression, pinned));
+                }
+                Expression::TSNonNullExpression(non_null) => {
+                    branches.push((&non_null.expression, pinned));
+                }
+                Expression::ConditionalExpression(conditional) => {
+                    branches.push((&conditional.alternate, pinned));
+                    branches.push((&conditional.consequent, pinned));
+                }
+                Expression::TSAsExpression(assertion)
+                    if verter_type_expr_oxc::is_const_assertion_type(
+                        &assertion.type_annotation,
+                    ) =>
+                {
+                    branches.push((&assertion.expression, true));
+                }
+                Expression::TSTypeAssertion(assertion)
+                    if verter_type_expr_oxc::is_const_assertion_type(
+                        &assertion.type_annotation,
+                    ) =>
+                {
+                    branches.push((&assertion.expression, true));
+                }
+                Expression::TSAsExpression(assertion) => {
+                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                        &assertion.type_annotation,
+                        source,
+                    )))
+                }
+                Expression::TSTypeAssertion(assertion) => {
+                    regular.push(IndexedRegularLiteralSource::Pinned(lower_ts_type(
+                        &assertion.type_annotation,
+                        source,
+                    )))
+                }
+                Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => {
+                    if pinned {
+                        regular.push(IndexedRegularLiteralSource::PinnedComposite);
+                    }
+                    composites.push((branch, pinned));
+                }
+                Expression::Identifier(identifier) if identifier.name == "undefined" => {}
+                Expression::NullLiteral(_)
+                | Expression::FunctionExpression(_)
+                | Expression::ArrowFunctionExpression(_) => {}
+                Expression::Identifier(identifier) => {
+                    regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                        path: vec![identifier.name.to_string()],
+                        type_args: Vec::new(),
+                    }));
+                }
+                Expression::StaticMemberExpression(_) => match indexed_read_path(branch) {
+                    Some(path) => regular.push(IndexedRegularLiteralSource::Read(ValueRef {
+                        path,
+                        type_args: Vec::new(),
+                    })),
+                    None => mixed = true,
+                },
+                branch => match scalar_literal_type(branch) {
+                    Some(literal) if pinned => {
+                        regular.push(IndexedRegularLiteralSource::Pinned(literal));
+                    }
+                    _ => mixed = true,
+                },
+            }
+        }
+        // A composite outside a const context is a fresh contributor: its
+        // nested positions decide their own literals.
+        mixed |= composites.iter().any(|(_, pinned)| !pinned);
+        if !regular.is_empty() && !path.is_empty() {
+            positions.push(verter_type_expr::IndexedLiteralPosition {
+                path: Arc::from(path.as_slice()),
+                regular: Arc::from(regular.into_boxed_slice()),
+                mixed,
+            });
+        }
+        let [(composite, pinned)] = composites.as_slice() else {
+            continue;
+        };
+        let nested = |step: IndexedLiteralStep, expr| {
+            let mut path = path.clone();
+            path.push(step);
+            Pending {
+                expr,
+                path,
+                pinned: *pinned,
+            }
+        };
+        match composite {
+            Expression::ObjectExpression(object) => {
+                for property in object.properties.iter().rev() {
+                    let ObjectPropertyKind::ObjectProperty(property) = property else {
+                        continue;
+                    };
+                    if property.method || !matches!(property.kind, PropertyKind::Init) {
+                        continue;
+                    }
+                    let Some(key) = lower_property_key(&property.key, source).cloned_known() else {
+                        continue;
+                    };
+                    pending.push(nested(IndexedLiteralStep::Member(key), &property.value));
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                // A spread or an elision leaves no element at its own index.
+                if array.elements.iter().any(|element| {
+                    matches!(
+                        element,
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                            | oxc_ast::ast::ArrayExpressionElement::Elision(_)
+                    )
+                }) {
+                    continue;
+                }
+                for (index, element) in array.elements.iter().enumerate().rev() {
+                    if let (Some(element), Ok(index)) =
+                        (element.as_expression(), u32::try_from(index))
+                    {
+                        pending.push(nested(IndexedLiteralStep::Element(index), element));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (!positions.is_empty()).then(|| {
+        Arc::new(verter_type_expr::IndexedLiteralProvenance {
+            positions: Arc::from(positions.into_boxed_slice()),
+        })
+    })
+}
+
+/// The dotted path of a member read off a chain of identifiers (`o.a.b`).
+fn indexed_read_path(expr: &Expression<'_>) -> Option<Vec<String>> {
+    let mut path = Vec::new();
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::StaticMemberExpression(member) => {
+                path.push(member.property.name.to_string());
+                cursor = &member.object;
+            }
+            Expression::Identifier(identifier) => {
+                path.push(identifier.name.to_string());
+                path.reverse();
+                return Some(path);
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// A contextual declarator whose method bodies need the initializer's flow
@@ -7352,6 +7684,7 @@ fn lower_indexed_tagged_template_expression_observed(
         point: tagged.quasi.span.start,
         spread: false,
         literal_mode: IndexedValueLiteralMode::Literal,
+        literal_provenance: None,
         context_sensitive: false,
         function_return_source: None,
     });
@@ -7450,6 +7783,7 @@ fn lower_indexed_call_argument(
         point: expression.span().start,
         spread,
         literal_mode: indexed_literal_mode(Some(expression)),
+        literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
     }

@@ -76,8 +76,9 @@ pub use facts::{
 
 mod indexed_expression;
 pub use indexed_expression::{
-    IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
-    IndexedValueLiteralMode,
+    DeclaredReadPosition, DeclaredReadProvenance, DeclaredReadStep, IndexedLiteralPosition,
+    IndexedLiteralProvenance, IndexedLiteralStep, IndexedRegularLiteralSource, IndexedValueCall,
+    IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
 };
 
 /// Property-key identity stored by authored type IR.
@@ -103,9 +104,9 @@ pub use publication::{
     select_type_publication, AuthoredProvenance, AuthoredSourceMint, AuthoredTypeEvidence,
     AuthoredTypeSource, PublicationPolicy, PublicationPolicyReason, PublicationProvenance,
     PublicationReason, PublicationResult, ResolutionDiagnostic, ResolutionDiagnosticKind,
-    ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority, ResolvedTypeOutcome,
-    SemanticAuthority, SymbolicEquivalenceKind, SymbolicEquivalenceMint, SymbolicEquivalenceProof,
-    TypePublication, TypedResolutionFailure,
+    ResolutionDiagnostics, ResolutionExactness, ResolutionProvenance, ResolvedTypeAuthority,
+    ResolvedTypeOutcome, SemanticAuthority, SharedTypeSource, SymbolicEquivalenceKind,
+    SymbolicEquivalenceMint, SymbolicEquivalenceProof, TypePublication, TypedResolutionFailure,
 };
 
 pub mod intrinsics;
@@ -192,6 +193,7 @@ impl TypeExprScope {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub enum SyntheticCarrierSurfaceKind {
     SlotBinding,
@@ -221,14 +223,17 @@ pub enum SyntheticCarrierSurfaceKind {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct SyntheticCarrierKey {
-    pub scope_canonical_id: Arc<str>,
+    pub scope_canonical_id: OwnedStr,
     pub surface_kind: SyntheticCarrierSurfaceKind,
-    pub slot_name: Option<Arc<str>>,
-    pub binding_name: Arc<str>,
+    pub slot_name: Option<OwnedStr>,
+    pub binding_name: OwnedStr,
     pub value_node: u64,
 }
+
+verter_retention::measured_by_heap_size!(SyntheticCarrierKey);
 
 /// Internal type expression node.
 ///
@@ -243,7 +248,14 @@ pub struct SyntheticCarrierKey {
 /// `cycle_guard::hash_type_expr` routes a `TypeExpr` through `Hash`). The
 /// manual impl emits a BYTE-IDENTICAL stream to the former derive
 /// (pinned by `tests/cases/hash_byte_stream_contract.rs`).
-#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
+)]
 #[heap_size(iterative)]
 pub enum TypeExpr {
     // -- Terminals --
@@ -447,7 +459,15 @@ pub enum TypeExpr {
 // ---------------------------------------------------------------------------
 
 /// A snapshot of one conditional branch frame at the moment recursion was detected.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
+)]
 pub struct RecursiveConditionalFrame {
     pub branch: RecursiveConditionalBranch,
     pub decided: bool,
@@ -456,7 +476,16 @@ pub struct RecursiveConditionalFrame {
 }
 
 /// Which branch of a conditional type was active.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
+)]
 pub enum RecursiveConditionalBranch {
     True,
     False,
@@ -479,6 +508,7 @@ pub enum RecursiveConditionalBranch {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum PrimitiveName {
@@ -550,6 +580,7 @@ impl fmt::Display for PrimitiveName {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(tag = "literalKind", rename_all = "camelCase")]
 pub enum LiteralValue {
@@ -607,6 +638,7 @@ impl Hash for LiteralValue {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ValueRef {
@@ -630,6 +662,7 @@ pub struct ValueRef {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TupleElement {
@@ -653,6 +686,7 @@ pub struct TupleElement {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectExpr {
@@ -669,6 +703,7 @@ pub struct ObjectExpr {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(tag = "memberKind", rename_all = "camelCase")]
 pub enum ObjectMember {
@@ -708,6 +743,7 @@ pub enum ObjectMember {
     Hash,
     verter_no_typeexpr::NoTypeExpr,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct MemberSpans {
     /// Span of the whole member declaration (`name?: T` / `name(): T`).
@@ -738,7 +774,15 @@ impl MemberSpans {
 
 /// OXC-derived spans for a call / construct / method function signature.
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct FunctionSpans {
     /// Span of the whole signature declaration.
@@ -749,7 +793,15 @@ pub struct FunctionSpans {
 
 /// OXC-derived spans for an index signature (`[k: K]: V`).
 #[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, verter_retention::heap_size::HeapSize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 pub struct IndexSignatureSpans {
     /// Span of the whole index-signature declaration.
@@ -791,6 +843,7 @@ pub struct IndexSignatureSpans {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum MemberVisibility {
@@ -883,6 +936,7 @@ impl MemberVisibility {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -1041,6 +1095,7 @@ impl ObjectProperty {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -1103,6 +1158,7 @@ impl IndexSignature {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -1148,6 +1204,7 @@ pub struct MethodSignature {
     verter_no_typeexpr::NoTypeExpr,
     verter_no_storedspan::NoStoredSpan,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum ObjectMethodKind {
@@ -1281,6 +1338,7 @@ impl MethodSignature {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -1383,6 +1441,7 @@ impl FunctionExpr {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TypePredicate {
@@ -1419,6 +1478,7 @@ impl TypePredicate {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum TypePredicateSubject {
@@ -1442,7 +1502,12 @@ pub enum TypePredicateSubject {
 /// otherwise-equal parameters across cache keys or equivalence checks. `span`
 /// remains part of identity (it is a real provenance coordinate).
 #[derive(
-    Debug, Clone, serde::Serialize, serde::Deserialize, verter_retention::heap_size::HeapSize,
+    Debug,
+    Clone,
+    serde::Serialize,
+    serde::Deserialize,
+    verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -1550,6 +1615,7 @@ impl FunctionParam {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub struct TypeParam {
@@ -1573,6 +1639,7 @@ pub struct TypeParam {
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
+    verter_retention::unshared::Unshared,
 )]
 #[serde(rename_all = "camelCase")]
 pub enum MappedModifier {

@@ -1,8 +1,8 @@
-//! Runtime guard — R20 admission contract: `insert_arc_with_kind`
+//! Runtime guard — R20 admission contract: `insert_value_with_kind`
 //! refuses an empty signature for every production cache kind.
 //!
 //! The strict admission method
-//! `ValidatedFactCache::insert_arc_with_kind(key, value, facts, kind)`
+//! `ValidatedFactCache::insert_value_with_kind(key, value, facts, kind)`
 //! gates fact-completeness: an empty `facts` vector causes the
 //! admission to be REFUSED — the cache entry is NOT recorded, the
 //! `admission_refused_count()` counter advances, and a
@@ -11,7 +11,7 @@
 //!
 //! This complements `admission_guard.rs`'s generic empty-signature
 //! refusal test with a PER-KIND enumeration over every production
-//! cache that goes through `insert_arc_with_kind`. The discriminating
+//! cache that goes through `insert_value_with_kind`. The discriminating
 //! property: each kind's refusal must independently land — both on
 //! the counter (one increment per refused admission) and on the
 //! cache state (`cache.entries` map stays empty for that key). If a
@@ -23,7 +23,7 @@
 //! ## Production cache kinds enumerated
 //!
 //! The six kinds below are exactly the `&'static str` literals
-//! passed to `insert_arc_with_kind` in `crates/verter_session/src/`
+//! passed to `insert_value_with_kind` in `crates/verter_session/src/`
 //! (see `insert_arc_strict_admission_required.rs` for the scanner
 //! that pins them down). The arch guard and this runtime test cite
 //! the same list — if one drifts, both fail.
@@ -35,11 +35,9 @@
 
 #![cfg(test)]
 
-use std::sync::Arc;
-
 use verter_session::resolver_core::ValidatedFactCache;
 
-/// Production-source cache kinds passed to `insert_arc_with_kind`.
+/// Production-source cache kinds passed to `insert_value_with_kind`.
 /// Mirrors the `PRODUCTION_CACHE_KINDS` list in
 /// `insert_arc_strict_admission_required.rs` — when one is added or
 /// renamed, both must be updated together.
@@ -58,7 +56,7 @@ const PRODUCTION_CACHE_KINDS: &[&str] = &[
 /// - `admission_refused_count()` advances by exactly one per kind.
 ///
 /// Discriminating signal: a substrate regression that caused
-/// `insert_arc_with_kind` to silently admit an empty signature for
+/// `insert_value_with_kind` to silently admit an empty signature for
 /// any one kind would (a) leave a cache entry under that kind's
 /// key, and (b) leave `admission_refused_count()` below the per-kind
 /// expected total.
@@ -69,7 +67,12 @@ fn empty_signature_refused_per_production_cache_kind() {
         let key = format!("k_{idx}");
 
         // Admission attempt: empty signature, strict mode.
-        cache.insert_arc_with_kind(key.clone(), Arc::new(idx as u64), Vec::new(), kind);
+        cache.insert_value_with_kind(
+            key.clone(),
+            verter_retention::heap_size::OwnedValue::new(idx as u64),
+            Vec::new(),
+            kind,
+        );
 
         // Assertion 1: the entry was NOT recorded.
         assert_eq!(
@@ -111,7 +114,12 @@ fn non_empty_signature_admits_normally_per_production_cache_kind() {
             hash,
         };
 
-        cache.insert_arc_with_kind(key.clone(), Arc::new(idx as u64), vec![fact], kind);
+        cache.insert_value_with_kind(
+            key.clone(),
+            verter_retention::heap_size::OwnedValue::new(idx as u64),
+            vec![fact],
+            kind,
+        );
 
         assert_eq!(
             cache.len(),
@@ -139,7 +147,12 @@ fn repeated_empty_signature_refusals_accumulate_for_one_kind() {
     let kind = "prepared_decl_bundles";
 
     for n in 0u32..5 {
-        cache.insert_arc_with_kind(format!("k_{n}"), Arc::new(n as u64), Vec::new(), kind);
+        cache.insert_value_with_kind(
+            format!("k_{n}"),
+            verter_retention::heap_size::OwnedValue::new(n as u64),
+            Vec::new(),
+            kind,
+        );
     }
 
     assert_eq!(
