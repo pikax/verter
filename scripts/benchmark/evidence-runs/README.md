@@ -34,7 +34,7 @@ and peak memory beside whole-program TypeScript wall time),
 and a module interface augmented by 2,000 unimported modules; cold Verter time
 and peak memory, and each reproduction's retention proof: one engine answering
 500 then 2,000 contributors against a 2,000-only baseline session),
-`skr-scale-answers`, `skr-mapped-expand`.
+`skr-scale-answers`, `skr-mapped-expand`, `rev11-l1-soak`.
 
 `skr-mapped-indexb` demands conditional mapped values through the entire source
 key domain at 1,000, 3,000 and 10,000 keys. The recorded TypeScript 7.0.2 answer
@@ -67,6 +67,31 @@ deep. TypeScript 7.0.2 answers each with the resolved object type. The run sets
 `requireAllMatched`, so every Verter answer must match the measured reference
 exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 `peakBytes`.
+
+`rev11-l1-soak` is a soak manifest (`"kind": "soak"`): it registers the
+long-churn soak runner (`crates/verter_bench/src/soak/`, binary
+`verter-soak`) rather than a semantic-perf invocation. Its two workloads,
+`normal` and `pressure`, are 100 tranches of one 100-action template
+(10,000 actions, at least 3,000 distinct query identities, every lifecycle
+class), frozen by the digests under `soak.workloads`; the runner's test
+(`cargo nextest run -p verter_bench -E 'test(soak::)'`) regenerates them and
+compares, and runs the one-tranche smoke manifests (`soak.smoke`) and the
+negative controls on any worker. Each mode's verdict comes from the runner's
+own judgement of its written summary: action and result inventories, the
+per-class answer rules, sampling at least every `sampleEvery` actions, the
+envelope the first `envelopeActions` actions set, and the drain to baseline
+(object counts, content pins and retained account bytes at the host's close
+route; pinned account bytes and store storage once the host is dropped). The
+pressure workload's full manifest also freezes surge tranches that hold
+component-meta results past the account's aggregate ceiling and entry cap,
+and every mode drives a component-meta batch isolation action (a demand
+issued from inside a batch payload callback after the batch spent
+operations, against its cold oracles); the full pressure verdict requires
+positive, surge-attributed aggregate-pressure and oversized refusal deltas
+and complete delivery of every surge answer. `work` cells are read on every
+worker; wall time, peak RSS and the process-tree peak are `benchM3Only`
+cells. A soak manifest carries `name`, `kind`, `description`, `modes`,
+`noise`, `soak` and `requiredCells` (`mode`, `metrics`, `benchM3Only`).
 
 | Field                             | Meaning                                                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

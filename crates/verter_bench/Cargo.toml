@@ -26,6 +26,11 @@ semantic-observe = [
 # Allocation profiling through hotpath's own allocator, on top of the
 # coordinated opt-in.
 hotpath-alloc = ["semantic-observe", "verter_compiler/hotpath-alloc", "hotpath/hotpath-alloc"]
+# The long-churn soak runner (`src/soak/`, `verter-soak`). Default-off
+# tooling opt-in that forwards only the session's soak seams: the engine's
+# flight rendezvous and the retention account's ACTIVE-occupancy window.
+# Audit/footprint capture and `semantic-observe` stay off in this lane.
+soak-support = ["verter_session/soak-support", "verter_type_engine/soak-support"]
 
 [dependencies]
 # `bench` unlocks `template`/`script` module visibility (see
@@ -38,7 +43,11 @@ verter_parser = { path = "../verter_parser" }
 verter_session = { path = "../verter_session" }
 verter_type_engine = { path = "../verter_type_engine" }
 verter_workspace = { path = "../verter_workspace" }
+verter_lsp = { path = "../verter_lsp" }
+tokio = { version = "1.52", features = ["rt", "sync"] }
+verter_session_query = { workspace = true }
 verter_audit = { path = "../verter_audit" }
+verter_execution = { path = "../verter_execution" }
 verter_diagnostics = { path = "../verter_diagnostics" }
 verter_semantic = { path = "../verter_semantic" }
 verter_semantic_source = { workspace = true }
@@ -69,7 +78,6 @@ libc = "0.2"
 
 [dev-dependencies]
 verter_supervise = { path = "../verter_supervise" }
-verter_session_query = { workspace = true }
 # Activates `test-support` on `verter_compiler` for THIS crate's own
 # bench/example targets only — `real_world_compile_bench.rs` and the
 # `new_impl_check`/`profile_ast`/`vapor_check` examples measure the raw
@@ -99,6 +107,13 @@ path = "src/bin/semantic_perf_probe.rs"
 [[bin]]
 name = "semantic_perf_probe_counted"
 path = "src/bin/semantic_perf_probe_counted.rs"
+
+# The long-churn soak runner (`src/soak/`): runs and verifies one mode of
+# the frozen workload registered as evidence run `rev11-l1-soak`.
+[[bin]]
+name = "verter-soak"
+path = "src/bin/verter-soak.rs"
+required-features = ["soak-support"]
 
 [[bench]]
 name = "bindings_bench"
