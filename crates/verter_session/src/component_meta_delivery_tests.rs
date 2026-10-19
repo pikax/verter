@@ -75,19 +75,28 @@ mod nested_publication_allocations {
 
     const LARGE: usize = 64 * 1024;
 
+    pub(super) fn authored(canonical_id: &str) -> SemanticTypeSource {
+        SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(TypeBodySlot {
+            anchor: AuthoredAnchor {
+                canonical_id: canonical_id.into(),
+                owner: TopLevelOwnerId::default(),
+                symbol: OwnedStr::from("Props"),
+                space: LocatorSymbolSpace::Type,
+            },
+            path: Vec::new().into(),
+        }))
+    }
+
     fn analysis(canonical_id: &str, context: &str) -> ComponentMetaAnalysis {
+        analysis_publishing(authored(canonical_id), context)
+    }
+
+    pub(super) fn analysis_publishing(
+        source: SemanticTypeSource,
+        context: &str,
+    ) -> ComponentMetaAnalysis {
         let publication = TypePublication::from_source_position(
-            &SourcePosition::Present(SemanticTypeSource::Authored(AuthoredBodyLocator::DeclBody(
-                TypeBodySlot {
-                    anchor: AuthoredAnchor {
-                        canonical_id: canonical_id.into(),
-                        owner: TopLevelOwnerId::default(),
-                        symbol: OwnedStr::from("Props"),
-                        space: LocatorSymbolSpace::Type,
-                    },
-                    path: Vec::new().into(),
-                },
-            ))),
+            &SourcePosition::Present(source),
             ResolutionExactness::ExactConcrete,
             ResolutionProvenance::SemanticEvaluator,
             vec![ResolutionDiagnostic {
@@ -210,6 +219,193 @@ mod nested_publication_allocations {
                     0,
                     "({leaf}, leaf first {leaf_first}) final release is immediate"
                 );
+            }
+        }
+    }
+}
+
+mod nested_source_allocations {
+    use verter_session_query::analysis::component_meta::ResolvedTypeAnalysis;
+    use verter_session_query::retention::owned::{ChargeCtx, Owned, OwnedSlice, OwnedStr};
+    use verter_session_query::retention::{ChargeClass, RetentionLimits, SemanticRetentionAccount};
+    use verter_type_expr::facts::{
+        ClosedTypeFact, FactPropertyKey, LeafTypeFact, ProjectedTypeFact, SemanticTypeSource,
+        SourcePosition,
+    };
+    use verter_type_expr::publication::ResolvedTypeOutcome;
+    use verter_type_expr::{PropertyKey, SyntheticCarrierKey, SyntheticCarrierSurfaceKind};
+
+    use super::nested_publication_allocations::{analysis_publishing, authored};
+    use crate::component_meta_cached_result::shared_component_meta_analysis;
+
+    const LARGE: usize = 64 * 1024;
+
+    /// A nested list or name a caller clones out of a published source.
+    enum Leaf {
+        Union(OwnedSlice<LeafTypeFact>),
+        Path(OwnedSlice<FactPropertyKey>),
+        Carrier(Owned<SyntheticCarrierKey>),
+        Name(OwnedStr),
+    }
+
+    impl Leaf {
+        fn charge_class(&self) -> Option<ChargeClass> {
+            match self {
+                Self::Union(list) => list.charge_class(),
+                Self::Path(list) => list.charge_class(),
+                Self::Carrier(key) => key.charge_class(),
+                Self::Name(name) => name.charge_class(),
+            }
+        }
+    }
+
+    fn sources(text: &str) -> [(&'static str, SemanticTypeSource); 3] {
+        let SemanticTypeSource::Authored(base) = authored("/src/Base.ts") else {
+            unreachable!("an authored source");
+        };
+        [
+            (
+                "leaf union",
+                SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(OwnedSlice::from(vec![
+                    LeafTypeFact::StringLiteral(text.to_owned()),
+                    LeafTypeFact::BooleanLiteral(true),
+                ]))),
+            ),
+            (
+                "member path",
+                SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath {
+                    base,
+                    path: OwnedSlice::from(vec![PropertyKey::String(OwnedStr::from(text))]),
+                }),
+            ),
+            (
+                "synthetic binding",
+                SemanticTypeSource::SyntheticSlotBinding(Owned::new(SyntheticCarrierKey {
+                    scope_canonical_id: OwnedStr::from("/src/Owner.vue"),
+                    surface_kind: SyntheticCarrierSurfaceKind::SlotBinding,
+                    slot_name: Some(OwnedStr::from("default")),
+                    binding_name: OwnedStr::from(text),
+                    value_node: 7,
+                })),
+            ),
+        ]
+    }
+
+    /// The nested allocation a caller can clone out of `source` by borrow.
+    fn nested_leaf(source: &SemanticTypeSource, name_only: bool) -> Leaf {
+        match source {
+            SemanticTypeSource::Closed(ClosedTypeFact::LeafUnion(members)) => {
+                Leaf::Union(members.clone())
+            }
+            SemanticTypeSource::Projected(ProjectedTypeFact::MemberPath { path, .. }) => {
+                match (name_only, &path[0]) {
+                    (true, PropertyKey::String(name)) => Leaf::Name(name.clone()),
+                    _ => Leaf::Path(path.clone()),
+                }
+            }
+            SemanticTypeSource::SyntheticSlotBinding(key) if name_only => {
+                Leaf::Name(key.binding_name.clone())
+            }
+            SemanticTypeSource::SyntheticSlotBinding(key) => Leaf::Carrier(key.clone()),
+            other => panic!("a source with a nested allocation was published: {other:?}"),
+        }
+    }
+
+    /// A caller that clones a list or a name out of a published type source
+    /// — a closed leaf union, a projected member path or its key, a
+    /// synthetic binding carrier or its name — from a prop's publication or
+    /// from a type-registry entry keeps an owned handle: the nested
+    /// allocation stays charged by its own cell after the analysis cell
+    /// lets go, at zero headroom, and its own final drop restores the
+    /// baseline at once. Dropping the leaf first leaves the analysis's
+    /// charge whole.
+    #[test]
+    fn a_cloned_nested_source_allocation_stays_charged_after_its_analysis_lets_go() {
+        let text = "nested_source_text_".repeat(LARGE / 19);
+        for index in 0..3 {
+            for registry in [false, true] {
+                for name_only in [false, true] {
+                    for leaf_first in [false, true] {
+                        // A fresh source each run: the cell must be its only
+                        // holder, so the kept leaf is the last owner left.
+                        let (kind, source) = sources(&text)
+                            .into_iter()
+                            .nth(index)
+                            .expect("three sources");
+                        let label = format!(
+                            "{kind}, registry {registry}, name {name_only}, \
+                             leaf first {leaf_first}"
+                        );
+                        let account = SemanticRetentionAccount::new(RetentionLimits {
+                            aggregate_ceiling_bytes: 0,
+                            active_ceiling_bytes: 0,
+                            max_entry_bytes: 0,
+                            pin_threshold_bytes: 0,
+                        });
+                        let mut analysis = analysis_publishing(source.clone(), "context");
+                        if registry {
+                            analysis.props.clear();
+                            analysis.type_registry.push(ResolvedTypeAnalysis {
+                                name: "Registered".to_owned(),
+                                type_source: SourcePosition::Present(source),
+                                type_expansion: None,
+                            });
+                        } else {
+                            drop(source);
+                        }
+                        let cell = shared_component_meta_analysis(analysis);
+                        cell.pin(ChargeCtx::new(&account));
+                        let published = account.snapshot().pinned_bytes;
+                        assert!(published >= text.len(), "({label}) the source is charged");
+                        let kept = if registry {
+                            let SourcePosition::Present(source) =
+                                &cell.type_registry[0].type_source
+                            else {
+                                panic!("({label}) a present registry source");
+                            };
+                            nested_leaf(source, name_only)
+                        } else {
+                            match cell.props[0].publication.authority().outcome() {
+                                ResolvedTypeOutcome::Present { source, .. } => {
+                                    nested_leaf(source, name_only)
+                                }
+                                other => panic!("({label}) a present source: {other:?}"),
+                            }
+                        };
+                        assert_eq!(
+                            kept.charge_class(),
+                            Some(ChargeClass::Pinned),
+                            "({label}) the nested allocation is charged by its own cell"
+                        );
+                        assert_eq!(account.snapshot().pinned_bytes, published);
+                        if leaf_first {
+                            drop(kept);
+                            assert_eq!(account.snapshot().pinned_bytes, published);
+                            drop(cell);
+                        } else {
+                            drop(cell);
+                            let surviving = account.snapshot().pinned_bytes;
+                            assert!(
+                                surviving >= text.len() && surviving < published,
+                                "({label}) the kept leaf owns its allocation, not the \
+                                 analysis: {surviving} of {published}"
+                            );
+                            if matches!(kept, Leaf::Name(_)) {
+                                assert_eq!(
+                                    surviving,
+                                    OwnedStr::charge_for_len(text.len()),
+                                    "({label}) a kept name is charged exactly its own allocation"
+                                );
+                            }
+                            drop(kept);
+                        }
+                        assert_eq!(
+                            account.snapshot().total_bytes(),
+                            0,
+                            "({label}) final release is immediate"
+                        );
+                    }
+                }
             }
         }
     }

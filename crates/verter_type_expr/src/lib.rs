@@ -226,12 +226,14 @@ pub enum SyntheticCarrierSurfaceKind {
     verter_retention::unshared::Unshared,
 )]
 pub struct SyntheticCarrierKey {
-    pub scope_canonical_id: Arc<str>,
+    pub scope_canonical_id: OwnedStr,
     pub surface_kind: SyntheticCarrierSurfaceKind,
-    pub slot_name: Option<Arc<str>>,
-    pub binding_name: Arc<str>,
+    pub slot_name: Option<OwnedStr>,
+    pub binding_name: OwnedStr,
     pub value_node: u64,
 }
+
+verter_retention::measured_by_heap_size!(SyntheticCarrierKey);
 
 /// Internal type expression node.
 ///

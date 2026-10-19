@@ -1372,10 +1372,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn from_carrier_key(key: &verter_type_expr::SyntheticCarrierKey) -> Self {
         Self {
-            scope_canonical_id: OwnedStr::from(key.scope_canonical_id.clone()),
+            scope_canonical_id: key.scope_canonical_id.clone(),
             surface_kind: key.surface_kind,
             slot_name: key.slot_name.as_ref().map(OwnedStr::from),
-            binding_name: OwnedStr::from(key.binding_name.clone()),
+            binding_name: key.binding_name.clone(),
         }
     }
 
@@ -1386,10 +1386,10 @@ impl SyntheticBindingId {
     #[must_use]
     pub fn to_carrier_key(&self, value_node: u64) -> verter_type_expr::SyntheticCarrierKey {
         verter_type_expr::SyntheticCarrierKey {
-            scope_canonical_id: std::sync::Arc::<str>::from(self.scope_canonical_id.as_str()),
+            scope_canonical_id: self.scope_canonical_id.clone(),
             surface_kind: self.surface_kind,
-            slot_name: self.slot_name.as_ref().map(std::sync::Arc::<str>::from),
-            binding_name: std::sync::Arc::<str>::from(self.binding_name.as_str()),
+            slot_name: self.slot_name.clone(),
+            binding_name: self.binding_name.clone(),
             value_node,
         }
     }

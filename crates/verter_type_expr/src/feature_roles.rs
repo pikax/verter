@@ -5,7 +5,7 @@ use std::sync::Arc;
 use verter_no_storedspan::NoStoredSpan;
 use verter_no_typeexpr::NoTypeExpr;
 
-use crate::{ResolutionExactness, ResolutionProvenance, TopLevelOwnerId};
+use crate::{OwnedStr, ResolutionExactness, ResolutionProvenance, TopLevelOwnerId};
 
 /// Content-free identity of one resolved declaration symbol.
 #[derive(
@@ -23,11 +23,11 @@ use crate::{ResolutionExactness, ResolutionProvenance, TopLevelOwnerId};
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedSymbolIdentity {
     /// Canonical file that defines the symbol.
-    pub canonical_id: Arc<str>,
+    pub canonical_id: OwnedStr,
     /// Exact neutral lexical owner of the declaration.
     pub owner: TopLevelOwnerId,
     /// Declaration symbol name in the defining file.
-    pub symbol: Arc<str>,
+    pub symbol: OwnedStr,
 }
 
 /// Typed reason a prop callable role could not be decided.
@@ -272,9 +272,9 @@ mod tests {
     fn svelte_snippet_role_round_trips_exact_identity() {
         let role = PropCallableRole::SvelteSnippet {
             symbol: ResolvedSymbolIdentity {
-                canonical_id: Arc::from("/node_modules/svelte/index.d.ts"),
+                canonical_id: "/node_modules/svelte/index.d.ts".into(),
                 owner: TopLevelOwnerId::ordinary_file(),
-                symbol: Arc::from("Snippet"),
+                symbol: "Snippet".into(),
             },
             exactness: ResolutionExactness::ExactSymbolic,
             provenance: ResolutionProvenance::FrameworkSurface,

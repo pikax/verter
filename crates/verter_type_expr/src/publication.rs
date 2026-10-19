@@ -10,7 +10,11 @@ use crate::{OwnedSlice, OwnedStr};
 /// A semantic type source a publication shares: a sealed, self-charged
 /// allocation, so a reader's clone keeps it charged after every cache and
 /// result that handed it out let go.
-pub type SharedTypeSource = verter_retention::heap_size::OwnedValue<SemanticTypeSource>;
+///
+/// Its value reaches no raw `Arc`: every list and name a source keeps is an
+/// owned handle charged by its own cell, so a leaf a reader clones out of a
+/// borrowed source keeps its own charge.
+pub type SharedTypeSource = verter_retention::owned::Owned<SemanticTypeSource>;
 
 /// A publication's diagnostics: a sealed, self-charged list whose names are
 /// owned strings, each charged by its own cell.

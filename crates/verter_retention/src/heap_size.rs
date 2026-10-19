@@ -68,7 +68,17 @@ impl<'h, 't> HeapMeter<'h, 't> {
     }
 
     /// `true` the first time the raw allocation of `arc` is offered.
+    ///
+    /// Only a data tree's own cell ([`Tree`]) owns raw `Arc`s; any other
+    /// owned cell's value reaches none (see [`super::owned`]), so a debug
+    /// build fails the measurement of such a value that reaches one.
     pub fn first<T: ?Sized>(&mut self, arc: &Arc<T>) -> bool {
+        verter_debug_assert::verter_debug_assert!(
+            !self.handles.measures_cell(),
+            "an owned value reaches a raw `Arc<{}>`: an allocation a caller can clone out of a \
+             delivered value must be an owned handle charged by itself",
+            std::any::type_name::<T>()
+        );
         self.raw.insert(Arc::as_ptr(arc).cast::<()>() as usize)
     }
 

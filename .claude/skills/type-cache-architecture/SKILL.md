@@ -293,7 +293,11 @@ reserve their metadata and hold their owned values.
 `OwnedTree` measures the raw allocations reachable through a plain tree;
 it does not by itself seal independently clonable inner `Arc` fields, so
 an allocation several owners share, or a caller can keep, is its own
-owned cell: a file analysis snapshot's lists (`SharedList`, shared with the
+owned cell. A published type source (`SharedTypeSource`) and a lowered
+flow slice (`SharedFlowSliceIR`) are strict `Owned` cells, not trees:
+every list and name their values keep is an `OwnedSlice` / `OwnedStr`, and
+a debug build fails the `HeapSize` measurement of such a cell that reaches
+a raw `Arc` (`HeapMeter::first`). Further owned cells: a file analysis snapshot's lists (`SharedList`, shared with the
 host analysis lists and the artifact's export signatures), template
 analyses (the raw template slot holds the one it serves, refusably with
 its evidence), module-export names, namespace targets and proofs (a
@@ -1175,7 +1179,11 @@ Construction ownership: an intern records its construction count on the
 innermost construction owner of its arena as a bare ordinal, released in one
 batch when that owner closes. A delivery lease is held by the OLDEST open
 owner of its arena (`NodeRootScope::capture_delivery`; the innermost owner
-when the lease names no arena): a closing owner hands its deliveries to
+when the lease names no arena). A suspended task's construction owner
+(`TaskConstructionOwner`) is a floor while a poll has it installed: the
+search starts at the newest installed task owner of the arena, so a delivery
+a task's step reads stays with the task across `Pending` and is never handed
+to an older owner the polling thread opened for unrelated work. A closing owner hands its deliveries to
 another open owner of the arena, so a delivery lives until no owner of its
 arena is open on the thread whichever owner holds it, and holding it at the
 oldest spares the hand-on at every nested scope's close. A closing owner that
