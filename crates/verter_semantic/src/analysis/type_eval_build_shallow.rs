@@ -719,19 +719,12 @@ fn value<'a>(
 /// A conditional's two branch types joined, their unions flattened into
 /// one. A union of a fresh literal and its regular counterpart is the
 /// regular one (`c ? "a" : ("a" as "a")` is the regular `"a"`). The
-/// positions each branch nests stay addressable by their paths only while
-/// at most one branch is an object or array literal: the paths do not tell
-/// two such branches apart, so theirs widen now.
-fn join_branches(mut consequent: Typed, mut alternate: Typed) -> Typed {
-    if (!consequent.nested.is_empty() || !alternate.nested.is_empty())
-        && holds_composite(&consequent.ty)
-        && holds_composite(&alternate.ty)
-    {
-        for branch in [&mut consequent, &mut alternate] {
-            let ty = std::mem::replace(&mut branch.ty, TypeExpr::Primitive(PrimitiveName::Any));
-            branch.ty = resolve_deferred(ty, &std::mem::take(&mut branch.nested));
-        }
-    }
+/// positions each branch nests stay addressable by their paths, which
+/// reach every object or array branch holding them: a read one branch's
+/// position widens widens at every branch's position of that path, so
+/// `c ? { v: s } : { v: 1 }` with `const s = "a"` is `{ v: string } | {
+/// v: number }`.
+fn join_branches(consequent: Typed, alternate: Typed) -> Typed {
     let regular: Vec<LiteralValue> = top_level_literals(&consequent.ty)
         .filter(|literal| !consequent.fresh.contains(literal))
         .chain(
@@ -762,18 +755,6 @@ fn join_branches(mut consequent: Typed, mut alternate: Typed) -> Typed {
         reads,
         nested,
     }
-}
-
-/// Whether `ty` is, or a member of the union it is, an object or array
-/// type.
-fn holds_composite(ty: &TypeExpr) -> bool {
-    let members: &[TypeExpr] = match ty {
-        TypeExpr::Union(members) => members,
-        other => std::slice::from_ref(other),
-    };
-    members
-        .iter()
-        .any(|member| matches!(member, TypeExpr::Object(_) | TypeExpr::Array { .. }))
 }
 
 /// The literals at `ty`'s top level: itself, or the members of the union
@@ -1158,11 +1139,11 @@ pub(super) struct ObjectFrame<'a> {
     as_type: bool,
     next: usize,
     members: Vec<ObjectMember>,
-    /// The positions the members nest, by the member's key.
+    /// The positions the members nest, by the member's key. A spread
+    /// leaves them addressable: a reader addresses a member by the
+    /// literal's own write of its key, which a later spread may override
+    /// but never rewrites.
     deferred: Vec<Deferred>,
-    /// Whether a spread contributes members: a later reader then addresses
-    /// no member by its key.
-    spread: bool,
     awaiting: Option<ObjectAwait<'a>>,
 }
 
@@ -1179,7 +1160,6 @@ impl<'a> ObjectFrame<'a> {
             next: 0,
             members: Vec::new(),
             deferred: Vec::new(),
-            spread: false,
             awaiting: None,
         }
     }
@@ -1305,12 +1285,9 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     };
                     data_member(key, property, ty, readonly)
                 }
-                ObjectAwait::Spread => {
-                    self.spread = true;
-                    ObjectMember::Spread(verter_type_expr::SpreadMember::new(
-                        delivered.into_position_type(budget),
-                    ))
-                }
+                ObjectAwait::Spread => ObjectMember::Spread(verter_type_expr::SpreadMember::new(
+                    delivered.into_position_type(budget),
+                )),
             };
             self.members.push(member);
         }
@@ -1389,7 +1366,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
             nested: std::mem::take(&mut self.deferred),
             ..Typed::plain(object)
         };
-        Ok(Step::Done(if self.as_type && !self.spread {
+        Ok(Step::Done(if self.as_type {
             Value::Typed(typed)
         } else {
             let resolved = typed.into_resolved();
