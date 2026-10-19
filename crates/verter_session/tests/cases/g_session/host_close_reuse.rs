@@ -17,11 +17,10 @@ use verter_type_engine::semantic_query_memo::node_roots::NodeRoot;
 use verter_type_engine::signature_kernel::{BorrowedSet, SemanticReadView, SignatureSetRef};
 
 /// Every host charges the one process account, so tests comparing account
-/// figures run one at a time.
-static PROCESS_ACCOUNT: Mutex<()> = Mutex::new(());
-
+/// figures run one at a time, under the lock the occupancy-window suite
+/// shares.
 fn serial() -> std::sync::MutexGuard<'static, ()> {
-    PROCESS_ACCOUNT
+    super::active_occupancy_window::PROCESS_ACCOUNT
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
