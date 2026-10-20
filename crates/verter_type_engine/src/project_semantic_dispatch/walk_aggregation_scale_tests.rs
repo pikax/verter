@@ -7,6 +7,7 @@ use super::{
     merge_intersection_surfaces_with_graph, merge_union_surfaces, merge_union_surfaces_for_macro,
     ShallowSurface, ShallowSurfaceEntry, ShallowSurfaceMember,
 };
+use crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter;
 use crate::semantic_query::{
     key_scan_comparisons_for_tests, AuthoredPropertyKey, CanonicalIndexInt, PrimitiveKind,
     SemanticNodeData,
@@ -93,10 +94,11 @@ fn merge(
     arms: &[Option<ShallowSurface>],
 ) -> ShallowSurface {
     let evidence = &mut Default::default();
+    let meter = ConstructionMeter::UNMETERED;
     match kind {
-        Merge::Intersection => merge_intersection_surfaces_with_graph(graph, arms, evidence),
-        Merge::UnionCommon => merge_union_surfaces(graph, arms, evidence),
-        Merge::UnionMacro => merge_union_surfaces_for_macro(graph, arms, evidence),
+        Merge::Intersection => merge_intersection_surfaces_with_graph(graph, arms, meter, evidence),
+        Merge::UnionCommon => merge_union_surfaces(graph, arms, meter, evidence),
+        Merge::UnionMacro => merge_union_surfaces_for_macro(graph, arms, meter, evidence),
     }
     .expect("two object arms merge")
 }

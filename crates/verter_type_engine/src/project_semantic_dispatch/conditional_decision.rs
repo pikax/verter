@@ -17,9 +17,10 @@ use rustc_hash::FxHashSet;
 use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
-    BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, OriginEdgeKind,
-    OriginMeta, PartialReason, ProjectionMode, ProjectionReductionContext, QueryError, QueryResult,
-    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
+    BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, LiteralValue,
+    OriginEdgeKind, OriginMeta, PartialReason, PrimitiveKind, ProjectionMode,
+    ProjectionReductionContext, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
+    SemanticQueryKey,
 };
 
 /// The free type variables below one semantic node, binder-aware: the type
@@ -457,11 +458,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// using the shared relation engine and returns one of:
         ///
         /// - **Distributive union check** — when `distributive == true` AND
-        ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
+        ///   `check` resolves to a union or `boolean`, the builder
         ///   distributes per-member by re-entering the dispatcher with
         ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
         ///   check: member, extends, true_branch, false_branch,
-        ///   distributive: false })` for every member, then combines the
+        ///   distributive: false })` for every member (`boolean` contributes
+        ///   `true` and `false`), then combines the
         ///   per-member results through
         ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
         ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
@@ -598,7 +600,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             && operand_read.value().0 == authored_check
             && !self.decision_waits()
         {
-            if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+            if let Some(arm) = self.true_through_written_arm(authored_check, extends, distributive)
+            {
                 // An arm relation that waits on a read proves nothing yet:
                 // the frame runs the decision again once it is delivered.
                 if self.decision_waits() {
@@ -830,6 +833,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
+        distributive: bool,
     ) -> Option<super::flow_return_fact::ObservedRead<super::dispatch_txn::RelationStep>> {
         let arms = match self.graph().node_data(extends).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc(),
@@ -844,7 +848,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         // Whether the check absorbs or distributes is read off the type it
         // names; that read is evidence of the decision only when complete.
-        let plain = self.observe_read(|| self.check_neither_absorbs_nor_distributes(check));
+        let plain =
+            self.observe_read(|| self.check_neither_absorbs_nor_distributes(check, distributive));
         if !plain.observations_are_complete() || !*plain.value() {
             let _ = plain.discard();
             return None;
@@ -874,8 +879,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// reference to an interface or a class names an object type. Every
     /// other check — a union, an intersection (`1 & Id<any>` is `any`), an
     /// indexed access, a `keyof`, a conditional, a template, a tuple, or a
-    /// name the lane cannot read completely — is not proven plain.
-    fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
+    /// name the lane cannot read completely — is not proven plain. Boolean
+    /// is plain only when the conditional is non-distributive.
+    fn check_neither_absorbs_nor_distributes(
+        &self,
+        check: SemanticNodeId,
+        distributive: bool,
+    ) -> bool {
         let named = match self.graph().node_data(check).as_deref() {
             Some(
                 SemanticNodeData::DeclRef { identity }
@@ -905,17 +915,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => check,
         };
         self.peek_special(named).is_none()
-            && matches!(
-                self.graph().node_data(named).as_deref(),
+            && match self.graph().node_data(named).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => !distributive,
                 Some(
                     SemanticNodeData::Primitive(_)
-                        | SemanticNodeData::Literal(_)
-                        | SemanticNodeData::EnumLiteral(_)
-                        | SemanticNodeData::Object(_)
-                        | SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Signature { .. }
-                )
-            )
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Signature { .. },
+                ) => true,
+                _ => false,
+            }
     }
 
     /// What a decision that waits on a read returns: a typed gap its frame
@@ -1456,7 +1467,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// CARRIER of a union (the defaulted-union type argument
     /// `T extends SingleOrMultiple = SingleOrMultiple` of reka-ui's
     /// `AccordionRootEmits`) distributes exactly like a raw `Union`
-    /// binding. The raw-`Union` fast path stays allocation-free; the
+    /// binding. `boolean` contributes its two literals, even inside a union;
+    /// unions without `boolean` retain their member slice without allocation. The
     /// carrier shapes resolve through the shared structural-fact demand
     /// primitive ([`Self::normalize_node_for_structural_fact_demand`] —
     /// the same `ResolveDecl` / `Instantiate` delegation the relation
@@ -1466,7 +1478,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///
     /// Fail-closed on BOTH rails: a `Partial` demand (budget / cycle /
     /// fault — the primitive folds the reasons into the active build
-    /// taint frame) and a resolved non-`Union` surface return `None`,
+    /// taint frame) and a resolved surface other than a union or `boolean` return `None`,
     /// deferring to the tri-state oracle path. `TypeParam` / `Infer`
     /// shells are STABLE STOPS of the deferred evaluator, so an OPEN
     /// generic check never distributes over its constraint or default —
@@ -1475,9 +1487,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         check: SemanticNodeId,
     ) -> Option<(SemanticNodeId, Arc<[SemanticNodeId]>)> {
+        let is_boolean = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+            )
+        };
+        let boolean_members = || {
+            [true, false].map(|value| {
+                self.graph()
+                    .intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+            })
+        };
         let union_members_of = |node: SemanticNodeId| {
             self.graph().node_data(node).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some((node, members.members_arc())),
+                SemanticNodeData::Primitive(PrimitiveKind::Boolean) => {
+                    Some((node, Arc::from(boolean_members())))
+                }
+                SemanticNodeData::Union(members) => {
+                    let Some(first_boolean) = members.iter().position(|&member| is_boolean(member))
+                    else {
+                        return Some((node, members.members_arc()));
+                    };
+                    let mut split = Vec::with_capacity(members.len() + 1);
+                    split.extend(members.iter().take(first_boolean).copied());
+                    for &member in members.iter().skip(first_boolean) {
+                        if is_boolean(member) {
+                            split.extend(boolean_members());
+                        } else {
+                            split.push(member);
+                        }
+                    }
+                    Some((node, Arc::from(split)))
+                }
                 _ => None,
             })
         };
