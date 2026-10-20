@@ -148,6 +148,11 @@ pub enum DeclaredReadStep {
         key: crate::TypePropertyKey,
         at: verter_span::Span,
     },
+    /// The member the authored property declared at `at` writes under a
+    /// computed key (`{ [k]: s }`), which only the key's resolution names.
+    ComputedMember {
+        at: verter_span::Span,
+    },
     Element,
 }
 

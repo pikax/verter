@@ -15,9 +15,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet, PrimitiveKind,
-    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceKeyProjection,
-    SurfaceMember,
+    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet,
+    PrimitiveKind, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
+    SurfaceKeyProjection, SurfaceMember, SurfaceView,
 };
 use verter_type_expr::{DeclaredReadPosition, DeclaredReadStep};
 
@@ -89,7 +89,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// `node` with the position `path` addresses rewritten by `rewrite`: an
-    /// object's member by its key and the authored property declaring it,
+    /// object's member by its key and the authored property declaring it
+    /// (by that property alone under a computed key),
     /// an array's element type, through each member of a union. A path that
     /// addresses nothing leaves `node` as it is.
     fn rewrite_declared_position(
@@ -117,22 +118,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.intern_normalized_union_or_intersection(&rewritten, true)
                 }
             }
-            (Some(SemanticNodeData::Object(surface)), DeclaredReadStep::Member { key, at }) => {
+            (
+                Some(SemanticNodeData::Object(surface)),
+                DeclaredReadStep::Member { .. } | DeclaredReadStep::ComputedMember { .. },
+            ) => {
                 let surface = surface.clone();
                 drop(data);
-                let SurfaceKeyProjection::Exact(member) = surface.project_known_key(key) else {
+                let Some(index) = addressed_member(&surface, step) else {
                     return node;
                 };
-                if !written_at(&member.spans, *at) {
-                    return node;
-                }
-                let Some(index) = surface
-                    .positive_members()
-                    .iter()
-                    .position(|candidate| std::ptr::eq(candidate, member))
-                else {
-                    return node;
-                };
+                let member = &surface.positive_members()[index];
                 let value = self.rewrite_declared_position(member.value, rest, rewrite);
                 if value == member.value {
                     return node;
@@ -156,7 +151,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // a spread's operand, which the object holds as its own.
             (
                 Some(SemanticNodeData::ObjectSpreadProgram(program)),
-                DeclaredReadStep::Member { key, at },
+                DeclaredReadStep::Member { .. } | DeclaredReadStep::ComputedMember { .. },
             ) => {
                 let mut effects: Vec<ObjectConstructionEffect> = program
                     .effects
@@ -168,8 +163,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 for effect in &mut effects {
                     match effect {
                         ObjectConstructionEffect::DirectProperty(property)
-                            if property.key.cloned_known().as_ref() == Some(key)
-                                && written_at(&property.spans, *at) =>
+                            if addresses(step, &property.key, &property.spans) =>
                         {
                             let value =
                                 self.rewrite_declared_position(property.value, rest, rewrite);
@@ -321,13 +315,49 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 }
 
-/// Whether the member `spans` locate is the one the authored property
-/// declared at `at` writes; a member without a declaration site is
-/// addressed by its key alone.
-fn written_at(spans: &verter_type_expr::MemberSpans, at: verter_span::Span) -> bool {
-    spans
-        .declaration
-        .is_none_or(|declaration| declaration == at)
+/// The index of the member of `surface` the member step `step` addresses
+/// ([`addresses`]).
+fn addressed_member(surface: &SurfaceView, step: &DeclaredReadStep) -> Option<usize> {
+    let member = match step {
+        DeclaredReadStep::Member { key, .. } => match surface.project_known_key(key) {
+            SurfaceKeyProjection::Exact(member) => member,
+            _ => return None,
+        },
+        DeclaredReadStep::ComputedMember { at } => surface
+            .positive_members()
+            .iter()
+            .find(|member| member.spans.declaration == Some(*at))?,
+        DeclaredReadStep::Element => return None,
+    };
+    if !addresses(step, &member.key, &member.spans) {
+        return None;
+    }
+    surface
+        .positive_members()
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, member))
+}
+
+/// Whether the member step `step` addresses the member of `key` that
+/// `spans` locate: a member of the step's key the authored property
+/// declared at its site writes — a member without a declaration site is
+/// addressed by its key alone — or, under a computed key, the member that
+/// property writes, whatever its key resolves to.
+fn addresses(
+    step: &DeclaredReadStep,
+    key: &AuthoredPropertyKey,
+    spans: &verter_type_expr::MemberSpans,
+) -> bool {
+    match step {
+        DeclaredReadStep::Member { key: step_key, at } => {
+            key.cloned_known().as_ref() == Some(step_key)
+                && spans
+                    .declaration
+                    .is_none_or(|declaration| declaration == *at)
+        }
+        DeclaredReadStep::ComputedMember { at } => spans.declaration == Some(*at),
+        DeclaredReadStep::Element => false,
+    }
 }
 
 /// Whether `a` and `b` are the same literal type, whatever scope each

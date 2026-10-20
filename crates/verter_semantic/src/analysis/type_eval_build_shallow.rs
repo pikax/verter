@@ -144,7 +144,8 @@ fn resolve_deferred(mut ty: TypeExpr, positions: &[Deferred]) -> TypeExpr {
 }
 
 /// `ty` with the position `path` addresses rewritten by `rewrite`: an
-/// object member by its known key and authored declaration, inside the
+/// object member by its known key and authored declaration, or by its
+/// authored declaration alone under a computed key, inside the
 /// operand of a spread the object holds as well, an array's element type,
 /// through each member of a union.
 fn rewrite_at(
@@ -162,13 +163,19 @@ fn rewrite_at(
                 .map(|member| rewrite_at(member.clone(), path, rewrite))
                 .collect(),
         ),
-        (TypeExpr::Object(object), DeclaredReadStep::Member { key, at }) => {
+        (
+            TypeExpr::Object(object),
+            DeclaredReadStep::Member { .. } | DeclaredReadStep::ComputedMember { .. },
+        ) => {
             let mut object = Arc::clone(object);
             for member in &mut Arc::make_mut(&mut object).properties {
                 let (slot, rest) = match member {
                     ObjectMember::Property(property)
-                        if property.key.cloned_known().as_ref() == Some(key)
-                            && written_at(&property.spans, *at) =>
+                        if addresses(
+                            step,
+                            property.key.cloned_known().as_ref(),
+                            &property.spans,
+                        ) =>
                     {
                         (&mut property.ty, rest)
                     }
@@ -188,13 +195,26 @@ fn rewrite_at(
     }
 }
 
-/// Whether the member `spans` locate is the one the authored property
-/// declared at `at` writes; a member without a declaration site is
-/// addressed by its key alone.
-fn written_at(spans: &verter_type_expr::MemberSpans, at: verter_span::Span) -> bool {
-    spans
-        .declaration
-        .is_none_or(|declaration| declaration == at)
+/// Whether the member step `step` addresses the member of the known key
+/// `key` that `spans` locate: a member of the step's key the authored
+/// property declared at its site writes — a member without a declaration
+/// site addressed by its key alone — or, under a computed key, the member
+/// that property writes whatever its key.
+fn addresses(
+    step: &DeclaredReadStep,
+    key: Option<&verter_type_expr::TypePropertyKey>,
+    spans: &verter_type_expr::MemberSpans,
+) -> bool {
+    match step {
+        DeclaredReadStep::Member { key: step_key, at } => {
+            key == Some(step_key)
+                && spans
+                    .declaration
+                    .is_none_or(|declaration| declaration == *at)
+        }
+        DeclaredReadStep::ComputedMember { at } => spans.declaration == Some(*at),
+        DeclaredReadStep::Element => false,
+    }
 }
 
 impl Value {
@@ -1306,7 +1326,8 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     readonly,
                 } => {
                     let mut value = delivered.into_typed().into_position(budget);
-                    let ty = match key.cloned_known() {
+                    let at = verter_span::Span::new(property.span.start, property.span.end);
+                    let step = match key.cloned_known() {
                         Some(known) => {
                             // A later member of the same key is the one the
                             // object holds.
@@ -1316,16 +1337,12 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                                     Some(DeclaredReadStep::Member { key, .. }) if *key == known
                                 )
                             });
-                            let step = DeclaredReadStep::Member {
-                                key: known,
-                                at: verter_span::Span::new(property.span.start, property.span.end),
-                            };
-                            self.deferred.extend(value.nested_under(&step));
-                            value.ty
+                            DeclaredReadStep::Member { key: known, at }
                         }
-                        None => value.into_resolved(),
+                        None => DeclaredReadStep::ComputedMember { at },
                     };
-                    data_member(key, property, ty, readonly)
+                    self.deferred.extend(value.nested_under(&step));
+                    data_member(key, property, value.ty, readonly)
                 }
                 // The operand's members are the object's own: the positions
                 // they nest stay addressable by their authored declarations.
@@ -1337,7 +1354,10 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                             .partition(|deferred| {
                                 matches!(
                                     deferred.path.first(),
-                                    Some(DeclaredReadStep::Member { .. })
+                                    Some(
+                                        DeclaredReadStep::Member { .. }
+                                            | DeclaredReadStep::ComputedMember { .. }
+                                    )
                                 )
                             });
                     operand.nested = own;

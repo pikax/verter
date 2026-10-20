@@ -617,7 +617,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 fresh
             };
         }
-        match self.literal_context_of(node, contexts, declared) {
+        // A position whose contextual type is a `const` type parameter is a
+        // const context (`isConstContext`), whose fresh literals are written
+        // as they are whatever the parameter's constraint, and every
+        // parameter the contextual type names keeps them (`f<const T>(x: {
+        // v: T })` over `{ v: "a" }` is `"a"`). The parameter is no literal
+        // context by itself (`isLiteralOfContextualType`).
+        let context = if position.const_context
+            || contexts
+                .iter()
+                .any(|&contextual| self.is_const_type_variable(contextual, declared))
+        {
+            LiteralContext::Keep
+        } else {
+            self.literal_context_of(node, contexts, declared)
+        };
+        match context {
             LiteralContext::Keep => {
                 for decl in declared {
                     if position.through.contains(&decl.param)
