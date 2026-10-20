@@ -79,6 +79,9 @@ impl KeySpaceDomain {
     pub(super) fn is_finite(&self) -> bool {
         self.broad.is_empty()
     }
+    pub(super) fn literal_keys(&self) -> &[KeyDomainKey] {
+        &self.keys
+    }
     pub(super) fn membership(&self, key: &PropertyKey) -> Option<bool> {
         if self.members.contains(key) {
             return Some(true);

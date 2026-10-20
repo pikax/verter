@@ -2870,6 +2870,30 @@ construction_ordinal_seam! {
     }
 }
 
+construction_ordinal_seam! {
+    /// TypeScript's modifiers type for a mapping over the lowered key source
+    /// `key_source` that is not written `keyof X`
+    /// ([`MapperKey::modifiers_type`]): when the key source is a type
+    /// parameter constrained to `keyof X`, `X`; otherwise none.
+    #[must_use]
+    fn modifiers_type_of_key_parameter(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        key_source: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let constraint = match graph.node_data(key_source).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
+        };
+        match graph.node_data(constraint).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => Some(*base),
+            _ => None,
+        }
+    }
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2901,6 +2925,14 @@ pub struct MapperKey {
     /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
     /// that type's own keys.
     pub over_type_variable: bool,
+    /// TypeScript's modifiers type (`getModifiersTypeFromMappedType`) when it
+    /// is not `source`: for a mapping whose key source is a type parameter
+    /// constrained to `keyof X` (`{ [P in K]: X[P] }` with `K extends keyof
+    /// X`, the shape of `Pick`), `X` or the type that instantiated it. Each
+    /// produced property keeps the `readonly` and `?` of `X`'s member under a
+    /// `Keep` modifier. `None` for a `keyof` mapping, whose modifiers type is
+    /// `source`, and for any other key source, which has none.
+    pub modifiers_type: Option<SemanticNodeId>,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -10527,6 +10559,28 @@ impl ObjectSpreadProgram {
 }
 
 impl ObjectConstructionEffect {
+    /// This effect's child in its slot `slot` (`0` or `1`), in
+    /// [`Self::for_each_child_node`] order: a computed or index key first,
+    /// then the value. A one-child effect holds it in slot `1`.
+    fn child_in_slot(&self, slot: usize) -> Option<SemanticNodeId> {
+        match (self, slot) {
+            (Self::DirectProperty(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectProperty(effect), _) => Some(effect.value),
+            (Self::DirectMethod(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectMethod(effect), _) => Some(effect.signature),
+            (Self::DirectGet(effect) | Self::DirectSet(effect), 0) => {
+                authored_property_key_child(&effect.key)
+            }
+            (Self::DirectGet(effect) | Self::DirectSet(effect), _) => Some(effect.signature),
+            (Self::DirectIndex(effect), 0) => Some(effect.key_type),
+            (Self::DirectIndex(effect), _) => Some(effect.value_type),
+            (Self::DirectCall(_) | Self::DirectConstruct(_) | Self::Spread(_), 0) => None,
+            (Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node), _) => {
+                Some(*node)
+            }
+        }
+    }
+
     fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
@@ -10576,6 +10630,22 @@ impl ObjectSpreadProgram {
     pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
         for effect in self.effects.iter() {
             effect.for_each_child_node(&mut visit);
+        }
+    }
+
+    /// The first child at or after cursor slot `slot`, with the slot it
+    /// occupies; `None` past the last child. Effect `e` owns two slots,
+    /// `2e` and `2e + 1`, holding its children in [`Self::child_nodes`]
+    /// order and vacant where it has fewer, so a child is found without
+    /// counting the children of the effects before it.
+    pub fn child_at_slot(&self, slot: usize) -> Option<(usize, SemanticNodeId)> {
+        let mut slot = slot;
+        loop {
+            let effect = self.effects.get(slot / 2)?;
+            if let Some(child) = effect.child_in_slot(slot % 2) {
+                return Some((slot, child));
+            }
+            slot += 1;
         }
     }
 

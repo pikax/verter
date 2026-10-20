@@ -3026,6 +3026,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             crate::semantic_query::PathSegment::Index(_) => return None,
         };
         let identity = self.flow_return_callee_for_typeof_arg(callee_arg)?;
+        // A completed whole return already satisfies this member demand.
+        // Let the ordinary utility unwrap and PathWalker consume that value
+        // rather than planning the same body's effects once per member.
+        // Probe only validated, already completed work: a lone member demand
+        // must never trigger whole-body inference, and an unfinished whole
+        // return cannot replace the member's independent proof.
+        let whole_key = self.flow_return_key_for(&identity);
+        let whole = self.observe_read(|| {
+            if self
+                .dispatch_txn
+                .borrow()
+                .reentry()
+                .find(&ObligationIdentity::FlowReturn(whole_key.clone()))
+                .is_some()
+            {
+                return None;
+            }
+            self.warm_flow_return_read(&whole_key)
+                .or_else(|| self.reusable_completed_flow_member(&whole_key))
+        });
+        let complete = whole.observations_are_complete()
+            && whole
+                .value()
+                .as_ref()
+                .is_some_and(|result| result.fact().status().is_complete());
+        // The fall-through owns its fact replay and completion rails.
+        let _ = whole.discard();
+        if complete {
+            return None;
+        }
         // The member demand rides the CANONICAL identity point plus the
         // authored member path — the only demand shape the proof planner
         // represents. (The evaluator reads only the path; the walker's
