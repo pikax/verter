@@ -32,7 +32,7 @@ use verter_type_expr::{ObjectMember, TypeExpr};
 const SCENARIO: &str = "/expand/scenario.ts";
 
 /// The work a demand did, by the counters a growth proof compares.
-type Work = [(&'static str, u64); 3];
+type Work<const N: usize = 3> = [(&'static str, u64); N];
 
 /// A named demand's wire answer and the work it took.
 struct Answer {
@@ -219,10 +219,10 @@ fn assert_properties(label: &str, answer: &TypeExpr, expected: BTreeMap<String, 
 /// Between a size and a larger one each work counter may grow at most 1.5
 /// times faster than the input: a quadratic term grows with the square of
 /// the step.
-fn assert_linear_growth(
+fn assert_linear_growth<const N: usize>(
     label: &str,
-    (small, before): (usize, Work),
-    (large, after): (usize, Work),
+    (small, before): (usize, Work<N>),
+    (large, after): (usize, Work<N>),
 ) {
     for ((what, before), (_, after)) in before.into_iter().zip(after) {
         println!("{label}: {what} {before} at {small}, {after} at {large}");
@@ -269,9 +269,13 @@ fn setup_store_remap_answers_and_grows_linearly() {
             display(&answer.answer),
             "readonly [number] | readonly [string]"
         );
-        let mut work = answer.work;
-        work[1] = ("key remaps", answer.name_remaps);
-        work[2] = ("flow obligations", answer.flow_obligations);
+        let work = [
+            answer.work[0],
+            answer.work[1],
+            answer.work[2],
+            ("key remaps", answer.name_remaps),
+            ("flow obligations", answer.flow_obligations),
+        ];
         (count, work)
     });
     assert_linear_growth("setup store", work[0], work[1]);
