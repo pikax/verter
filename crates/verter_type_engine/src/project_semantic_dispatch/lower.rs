@@ -2574,8 +2574,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // arguments until the shared relation authority consumes
                 // them. Eager expansion here would compare object bodies
                 // instead of applying the generic's variance annotations.
-                // Only the selected branch uses the publication demand.
-                let relation_input_context = Self::conditional_operand_context(reduction_context);
+                // The check consumes its value at the caller's demand; the
+                // target pattern stays structural. The selected branch keeps
+                // the caller's publication context.
+                let check_context = Self::conditional_operand_context(reduction_context);
+                let extends_context = Self::conditional_target_context(reduction_context);
                 let check_id = self.lower_type_expr_with_infer_factory(
                     infer_binders,
                     check,
@@ -2585,7 +2588,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     shadowing,
                     substitutions,
-                    relation_input_context,
+                    check_context,
                 );
                 let extends_path = infer_binders.path_for_expr(expr).child(
                     crate::semantic_query::infer_binder_names::
@@ -2618,7 +2621,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 scope_payload,
                                 shadowing,
                                 substitutions,
-                                relation_input_context,
+                                extends_context,
                             )
                         });
                         let declaration = graph.intern_node_with_scope(
@@ -2644,7 +2647,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     shadowing,
                     substitutions,
-                    relation_input_context,
+                    extends_context,
                 );
                 let mut lowered = [None, None];
                 let output = self.build_conditional_from_lowering(

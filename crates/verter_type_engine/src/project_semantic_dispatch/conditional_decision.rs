@@ -434,10 +434,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         } else {
             ProjectionMode::Navigate
         };
-        // Operators still answer at the caller's demand: an unread indexed
-        // value must not become a reflexive relation fact merely because its
-        // carrier is identical on both sides.
+        // The check consumes its selected value: an unread indexed carrier
+        // cannot prove a reflexive relation merely by node identity.
         context.with_mode(mode)
+    }
+
+    /// An extends pattern keeps its operators structural until the relation
+    /// demands them, without publishing nested mapped members.
+    pub(super) fn conditional_target_context(
+        context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        let context = Self::conditional_operand_context(context);
+        context.into_structural_transit_with_mode(context.mode)
     }
 
     construction_ordinal_seam! {
@@ -2006,7 +2014,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
-    fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
+    pub(super) fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
         let summary = self.free_type_variables(node);
         summary.params.is_some() || summary.infer_ref
     }

@@ -4822,6 +4822,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<RelationResult> {
         const MAX_DISCRIMINATED_COMBINATIONS: usize = 25;
         let graph = self.graph();
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(source) => source,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
         let source_view = match graph.node_data(source)?.as_ref() {
             SemanticNodeData::Object(view) => view.clone(),
             _ => return None,
@@ -8145,7 +8149,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // throughout: `[marker]` is no more `[marker]` than the marker is
         // itself.
         let identical_unread = source == target && self.graph().node_reaches_unresolved(source);
-        (marker(source) || marker(target) || identical_unread) && !top(target)
+        let source_marker = marker(source);
+        // A declaration carrier against composition is a plan to read that
+        // declaration in each arm, rather than a fact about an unread value.
+        let source_distributes = source_marker
+            && self.graph().node_data(source).is_some_and(|source| {
+                self.graph()
+                    .node_data(target)
+                    .is_some_and(|target| declaration_source_distributes(&source, &target))
+            });
+        ((source_marker && !source_distributes) || marker(target) || identical_unread)
+            && !top(target)
     }
 
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
@@ -8358,16 +8372,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let _ = concrete_read.discard();
             return result;
         }
-        // An alias application on one side stands for the type its body
-        // instantiates to: a reference to the other side's declaration
-        // relates by type arguments as that reference would.
-        let through_alias = [
-            self.alias_application_reference_to(source, target)
-                .map(|resolved| (resolved, target)),
-            self.alias_application_reference_to(target, source)
-                .map(|resolved| (source, resolved)),
-        ];
-        for (source, target) in through_alias.into_iter().flatten() {
+        // Alias applications on either side stand for the references their
+        // bodies instantiate to. Normalize both before comparing arguments.
+        let through_alias = (
+            self.declaration_reference_for_relation(source)
+                .unwrap_or(source),
+            self.declaration_reference_for_relation(target)
+                .unwrap_or(target),
+        );
+        if through_alias != (source, target) {
+            let (source, target) = through_alias;
             if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
                 let _ = concrete_read.discard();
                 return result;
@@ -8402,10 +8416,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
+        // A target composition still needs the source's declaration at each
+        // arm: unwrapping it now would bypass same-generic variance there.
+        // A source composition keeps its existing distribution order.
+        let target_composition = source != concrete[0]
+            && matches!(
+                self.graph().node_data(concrete[1]).as_deref(),
+                Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+            );
+        let source_reference = if target_composition {
+            self.reference_operand_for_relation(source)
+                .unwrap_or(source)
+        } else {
+            source
+        };
+        let preserve_source_reference = target_composition
+            && self
+                .graph()
+                .node_data(source_reference)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
+            && matches!(
+                self.graph().node_data(concrete[0]).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                )
+            );
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
         // verbatim and resolves at the bound's own demand points).
         let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(_) if preserve_source_reference => source_reference,
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
@@ -15099,15 +15143,20 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 && !(matches!(data, SemanticNodeData::TemplateLiteral { .. })
                     && self.template_is_settled(node))
         };
+        // The canonical frame retained this declaration so composition can
+        // distribute before each arm demands its arguments or structure.
+        let reference_source_distributes =
+            declaration_source_distributes(&source_data, &target_data);
         if !nominal_defers_gate
-            && (deferred(source, &source_data) || deferred(target, &target_data))
+            && ((deferred(source, &source_data) && !reference_source_distributes)
+                || deferred(target, &target_data))
         {
             results.push(RelationResult::Unknown);
             return;
         }
 
         // ── Remaining opaque carriers → Unknown ────────────────────────
-        if matches!(&*source_data, SemanticNodeData::Opaque(_))
+        if (matches!(&*source_data, SemanticNodeData::Opaque(_)) && !reference_source_distributes)
             || matches!(&*target_data, SemanticNodeData::Opaque(_))
         {
             results.push(RelationResult::Unknown);
@@ -15634,14 +15683,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> bool {
         let graph = self.graph();
         [source, target].into_iter().any(|node| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(
-                    SemanticNodeData::DeclRef { .. }
-                        | SemanticNodeData::InstantiationRef { .. }
-                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                )
-            )
+            graph
+                .node_data(node)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
         })
     }
 }

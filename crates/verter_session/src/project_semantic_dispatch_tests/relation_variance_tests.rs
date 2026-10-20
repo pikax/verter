@@ -59,6 +59,113 @@ fn authored_variance_annotations_decide_same_generic_relations() {
     }
 }
 
+#[test]
+fn transparent_aliases_preserve_annotated_generic_relations() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type Alias<T> = Cell<T>;\n\
+         type Chain<T> = Alias<T>;\n\
+         type Narrow = Alias<'a'>;\n\
+         type Broad = Alias<string>;\n",
+        &[
+            ("Alias<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Alias<string> extends Alias<'a'> ? 1 : 0", "0"),
+            ("Alias<'a'> extends Alias<'a'> ? 1 : 0", "1"),
+            ("Chain<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Alias<'a'> extends Cell<string> ? 1 : 0", "0"),
+            ("Cell<'a'> extends Alias<string> ? 1 : 0", "0"),
+            ("Narrow extends Broad ? 1 : 0", "0"),
+            ("[Alias<'a'>] extends [Alias<string>] ? 1 : 0", "0"),
+            (
+                "{ value: Alias<'a'> } extends { value: Alias<string> } ? 1 : 0",
+                "0",
+            ),
+            ("Alias<'a'> extends { get(): string } ? 1 : 0", "1"),
+            ("{ get(): 'a' } extends Alias<string> ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn composite_targets_preserve_annotated_generic_relations() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type UnionTarget = Cell<string> | number;\n\
+         type IntersectionTarget = Cell<string> & { get(): string };\n\
+         type SourceUnion = Cell<'a'> | Cell<'b'>;\n\
+         interface ValueCell<in out T> { v: T }\n\
+         interface IndexedSource { value: { cell: Cell<'a'> }['cell'] }\n\
+         interface RecursiveCell<in out T> { next: RecursiveCell<T> | number }\n\
+         interface DefaultRecursiveCell<in out T = string> { next: DefaultRecursiveCell | number }\n",
+        &[
+            ("Cell<'a'> extends Cell<string> | number ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<string> & { get(): string } ? 1 : 0", "0"),
+            ("Cell<'a'> extends UnionTarget ? 1 : 0", "0"),
+            ("Cell<'a'> extends IntersectionTarget ? 1 : 0", "0"),
+            ("Cell<'a'> extends Cell<'a'> | number ? 1 : 0", "1"),
+            ("Cell<'a'> extends Cell<'a'> & { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> extends Cell<string> | { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> extends { get(): string } & { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> | Cell<'b'> extends Cell<string> | number ? 1 : 0", "0"),
+            ("{ get(): 'a' } extends Cell<string> | number ? 1 : 0", "1"),
+            ("Cell<'a'> extends (Cell<string> | number) & { get(): string } ? 1 : 0", "0"),
+            ("SourceUnion extends Cell<'a'> | Cell<'b'> | number ? 1 : 0", "1"),
+            ("ValueCell<'a' | 'b'> extends ValueCell<'a'> | ValueCell<'b'> ? 1 : 0", "1"),
+            ("ValueCell<'a'> extends ValueCell<string> | number ? 1 : 0", "0"),
+            ("{ cell: Cell<'a'> }['cell'] extends Cell<string> | number ? 1 : 0", "0"),
+            ("IndexedSource extends { value: Cell<string> | number } ? 1 : 0", "0"),
+            ("RecursiveCell<'a'> extends { next: RecursiveCell<string> | number } ? 1 : 0", "0"),
+            ("DefaultRecursiveCell<'a'> extends { next: DefaultRecursiveCell<'a'> | number } ? 1 : 0", "0"),
+        ],
+    );
+}
+
+#[test]
+fn unannotated_variance_survives_named_publication() {
+    assert_named_answers(
+        "interface Co<T> { v: T }\n\
+         interface Contra<T> { f: (x: T) => void }\n\
+         interface Bi<T> { m(x: T): void }\n\
+         interface Ind<T> { n: number }\n\
+         interface Unm<T> { v: { [K in keyof T]-?: T[K] } }\n",
+        &[
+            ("Co<'a'> extends Co<string> ? 1 : 0", "1"),
+            ("Co<string> extends Co<'a'> ? 1 : 0", "0"),
+            ("Contra<string> extends Contra<'a'> ? 1 : 0", "1"),
+            ("Contra<'a'> extends Contra<string> ? 1 : 0", "0"),
+            ("Bi<'a'> extends Bi<string> ? 1 : 0", "1"),
+            ("Bi<string> extends Bi<'a'> ? 1 : 0", "1"),
+            ("Bi<string> extends Bi<number> ? 1 : 0", "0"),
+            ("Ind<string> extends Ind<number> ? 1 : 0", "1"),
+            (
+                "Unm<{ a?: number }> extends Unm<{ a: number }> ? 1 : 0",
+                "1",
+            ),
+            ("Co<'a' | 'b'> extends { v: 'a' } | { v: 'b' } ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn fixed_annotations_are_checked_before_inference() {
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         interface Mixed<in out T, U> { value: T; other: U }\n",
+        &[
+            (
+                "Cell<'a'> extends Cell<string> | { other: infer U } ? 1 : 0",
+                "0",
+            ),
+            (
+                "Cell<'a'> extends Cell<'a'> | { other: infer U } ? 1 : 0",
+                "1",
+            ),
+            ("Mixed<'a', 1> extends Mixed<string, infer U> ? U : 0", "0"),
+            ("Mixed<'a', 1> extends Mixed<'a', infer U> ? U : 0", "1"),
+        ],
+    );
+}
+
 /// Demand aliases through the publication path used by the benchmark. Flow
 /// return probes lower their annotations as carriers and do not exercise the
 /// eager declaration-body lowering used by a named expanded demand.

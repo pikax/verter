@@ -943,7 +943,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context,
                     data,
                 } => {
-                    let extends_context = Self::conditional_operand_context(context);
+                    let extends_context = Self::conditional_target_context(context);
                     let SemanticNodeData::Conditional { extends, .. } = data.as_ref() else {
                         unreachable!("conditional staging frame must carry a conditional")
                     };

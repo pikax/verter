@@ -36,9 +36,11 @@ Concrete expectations:
 Conditional syntax lowering and graph-native view projection share
 `conditional_operand_context`: both relation operands use `Navigate` mode (or
 `Skeleton` for a skeleton demand), preserving declaration identity and type
-arguments for the shared relation authority. The caller's operator demand stays
-intact so unread indexed values cannot prove a reflexive relation by carrier
-identity. The selected branch retains the caller's publication context. Eagerly
+arguments for the shared relation authority. The check retains the caller's
+value demand so an unread indexed carrier cannot prove a reflexive relation.
+The extends pattern uses structural transit, so its nested mapped operators
+do not publish members while a decision reads its inputs. The selected branch
+retains the caller's publication context. Eagerly
 expanding an operand into its object body would bypass
 same-generic variance: `Cell<'a'> extends Cell<string>` is false for
 `interface Cell<in out T> { get(): T }`, despite the covariant member surface.
@@ -48,6 +50,20 @@ unannotated parameters. `authored_variance_annotations_decide_same_generic_relat
 checks named publication and warm reuse for interfaces, classes and aliases in
 all four strictness settings. Flow-return probes alone do not exercise the
 publication lowering context.
+
+Transparent alias applications normalize independently on both sides before
+same-generic argument comparison. Target unions and intersections retain a
+declaration source until each arm is related; a source that itself names a
+composition keeps the ordinary source-distribution order. Structural targets
+continue to compare member shapes, and discriminant fallback reads the source
+structure after ordinary target-arm comparisons. Selected indexed references
+and recursive declaration carriers retain their identity through composition.
+Within an inference session, fixed annotated arguments are checked before
+candidate collection; other arguments keep the ordinary inference path and
+unannotated parameters keep their existing variance computation.
+Named-publication tests cover these paths
+and unannotated covariance, contravariance, bivariance, independent parameters
+and unmeasurable-variance fallback, including warm reuse.
 
 A conditional is decided by relating its operands as the checker relates them; a decision is only as exact as the operands' shapes. The rules below keep the operand shapes a branch selection reads checker-faithful.
 

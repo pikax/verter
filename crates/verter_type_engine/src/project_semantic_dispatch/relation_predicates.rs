@@ -17,7 +17,8 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    InferBinding, LiteralValue, PrimitiveKind, RelationResult, SemanticNodeData, SemanticNodeId,
+    InferBinding, LiteralValue, PrimitiveKind, QueryError, RelationResult, SemanticNodeData,
+    SemanticNodeId,
 };
 use crate::semantic_query_memo::SemanticGraphStore;
 
@@ -25,6 +26,30 @@ pub(super) fn assignable(bindings: &[InferBinding]) -> RelationResult {
     RelationResult::Assignable {
         bindings: Arc::from(bindings.to_vec().into_boxed_slice()),
     }
+}
+
+/// References whose declaration identity must survive composition until an
+/// individual relation arm consumes it, including lowering-time self refs.
+pub(super) fn is_declaration_reference(data: &SemanticNodeData) -> bool {
+    matches!(
+        data,
+        SemanticNodeData::DeclRef { .. }
+            | SemanticNodeData::InstantiationRef { .. }
+            | SemanticNodeData::Opaque(
+                QueryError::DeclPlaceholder { .. } | QueryError::RecursiveRef { .. }
+            )
+    )
+}
+
+pub(super) fn declaration_source_distributes(
+    source: &SemanticNodeData,
+    target: &SemanticNodeData,
+) -> bool {
+    is_declaration_reference(source)
+        && matches!(
+            target,
+            SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)
+        )
 }
 
 pub fn is_deferred(data: &SemanticNodeData) -> bool {
