@@ -278,6 +278,10 @@ Statement-position calls take the same discipline: a callee is inert only when i
 
 Gap COUNT cannot discriminate these defects — a modeled fact and a proved-inert fact both mint zero gaps — so a regression test for this contract must assert the lowered guard SHAPE or the boundary degradation, never the gap count alone.
 
+### Guard-Chain Cost
+
+A chain of guards over one union subject (`instanceof`, `in`, a user type predicate, a discriminant equality) enumerates the subject's remaining arms at every guard, as the checker's `filterType` does. Everything an arm costs beyond that enumeration is paid once per root evaluation, never once per guard: the evaluator's `SharedEvaluationMemo`s (shared with nested evaluators like `declared_type_reads`) hold each arm's identity-carrier unwrap (`carrier_unwrap`, read by union enumeration and `in` presence), each arm's discriminant member (`discriminant_member`) and each predicate relation (`narrowing_assignable`, which both edges of a guard share). Two per-guard rules keep the remaining work proportional to the arms: an `instanceof` positive edge takes the union-level fallback's relations only when no arm survives by heritage, and a discriminant test answers an arm whose tag is one of the narrowed literal tags by membership rather than a relation per remaining tag. A user predicate still relates each remaining arm to its target once per guard — the checker's own `getNarrowedType` cost. `narrowing_chain_growth_tests` holds the growth proofs on work counters.
+
 ### Positional Element Reads
 
 A numeric key of an array, a tuple or a string is the checker's indexed access by the key's type, in expression position and in a declared type alike.
