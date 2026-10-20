@@ -6055,6 +6055,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // Identity / Navigate / Skeleton retain their bare carriers —
         // those modes' contracts promise no terminal-surface synthesis.
         if matches!(self.mode(), ProjectionMode::Expanded) {
+            // A TypeOf read already projects its terminal in the caller's
+            // mode. Expanding that answer again would open a nominal class
+            // reference returned by a value (`new C()` is C, not its body).
+            let typeof_owns_terminal_projection = self.original_path_non_empty
+                && matches!(
+                    self.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::TypeOf(_))
+                );
             // Path-precision: when this is a NON-EMPTY projected path,
             // the terminal value is a projected segment result. A
             // terminal `DeclRef` / `InstantiationRef` carrier
@@ -6068,7 +6076,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.original_path_non_empty {
                 current = self.resolve_expanded_terminal_carrier(current);
             }
-            current = self.expand_empty_path_terminal(current);
+            if !typeof_owns_terminal_projection {
+                current = self.expand_empty_path_terminal(current);
+            }
             if self.original_path_non_empty {
                 // Terminal-surface carrier PRESENTATION: the demanded
                 // terminal projection materialises its own surface one

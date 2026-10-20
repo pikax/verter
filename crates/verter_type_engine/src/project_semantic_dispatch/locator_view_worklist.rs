@@ -605,11 +605,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.recursive_ref_sentinel(identity, Arc::from([])),
                     );
                 }
-                // A demanded alias is transparent to navigation. Resolve it
-                // on this worklist before an index selects its value; aliases
-                // in member-value positions still keep their references.
+                // Only an indexed-access object demands the alias's value in
+                // navigation. Ordinary alias reads keep their reference
+                // carriers, including the back-edges used by cycle readers.
                 if context.mode == ProjectionMode::Navigate
                     && !self.in_deferred_interior(ancestors)
+                    && ancestors.iter().any(|frame| {
+                        matches!(frame,
+                            ProjectionFrame::CompositeResume { data, next_child: 1, .. }
+                                if matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }))
+                    })
                     && matches!(
                         self.prepared_decl_kind(identity),
                         Some(verter_session_query::declarations::TypeDeclKind::Alias)
