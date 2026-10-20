@@ -205,6 +205,9 @@ Inferred value declarations also run the shared
 answer, on both the located-body and expression-source paths. Array element
 unions and conditional results therefore receive the same optional `undefined`
 properties as return/yield joins, including nested literal siblings. Authored
+computed keys use shared index-key resolution before literal eligibility and
+matching. Spread-built siblings supply same-property nested contexts without
+contributing their outer keys to missing-property padding. Authored
 annotations and non-literal object types keep their own shapes. Nonempty
 literals carry provenance on their members; the transient `ObjectExpr` carries
 `empty_literal` for an empty source literal, which lowers to a zero-effect
@@ -318,6 +321,8 @@ Classification rules, each of which exists because the checker narrows through t
 A `switch` clause's relation is `SliceSwitchTest::{Default, Literal, Unmodeled}`, never an optional literal — an optional conflates an absent test with an unrecognized one, and the evaluator acted on that conflation by routing an unrecognized clause onto the DEFAULT dispatch edge, whose remainder is not that clause's reaching set. That produced a WRONG VALUE rather than a superset. The modeled dispatch is exactly one shape: a represented discriminant against a literal case relation. An `Unmodeled` clause applies no dispatch narrow, never takes the default edge, and is excluded from the exhaustiveness remainder — leaving that remainder a superset, the sound direction.
 
 Statement-position calls take the same discipline: a callee is inert only when it is a closed same-file declaration that is not an assertion and provably completes; a proven non-returning callee ends the path; every other call degrades rather than lowering to a bare throw point with its argument dropped.
+
+An entered call of a closed same-file assertion lowers to `SliceStatement::Assertion { claim, call }`. A reference argument is `SliceAssertionClaim::Reference` (the predicate target, or truthiness for a targetless `asserts x`). A targetless `asserts x` whose argument is not a reference (`assert(typeof z === "string")`) is `SliceAssertionClaim::Condition`: the argument classifies through the same guard authority as an `if` test, and its positive reading lands for the rest of the region (the checker's `narrowTypeByAssertion` → `narrowType(…, assumeTrue)`); an unexpressible condition takes the `GuardNarrowing` gap. A `SliceStatement::CalleeEffect` (a callee whose declared signatures decide the effect) carries each non-reference argument as a `SliceAssertionCondition` the same way: a call-free condition's guard, applied when the effects signature is a targetless `asserts x`, or `Unexpressible` (a condition holding a call), which then takes the gap. A call of a binding (`SliceCall::OnBinding`) reads the narrowing standing on it, so `typeof f === "function"` leaves `f()` calling the callable arms.
 
 Gap COUNT cannot discriminate these defects — a modeled fact and a proved-inert fact both mint zero gaps — so a regression test for this contract must assert the lowered guard SHAPE or the boundary degradation, never the gap count alone.
 

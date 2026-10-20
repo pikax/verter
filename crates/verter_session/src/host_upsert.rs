@@ -1,7 +1,7 @@
 //! `impl VerterHost` — source upsert methods.
 //!
-//! Contains [`VerterHost::upsert`], native batch source ingestion, and internal
-//! compile-input projection for change detection and cache invalidation.
+//! Contains [`VerterHost::upsert`] and internal compile-input projection,
+//! which handle file ingestion, change detection, and cache invalidation.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -26,9 +26,12 @@ use verter_scheduler::stage::Priority;
 ///
 /// `canonical_id` is the request's resolved canonical on every arm —
 /// including the failure arms, whose `result` `HostError` carries no
-/// canonical of its own — so native batch callers can preserve per-input
-/// identity and attribute failures without re-deriving it. The field tracks
-/// those APIs' target gate: wasm has no batch source-ingestion API.
+/// canonical of its own — so callers can fold a failure into a
+/// per-canonical error map without re-deriving it. Its only consumer is
+/// `compile_many`'s Stage B error-folding, which lives in `host_compile`
+/// (the whole module is `not(target_arch = "wasm32")`). The field tracks
+/// that same target gate: on wasm there is no compile-batch path to read
+/// it, so carrying it would be dead storage.
 pub(crate) struct UpsertBatchOutcome {
     #[cfg(not(target_arch = "wasm32"))]
     pub canonical_id: String,
@@ -219,34 +222,6 @@ impl VerterHost {
             .host_upsert_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.upsert_with_priority(req, Priority::Interactive)
-    }
-
-    /// Register source files as one atomic batch and return full updates in
-    /// input order, using the same interactive priority as [`Self::upsert`].
-    ///
-    /// # Panics
-    ///
-    /// Requests must have distinct resolved canonical IDs. Duplicate IDs are
-    /// rejected before any source is admitted.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[must_use]
-    pub fn upsert_many(
-        &self,
-        requests: Vec<UpsertRequest>,
-    ) -> Vec<Result<HostUpdateResult, HostError>> {
-        self.provenance
-            .host_upsert_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.upsert_many_with_priority(requests, Priority::Interactive)
-            .into_iter()
-            .map(|outcome| {
-                outcome.result.and_then(|result| {
-                    result.ok_or(HostError::MissingSource {
-                        canonical_id: outcome.canonical_id,
-                    })
-                })
-            })
-            .collect()
     }
 
     /// Ingest an already registered carrier envelope at the Source stage.

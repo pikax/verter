@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PrimitiveKind,
+    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PrimitiveKind, PropertyKey,
     SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
 };
 use verter_session_query::flow::policy::NullabilityPolicy;
@@ -285,10 +285,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                     for sibling in &context {
                         for candidate in sibling.positive_members() {
-                            if members
-                                .iter()
-                                .any(|member| same_property(&member.key, &candidate.key))
-                            {
+                            if members.iter().any(|member| {
+                                self.same_widening_property(&member.key, &candidate.key)
+                            }) {
                                 continue;
                             }
                             members.push(SurfaceMember {
@@ -363,7 +362,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     siblings: None,
                 }));
             }
-            Some(SemanticNodeData::Object(view)) if object_literal_surface(view) => {
+            Some(SemanticNodeData::Object(view)) if self.object_literal_surface(view) => {
                 let view = view.clone();
                 drop(data);
                 match siblings {
@@ -410,7 +409,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .filter_map(|sibling| {
                                 match self.graph().node_data(*sibling).as_deref() {
                                     Some(SemanticNodeData::Object(sibling))
-                                        if object_literal_surface(sibling) =>
+                                        if self.object_literal_surface(sibling) =>
                                     {
                                         Some(sibling.clone())
                                     }
@@ -418,24 +417,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 }
                             })
                             .collect();
+                        let property_context = self.widening_property_context(&siblings);
                         let visits: Vec<Widening> = view
                             .positive_members()
                             .iter()
                             .rev()
-                            .map(|member| {
-                                let property_siblings: Vec<SemanticNodeId> = context
-                                    .iter()
-                                    .filter_map(|sibling| {
-                                        sibling.positive_members().iter().find(|candidate| {
-                                            same_property(&candidate.key, &member.key)
-                                        })
-                                    })
-                                    .flat_map(|candidate| self.constituents(candidate.value))
-                                    .collect();
-                                Widening::Visit {
-                                    node: member.value,
-                                    siblings: Some(Arc::from(property_siblings)),
-                                }
+                            .map(|member| Widening::Visit {
+                                node: member.value,
+                                siblings: Some(
+                                    self.widening_property_siblings(&property_context, &member.key),
+                                ),
                             })
                             .collect();
                         tasks.push(Widening::LiteralInContext {
@@ -480,24 +471,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
                 let program = program.share();
                 drop(data);
+                let property_context = siblings
+                    .as_deref()
+                    .map(|siblings| self.widening_property_context(siblings));
                 let mut children = Vec::new();
                 let mut cursor = 0;
                 while let Some((slot, child)) = program.child_at_slot(cursor) {
-                    let spread_operand = match program
+                    let visit = match program
                         .effects
                         .get(slot / 2)
                         .expect("the construction child's effect")
                     {
-                        ObjectConstructionEffect::Spread(_) => true,
+                        ObjectConstructionEffect::Spread(_) => {
+                            Widening::SpreadOperand { node: child }
+                        }
+                        ObjectConstructionEffect::DirectProperty(effect) if slot % 2 == 1 => {
+                            Widening::Visit {
+                                node: child,
+                                siblings: property_context.as_ref().map(|context| {
+                                    self.widening_property_siblings(context, &effect.key)
+                                }),
+                            }
+                        }
                         ObjectConstructionEffect::DirectProperty(_)
                         | ObjectConstructionEffect::DirectMethod(_)
                         | ObjectConstructionEffect::DirectGet(_)
                         | ObjectConstructionEffect::DirectSet(_)
                         | ObjectConstructionEffect::DirectIndex(_)
                         | ObjectConstructionEffect::DirectCall(_)
-                        | ObjectConstructionEffect::DirectConstruct(_) => false,
+                        | ObjectConstructionEffect::DirectConstruct(_) => Widening::Visit {
+                            node: child,
+                            siblings: None,
+                        },
                     };
-                    children.push((child, spread_operand));
+                    children.push(visit);
                     cursor = slot + 1;
                 }
                 tasks.push(Widening::SpreadLiteral {
@@ -506,16 +513,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     siblings,
                     count: children.len(),
                 });
-                tasks.extend(children.into_iter().rev().map(|(node, spread_operand)| {
-                    if spread_operand {
-                        Widening::SpreadOperand { node }
-                    } else {
-                        Widening::Visit {
-                            node,
-                            siblings: None,
-                        }
-                    }
-                }));
+                tasks.extend(children.into_iter().rev());
             }
             _ => {
                 drop(data);
@@ -551,11 +549,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             else {
                 continue;
             };
-            if !object_literal_surface(&sibling) {
+            if !self.object_literal_surface(&sibling) {
                 continue;
             }
             for candidate in sibling.positive_members() {
-                let named = |member: &SurfaceMember| same_property(&member.key, &candidate.key);
+                let named = |member: &SurfaceMember| {
+                    self.same_widening_property(&member.key, &candidate.key)
+                };
                 if surface.positive_members().iter().any(named) || added.iter().any(named) {
                     continue;
                 }
@@ -607,6 +607,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         view: &SurfaceView,
         members: Vec<SurfaceMember>,
     ) -> SemanticNodeId {
+        let members = members
+            .into_iter()
+            .map(|mut member| {
+                if let Some(key) = self.widening_property_key(&member.key) {
+                    member.key = AuthoredPropertyKey::from_known(key);
+                }
+                member
+            })
+            .collect::<Vec<_>>();
         if members.as_slice() == view.positive_members() {
             return node;
         }
@@ -622,26 +631,73 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }),
         )
     }
-}
+    /// Same-property contexts include spread-built literals, whose outer
+    /// keys still do not contribute missing properties to their siblings.
+    fn widening_property_context(&self, siblings: &[SemanticNodeId]) -> Vec<SurfaceView> {
+        siblings
+            .iter()
+            .filter_map(
+                |sibling| match self.graph().node_data(*sibling).as_deref() {
+                    Some(SemanticNodeData::Object(view)) if self.object_literal_surface(view) => {
+                        Some(view.clone())
+                    }
+                    Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
+                        self.resolve_typeinfo_surface_view(
+                            *sibling,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
 
-/// Whether `view` is an object literal's own type: a surface whose every
-/// member the literal wrote directly (`FreshOwn`), with no signature. An
-/// empty surface names no literal member and is not recognised as one.
-fn object_literal_surface(view: &SurfaceView) -> bool {
-    view.call_signatures.is_empty()
-        && view.construct_signatures.is_empty()
-        && view.index_signatures.is_empty()
-        && !view.positive_members().is_empty()
-        && view.positive_members().iter().all(|member| {
-            member.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
-                && member.key.as_known().is_some()
-        })
-}
+    fn widening_property_siblings(
+        &self,
+        context: &[SurfaceView],
+        key: &AuthoredPropertyKey,
+    ) -> Arc<[SemanticNodeId]> {
+        context
+            .iter()
+            .filter_map(|sibling| {
+                sibling
+                    .positive_members()
+                    .iter()
+                    .find(|candidate| self.same_widening_property(&candidate.key, key))
+            })
+            .flat_map(|candidate| self.constituents(candidate.value))
+            .collect()
+    }
 
-/// Whether two member keys name the same property.
-fn same_property(a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
-    match (a.as_known(), b.as_known()) {
-        (Some(a), Some(b)) => a.element_access_collides(&b),
-        _ => false,
+    /// A computed key participates only once the shared index-key resolver
+    /// identifies one property; dynamic key domains remain ineligible.
+    fn widening_property_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
+        match key {
+            AuthoredPropertyKey::Computed(node) => {
+                self.resolve_authored_key(&self.normalized_index_key_node(*node))
+            }
+            _ => key.cloned_known(),
+        }
+    }
+
+    /// Whether every member was written directly by this literal and names
+    /// one resolved property. An empty surface carries no literal provenance.
+    fn object_literal_surface(&self, view: &SurfaceView) -> bool {
+        view.call_signatures.is_empty()
+            && view.construct_signatures.is_empty()
+            && view.index_signatures.is_empty()
+            && !view.positive_members().is_empty()
+            && view.positive_members().iter().all(|member| {
+                member.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+                    && self.widening_property_key(&member.key).is_some()
+            })
+    }
+
+    fn same_widening_property(&self, a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
+        match (self.widening_property_key(a), self.widening_property_key(b)) {
+            (Some(a), Some(b)) => a.element_access_collides(&b),
+            _ => false,
+        }
     }
 }

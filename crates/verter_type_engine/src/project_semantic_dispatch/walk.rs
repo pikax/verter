@@ -2809,6 +2809,60 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         read.value
     }
 
+    /// Adopt an operand evaluated by the shared heap worklist with the
+    /// same partiality and positional guarantees as a nested query read.
+    fn evaluate_deferred_operand(
+        &mut self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> QueryResult<SemanticNodeId> {
+        let output = self
+            .dispatch
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_query_build_output(self.dispatch);
+        self.cache_suppress |= output.cache_suppress;
+        if output.completeness.is_partial() {
+            match (&output.result, output.approximation) {
+                (
+                    QueryResult::Value(node),
+                    Some(super::projection_fact::ProjectionInterpretation::Positional),
+                ) => {
+                    self.completeness = self.completeness.merge(output.completeness);
+                    self.positional_child_terminal = Some(*node);
+                }
+                _ => self.mark_partial_with(output.completeness.reasons()),
+            }
+        }
+        if matches!(output.result, QueryResult::Error(_)) {
+            self.positional_children_supported = false;
+        }
+        output.result
+    }
+
+    /// Read a value's typeof once. Any deferred result belongs to the
+    /// caller's evaluation worklist rather than a nested evaluator drive.
+    fn read_typeof_carrier(
+        &mut self,
+        value_root: crate::semantic_query::ValueRootKey,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        type_args: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> QueryResult<SemanticNodeId> {
+        let key = self
+            .dispatch
+            .typeof_key_with_path(value_root, path, context);
+        let value = match self.execute_read_folding_partial(key) {
+            QueryResult::Value(value) => value,
+            other => return other,
+        };
+        QueryResult::Value(if type_args.is_empty() {
+            value
+        } else {
+            self.dispatch
+                .apply_typeof_instantiation_args(value, type_args)
+        })
+    }
+
     fn resolve_carrier_subject(
         &mut self,
         node: SemanticNodeId,
@@ -4486,8 +4540,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let object = *object;
+                    let mut object = *object;
                     let ix = ix.clone();
+                    // Resolve nested operands on the shared evaluator's
+                    // worklist. Re-entering one query per authored index
+                    // otherwise makes a finite path consume native depth.
+                    if matches!(self.graph().node_data(object).as_deref(), Some(SemanticNodeData::IndexedAccess { .. })) {
+                        object = match self.evaluate_deferred_operand(
+                            object,
+                            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+                        ) {
+                            QueryResult::Value(node) => node,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                    }
                     let resolved =
                         match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
                             base: object,
@@ -5245,25 +5314,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
                     drop(data);
                     let typeof_context = self.context;
-                    let typeof_key = self.dispatch.typeof_key_with_path(
+                    let resolved = match self.read_typeof_carrier(
                         value_root.clone(),
                         typeof_path.clone(),
+                        &type_args,
                         typeof_context,
-                    );
-                    let mut resolved = match self.execute_read_folding_partial(typeof_key) {
+                    ) {
                         QueryResult::Value(id) => id,
                         _ => {
                             results.push(self.opaque_miss());
                             return;
                         }
                     };
-                    // Instantiation expression (`typeof C.make<string>`): apply
-                    // the lowered type arguments to the projected generic
-                    // signature AFTER the path projection reached it. An
-                    // arity/shape mismatch composes an honest `Opaque(Miss)`.
-                    if !type_args.is_empty() {
-                        resolved = self.dispatch.apply_typeof_instantiation_args(resolved, &type_args);
-                    }
                     #[cfg(any(test, feature = "test-support"))]
                     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
@@ -5995,6 +6057,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // Identity / Navigate / Skeleton retain their bare carriers —
         // those modes' contracts promise no terminal-surface synthesis.
         if matches!(self.mode(), ProjectionMode::Expanded) {
+            // A TypeOf read already projects its terminal in the caller's
+            // mode. Expanding that answer again would open a nominal class
+            // reference returned by a value (`new C()` is C, not its body).
+            let typeof_owns_terminal_projection = self.original_path_non_empty
+                && matches!(
+                    self.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::TypeOf(_))
+                );
             // Path-precision: when this is a NON-EMPTY projected path,
             // the terminal value is a projected segment result. A
             // terminal `DeclRef` / `InstantiationRef` carrier
@@ -6008,7 +6078,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.original_path_non_empty {
                 current = self.resolve_expanded_terminal_carrier(current);
             }
-            current = self.expand_empty_path_terminal(current);
+            if !typeof_owns_terminal_projection {
+                current = self.expand_empty_path_terminal(current);
+            }
             if self.original_path_non_empty {
                 // Terminal-surface carrier PRESENTATION: the demanded
                 // terminal projection materialises its own surface one
@@ -6079,6 +6151,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             None => return node,
         };
         match &*data {
+            SemanticNodeData::TypeOf(_) => {
+                let (root, path) = data.typeof_head().expect("TypeOf carrier head");
+                let root = root.clone();
+                let path = path.clone();
+                let type_args = data.carrier_type_args().to_vec();
+                drop(data);
+                match self.read_typeof_carrier(root, path, &type_args, self.context) {
+                    QueryResult::Value(value) => value,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => node,
+                }
+            }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
                     canonical_id: identity.canonical_id.clone(),

@@ -16,6 +16,21 @@ declare const c: boolean;
 const arr = [{ a: 1 }, { b: "x" }];
 const cond = c ? { a: 1 } : { b: "x" };
 const nested = [{ o: { a: 1 } }, { o: { b: "x" } }];
+const key = "a";
+const computed = [{ [key]: 1 }, { b: "x" }];
+const numericKey = 1.5;
+const computedNumeric = [{ [numericKey]: 1 }, { b: "x" }];
+declare const symbolKey: unique symbol;
+const computedSymbol = [{ [symbolKey]: 1 }, { b: "x" }];
+const spreadSibling = c ? { o: { a: 1 } } : { ...{ z: 1 }, o: { b: "x" } };
+const spreadSiblingReverse = c ? { ...{ z: 1 }, o: { b: "x" } } : { o: { a: 1 } };
+type Computed = typeof computed;
+type ComputedNumericMissingB = Extract<(typeof computedNumeric)[number], { 1.5: unknown }>['b'];
+type ComputedNumericMissingKey = Extract<(typeof computedNumeric)[number], { b: unknown }>[1.5];
+type ComputedSymbolMissingB = Extract<(typeof computedSymbol)[number], { [symbolKey]: unknown }>['b'];
+type ComputedSymbolMissingKey = Extract<(typeof computedSymbol)[number], { b: unknown }>[typeof symbolKey];
+type SpreadSibling = typeof spreadSibling;
+type SpreadSiblingReverse = typeof spreadSiblingReverse;
 interface A { a: number; }
 interface B { b: string; }
 declare const a: A;
@@ -162,6 +177,13 @@ fn inferred_object_literal_unions_normalize_only_fresh_members() {
                     "({ o: { a: number; b?: undefined; }; } | { o: { a?: undefined; b: string; }; })[]",
                 ),
                 ("Declared", "(A | B)[]"),
+                ("Computed", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("ComputedNumericMissingB", "undefined"),
+                ("ComputedNumericMissingKey", "undefined"),
+                ("ComputedSymbolMissingB", "undefined"),
+                ("ComputedSymbolMissingKey", "undefined"),
+                ("SpreadSibling", "{ o: { a: number; b?: undefined; }; } | { o: { a?: undefined; b: string; }; z: number; }"),
+                ("SpreadSiblingReverse", "{ o: { a: number; b?: undefined; }; } | { o: { a?: undefined; b: string; }; z: number; }"),
                 ("DeclaredConditional", "A | B"),
                 ("Empty", "({ a?: undefined; } | { a: number; })[]"),
                 ("EmptyConditional", "{ a?: undefined; } | { a: number; }"),
