@@ -610,6 +610,24 @@ async function assertCtrlClick(local: LocalCarrierCase): Promise<void> {
         active.document.offsetAt(active.selection.active) === targetOffset,
       10_000,
     );
+  } catch (error) {
+    const active = vscode.window.activeTextEditor;
+    console.error("Definition jump selection", {
+      windowFocused: vscode.window.state.focused,
+      expectedFile: absoluteFile(local.declaration.file),
+      expectedOffset: targetOffset,
+      actual: active
+        ? {
+            file: active.document.uri.fsPath,
+            anchor: active.document.offsetAt(active.selection.anchor),
+            active: active.document.offsetAt(active.selection.active),
+            start: active.document.offsetAt(active.selection.start),
+            end: active.document.offsetAt(active.selection.end),
+            text: active.document.getText(active.selection).slice(0, 100),
+          }
+        : undefined,
+    });
+    throw error;
   } finally {
     await config.update(
       "gotoLocation.multipleDefinitions",
