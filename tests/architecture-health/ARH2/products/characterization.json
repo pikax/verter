@@ -577,6 +577,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/class_evaluation_flow_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closedness_evaluator_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/closure_narrowing_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/conditional_decision_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_operand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/connected_demand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/conditional_tail_tests.rs",

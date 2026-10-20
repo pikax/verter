@@ -86,6 +86,7 @@ fn computed_mapper(
     let k_param = outer_type_param(dispatch, "K");
     MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
