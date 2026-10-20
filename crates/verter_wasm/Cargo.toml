@@ -13,6 +13,11 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["console_error_panic_hook"]
+# The coordinated, default-off observation opt-in
+# (docs/arch/semantic-observe.md). Builds the instrumentation module whose
+# audit methods return records; a default build reports unavailable
+# capture from them.
+semantic-observe = ["verter_session/semantic-observe"]
 
 [dependencies]
 verter_resolution = { workspace = true }

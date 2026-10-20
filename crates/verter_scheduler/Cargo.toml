@@ -24,6 +24,7 @@ publish = false
 # is out of scope here.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "dep:hotpath",
   "hotpath/hotpath",
   "hotpath/parking_lot",

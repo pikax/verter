@@ -118,14 +118,21 @@ pub trait RequestContextLike: Send + Sync + 'static {
     /// accumulator attached). Consumers of dedup hooks use this to
     /// decide whether a joiner can expect a full audit record from the
     /// winner or must fall back to a "winner unaudited" rendering.
-    fn capture_enabled(&self) -> bool;
+    ///
+    /// Optional capture: compiled only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
+    fn capture_enabled(&self) -> bool {
+        false
+    }
 
     /// Whether per-file timing capture is enabled for this request.
     /// Producers gate `Instant::now()` calls and other timing-only
-    /// instrumentation behind this flag so the zero-cost path is
-    /// preserved when the host's `audit_timing_capture` is `false`.
-    /// Default is `false` so adapters and trivial fakes need not
-    /// override unless they want timing.
+    /// instrumentation behind this flag. Default is `false` so adapters
+    /// and trivial fakes need not override unless they want timing.
+    ///
+    /// Optional capture: compiled only with `semantic-observe`, so a
+    /// default build carries no per-operation timing check.
+    #[cfg(feature = "semantic-observe")]
     fn timing_enabled(&self) -> bool {
         false
     }
@@ -142,11 +149,23 @@ pub trait RequestContextLike: Send + Sync + 'static {
     /// identified by `winner_request_id` (zero if the winner has no
     /// context). Session-side impl pushes a `SharedLoadReuseRecord`
     /// into the joiner's accumulator, keyed by `canonical_id`.
-    fn on_dedup_joiner(&self, canonical_id: Arc<str>, winner_request_id: u64, winner_audited: bool);
+    ///
+    /// Optional capture: compiled only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
+    fn on_dedup_joiner(
+        &self,
+        _canonical_id: Arc<str>,
+        _winner_request_id: u64,
+        _winner_audited: bool,
+    ) {
+    }
 
     /// Route one cache-event increment through the per-context
     /// counters. Session-side impl dispatches to the matching atomic.
-    fn record_cache_event(&self, event: CacheEventKind);
+    ///
+    /// Optional capture: compiled only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
+    fn record_cache_event(&self, _event: CacheEventKind) {}
 
     /// Install `self` into the scheduler's TLS and return an RAII
     /// handle. Dropping the handle restores whatever was in TLS before
@@ -164,7 +183,6 @@ impl std::fmt::Debug for OpaqueRequestContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OpaqueRequestContext")
             .field("request_id", &self.0.request_id())
-            .field("capture_enabled", &self.0.capture_enabled())
             .finish()
     }
 }
@@ -185,11 +203,6 @@ impl OpaqueRequestContext {
             fn request_id(&self) -> u64 {
                 self.id
             }
-            fn capture_enabled(&self) -> bool {
-                false
-            }
-            fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
-            fn record_cache_event(&self, _event: CacheEventKind) {}
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 struct NoopUninstall;
                 impl TlsUninstall for NoopUninstall {
@@ -225,6 +238,9 @@ pub fn current_request_id() -> Option<u64> {
 /// is installed. Called from VFS / workspace code that wants to gate
 /// `Instant::now()` instrumentation on the host's
 /// `audit_timing_capture` flag without pulling in `verter_session`.
+///
+/// Optional capture: compiled only with `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
 #[must_use]
 pub fn current_timing_enabled() -> bool {
     CURRENT_OPAQUE_CONTEXT
@@ -357,25 +373,14 @@ impl Drop for AllSlotsClearGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     struct TestCtx {
         id: u64,
-        captures: bool,
-        joined: AtomicU64,
     }
 
     impl RequestContextLike for TestCtx {
         fn request_id(&self) -> u64 {
             self.id
         }
-        fn capture_enabled(&self) -> bool {
-            self.captures
-        }
-        fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
-            self.joined.fetch_add(1, Ordering::Relaxed);
-        }
-        fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
             let guard = OpaqueContextGuard::install(OpaqueRequestContext(
                 self as Arc<dyn RequestContextLike>,
@@ -391,11 +396,7 @@ mod tests {
 
     #[test]
     fn install_and_current_id_round_trip() {
-        let ctx = Arc::new(TestCtx {
-            id: 42,
-            captures: true,
-            joined: AtomicU64::new(0),
-        });
+        let ctx = Arc::new(TestCtx { id: 42 });
         assert_eq!(current_request_id(), None);
         let _guard = OpaqueContextGuard::install(OpaqueRequestContext(Arc::clone(&ctx) as _));
         assert_eq!(current_request_id(), Some(42));
@@ -407,16 +408,8 @@ mod tests {
     fn install_uses_replace_no_panic_on_nested() {
         // Two successive installs — the outer's Drop must restore the
         // outer's prior (None), NOT panic on the inner's live borrow.
-        let a = Arc::new(TestCtx {
-            id: 1,
-            captures: false,
-            joined: AtomicU64::new(0),
-        });
-        let b = Arc::new(TestCtx {
-            id: 2,
-            captures: false,
-            joined: AtomicU64::new(0),
-        });
+        let a = Arc::new(TestCtx { id: 1 });
+        let b = Arc::new(TestCtx { id: 2 });
         let g1 = OpaqueContextGuard::install(OpaqueRequestContext(Arc::clone(&a) as _));
         assert_eq!(current_request_id(), Some(1));
         let g2 = OpaqueContextGuard::install(OpaqueRequestContext(Arc::clone(&b) as _));
@@ -430,11 +423,7 @@ mod tests {
     #[test]
     fn guard_restores_prior_on_panic_unwind() {
         use std::panic::{catch_unwind, AssertUnwindSafe};
-        let ctx = Arc::new(TestCtx {
-            id: 7,
-            captures: true,
-            joined: AtomicU64::new(0),
-        });
+        let ctx = Arc::new(TestCtx { id: 7 });
         let result = catch_unwind(AssertUnwindSafe(|| {
             let _g = OpaqueContextGuard::install(OpaqueRequestContext(Arc::clone(&ctx) as _));
             assert_eq!(current_request_id(), Some(7));
@@ -450,11 +439,7 @@ mod tests {
 
     #[test]
     fn install_tls_trait_method_drives_tls_via_concrete_context() {
-        let ctx = Arc::new(TestCtx {
-            id: 99,
-            captures: true,
-            joined: AtomicU64::new(0),
-        });
+        let ctx = Arc::new(TestCtx { id: 99 });
         assert_eq!(current_request_id(), None);
         let handle = Arc::clone(&ctx).install_tls();
         assert_eq!(current_request_id(), Some(99));

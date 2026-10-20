@@ -26,6 +26,8 @@ mod import_route_writer_guard;
 #[path = "g_misc3/legacy_accumulate_dispatch_dep_signature_gone.rs"]
 mod legacy_accumulate_dispatch_dep_signature_gone;
 #[path = "g_misc3/mapper_fingerprint_content_addressed.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod mapper_fingerprint_content_addressed;
 #[path = "g_misc3/module_augmentation_stitching.rs"]
 pub(crate) mod module_augmentation_stitching;
@@ -40,6 +42,8 @@ mod path_precise_invalidation_baseline;
 #[path = "g_misc3/repo_first_pass_diagnosis_corpus.rs"]
 mod repo_first_pass_diagnosis_corpus;
 #[path = "g_misc3/shallow_walk_no_over_materialise.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod shallow_walk_no_over_materialise;
 #[path = "g_misc3/signature_width_pages.rs"]
 mod signature_width_pages;
@@ -64,10 +68,16 @@ mod typeinfo_public_api;
 #[path = "g_misc3/vue_macro_define_surface_dispatch_only.rs"]
 mod vue_macro_define_surface_dispatch_only;
 #[path = "g_misc3/wait_audit_lock_contention_observable.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod wait_audit_lock_contention_observable;
 #[path = "g_misc3/wait_audit_off_when_flag_off.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod wait_audit_off_when_flag_off;
 #[path = "g_misc3/wait_audit_queue_wait_derives_from_scheduler_audit.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod wait_audit_queue_wait_derives_from_scheduler_audit;
 #[path = "g_misc3/world_snapshot_is_not_a_cache_key.rs"]
 mod world_snapshot_is_not_a_cache_key;

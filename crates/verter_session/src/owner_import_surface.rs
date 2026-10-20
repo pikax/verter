@@ -149,7 +149,7 @@ impl OwnerImportSurfaceDb {
             }
             _ => None,
         };
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .owner_import
@@ -161,7 +161,7 @@ impl OwnerImportSurfaceDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 

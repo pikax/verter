@@ -1326,7 +1326,7 @@ impl SemanticGraphStore {
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
     ) {
         let work = self.reverse_index_pending.lock().take();
-        let timing_on = verter_execution::request_context::current_timing_enabled();
+        let timing_on = crate::request_observers::capture_timing_enabled();
         match work {
             reverse_index::PendingWork::None => {}
             reverse_index::PendingWork::Published(published) => {
@@ -1446,7 +1446,7 @@ impl SemanticGraphStore {
         let mut affected_pairs: FxHashSet<(FamilyKey, ModeSlot)> = FxHashSet::default();
         let mut evicted = 0usize;
         {
-            let timing_on = verter_execution::request_context::current_timing_enabled();
+            let timing_on = crate::request_observers::capture_timing_enabled();
             let mut entries = self.entries_lock_diagnosed();
             // The drain reads the reverse index: every resident candidate
             // is registered first, under this same hold.
@@ -2088,7 +2088,7 @@ impl SemanticGraphStore {
                 }
             })
         });
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|rctx| {
             if result.is_some() {
                 rctx.cache_counters
                     .semantic_graph
@@ -2100,7 +2100,7 @@ impl SemanticGraphStore {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result.map(narrow_cache_read)
     }
 
@@ -2247,7 +2247,7 @@ impl SemanticGraphStore {
                 receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
             }
         });
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|rctx| {
             if result.is_some() {
                 rctx.cache_counters
                     .semantic_graph
@@ -2259,7 +2259,7 @@ impl SemanticGraphStore {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -2445,19 +2445,18 @@ impl SemanticGraphStore {
         // warm call (the slow path's old `let initial_hit = self.get_unvalidated(&key)`
         // observation plus the loop's step-1 `self.get_unvalidated(&key)` call
         // bumped this counter twice; the fast path bumps it once).
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|rctx| {
             rctx.cache_counters
                 .semantic_graph
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
-        }
+        });
 
         // Per-context cache-event attribution (Hit). Same as the slow
         // path's step-1 warm branch, single TLS lookup.
-        if let Some(ctx) = verter_execution::request_context::current_context() {
-            ctx.0
-                .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
-        }
+        crate::request_observers::record_cache_event(
+            verter_execution::request_context::CacheEventKind::Hit,
+        );
 
         // cfg-test dispatch recording (warm). Same as the slow path's
         // pre-loop `initial_hit` observation.
@@ -2701,10 +2700,10 @@ impl SemanticGraphStore {
         // without false positives from peer dispatches in
         // workspace-parallel runs.
         if !populated_slots.is_empty() {
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            crate::observe_request!(|ctx| {
                 ctx.memo_insertions
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
-            }
+            });
         }
         // Drain per-candidate reverse-index registrations for every
         // candidate this publish DISPLACED (same-discriminant
@@ -2942,10 +2941,10 @@ impl SemanticGraphStore {
         // path bumps the same per-request counter so attribution
         // tests cover both publish sites.
         if !populated_slots.is_empty() {
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            crate::observe_request!(|ctx| {
                 ctx.memo_insertions
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
-            }
+            });
         }
         // Drain displaced candidates' per-candidate registrations —
         // see `warm_publish_one` for the rationale.
@@ -3214,9 +3213,9 @@ fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
     stats
         .inflight_aborted_retries
         .fetch_add(1, Ordering::Relaxed);
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    crate::observe_request!(|ctx| {
         ctx.inflight_aborted_retries.fetch_add(1, Ordering::Relaxed);
-    }
+    });
 }
 
 /// Bump `cold_aborts_swept` on both the global `SemanticGraphStats`
@@ -3228,9 +3227,9 @@ fn record_inflight_aborted_retry(stats: &AtomicSemanticGraphStats) {
 #[inline]
 fn record_cold_abort_swept(stats: &AtomicSemanticGraphStats) {
     stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    crate::observe_request!(|ctx| {
         ctx.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-    }
+    });
 }
 
 #[cfg(test)]

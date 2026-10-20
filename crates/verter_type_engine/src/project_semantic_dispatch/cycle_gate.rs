@@ -82,9 +82,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // No cold build ran on this thread — the family warm-served
             // (or a cross-thread join landed). Attribute the hit on the
             // active request; cheap when no context is installed.
-            if let Some(req_ctx) = crate::request_context::current_request_context() {
+            crate::observe_request!(|req_ctx| {
                 req_ctx.bump_type_resolution_ref_root_cycle_hit();
-            }
+            });
         }
         let read_partial_reasons = read.partial_reason_classes();
         let (value, defensive) = match read.value {

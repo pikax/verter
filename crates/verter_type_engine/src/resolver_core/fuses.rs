@@ -85,9 +85,9 @@ impl FuseState {
         // Per-request audit attribution: one wildcard-route fanout
         // expansion observed. Bumped before the budget check so the
         // counter reflects total expansions even when the fuse trips.
-        if let Some(obs) = verter_audit::current_observer() {
+        verter_audit::observe!(|obs| {
             obs.record_event(verter_audit::AuditEvent::RouteDbWildcardFanout);
-        }
+        });
         if self.wildcard_sources_processed > budgets.wildcard_route_fanout {
             self.trips.push(FuseTrip::new(
                 "wildcard_route_fanout",

@@ -4307,6 +4307,8 @@ fn native_member_domains_preserve_producer_guarantees() {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn native_fact_refusal_replay_heals_and_invalidates() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};

@@ -333,11 +333,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // beneath a `FlowReturn` root leaves no trace of the family that decided
         // its overload, and the audit record under-reports the query families the
         // resolution actually touched.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|ctx| {
             ctx.record_dispatched_query_tag(
                 crate::semantic_query::SemanticQueryKeyTag::ResolveCall,
             );
-        }
+        });
         let identity = ObligationIdentity::ResolveCall(key.clone());
         {
             let mut txn = self.dispatch_txn.borrow_mut();

@@ -25,11 +25,6 @@
 //! `Drop` if the caller forgets. The two paths are mutually
 //! exclusive — there is no double-release semantics.
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
-
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -284,6 +279,10 @@ impl RequestGroup {
 /// [`Self::fire`] AFTER the DAG lock is released. This keeps the
 /// callback-under-lock hazard out of both the single-request and the
 /// atomic-batch admission paths through one shared mechanism.
+///
+/// The event feeds only the audit record's share-reuse facts, so it is
+/// optional capture: it exists only with `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
 pub struct DedupJoinerEvent {
     canonical: Arc<str>,
     joiner_context: verter_execution::request_context::OpaqueRequestContext,
@@ -291,6 +290,7 @@ pub struct DedupJoinerEvent {
     winner_audited: bool,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl DedupJoinerEvent {
     /// Invoke the joiner's `on_dedup_joiner` callback. MUST be called
     /// after the DAG lock has been released — the callback may re-enter
@@ -307,6 +307,7 @@ impl DedupJoinerEvent {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl std::fmt::Debug for DedupJoinerEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DedupJoinerEvent")
@@ -317,6 +318,15 @@ impl std::fmt::Debug for DedupJoinerEvent {
     }
 }
 
+/// What [`SchedulerDag::register_request`] hands back for a dedup join:
+/// the deferred audit event with `semantic-observe`, nothing without it.
+#[cfg(feature = "semantic-observe")]
+pub type DedupJoinObservation = Option<DedupJoinerEvent>;
+/// What [`SchedulerDag::register_request`] hands back for a dedup join:
+/// the deferred audit event with `semantic-observe`, nothing without it.
+#[cfg(not(feature = "semantic-observe"))]
+pub type DedupJoinObservation = ();
+
 /// Per-node bookkeeping inside the DAG. `pub(in crate::dag)` so the
 /// `terminal_failures` child module can mutate
 /// `failed_blocker_deps` and `deps_remaining` directly when fanning
@@ -326,11 +336,11 @@ pub(in crate::dag) struct DagNode {
     pub(in crate::dag) identity: WorkNodeIdentity,
     pub(in crate::dag) kind: WorkKind,
     pub(in crate::dag) base_priority: Priority,
-    /// Wall-clock admission time. Retained ONLY for queue-dwell
-    /// audit (copied into [`ReadyJob::enqueue_time`] at dispatch);
-    /// it no longer influences selection order (the weighted-credit
-    /// lane selector replaced time-based aging).
-    pub(in crate::dag) enqueue_time: Instant,
+    /// Admission clock for the optional queue-dwell audit (copied into
+    /// [`ReadyJob::enqueue_time`] at dispatch). It never influences
+    /// selection order, and without `semantic-observe` it is zero-size
+    /// and reads no clock.
+    pub(in crate::dag) enqueue_time: verter_audit::observe::Stopwatch,
     /// The `(Priority, ResourceClass)` lane this token currently
     /// occupies in [`SchedulerDag::ready_lanes`], or `None` if the
     /// node is not currently dispatch-ready (gated, dispatched, or
@@ -496,7 +506,8 @@ pub struct ReadyJob {
     /// always the node's own base priority — selection-count credit
     /// never rewrites a node's priority.
     pub priority: Priority,
-    pub enqueue_time: Instant,
+    /// Admission clock for the optional queue-dwell audit.
+    pub enqueue_time: verter_audit::observe::Stopwatch,
     pub request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
     /// Aggregate job token created at admission and shared unchanged with the
     /// executor. Never a winner request's private token.
@@ -1675,7 +1686,7 @@ impl SchedulerDag {
             identity: identity.clone(),
             kind,
             base_priority: priority,
-            enqueue_time: Instant::now(),
+            enqueue_time: verter_audit::observe::Stopwatch::start(),
             request_context,
             cancellation: CancellationToken::aggregate(),
             deps_remaining,
@@ -2562,14 +2573,17 @@ impl SchedulerDag {
     /// (single or batch) collects the events and fires them once the
     /// lock has dropped.
     ///
-    /// Returns `Some(event)` exactly when this registration was a
-    /// dedup join AND the joiner carried a `request_context`;
-    /// otherwise `None`.
+    /// With `semantic-observe`, returns `Some(event)` exactly when this
+    /// registration was a dedup join AND the joiner carried a
+    /// `request_context`; otherwise `None`. Without it there is no event.
     ///
     /// There is no group-level priority upgrade semantics: priority
     /// service lives on the DAG node and callers propagate urgency via
     /// [`Self::upgrade_priority`] on the matching identity directly.
-    #[must_use = "the returned DedupJoinerEvent must be fired after the DAG lock is released"]
+    #[cfg_attr(
+        feature = "semantic-observe",
+        must_use = "the returned DedupJoinerEvent must be fired after the DAG lock is released"
+    )]
     pub fn register_request(
         &mut self,
         canonical: &Arc<str>,
@@ -2577,7 +2591,7 @@ impl SchedulerDag {
         target: TargetStage,
         sender: CompletionSender<RequestResult>,
         request_context: Option<verter_execution::request_context::OpaqueRequestContext>,
-    ) -> Option<DedupJoinerEvent> {
+    ) -> DedupJoinObservation {
         let key = FileGenKey {
             canonical: Arc::clone(canonical),
             generation,
@@ -2592,6 +2606,7 @@ impl SchedulerDag {
                 // Dedup: capture the winner details so the caller can
                 // observe them via `on_dedup_joiner` AFTER unlock. The
                 // callback is NOT fired here.
+                #[cfg(feature = "semantic-observe")]
                 let event = request_context.as_ref().map(|joiner_ctx| {
                     let (winner_id, winner_audited) = group
                         .winner_context
@@ -2605,6 +2620,8 @@ impl SchedulerDag {
                         winner_audited,
                     }
                 });
+                #[cfg(not(feature = "semantic-observe"))]
+                let event = ();
                 group.senders.push(sender);
                 return event;
             }
@@ -2614,7 +2631,7 @@ impl SchedulerDag {
             senders: vec![sender],
             winner_context: request_context,
         });
-        None
+        DedupJoinObservation::default()
     }
 
     /// Signal all waiter groups at `(canonical, generation)` matching

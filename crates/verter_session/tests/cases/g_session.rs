@@ -10,6 +10,8 @@ mod cooperative_drive_seam;
 mod flight_rendezvous;
 mod host_close_reuse;
 #[path = "g_session/inline_execute_clears_all_install_tls_slots.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod inline_execute_clears_all_install_tls_slots;
 #[path = "g_session/module_augmentation_body_rekey.rs"]
 mod module_augmentation_body_rekey;

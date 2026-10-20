@@ -1,12 +1,16 @@
 //! Consolidated integration-test group `component`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
 #[path = "g_component/component_meta_degraded_flow_interior_not_warm.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod component_meta_degraded_flow_interior_not_warm;
 #[path = "g_component/component_meta_family_producers_observe_cross_file_deps.rs"]
 mod component_meta_family_producers_observe_cross_file_deps;
 #[path = "g_component/component_meta_no_cache_poisoning.rs"]
 mod component_meta_no_cache_poisoning;
 #[path = "g_component/component_meta_partial_no_replay_and_benign_warms.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod component_meta_partial_no_replay_and_benign_warms;
 #[path = "g_component/component_meta_result_eager_invalidation_defeating.rs"]
 mod component_meta_result_eager_invalidation_defeating;

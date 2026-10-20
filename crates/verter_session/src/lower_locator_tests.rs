@@ -38,9 +38,11 @@ use verter_type_engine::project_semantic_dispatch::locator_shape::{
 };
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::resolver_core::scope_shadowing::ScopeShadowing;
+#[cfg(feature = "semantic-observe")]
+use verter_type_engine::semantic_query::SemanticQueryKeyTag;
 use verter_type_engine::semantic_query::{
     DeclIdentity, MemberMergeRole, NodeScopeId, ObjectConstructionEffect, ProjectionMode,
-    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId, SemanticQueryKeyTag,
+    ProjectionReductionContext, QueryResult, SemanticNodeData, SemanticNodeId,
 };
 
 fn host() -> VerterHost {
@@ -232,6 +234,8 @@ fn member_value(
         .value
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A COLD `lower_locator` demand performs ZERO reduction dispatches: the
 /// per-request dispatch mask records ONLY the `LowerLocator` tag — never
 /// `Instantiate` / `ResolveDecl` / `IndexedAccess` / `Conditional` / `KeyOf`

@@ -127,12 +127,12 @@ impl ComponentMetaQueryEngine<'_> {
             // from a host-cache peek. Differentiate warm positive from warm
             // negative (`None`) so the audit reflects how many of the warm hits
             // were actually "this symbol is known unresolvable".
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRegistryWarm);
                 if cached.is_none() {
                     obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
                 }
-            }
+            });
             self.imported_registry_symbols
                 .borrow_mut()
                 .insert(key, cached.clone());
@@ -286,9 +286,9 @@ impl ComponentMetaQueryEngine<'_> {
         // `resolve_imported_registry_symbol_with_budget` resolution. Joiners
         // that block on this closure do NOT re-enter — so the counter reflects
         // unique cold work, not per-waiter overhead.
-        if let Some(obs) = verter_audit::current_observer() {
+        verter_audit::observe!(|obs| {
             obs.record_event(verter_audit::AuditEvent::ImportedRegistryCold);
-        }
+        });
         // Snapshot the project generation BEFORE the resolution dispatches any
         // work. The `fact_dep_signature` carrier validates only file-content
         // whole-hashes; a `ProjectGeneration` reset (tsconfig / path-alias / SDK
@@ -385,9 +385,9 @@ impl ComponentMetaQueryEngine<'_> {
         // symbol at all from the owner. The warm peek branch above handles the
         // warm-negative case separately.
         if result.is_none() {
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
-            }
+            });
         }
         self.imported_registry_symbols
             .borrow_mut()

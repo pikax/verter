@@ -2096,6 +2096,9 @@ fn macro_impacting_constructs_fail_lowering_not_silent_skip() {
     }
 }
 
+// Pins the provenance walker's depth cap, which exists only with optional
+// capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn recursion_budget_invariant_across_module_boundary() {
     // Plan §4.5: the recursion-budget mechanism must remain reachable and

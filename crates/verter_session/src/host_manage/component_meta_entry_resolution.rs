@@ -23,6 +23,7 @@ use super::{extract_component_meta_from_resolved, ComponentMetaOptions};
 /// its accumulator `Arc`) drops, late fan-out events no-op — matching the
 /// inline preamble this helper was extracted from.
 struct ComponentMetaAuditScope {
+    #[cfg(feature = "semantic-observe")]
     _sink_handle: Option<verter_workspace::audit_sink::SinkHandle>,
     _ctx_guard: verter_type_engine::request_context::RequestContextGuard,
 }
@@ -40,6 +41,9 @@ impl VerterHost {
         request_id: u64,
     ) -> ComponentMetaAuditScope {
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
+        #[cfg(not(feature = "semantic-observe"))]
+        let accumulator = None;
+        #[cfg(feature = "semantic-observe")]
         let accumulator = if footprint_capture {
             // Wire `HostConfig::audit_caps` through to the accumulator so
             // per-host cap overrides take effect on every raw push lane.
@@ -66,18 +70,22 @@ impl VerterHost {
         // registry; the `Noop` arm is returned when the consumer filter
         // rejects the kind. Plant the registration on the request context
         // so the inner resolver path finalises through it.
-        let registration =
-            std::sync::Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
-                self,
-                std::sync::Arc::clone(&ctx),
-            ));
-        verter_debug_assert!(
-            ctx.audit_registration.get().is_none(),
-            "freshly-constructed RequestContext must have no audit_registration",
-        );
-        let _ = ctx.install_audit_registration(registration.clone());
+        #[cfg(feature = "semantic-observe")]
+        {
+            let registration =
+                std::sync::Arc::new(crate::host_audit_runtime::AuditRequestRegistration::new(
+                    self,
+                    std::sync::Arc::clone(&ctx),
+                ));
+            verter_debug_assert!(
+                ctx.audit_registration.get().is_none(),
+                "freshly-constructed RequestContext must have no audit_registration",
+            );
+            let _ = ctx.install_audit_registration(registration.clone());
+        }
 
         let ctx_guard = verter_type_engine::request_context::RequestContextGuard::install(ctx);
+        #[cfg(feature = "semantic-observe")]
         let sink_registration = accumulator.as_ref().and_then(|acc| {
             let sink = crate::session_vfs_sink::SessionVfsSink::new(
                 request_id,
@@ -86,6 +94,7 @@ impl VerterHost {
             self.workspace().register_audit_sink(sink).ok()
         });
         ComponentMetaAuditScope {
+            #[cfg(feature = "semantic-observe")]
             _sink_handle: sink_registration,
             _ctx_guard: ctx_guard,
         }
@@ -148,6 +157,7 @@ impl VerterHost {
         // harness tracks this via `REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN`
         // so multi-request closures inside `run_custom` can be rejected.
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -300,10 +310,13 @@ impl VerterHost {
                 // captured tracing logs by string match. The
                 // `suppress` field surfaces the synthesis suppression
                 // decision in spans for the same reason.
+                #[cfg(feature = "semantic-observe")]
                 let publish_trace_id =
                     verter_type_engine::request_context::current_request_context()
                         .map(|ctx| ctx.trace_id.clone())
                         .unwrap_or_default();
+                #[cfg(not(feature = "semantic-observe"))]
+                let publish_trace_id = "";
                 let publish_span = tracing::info_span!(
                     "publish_component_meta",
                     file = %canonical,
@@ -440,6 +453,7 @@ impl VerterHost {
             .get_component_meta_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
@@ -801,6 +815,7 @@ impl VerterHost {
         // The peak-RSS slot is read from the active request context —
         // if the sampler thread ticked while the warm-cache path ran,
         // the peak surfaces here too.
+        #[cfg(feature = "semantic-observe")]
         if self.config.audit_enabled {
             let store = crate::component_meta_audit::RequestStoreAudit {
                 cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),

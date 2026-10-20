@@ -30,9 +30,9 @@ use verter_ffi::convert::*;
 use verter_ffi::types::*;
 use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
 use verter_session as host;
-use verter_session::component_meta_audit::{
-    assertions::RequestAuditRecordAssertions, RequestAuditRecord,
-};
+#[cfg(feature = "semantic-observe")]
+use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+use verter_session::component_meta_audit::RequestAuditRecord;
 use wasm_bindgen::prelude::*;
 
 mod audit;
@@ -43,10 +43,13 @@ mod feasibility_probe_tests;
 mod host_compile_request_tests;
 mod input_snapshot;
 mod typeinfo;
+#[cfg(feature = "semantic-observe")]
 use audit::{
-    audit_record_list_to_json_string, audit_record_to_json_string, kind_matches_wasm,
-    parse_bundler_kind_wasm, parse_compile_target_wasm, parse_request_id_str_wasm,
-    stored_audit_record_to_json_string, AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm,
+    audit_record_list_to_json_string, kind_matches_wasm, parse_bundler_kind_wasm,
+    parse_request_id_str_wasm, AuditRecordFilterWasm, BundlerBatchSummaryArgsWasm,
+};
+use audit::{
+    audit_record_to_json_string, parse_compile_target_wasm, stored_audit_record_to_json_string,
     WorkspaceOpArgWasm,
 };
 use compile_request_response::{
@@ -62,6 +65,7 @@ struct WasmAuditBundle {
     record: RequestAuditRecord,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`
 /// — only `record` round-trips through the walker path. `analysis`
 /// and `resolution` fields in the JSON are silently ignored by
@@ -71,6 +75,7 @@ struct WasmAuditBundleForWalker {
     record: RequestAuditRecord,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Parse a 32-char lowercase hex string into `Hash16`. WASM-error
 /// variant of the NAPI helper with the same name.
 fn parse_hash16_hex_wasm(
@@ -1159,30 +1164,37 @@ impl WasmVerterHost {
     /// returned record is removed from the store.
     #[wasm_bindgen(js_name = "getLastAuditRecord")]
     pub fn get_last_audit_record(&self) -> Result<JsValue, JsValue> {
-        use verter_audit::batch::AuditRecordSource;
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            let mut latest_id: Option<u64> = None;
-            let mut latest_at: Option<verter_audit::instant::Instant> = None;
-            store.for_each_record(&mut |inserted_at, record| {
-                let is_newer = match latest_at {
-                    None => true,
-                    Some(prev) => inserted_at > prev,
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            return Err(audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                let mut latest_id: Option<u64> = None;
+                let mut latest_at: Option<verter_audit::instant::Instant> = None;
+                store.for_each_record(&mut |inserted_at, record| {
+                    let is_newer = match latest_at {
+                        None => true,
+                        Some(prev) => inserted_at > prev,
+                    };
+                    if is_newer {
+                        latest_at = Some(inserted_at);
+                        latest_id = Some(record.request_id);
+                    }
+                });
+                let Some(id) = latest_id else {
+                    return Ok(JsValue::NULL);
                 };
-                if is_newer {
-                    latest_at = Some(inserted_at);
-                    latest_id = Some(record.request_id);
+                match store.take(id) {
+                    Some(rec) => audit_record_to_json_string(&rec),
+                    None => Ok(JsValue::NULL),
                 }
-            });
-            let Some(id) = latest_id else {
-                return Ok(JsValue::NULL);
-            };
-            match store.take(id) {
-                Some(rec) => audit_record_to_json_string(&rec),
-                None => Ok(JsValue::NULL),
-            }
-        }))?
+            }))?
+        }
     }
 
     /// Non-destructive filtered query over the host's audit store.
@@ -1191,40 +1203,49 @@ impl WasmVerterHost {
     /// limit? }` (any combination — independent narrowing).
     #[wasm_bindgen(js_name = "getAuditRecords")]
     pub fn get_audit_records(&self, filter_json: JsValue) -> Result<JsValue, JsValue> {
-        use verter_audit::batch::AuditRecordSource;
-        let filter: AuditRecordFilterWasm = if filter_json.is_undefined() || filter_json.is_null() {
-            AuditRecordFilterWasm::default()
-        } else {
-            parse_wasm_input(filter_json)?
-        };
-        let kind_filter = filter.kind;
-        let since = match filter.since_request_id.as_deref() {
-            Some(s) => Some(parse_request_id_str_wasm(s)?),
-            None => None,
-        };
-        let limit = filter.limit.map(|n| n as usize);
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
-            store.for_each_record(&mut |_inserted_at, record| {
-                if let Some(filter_kind) = kind_filter.as_deref() {
-                    if !kind_matches_wasm(filter_kind, &record.kind) {
-                        return;
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (filter_json,);
+            return Err(audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            let filter: AuditRecordFilterWasm =
+                if filter_json.is_undefined() || filter_json.is_null() {
+                    AuditRecordFilterWasm::default()
+                } else {
+                    parse_wasm_input(filter_json)?
+                };
+            let kind_filter = filter.kind;
+            let since = match filter.since_request_id.as_deref() {
+                Some(s) => Some(parse_request_id_str_wasm(s)?),
+                None => None,
+            };
+            let limit = filter.limit.map(|n| n as usize);
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+                store.for_each_record(&mut |_inserted_at, record| {
+                    if let Some(filter_kind) = kind_filter.as_deref() {
+                        if !kind_matches_wasm(filter_kind, &record.kind) {
+                            return;
+                        }
                     }
-                }
-                if let Some(since_id) = since {
-                    if record.request_id <= since_id {
-                        return;
+                    if let Some(since_id) = since {
+                        if record.request_id <= since_id {
+                            return;
+                        }
                     }
+                    collected.push(record.clone());
+                });
+                if let Some(n) = limit {
+                    collected.truncate(n);
                 }
-                collected.push(record.clone());
-            });
-            if let Some(n) = limit {
-                collected.truncate(n);
-            }
-            audit_record_list_to_json_string(&collected)
-        }))?
+                audit_record_list_to_json_string(&collected)
+            }))?
+        }
     }
 
     /// Run the bundler-batch aggregator over the host's audit store
@@ -1233,44 +1254,55 @@ impl WasmVerterHost {
     /// sinceRequestId? }` (defaults: `Vite`, no-watermark).
     #[wasm_bindgen(js_name = "getBundlerBatchSummary")]
     pub fn get_bundler_batch_summary(&self, args_json: JsValue) -> Result<JsValue, JsValue> {
-        use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
-        let args: BundlerBatchSummaryArgsWasm = if args_json.is_undefined() || args_json.is_null() {
-            BundlerBatchSummaryArgsWasm::default()
-        } else {
-            parse_wasm_input(args_json)?
-        };
-        let kind = parse_bundler_kind_wasm(args.kind.as_deref());
-        let since_id = match args.since_request_id.as_deref() {
-            Some(s) => Some(parse_request_id_str_wasm(s)?),
-            None => None,
-        };
-        let host = std::sync::Arc::clone(&self.inner);
-        catch_panic(AssertUnwindSafe(move || {
-            let store = host.host_audit_runtime().audit_records_store();
-            let since_instant: Option<verter_audit::instant::Instant> = match since_id {
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (args_json,);
+            return Err(audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::{AuditRecordSource, BatchAuditAggregator};
+            let args: BundlerBatchSummaryArgsWasm =
+                if args_json.is_undefined() || args_json.is_null() {
+                    BundlerBatchSummaryArgsWasm::default()
+                } else {
+                    parse_wasm_input(args_json)?
+                };
+            let kind = parse_bundler_kind_wasm(args.kind.as_deref());
+            let since_id = match args.since_request_id.as_deref() {
+                Some(s) => Some(parse_request_id_str_wasm(s)?),
                 None => None,
-                Some(target_id) => {
-                    let mut best: Option<verter_audit::instant::Instant> = None;
-                    store.for_each_record(&mut |inserted_at, record| {
-                        if record.request_id <= target_id {
-                            best = match best {
-                                None => Some(inserted_at),
-                                Some(prev) if inserted_at > prev => Some(inserted_at),
-                                Some(prev) => Some(prev),
-                            };
-                        }
-                    });
-                    best
-                }
             };
-            let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
-            let payload = aggregator.summarize(since_instant);
-            serde_json::to_string(&payload)
-                .map(|s| JsValue::from_str(&s))
-                .map_err(|e| {
-                    JsValue::from_str(&format!("bundler batch summary serialization error: {e}"))
-                })
-        }))?
+            let host = std::sync::Arc::clone(&self.inner);
+            catch_panic(AssertUnwindSafe(move || {
+                let store = host.host_audit_runtime().audit_records_store();
+                let since_instant: Option<verter_audit::instant::Instant> = match since_id {
+                    None => None,
+                    Some(target_id) => {
+                        let mut best: Option<verter_audit::instant::Instant> = None;
+                        store.for_each_record(&mut |inserted_at, record| {
+                            if record.request_id <= target_id {
+                                best = match best {
+                                    None => Some(inserted_at),
+                                    Some(prev) if inserted_at > prev => Some(inserted_at),
+                                    Some(prev) => Some(prev),
+                                };
+                            }
+                        });
+                        best
+                    }
+                };
+                let aggregator = BatchAuditAggregator::new(store.as_ref(), kind);
+                let payload = aggregator.summarize(since_instant);
+                serde_json::to_string(&payload)
+                    .map(|s| JsValue::from_str(&s))
+                    .map_err(|e| {
+                        JsValue::from_str(&format!(
+                            "bundler batch summary serialization error: {e}"
+                        ))
+                    })
+            }))?
+        }
     }
 
     // =========================================================================
@@ -2430,6 +2462,9 @@ impl WasmMetaSession {
             let (outcome, record) = session
                 .get_component_meta_with_audit(canonical_or_alias)
                 .into_parts();
+            if record.capture_state == verter_audit::AuditCaptureState::Unavailable {
+                return Err(audit::capture_unavailable_error());
+            }
             let Some(output) = outcome.map_err(ffi_err)? else {
                 return Ok(JsValue::NULL);
             };
@@ -2515,15 +2550,23 @@ impl WasmMetaSession {
         audit_json: &str,
         canonical_id: &str,
     ) -> Result<String, JsValue> {
-        catch_panic(AssertUnwindSafe(|| {
-            let bundle: WasmAuditBundleForWalker =
-                serde_json::from_str(audit_json).map_err(|e| {
-                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
-                })?;
-            let chain = bundle.record.why_loaded(canonical_id);
-            serde_json::to_string(&chain)
-                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
-        }))?
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (audit_json, canonical_id);
+            return Err(audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            catch_panic(AssertUnwindSafe(|| {
+                let bundle: WasmAuditBundleForWalker =
+                    serde_json::from_str(audit_json).map_err(|e| {
+                        JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                    })?;
+                let chain = bundle.record.why_loaded(canonical_id);
+                serde_json::to_string(&chain)
+                    .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
+            }))?
+        }
     }
 
     /// Run the Rust walker rooted at the instantiation keyed by
@@ -2538,19 +2581,33 @@ impl WasmMetaSession {
         decl_symbol_name: &str,
         args_fingerprint_hex: &str,
     ) -> Result<String, JsValue> {
-        catch_panic(AssertUnwindSafe(|| {
-            let bundle: WasmAuditBundleForWalker =
-                serde_json::from_str(audit_json).map_err(|e| {
-                    JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
-                })?;
-            let fingerprint = parse_hash16_hex_wasm(args_fingerprint_hex)?;
-            let chain =
-                bundle
-                    .record
-                    .why_instantiated(decl_canonical_id, decl_symbol_name, fingerprint);
-            serde_json::to_string(&chain)
-                .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
-        }))?
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (
+                audit_json,
+                decl_canonical_id,
+                decl_symbol_name,
+                args_fingerprint_hex,
+            );
+            return Err(audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            catch_panic(AssertUnwindSafe(|| {
+                let bundle: WasmAuditBundleForWalker =
+                    serde_json::from_str(audit_json).map_err(|e| {
+                        JsValue::from_str(&format!("audit_json is not a valid AuditBundle: {e}"))
+                    })?;
+                let fingerprint = parse_hash16_hex_wasm(args_fingerprint_hex)?;
+                let chain = bundle.record.why_instantiated(
+                    decl_canonical_id,
+                    decl_symbol_name,
+                    fingerprint,
+                );
+                serde_json::to_string(&chain)
+                    .map_err(|e| JsValue::from_str(&format!("chain serialization error: {e}")))
+            }))?
+        }
     }
 
     #[wasm_bindgen(js_name = "getEffectiveSource")]

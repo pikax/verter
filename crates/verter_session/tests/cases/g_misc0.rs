@@ -3,6 +3,8 @@
 #[path = "g_misc0/admission_guard.rs"]
 mod admission_guard;
 #[path = "g_misc0/audited_request_e2e.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod audited_request_e2e;
 #[path = "g_misc0/batch_api_shared_admissions.rs"]
 mod batch_api_shared_admissions;
@@ -51,6 +53,8 @@ mod env_hashes_swap_atomically_on_snapshot_bump;
 #[path = "g_misc0/eviction_policy.rs"]
 mod eviction_policy;
 #[path = "g_misc0/flow_return_audit_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod flow_return_audit_tls_propagation;
 #[path = "g_misc0/framework_adapter_guards.rs"]
 mod framework_adapter_guards;
@@ -59,6 +63,8 @@ mod framework_carrier_compiler_guards;
 #[path = "g_misc0/framework_carrier_confinement.rs"]
 mod framework_carrier_confinement;
 #[path = "g_misc0/getcomponentmeta_fallthrough_audit_cleanliness.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod getcomponentmeta_fallthrough_audit_cleanliness;
 #[path = "g_misc0/golden_semantic_dump.rs"]
 mod golden_semantic_dump;
@@ -81,12 +87,20 @@ mod language_routing_characterization;
 #[path = "g_misc0/legacy_dep_signature_field_gone.rs"]
 mod legacy_dep_signature_field_gone;
 #[path = "g_misc0/legacy_walker_parity_baseline.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod legacy_walker_parity_baseline;
 #[path = "g_misc0/materializations_lane_wired.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod materializations_lane_wired;
 #[path = "g_misc0/mcp_audit_e2e.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod mcp_audit_e2e;
 #[path = "g_misc0/mcp_audit_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod mcp_audit_tls_propagation;
 #[path = "g_misc0/no_default_env_hashes_in_production.rs"]
 mod no_default_env_hashes_in_production;
@@ -113,12 +127,16 @@ mod request_kind_payload_parity;
 #[path = "g_misc0/resolver_context_active_session_view.rs"]
 mod resolver_context_active_session_view;
 #[path = "g_misc0/sampler_thread_joined_at_host_drop.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod sampler_thread_joined_at_host_drop;
 #[path = "g_misc0/selective_component_meta_api.rs"]
 mod selective_component_meta_api;
 #[path = "g_misc0/semantic_analysis_audit_e2e.rs"]
 mod semantic_analysis_audit_e2e;
 #[path = "g_misc0/semantic_analysis_audit_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod semantic_analysis_audit_tls_propagation;
 #[path = "g_misc0/semantic_graph_production_reads_validated.rs"]
 mod semantic_graph_production_reads_validated;
@@ -127,14 +145,22 @@ mod single_language_classifier;
 #[path = "g_misc0/slot_binding_graph_matrix_module_aug_index_shape.rs"]
 mod slot_binding_graph_matrix_module_aug_index_shape;
 #[path = "g_misc0/slot_binding_shallow_publication_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod slot_binding_shallow_publication_tests;
 #[path = "g_misc0/synthetic_carrier_explicit_deepen_proof.rs"]
 mod synthetic_carrier_explicit_deepen_proof;
 #[path = "g_misc0/terminal_partial_field_type_publishes_finite_utility_shape.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod terminal_partial_field_type_publishes_finite_utility_shape;
 #[path = "g_misc0/tls_harness_cross_crate.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod tls_harness_cross_crate;
 #[path = "g_misc0/tls_harness_in_crate.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod tls_harness_in_crate;
 #[path = "g_misc0/tracer_stack_reentrant_observe_safe.rs"]
 mod tracer_stack_reentrant_observe_safe;
@@ -147,6 +173,10 @@ mod vue_relocation_no_shim;
 #[path = "g_misc0/walker_parity_baselines_have_full_coverage.rs"]
 mod walker_parity_baselines_have_full_coverage;
 #[path = "g_misc0/workspace_audit_production_callsite.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod workspace_audit_production_callsite;
 #[path = "g_misc0/workspace_audit_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod workspace_audit_tls_propagation;

@@ -649,6 +649,8 @@ fn typeinfo_graph_request_across_hosts_stays_isolated() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Audit-enabled host lifecycle: create -> audited call -> drop -> recreate,
 /// in one process. `verter_audit::current_observer()` is thread-local
 /// state — exactly the class nextest's per-test process isolation cannot

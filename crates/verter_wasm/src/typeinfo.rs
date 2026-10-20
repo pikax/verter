@@ -66,7 +66,8 @@ pub(crate) fn encode_stored_audit_record(
     match rec.capture_state {
         verter_audit::AuditCaptureState::ActiveStored => encode_audit_record(rec).map(Some),
         verter_audit::AuditCaptureState::FilteredNoop
-        | verter_audit::AuditCaptureState::AuditDisabled => Ok(None),
+        | verter_audit::AuditCaptureState::AuditDisabled
+        | verter_audit::AuditCaptureState::Unavailable => Ok(None),
     }
 }
 

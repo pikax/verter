@@ -22,6 +22,11 @@ default = []
 # exercises. A generator has no business being linked for a Windows or musl
 # publish, and a first link there would happen at publish time.
 generate-host-request-ts = []
+# The coordinated, default-off observation opt-in
+# (docs/arch/semantic-observe.md). Builds the instrumentation binding: the
+# audit records, footprints and provenance counters the audit methods
+# return. A default build reports unavailable capture from those methods.
+semantic-observe = ["verter_session/semantic-observe"]
 
 # The generator that writes `packages/native/host-compile-request.generated.ts`.
 # Declared explicitly so `required-features` can keep it out of the default

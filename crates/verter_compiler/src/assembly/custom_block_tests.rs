@@ -939,6 +939,9 @@ fn stale_cancelled_partial_and_source_mismatch_cannot_publish_or_warm() {
         .unwrap();
 }
 
+// Counts transform work through the audit observer, which exists only
+// with optional capture compiled in.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn construction_is_metadata_only_and_unknown_absent_cells_do_zero_work() {
     use std::sync::{

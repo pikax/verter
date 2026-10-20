@@ -322,7 +322,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -334,7 +334,7 @@ impl RouteDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -345,7 +345,7 @@ impl RouteDb {
         key: &RouteNameKey,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -357,7 +357,7 @@ impl RouteDb {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -762,7 +762,7 @@ pub(crate) fn emit_export_route_resolved_event(
         ..
     } = result
     {
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::ExportRouteResolved {
                 provider_canonical: Arc::<str>::from(provider_canonical),
                 exported_name: Arc::<str>::from(exported_name),

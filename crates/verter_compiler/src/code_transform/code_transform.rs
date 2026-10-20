@@ -361,16 +361,15 @@ impl<'a> CodeTransform<'a> {
     /// at the entry of every public op (prepend / append / overwrite /
     /// remove / move / batch) to populate
     /// [`verter_audit::payloads::compile::CompilePayload::code_transform_ops`].
-    /// `current_observer()` returns `None` outside an audited request,
-    /// so this is a single TLS load with no allocation on the hot path.
-    /// The audit guard `audit_no_hot_loop_instrumentation` must keep
-    /// callers off the per-element / per-attribute inner loops; this
-    /// method itself is the boundary that satisfies the per-op contract.
+    /// Optional capture: without `semantic-observe` this compiles to
+    /// nothing; with it, it reads the observer slot once per op. Callers
+    /// stay off the per-element / per-attribute inner loops; this method
+    /// itself is the boundary that satisfies the per-op contract.
     #[inline]
     pub(super) fn record_audit_op(&self) {
-        if let Some(observer) = verter_audit::current_observer() {
-            observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp);
-        }
+        verter_audit::observe!(
+            |observer| observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp)
+        );
     }
 
     /// Prepend content to the very start

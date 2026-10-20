@@ -9,11 +9,13 @@ use std::sync::Arc;
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
-use serde::{Deserialize, Serialize};
+#[cfg(feature = "semantic-observe")]
+use serde::Deserialize;
+use serde::Serialize;
 use verter_protocol::types::{FfiComponentMeta, FfiComponentMetaResolution};
-use verter_session::component_meta_audit::{
-    assertions::RequestAuditRecordAssertions, RequestAuditRecord,
-};
+#[cfg(feature = "semantic-observe")]
+use verter_session::component_meta_audit::assertions::RequestAuditRecordAssertions;
+use verter_session::component_meta_audit::RequestAuditRecord;
 use verter_session::component_meta_host::{
     ComponentMetaHost, ComponentMetaHostError, ComponentMetaSession as HostComponentMetaSession,
 };
@@ -49,6 +51,7 @@ struct AuditBundle {
     record: RequestAuditRecord,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Minimal decoder for `whyLoadedFromAuditJson` / `whyInstantiatedFromAuditJson`.
 /// Only the `record` field is consumed; the `analysis` and
 /// `resolution` fields present in the JSON bundle are silently
@@ -59,6 +62,7 @@ struct AuditBundleForWalker {
     record: RequestAuditRecord,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Parse a 32-character lowercase hex string into a
 /// `verter_session_query::analysis::types::Hash16`. Returns a NAPI error on malformed
 /// input.
@@ -357,6 +361,9 @@ impl NapiMetaSession {
             let (outcome, record) = session
                 .get_component_meta_with_audit(&canonical_or_alias)
                 .into_parts();
+            if record.capture_state == verter_audit::AuditCaptureState::Unavailable {
+                return Err(crate::audit::capture_unavailable_error());
+            }
             let Some(output) = outcome.map_err(meta_err)? else {
                 return Ok(None);
             };
@@ -392,22 +399,32 @@ impl NapiMetaSession {
         audit_json: String,
         canonical_id: String,
     ) -> Result<String> {
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            // The input JSON is an AuditBundle. Decode just the record.
-            let bundle: AuditBundleForWalker = serde_json::from_str(&audit_json).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("audit_json is not a valid AuditBundle: {e}"),
-                )
-            })?;
-            let chain = bundle.record.why_loaded(&canonical_id);
-            serde_json::to_string(&chain).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("chain serialization error: {e}"),
-                )
-            })
-        }))?
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (audit_json, canonical_id);
+            return Err(crate::audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            catch_panic(std::panic::AssertUnwindSafe(|| {
+                // The input JSON is an AuditBundle. Decode just the record.
+                let bundle: AuditBundleForWalker =
+                    serde_json::from_str(&audit_json).map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("audit_json is not a valid AuditBundle: {e}"),
+                        )
+                    })?;
+                let chain = serde_json::to_string(&bundle.record.why_loaded(&canonical_id))
+                    .map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("chain serialization error: {e}"),
+                        )
+                    });
+                chain
+            }))?
+        }
     }
 
     /// Run the Rust walker against a committed audit record rooted at
@@ -423,25 +440,41 @@ impl NapiMetaSession {
         decl_symbol_name: String,
         args_fingerprint_hex: String,
     ) -> Result<String> {
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            let bundle: AuditBundleForWalker = serde_json::from_str(&audit_json).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("audit_json is not a valid AuditBundle: {e}"),
-                )
-            })?;
-            let fingerprint = parse_hash16_hex(&args_fingerprint_hex)?;
-            let chain =
-                bundle
-                    .record
-                    .why_instantiated(&decl_canonical_id, &decl_symbol_name, fingerprint);
-            serde_json::to_string(&chain).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("chain serialization error: {e}"),
-                )
-            })
-        }))?
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (
+                audit_json,
+                decl_canonical_id,
+                decl_symbol_name,
+                args_fingerprint_hex,
+            );
+            return Err(crate::audit::capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            catch_panic(std::panic::AssertUnwindSafe(|| {
+                let bundle: AuditBundleForWalker =
+                    serde_json::from_str(&audit_json).map_err(|e| {
+                        Error::new(
+                            Status::GenericFailure,
+                            format!("audit_json is not a valid AuditBundle: {e}"),
+                        )
+                    })?;
+                let fingerprint = parse_hash16_hex(&args_fingerprint_hex)?;
+                let chain = serde_json::to_string(&bundle.record.why_instantiated(
+                    &decl_canonical_id,
+                    &decl_symbol_name,
+                    fingerprint,
+                ))
+                .map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("chain serialization error: {e}"),
+                    )
+                });
+                chain
+            }))?
+        }
     }
 
     /// Plain component-meta payload under a legacy entry-point name: the
@@ -567,6 +600,8 @@ mod tests {
         assert!(err.to_string().contains("MetaProject.openSession"));
     }
 
+    // The walker bindings exist only with optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn audit_bundle_for_walker_tolerates_full_bundle_with_analysis_and_resolution() {
         // Pin the serde "tolerate unknown fields" posture

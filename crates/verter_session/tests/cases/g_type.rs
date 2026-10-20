@@ -5,6 +5,8 @@
 // stay disjoint and share no state. The "duplicate mod" the lint reports
 // is the intended layout, not an accident — keep the allow at every site.
 #[path = "g_type/flow_return_audit_contract.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod flow_return_audit_contract;
 #[allow(clippy::duplicate_mod)]
 #[path = "component_meta_audit/harness.rs"]
@@ -26,6 +28,8 @@ mod type_resolution_audit_pathological_recursion;
 #[path = "g_type/type_resolution_audit_read_once.rs"]
 mod type_resolution_audit_read_once;
 #[path = "g_type/type_resolution_audit_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod type_resolution_audit_tls_propagation;
 #[path = "g_type/typeinfo_graph_query_executor.rs"]
 mod typeinfo_graph_query_executor;

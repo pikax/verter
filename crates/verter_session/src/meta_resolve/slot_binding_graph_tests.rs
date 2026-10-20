@@ -42,6 +42,7 @@ use verter_session_query::analysis::component_meta::ComponentMetaAnalysis;
 use verter_session_query::analysis::type_expand::ExpansionExactness;
 use verter_type_expr::{ObjectMember, TypeExpr};
 
+#[cfg(feature = "semantic-observe")]
 use crate::audited_request::AuditedRequest;
 use crate::types::FileLanguage;
 use crate::{HostConfig, UpsertRequest, VerterHost};
@@ -372,6 +373,8 @@ defineSlots<Slots>()
 // the audit payload (via `RequestContext::expanded_instantiate_calls`)
 // gives synthesis-attributable visibility independently of those peer
 // dispatches; that mirror is what this regression asserts.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn enrich_does_not_eagerly_instantiate_carrier() {
     let result = AuditedRequest::builder()
@@ -425,6 +428,8 @@ defineSlots<Slots>()
 // imported `BaseSlots`), exercising the carrier path the carrier-complete
 // surface reader resolves in Skeleton — the path that would have driven an
 // Expanded dispatch had the reader been wired to `Expanded`.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn synthesis_scoped_expanded_instantiate_is_zero_for_cross_file_heritage_slots() {
     let result = AuditedRequest::builder()
@@ -1099,6 +1104,8 @@ defineSlots<{
 // the warm pass — same host, same file, no invalidation between calls — must
 // perform NONE, because a genuine `ComponentMetaResultDb` hit returns the
 // cached result without re-entering the projector/instantiator at all.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn slot_bindings_warm_pass_o1_for_mocked_heritage() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig {
@@ -1195,6 +1202,8 @@ defineSlots<Slots>()
 //  2. A doubling ratio: the work at 2N stays under 3x the work at N. A
 //     linear traversal doubles; a quadratic one quadruples. This rail is
 //     self-calibrating, so it discriminates independently of the constants.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cold_synthesis_work_stays_linear_in_heritage_members() {
     const MEMBERS: usize = 50;
@@ -1248,6 +1257,8 @@ fn cold_synthesis_work_stays_linear_in_heritage_members() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Drive a cold `get_component_meta` over an N-member slot-heritage
 /// intersection under an audited request, and return the deterministic
 /// per-request work counters.
@@ -1341,6 +1352,8 @@ defineSlots<Slots>()
 // smallest fixture that exercises both the diagnostics fan-out and
 // the per-binding shell synthesis without falling under the
 // noise floor of an empty payload.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn synthesis_audit_payload_byte_budget_mocked() {
     // 30-slot cyclic-heritage fixture. Cyclic `CycleA <-> CycleB`
@@ -2148,6 +2161,8 @@ defineSlots<Slots>()
 // `else` branch and bumps the per-request
 // `memo_publish_suppressed` counter, which we assert is non-zero
 // to pin the gate.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn cache_suppress_true_skips_memo_insertion() {
     let result = AuditedRequest::builder()
@@ -2212,6 +2227,8 @@ defineSlots<Slots>()
 // `MacroExpansionDiagnostics` accumulator) would publish an empty
 // `payload.diagnostics` and fail the `diagnostics_len > 0`
 // discriminator.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn componentmeta_audit_payload_includes_walker_diagnostics() {
     let result = AuditedRequest::builder()
@@ -2255,6 +2272,8 @@ defineSlots<Slots>()
 // synthesis that lost track of fatal `QueryError` arms (e.g. always
 // returning `should_suppress = false`) would fail the assertion
 // below and silently warm the result cache with partial data.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn componentmeta_audit_payload_carries_should_suppress_flag() {
     let result = AuditedRequest::builder()
@@ -2420,6 +2439,8 @@ defineSlots<Slots>()
 // matching the tracing span's `trace_id` field. The
 // `publish_component_meta` span emits `trace_id` so consumers can join
 // audit records to captured logs by string match.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 #[tracing_test::traced_test]
 fn audit_record_trace_id_matches_tracing_span() {

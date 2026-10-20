@@ -42,21 +42,28 @@
 //!    [`verter_audit::AuditCaptureState::FilteredNoop`] /
 //!    [`verter_audit::AuditCaptureState::AuditDisabled`].
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+#[cfg(feature = "semantic-observe")]
 use std::time::Instant;
 
 use std::convert::Infallible;
 
+#[cfg(feature = "semantic-observe")]
+use verter_audit::WaitAudit;
 use verter_audit::{
     AuditedResult, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTimingAudit, SemanticAnalysisPayload, WaitAudit,
+    RequestStoreAudit, RequestTimingAudit, SemanticAnalysisPayload,
 };
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::project_type_store::{AnalysisArtifactKey, AnalysisReady};
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 impl VerterHost {
@@ -101,32 +108,43 @@ impl VerterHost {
         // the request actually did.
         let pre_call_cache_hit = self.current_content_pinned_indexed(canonical_id).is_some();
 
-        // Audit-disabled fast path: drive the analysis with NO
-        // `RequestContextGuard` installed. Producer-side
-        // `current_observer()` returns `None`, the instrumentation
-        // short-circuits at the TLS check, and nothing is published.
-        // The carrier still carries a cheap default-filled record
-        // marked `AuditDisabled`.
-        if !self.config.audit_enabled {
-            let request_id = self.next_request_id();
-            let analysis = self.materialize_analysis_ready(canonical_id);
-            let parent_request_id =
-                verter_execution::request_context::current_request_id().map(|id| id.to_string());
-            let record = noop_semantic_analysis_record(
-                request_id,
-                canonical_id,
-                parent_request_id,
-                pre_call_cache_hit,
-                verter_audit::AuditCaptureState::AuditDisabled,
-            );
-            return AuditedResult::ok(analysis, record);
+        // Captured path: the request publishes a record.
+        #[cfg(feature = "semantic-observe")]
+        if self.config.audit_enabled {
+            return self.analyze_with_audit_captured(canonical_id, pre_call_cache_hit);
         }
 
+        // Uncaptured path (audit disabled by the host, or capture compiled
+        // out): drive the analysis and return the cheap default-filled
+        // record. Nothing is measured or published.
+        let request_id = self.next_request_id();
+        let analysis = self.materialize_analysis_ready(canonical_id);
+        let parent_request_id =
+            verter_execution::request_context::current_request_id().map(|id| id.to_string());
+        let record = noop_semantic_analysis_record(
+            request_id,
+            canonical_id,
+            parent_request_id,
+            pre_call_cache_hit,
+            crate::capture::uncaptured_state(false),
+        );
+        AuditedResult::ok(analysis, record)
+    }
+
+    /// The captured arm of [`Self::analyze_with_audit`]: registration,
+    /// context install, payload snapshot and record publication.
+    #[cfg(feature = "semantic-observe")]
+    fn analyze_with_audit_captured(
+        self: &Arc<Self>,
+        canonical_id: &str,
+        pre_call_cache_hit: bool,
+    ) -> AuditedResult<Option<AnalysisReady>, Infallible> {
         // Stamp request id and increment the created-counter so the
         // `AuditedRequest` harness's multi-request guard surfaces
         // correctly when a closure issues both a component-meta and
         // analyze call inside the same `run` window.
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         // Build the per-request context. Footprint capture follows
@@ -156,21 +174,12 @@ impl VerterHost {
         );
         let _ = ctx.install_audit_registration(registration.clone());
 
-        // Install the matching TLS observer at the audit boundary.
-        // Active registrations install the real
-        // `RequestContextGuard`; Noop installs
-        // `verter_audit::NoOpObserver` so emit sites still see
-        // `Some(observer)` without paying downstream cost.
+        // The request runs under its context whether or not the
+        // consumer filter admits it.
         let request_start = Instant::now();
-        let analysis = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                self.materialize_analysis_ready(canonical_id)
-            }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                self.materialize_analysis_ready(canonical_id)
-            }
+        let analysis = {
+            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+            self.materialize_analysis_ready(canonical_id)
         };
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -342,6 +351,7 @@ fn noop_semantic_analysis_record(
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Build a [`SemanticAnalysisPayload`] from the materialised
 /// [`AnalysisReady`] artifact. The `indexed_ready_built` flag is left
 /// at its default (`false`) — the caller decides that based on
@@ -410,6 +420,7 @@ fn build_payload_from_analysis(analysis: &AnalysisReady) -> SemanticAnalysisPayl
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 #[inline]
 fn u32_from_usize_clamped(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)

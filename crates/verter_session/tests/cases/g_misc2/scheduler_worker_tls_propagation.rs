@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use verter_execution::request_context::{
-    CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
 use verter_scheduler::execution::owner_command::OwnerCommand;
 use verter_scheduler::execution::pool::SchedulerIoPool;
@@ -143,21 +143,12 @@ fn scheduler_worker_directly_sees_session_request_context_via_install_tls() {
 fn opaque_context_guard_install_does_not_recurse() {
     struct TestCtx {
         id: u64,
-        captures: bool,
-        joined: AtomicU64,
     }
 
     impl RequestContextLike for TestCtx {
         fn request_id(&self) -> u64 {
             self.id
         }
-        fn capture_enabled(&self) -> bool {
-            self.captures
-        }
-        fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
-            self.joined.fetch_add(1, Ordering::Relaxed);
-        }
-        fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
             let guard = OpaqueContextGuard::install(OpaqueRequestContext(
                 self as Arc<dyn RequestContextLike>,
@@ -171,11 +162,7 @@ fn opaque_context_guard_install_does_not_recurse() {
         fn uninstall(self: Box<Self>) {}
     }
 
-    let ctx = Arc::new(TestCtx {
-        id: 84,
-        captures: false,
-        joined: AtomicU64::new(0),
-    });
+    let ctx = Arc::new(TestCtx { id: 84 });
 
     // Direct OpaqueContextGuard::install call — must not recurse.
     let _guard = OpaqueContextGuard::install(OpaqueRequestContext(

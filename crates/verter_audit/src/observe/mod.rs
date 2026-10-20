@@ -28,8 +28,10 @@ impl CaptureAvailability {
 
 /// Concrete execution modes carried by optional capture owners.
 ///
-/// Instrumented builds currently capture unconditionally. Root/job selection
-/// and propagation across resumptions belong to the execution owner.
+/// A root entry (or a background job at submission) selects its mode once
+/// with [`ObserveMode::select`]; the request context carries the choice
+/// through every scheduler resumption, so no operation re-checks whether
+/// capture is enabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObserveMode {
     /// Execute without optional observations.
@@ -39,6 +41,28 @@ pub enum ObserveMode {
 }
 
 impl ObserveMode {
+    /// Select the mode for one root entry: captured only when this binary
+    /// compiles capture in and the entry asks for it.
+    #[must_use]
+    pub const fn select(requested: bool) -> Self {
+        if requested
+            && matches!(
+                CaptureAvailability::compiled(),
+                CaptureAvailability::Available
+            )
+        {
+            Self::Captured
+        } else {
+            Self::Uncaptured
+        }
+    }
+
+    /// `true` for [`ObserveMode::Captured`].
+    #[must_use]
+    pub const fn is_captured(self) -> bool {
+        matches!(self, Self::Captured)
+    }
+
     /// The execution mode supported by this build before per-request selection.
     pub const fn compiled() -> Self {
         #[cfg(feature = "semantic-observe")]
@@ -66,5 +90,270 @@ pub fn capture<T>(collect: impl FnOnce() -> T) -> Option<T> {
     {
         let _ = collect;
         None
+    }
+}
+
+/// Optional per-request counter: a relaxed `u64` atomic with
+/// `semantic-observe`, a zero-size value whose writes compile to nothing
+/// without it.
+///
+/// The reader exists only where the counter is kept, so a default build
+/// cannot substitute zero for a measurement it never took.
+#[derive(Debug, Default)]
+pub struct ObservedU64 {
+    #[cfg(feature = "semantic-observe")]
+    value: std::sync::atomic::AtomicU64,
+}
+
+impl ObservedU64 {
+    /// Add `amount`. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_add(&self, amount: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_add(amount, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (amount, order);
+    }
+
+    /// Overwrite the counter. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn store(&self, value: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.store(value, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (value, order);
+    }
+
+    /// Subtract `amount`. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_sub(&self, amount: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_sub(amount, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (amount, order);
+    }
+
+    /// Raise the counter to at least `value`. A no-op without
+    /// `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_max(&self, value: u64, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_max(value, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (value, order);
+    }
+
+    /// Read the counter. Exists only where the counter is kept.
+    #[cfg(feature = "semantic-observe")]
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> u64 {
+        self.value.load(order)
+    }
+}
+
+/// Optional per-request `u32` counter or bit mask. See [`ObservedU64`].
+#[derive(Debug, Default)]
+pub struct ObservedU32 {
+    #[cfg(feature = "semantic-observe")]
+    value: std::sync::atomic::AtomicU32,
+}
+
+impl ObservedU32 {
+    /// Add `amount`. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_add(&self, amount: u32, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_add(amount, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (amount, order);
+    }
+
+    /// Set the bits of `mask`. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_or(&self, mask: u32, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_or(mask, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (mask, order);
+    }
+
+    /// Read the value. Exists only where it is kept.
+    #[cfg(feature = "semantic-observe")]
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> u32 {
+        self.value.load(order)
+    }
+}
+
+/// Optional per-request `u16` high-water mark. See [`ObservedU64`].
+#[derive(Debug, Default)]
+pub struct ObservedU16 {
+    #[cfg(feature = "semantic-observe")]
+    value: std::sync::atomic::AtomicU16,
+}
+
+impl ObservedU16 {
+    /// Raise the mark to at least `value`. A no-op without
+    /// `semantic-observe`.
+    #[inline(always)]
+    pub fn fetch_max(&self, value: u16, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.fetch_max(value, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (value, order);
+    }
+
+    /// Read the mark. Exists only where it is kept.
+    #[cfg(feature = "semantic-observe")]
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> u16 {
+        self.value.load(order)
+    }
+}
+
+/// Optional per-request flag. See [`ObservedU64`].
+#[derive(Debug, Default)]
+pub struct ObservedFlag {
+    #[cfg(feature = "semantic-observe")]
+    value: std::sync::atomic::AtomicBool,
+}
+
+impl ObservedFlag {
+    /// Raise the flag. A no-op without `semantic-observe`.
+    #[inline(always)]
+    pub fn raise(&self, order: std::sync::atomic::Ordering) {
+        #[cfg(feature = "semantic-observe")]
+        self.value.store(true, order);
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = order;
+    }
+
+    /// Read the flag. Exists only where it is kept.
+    #[cfg(feature = "semantic-observe")]
+    #[must_use]
+    pub fn load(&self, order: std::sync::atomic::Ordering) -> bool {
+        self.value.load(order)
+    }
+}
+
+/// Optional phase clock for audit timings.
+///
+/// With `semantic-observe` it reads the clock at [`Stopwatch::start`];
+/// without it it is a zero-size value that never reads the clock. Its
+/// reader belongs inside a [`crate::observe!`] body, which a default build
+/// never runs; reaching it there is a defect and panics rather than
+/// reporting a fabricated duration.
+#[derive(Debug, Clone, Copy)]
+pub struct Stopwatch {
+    #[cfg(feature = "semantic-observe")]
+    started: crate::instant::Instant,
+}
+
+impl Stopwatch {
+    /// Start the clock (no clock read without `semantic-observe`).
+    #[inline(always)]
+    #[must_use]
+    pub fn start() -> Self {
+        Self {
+            #[cfg(feature = "semantic-observe")]
+            started: crate::instant::Instant::now(),
+        }
+    }
+
+    /// Milliseconds since [`Stopwatch::start`].
+    #[must_use]
+    pub fn elapsed_ms(&self) -> f64 {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.started.elapsed().as_secs_f64() * 1000.0
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            unreachable!("a phase clock is read only inside an observe! body")
+        }
+    }
+
+    /// Nanoseconds since [`Stopwatch::start`], saturated to `u64`.
+    #[must_use]
+    pub fn elapsed_nanos(&self) -> u64 {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            unreachable!("a phase clock is read only inside an observe! body")
+        }
+    }
+}
+
+/// An optional observation sampled where its source is in scope and read
+/// later, inside a [`crate::observe!`] body.
+///
+/// With `semantic-observe`, [`Sample::take`] runs its closure and keeps the
+/// value; without it the closure is never called and the sample is
+/// zero-size. Reading a sample outside an `observe!` body in a default
+/// build is a defect and panics rather than inventing a value.
+pub struct Sample<T> {
+    #[cfg(feature = "semantic-observe")]
+    value: T,
+    #[cfg(not(feature = "semantic-observe"))]
+    _value: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T: Clone> Clone for Sample<T> {
+    fn clone(&self) -> Self {
+        Self {
+            #[cfg(feature = "semantic-observe")]
+            value: self.value.clone(),
+            #[cfg(not(feature = "semantic-observe"))]
+            _value: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: Copy> Copy for Sample<T> {}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Sample<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(feature = "semantic-observe")]
+        {
+            f.debug_tuple("Sample").field(&self.value).finish()
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            f.write_str("Sample(unavailable)")
+        }
+    }
+}
+
+impl<T> Sample<T> {
+    /// Sample `collect()` when capture is compiled in.
+    #[inline(always)]
+    pub fn take(collect: impl FnOnce() -> T) -> Self {
+        #[cfg(feature = "semantic-observe")]
+        {
+            Self { value: collect() }
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = collect;
+            Self {
+                _value: std::marker::PhantomData,
+            }
+        }
+    }
+
+    /// The sampled value.
+    #[must_use]
+    pub fn get(self) -> T {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.value
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            unreachable!("an optional sample is read only inside an observe! body")
+        }
     }
 }

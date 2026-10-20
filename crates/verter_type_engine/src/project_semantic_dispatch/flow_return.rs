@@ -3057,9 +3057,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // frame) never funnels through `execute_via_cold_build_helper`, so
         // the family's participation is recorded here — idempotent per
         // tag, no-op without an installed `RequestContext`.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|ctx| {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
-        }
+        });
         // The callee schedule learns what each frame's call resolution
         // demanded, for the frame's own instantiations.
         self.note_flow_return_demand(&key);

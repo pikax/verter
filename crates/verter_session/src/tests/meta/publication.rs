@@ -671,6 +671,8 @@ defineProps<P>()
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// AUDIT-lane equivalence: the audited session wrapper, the audited host
 /// entry (the LSP route), and the NAPI-shaped payload lane all serve the
 /// SAME materialized envelope for the same component.

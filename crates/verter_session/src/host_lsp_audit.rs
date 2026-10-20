@@ -36,13 +36,16 @@
 use std::sync::Arc;
 
 use verter_audit::payloads::tags::LspMethodTag;
+use verter_audit::{LspRequestPayload, RequestAuditRecord, RequestTargetIdentity};
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{
-    LspRequestPayload, RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit,
-    RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit,
+    RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Session object held by an audited LSP handler for the duration
@@ -60,7 +63,9 @@ use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 /// the registry.
 pub enum LspAuditSession {
     /// Active session — `audit_enabled = true` and the consumer
-    /// filter accepted [`RequestKind::Lsp`].
+    /// filter accepted [`RequestKind::Lsp`]. Exists only with
+    /// `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     Active(ActiveLspSession),
     /// No-op session — audit disabled or kind filtered out. All
     /// finalize methods short-circuit to `None`.
@@ -72,6 +77,7 @@ pub enum LspAuditSession {
 ///
 /// Access the request id via [`Self::request_id`] when constructing
 /// payloads or asserting lifecycle membership.
+#[cfg(feature = "semantic-observe")]
 pub struct ActiveLspSession {
     request_id: u64,
     method: LspMethodTag,
@@ -89,6 +95,7 @@ pub struct ActiveLspSession {
     tls_guard: Option<RequestContextGuard>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl ActiveLspSession {
     /// The freshly-stamped request id for this session.
     #[must_use]
@@ -111,6 +118,7 @@ impl LspAuditSession {
     pub fn request_id(&self) -> Option<u64> {
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(active) => Some(active.request_id),
         }
     }
@@ -122,8 +130,11 @@ impl LspAuditSession {
     /// `None` otherwise (noop session, or losing a race with the
     /// defensive drop path).
     pub fn finalize_ok(self, payload: LspRequestPayload) -> Option<RequestAuditRecord> {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = payload;
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(mut active) => {
                 let record = build_record(
                     active.request_id,
@@ -156,6 +167,7 @@ impl LspAuditSession {
     pub fn finalize_cancelled(self) -> Option<RequestAuditRecord> {
         match self {
             Self::Noop => None,
+            #[cfg(feature = "semantic-observe")]
             Self::Active(mut active) => {
                 let payload = LspRequestPayload {
                     method: active.method.clone(),
@@ -180,6 +192,7 @@ impl LspAuditSession {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 fn build_record(
     request_id: u64,
     target_identity: RequestTargetIdentity,
@@ -235,12 +248,24 @@ impl VerterHost {
         method: LspMethodTag,
         target_identity: RequestTargetIdentity,
     ) -> LspAuditSession {
-        if !self.config.audit_enabled {
-            return LspAuditSession::Noop;
+        #[cfg(feature = "semantic-observe")]
+        if self.config.audit_enabled {
+            return self.lsp_audit_begin_captured(method, target_identity);
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (method, target_identity);
+        LspAuditSession::Noop
+    }
 
+    #[cfg(feature = "semantic-observe")]
+    fn lsp_audit_begin_captured(
+        self: &Arc<Self>,
+        method: LspMethodTag,
+        target_identity: RequestTargetIdentity,
+    ) -> LspAuditSession {
         let canonical_id = target_identity.legacy_canonical_id();
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture;

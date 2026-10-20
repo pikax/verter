@@ -8,6 +8,13 @@
 //! the `is_approximate` story — they are exact even under concurrent
 //! audits because each request's context isolates its own events.
 //!
+//! Only the request id, cancellation, projection budget, committed input,
+//! partiality flag and request-scoped memos are required state. Every audit
+//! counter, set, timer and the footprint accumulator is optional capture:
+//! counters are `verter_audit::observe` zero-size values without
+//! `semantic-observe`, and the remaining capture fields, the accumulator TLS
+//! slot and the audit-observer install exist only with it.
+//!
 //! TLS installation is stack-safe:
 //!
 //! - `RequestContextGuard::install` uses `RefCell::replace` (never
@@ -20,13 +27,20 @@
 //!   `replace`, both of which are non-panicking.
 
 use std::cell::{Cell, RefCell};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use parking_lot::Mutex;
+use verter_audit::observe::{ObservedFlag, ObservedU16, ObservedU32, ObservedU64};
 use verter_execution::cancellation::CancellationToken;
+#[cfg(feature = "semantic-observe")]
+use verter_execution::request_context::CacheEventKind;
 use verter_execution::request_context::{
-    CacheEventKind, OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+    OpaqueContextGuard, OpaqueRequestContext, RequestContextLike, TlsUninstall,
 };
 
 pub use crate::request_budget::RequestBudget;
@@ -585,23 +599,34 @@ pub fn observe_component_meta_read_suppress<T>(read: &crate::semantic_query::Cac
 /// Re-entrant: nested synthesis frames raise/lower the depth so a balanced
 /// stack always restores the pre-entry depth. A no-op when no
 /// `RequestContext` is installed (the synthetic test-fixture path).
+///
+/// Optional capture: without `semantic-observe` the guard is zero-size and
+/// reads no request context.
 #[must_use]
 pub struct SynthesisScopeGuard {
+    #[cfg(feature = "semantic-observe")]
     ctx: Option<Arc<RequestContext>>,
 }
 
 impl SynthesisScopeGuard {
     /// Enter the synthesis phase: raise the active depth on the current
     /// request context (if any).
+    #[inline(always)]
     pub fn enter() -> Self {
-        let ctx = current_request_context();
-        if let Some(ctx) = ctx.as_ref() {
-            ctx.synthesis_active_depth.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let ctx = current_request_context();
+            if let Some(ctx) = ctx.as_ref() {
+                ctx.synthesis_active_depth.fetch_add(1, Ordering::Relaxed);
+            }
+            Self { ctx }
         }
-        Self { ctx }
+        #[cfg(not(feature = "semantic-observe"))]
+        Self {}
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl Drop for SynthesisScopeGuard {
     fn drop(&mut self) {
         if let Some(ctx) = self.ctx.as_ref() {
@@ -616,7 +641,9 @@ impl Drop for SynthesisScopeGuard {
 /// `build_instantiate` alongside the request-wide
 /// [`RequestContext::expanded_instantiate_calls`] bump. No-op when no
 /// context is installed or synthesis is not active.
+#[inline(always)]
 pub fn note_expanded_instantiate_for_synthesis_scope() {
+    #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = current_request_context() {
         if ctx.synthesis_active_depth.load(Ordering::Relaxed) > 0 {
             ctx.synthesis_expanded_instantiate_calls
@@ -635,15 +662,16 @@ pub fn note_expanded_instantiate_for_synthesis_scope() {
 #[derive(Debug, Default)]
 pub struct HitMiss {
     /// Hits observed on this cache layer during the request.
-    pub hits: AtomicU64,
+    pub hits: ObservedU64,
     /// Misses observed on this cache layer during the request.
-    pub misses: AtomicU64,
+    pub misses: ObservedU64,
 }
 
 impl HitMiss {
     /// Snapshot the current hit/miss values with relaxed ordering.
     /// The request is single-threaded at finalisation, so relaxed
     /// reads observe every prior bump on the same context.
+    #[cfg(feature = "semantic-observe")]
     #[must_use]
     pub fn snapshot(&self) -> (u64, u64) {
         (
@@ -734,27 +762,28 @@ pub struct BypassDiagnosticCounters {
     /// expects this to drop to a small constant; counts >1 reveal
     /// resolver-tier carriers that still build their own owned view
     /// instead of borrowing the request-bound view.
-    pub host_store_view_from_host_builds: AtomicU64,
+    pub host_store_view_from_host_builds: ObservedU64,
     /// Number of `ComponentMetaQueryEngine::new(ctx)` constructions
     /// on the current request where `ctx.is_request_bound()` returned
     /// `false` (i.e. the engine was bound to a bare `&VerterHost`
     /// rather than a `HostResolverContext` / `SessionResolverContext`).
     /// Final-state invariant: `0` — every production engine is bound
     /// to a request-bound ctx.
-    pub bare_engine_constructions: AtomicU64,
+    pub bare_engine_constructions: ObservedU64,
     /// Number of `ResolverContext::resolver_store_view()` calls on
     /// the current request. Each call rebuilds a full owned
     /// `HostStoreView` via `HostStoreView::from_host`; warm-hit
     /// validator paths in `fact_signature_helpers` now consult the
     /// borrowed `store_view()` directly, so this counter trends to 0
     /// in production.
-    pub resolver_store_view_calls: AtomicU64,
+    pub resolver_store_view_calls: ObservedU64,
 }
 
 impl BypassDiagnosticCounters {
     /// Snapshot the counter values with relaxed ordering. The
     /// request is single-threaded at finalisation so relaxed reads
     /// observe every prior bump.
+    #[cfg(feature = "semantic-observe")]
     #[must_use]
     pub fn snapshot(&self) -> (u64, u64, u64) {
         (
@@ -774,8 +803,9 @@ impl BypassDiagnosticCounters {
 /// observes all trait-dispatched owned-view rebuilds — the
 /// warm-hit validator path was the dominant consumer until the
 /// borrowed-view substitution landed.
-#[inline]
+#[inline(always)]
 pub fn bump_resolver_store_view_call() {
+    #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = current_request_context() {
         ctx.cache_counters
             .bypass_diagnostics
@@ -788,8 +818,9 @@ pub fn bump_resolver_store_view_call() {
 /// counter when a request context is installed. Called from
 /// `ComponentMetaQueryEngine::new` whenever a test context fails the
 /// `is_request_bound()` predicate. Production contexts are sealed and bound.
-#[inline]
+#[inline(always)]
 pub fn bump_bare_engine_construction() {
+    #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = current_request_context() {
         ctx.cache_counters
             .bypass_diagnostics
@@ -804,6 +835,7 @@ pub fn bump_bare_engine_construction() {
 /// request context and plants it through
 /// [`RequestContext::install_audit_registration`]; the inner resolver path
 /// finalizes the request's record through it instead of publishing directly.
+#[cfg(feature = "semantic-observe")]
 pub trait RequestAuditFinalization: Send + Sync + std::fmt::Debug {
     /// Store `record` as this request's audit record. Returns `true` on the
     /// first finalization of an active registration, `false` afterwards or
@@ -812,9 +844,11 @@ pub trait RequestAuditFinalization: Send + Sync + std::fmt::Debug {
 }
 
 /// Per-request state. Held as `Arc<RequestContext>` and wrapped into
-/// [`OpaqueRequestContext`] when handed to the scheduler. Also implements
-/// [`verter_audit::AuditObserver`] so the same `Arc` plants into the
-/// substrate's TLS slot via [`RequestContextGuard::install`].
+/// [`OpaqueRequestContext`] when handed to the scheduler. With
+/// `semantic-observe` it also implements [`verter_audit::AuditObserver`]
+/// so the same `Arc` plants into the substrate's TLS slot via
+/// [`RequestContextGuard::install`]; without it the audit counters are
+/// zero-size and the capture fields do not exist.
 #[derive(Debug)]
 pub struct RequestContext {
     /// Monotonic request id. Non-zero by construction.
@@ -827,6 +861,7 @@ pub struct RequestContext {
     /// the tracing instrumentation so log scrapers can correlate
     /// dispatch / memo / walker events under one request. Generated
     /// fresh per construction.
+    #[cfg(feature = "semantic-observe")]
     pub trace_id: String,
     /// Canonical id the request resolves for.
     pub canonical_id: Arc<str>,
@@ -835,9 +870,11 @@ pub struct RequestContext {
     /// entry-point. Other producer surfaces pass their own kind through
     /// [`Self::with_kind`] when wiring an audited request through this
     /// context.
+    #[cfg(feature = "semantic-observe")]
     pub kind: verter_audit::RequestKind,
     /// Whether the request is capturing its semantic footprint. When
     /// `true`, `audit_accumulator` is populated.
+    #[cfg(feature = "semantic-observe")]
     pub footprint_capture: bool,
     /// Whether per-file timing capture is enabled for this request.
     /// Mirrors `HostConfig::audit_timing_capture`. When `true`, the
@@ -845,8 +882,10 @@ pub struct RequestContext {
     /// in `Instant::now()` and the resulting `*_ns` values flow into
     /// `FileAudit::read_ms` / `parse_ms` / `lower_ms` for entries this
     /// request triggered.
+    #[cfg(feature = "semantic-observe")]
     pub timing_capture: bool,
     /// The per-request footprint accumulator (opt-in).
+    #[cfg(feature = "semantic-observe")]
     pub audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     /// Audit-record registration handle planted by the public audited
     /// entry-point. The entry-point constructs an
@@ -857,34 +896,35 @@ pub struct RequestContext {
     /// the host's records store. `None`
     /// when no audited entry-point is in scope (rare — direct callers
     /// of `resolve_component_meta` outside the audited path).
+    #[cfg(feature = "semantic-observe")]
     pub audit_registration: std::sync::OnceLock<Arc<dyn RequestAuditFinalization>>,
     /// Per-context cold-build counter. Populated by
     /// `execute_cooperative` calling `ctx.record_cache_event(Miss |
     /// ColdBuild)`. Exact per-request even under concurrent audits
     /// because each request's context isolates its own events
-    pub cold_builds: AtomicU64,
+    pub cold_builds: ObservedU64,
     /// Per-context warm-hit counter. Fired on `Hit`.
-    pub warm_hits: AtomicU64,
+    pub warm_hits: ObservedU64,
     /// Per-context joined-wait counter. Fired on `JoinedWait`
     /// (a peer picked up an in-flight artifact before this request
     /// could start from cold).
-    pub joined_waits: AtomicU64,
+    pub joined_waits: ObservedU64,
     /// Per-context sentinel counter. Fired on `Sentinel` — placeholder
     /// entries that collapse to a real artifact later.
-    pub sentinels: AtomicU64,
+    pub sentinels: ObservedU64,
     /// Per-context in-flight-abort-retry counter. Fired on
     /// `InflightAbortedRetry` — a retry loop after an in-flight
     /// slot was aborted by a newer generation.
-    pub inflight_aborted_retries: AtomicU64,
+    pub inflight_aborted_retries: ObservedU64,
     /// Per-context cold-abort-swept counter. Fired on
     /// `ColdAbortSwept` — a cold entry reaped during generation
     /// reconciliation.
-    pub cold_aborts_swept: AtomicU64,
+    pub cold_aborts_swept: ObservedU64,
     /// Per-context structural-materialisation call counter. No
     /// production producer bumps it (the projector pipeline publishes
     /// structural surfaces without a separate materialiser); it stays
     /// on the audit payload as a zero-valued field.
-    pub materialize_structure_calls: AtomicU64,
+    pub materialize_structure_calls: ObservedU64,
     /// Per-request projection-operation fuse used by semantic dispatch.
     /// Stored on the existing request context so scheduler worker TLS
     /// propagation carries the same budget state as audit/cache counters.
@@ -892,13 +932,13 @@ pub struct RequestContext {
     /// Per-context structural-materialisation warm-hit counter. No
     /// production producer bumps it; it stays on the audit payload as a
     /// zero-valued field.
-    pub materialize_structure_cache_hits: AtomicU64,
+    pub materialize_structure_cache_hits: ObservedU64,
     /// Per-context counter — lock acquisitions on the per-scope
     /// `NodeArena` dedup index.
-    pub node_arena_lock_acquisitions: AtomicU64,
+    pub node_arena_lock_acquisitions: ObservedU64,
     /// Per-context counter — lock acquisitions on the family-map
     /// dep-signature reverse index.
-    pub family_map_lock_acquisitions: AtomicU64,
+    pub family_map_lock_acquisitions: ObservedU64,
     /// Per-context aggregate — total wall-clock spent waiting on
     /// lock acquisitions during the audited window, in nanoseconds.
     /// Populated only when `audit_timing_capture` is `true`; the
@@ -906,26 +946,26 @@ pub struct RequestContext {
     /// `Instant::now()` when timing is off so this counter stays
     /// at `0`. Surfaces as
     /// [`verter_audit::WaitAudit::lock_wait_ns`].
-    pub lock_wait_ns: AtomicU64,
+    pub lock_wait_ns: ObservedU64,
     /// Per-context aggregate — total number of lock acquisitions
     /// (cross-cache) observed for the audited request. Bumped once
     /// per acquisition through the session-side helpers regardless
     /// of which shard / canonical owned the mutex. Surfaces as
     /// [`verter_audit::WaitAudit::lock_acquisitions`].
-    pub lock_acquisitions: AtomicU64,
+    pub lock_acquisitions: ObservedU64,
     /// Per-context aggregate — total scheduler queue dwell time for
     /// the audited request, in nanoseconds. Accumulates across
     /// every dispatch the request observes (initial + retries).
     /// Always `0` when no scheduler dispatch is observed (e.g. WASM,
     /// fast paths). Surfaces as
     /// [`verter_audit::WaitAudit::queue_wait_ns`].
-    pub queue_wait_ns: AtomicU64,
+    pub queue_wait_ns: ObservedU64,
     /// Per-context counter — times a `dep_signature` was merged into
     /// the materialiser's `local_fence`.
-    pub dep_signature_merges: AtomicU64,
+    pub dep_signature_merges: ObservedU64,
     /// Per-context counter — subset of `dep_signature_merges` that
     /// hit an existing intern bucket.
-    pub dep_signature_intern_hits: AtomicU64,
+    pub dep_signature_intern_hits: ObservedU64,
     /// Per-cache hit/miss attribution for the cache layers
     /// participating in the request. Bumped at the get/insert
     /// boundary of each cache. Snapshotted at request close into
@@ -939,12 +979,14 @@ pub struct RequestContext {
     /// the audit record's `parent_request_id` field is populated.
     /// `None` when the request has no parent (top-level audited
     /// entry-point with no enclosing TLS context).
+    #[cfg(feature = "semantic-observe")]
     pub parent_request_id: Option<u64>,
     /// Scheduler-side attribution for this request. Populated by
     /// [`Self::record_scheduler_dispatch`] (called via the audit
     /// observer trait by scheduler workers at dispatch time). The
     /// first dispatch wins on the per-request capture; subsequent
     /// dispatches increment `dispatch_count` on the captured value.
+    #[cfg(feature = "semantic-observe")]
     pub scheduler_audit: Mutex<Option<verter_audit::SchedulerAudit>>,
     /// Per-request peak process RSS slot. The host-owned sampler
     /// thread (see
@@ -970,6 +1012,7 @@ pub struct RequestContext {
     /// WRITE lock the sampler is holding a READ lock on) and then the
     /// runtime's `Drop` (which joins the sampler thread from the sampler
     /// thread). A bare counter has no destructor and reaches nothing.
+    #[cfg(feature = "semantic-observe")]
     pub process_rss_peak_bytes: Arc<AtomicU64>,
     /// The request's import-route witness builds
     /// ([`crate::request_route_memo::ImportRouteObservationMemo`]):
@@ -989,32 +1032,32 @@ pub struct RequestContext {
     /// Number of resolver hops taken — every dispatch through
     /// `SemanticQueryApi::execute` against the active context bumps
     /// this once.
-    pub type_resolution_hops: AtomicU64,
+    pub type_resolution_hops: ObservedU64,
     /// Number of `Navigate` hops — intermediate path-projection hops
     /// that walked through a member without expanding it.
-    pub type_resolution_navigations: AtomicU64,
+    pub type_resolution_navigations: ObservedU64,
     /// Number of `Expanded` / `Shallow` hops that allocated new
     /// semantic nodes. Cache hits do NOT bump this counter.
-    pub type_resolution_expansions: AtomicU64,
+    pub type_resolution_expansions: ObservedU64,
     /// Number of conditional-type branch decisions resolved (open
     /// distributions + closed branch reductions).
-    pub type_resolution_conditional_decisions: AtomicU64,
+    pub type_resolution_conditional_decisions: ObservedU64,
     /// Number of materialization cycle gate
     /// (`ClassifyMaterializationCycleGate`) warm family hits observed
     /// during the request. Field name retained for audit-harness JSON
     /// schema compatibility.
-    pub type_resolution_ref_root_cycle_hits: AtomicU64,
+    pub type_resolution_ref_root_cycle_hits: ObservedU64,
     /// Total projection ops executed against the projection-op
     /// budget (`SemanticQueryKey::ProjectPath` invocations).
-    pub type_resolution_projection_ops: AtomicU64,
+    pub type_resolution_projection_ops: ObservedU64,
     /// Maximum walker depth observed during the request — the
     /// `fetch_max`-monotonic high-water mark for navigator and
     /// dispatch recursion.
-    pub type_resolution_depth_high_water: AtomicU16,
+    pub type_resolution_depth_high_water: ObservedU16,
     /// Set to `true` when the depth budget
     /// (`verter_audit::WALKER_DEPTH_CAP`) was exceeded during the
     /// request.
-    pub type_resolution_recursion_limit_reached: AtomicBool,
+    pub type_resolution_recursion_limit_reached: ObservedFlag,
     /// Per-request `SemanticQueryKey` dispatch trace: bit `i` is set once a key
     /// with [`SemanticQueryKeyTag::bit_index`](crate::semantic_query::SemanticQueryKeyTag::bit_index)
     /// `i` dispatches through the shared
@@ -1030,44 +1073,44 @@ pub struct RequestContext {
     /// subset.) Surfaced verbatim on
     /// [`verter_audit::TypeResolutionPayload::semantic_query_dispatch_mask`] so a
     /// consumer can recover which query families a resolution actually touched.
-    pub type_resolution_dispatched_query_tags: AtomicU32,
+    pub type_resolution_dispatched_query_tags: ObservedU32,
     /// Number of cold whole-function flow-return evaluations this
     /// request ran (root plus nested inline frames). Bumped at the
     /// `FlowReturnStarted` emission site; a warm family hit bumps
     /// nothing (the cold-vs-warm audit contract's counter witness).
-    pub flow_return_cold_computes: AtomicU32,
+    pub flow_return_cold_computes: ObservedU32,
     /// Number of flow-slice budget refusals observed. Bumped at the
     /// `FlowSliceBudgetExceeded` emission site.
-    pub flow_return_budget_exceeded: AtomicU32,
+    pub flow_return_budget_exceeded: ObservedU32,
     /// Number of coinductive flow-cycle re-entry holds recorded on
     /// the shared obligation runtime. Bumped at the
     /// `FlowCycleSentinelHit` emission site.
-    pub flow_return_cycle_reentries: AtomicU32,
+    pub flow_return_cycle_reentries: ObservedU32,
     /// Per-context accumulator for compile-phase wall-clock — parse
     /// phase. Stored as fixed-point microseconds (`f64` ms × 1_000`)
     /// so the atomic counter can `fetch_add` cheaply; finalisation
     /// converts back to milliseconds.
-    pub compile_parse_us: AtomicU64,
+    pub compile_parse_us: ObservedU64,
     /// Per-context accumulator for compile-phase wall-clock — script
     /// (transform) phase. Same fixed-point-microseconds encoding as
     /// [`Self::compile_parse_us`].
-    pub compile_transform_us: AtomicU64,
+    pub compile_transform_us: ObservedU64,
     /// Per-context accumulator for compile-phase wall-clock — codegen
     /// phase (template / IDE). Same fixed-point-microseconds encoding
     /// as [`Self::compile_parse_us`].
-    pub compile_codegen_us: AtomicU64,
+    pub compile_codegen_us: ObservedU64,
     /// Per-context accumulator for compile-phase wall-clock — CSS
     /// analysis phase. Same fixed-point-microseconds encoding as
     /// [`Self::compile_parse_us`].
-    pub compile_css_analysis_us: AtomicU64,
+    pub compile_css_analysis_us: ObservedU64,
     /// Per-context accumulator for compile-phase wall-clock — sourcemap
     /// generation. Same fixed-point-microseconds encoding as
     /// [`Self::compile_parse_us`].
-    pub compile_sourcemap_us: AtomicU64,
+    pub compile_sourcemap_us: ObservedU64,
     /// Per-context counter — number of `CodeTransform` operations
     /// observed during the compile request. Bumped from
     /// [`verter_audit::AuditEvent::CompileCodeTransformOp`].
-    pub compile_code_transform_ops: AtomicU64,
+    pub compile_code_transform_ops: ObservedU64,
 
     // ─────── Slot-binding-synthesis attribution counters ───────
     //
@@ -1088,12 +1131,13 @@ pub struct RequestContext {
     /// expands imported macro roots). NOT a synthesis-purity signal — see
     /// [`Self::synthesis_expanded_instantiate_calls`] for the synthesis-scoped
     /// counter the slot-binding eagerness guard asserts.
-    pub expanded_instantiate_calls: AtomicU64,
+    pub expanded_instantiate_calls: ObservedU64,
     /// Re-entrant depth of the slot-binding synthesis phase
     /// ([`crate::meta_resolve::slot_binding_graph::resolve_slot_bindings_graph_native`]).
     /// Raised on synthesis entry, lowered on exit (a `Drop` guard restores
     /// it even on early return). `> 0` means an `Instantiate` dispatch is
     /// attributable to slot-binding synthesis.
+    #[cfg(feature = "semantic-observe")]
     pub synthesis_active_depth: AtomicU64,
     /// Expanded-mode `Instantiate` (`context.projection_reduction.mode ==
     /// Expanded`) dispatches observed WHILE
@@ -1104,18 +1148,18 @@ pub struct RequestContext {
     /// `Navigate` / `Skeleton`, never the giant-tree `Expanded` body mode.
     /// Surfaces on
     /// [`verter_audit::ComponentMetaPayload::synthesis_expanded_instantiate_calls`].
-    pub synthesis_expanded_instantiate_calls: AtomicU64,
+    pub synthesis_expanded_instantiate_calls: ObservedU64,
     /// `MemoEntry` insertions published into the `SemanticGraphStore`
     /// warm map during this request (bumped at `warm_publish_one`);
     /// surfaces on
     /// [`verter_audit::ComponentMetaPayload::memo_insertions`].
-    pub memo_insertions: AtomicU64,
+    pub memo_insertions: ObservedU64,
     /// `cache_runtime::singleflight` builds that landed with
     /// `cache_suppress=true` and had their warm-publish skipped;
     /// surfaces on
     /// [`verter_audit::ComponentMetaPayload::memo_publish_suppressed`].
     /// Discriminating signal for the no-poison gate.
-    pub memo_publish_suppressed: AtomicU64,
+    pub memo_publish_suppressed: ObservedU64,
     /// Sticky flag raised by reducer / materializer paths on every GENUINE
     /// PARTIAL semantic read (projection-budget exhaustion, cancellation,
     /// same-path recursion, walker fatal) — NOT on a benign
@@ -1136,144 +1180,144 @@ pub struct RequestContext {
     // [`verter_audit::ResolverHotPathCounters`] on the
     // [`verter_audit::RequestFootprintAudit::resolver_hot_path`] field.
     /// Total invocations of `run_external_type_frontier_closure_with_view`.
-    pub frontier_closure_invocations_total: AtomicU64,
+    pub frontier_closure_invocations_total: ObservedU64,
     /// Subset of [`Self::frontier_closure_invocations_total`] whose
     /// frontier returned `target = None`.
-    pub frontier_closure_invocations_target_none: AtomicU64,
+    pub frontier_closure_invocations_target_none: ObservedU64,
     /// Subset of [`Self::frontier_closure_invocations_target_none`]
     /// for `(owner, type_name)` pairs already observed in the request.
     /// Discriminating signal for the "cross-request negative-resolution
     /// caching defect" hypothesis.
-    pub frontier_closure_redundant_target_none_pairs: AtomicU64,
+    pub frontier_closure_redundant_target_none_pairs: ObservedU64,
     /// Warm hits on a host-owned negative entry in the
     /// resolved-external-type cache.
-    pub resolved_external_type_cache_negative_hits: AtomicU64,
+    pub resolved_external_type_cache_negative_hits: ObservedU64,
     /// Misses on a host-owned negative entry — the cache had no
     /// "known None" entry to short-circuit.
-    pub resolved_external_type_cache_negative_misses: AtomicU64,
+    pub resolved_external_type_cache_negative_misses: ObservedU64,
     /// Cold import-route resolutions that returned a positive target.
-    pub resolve_import_cold_positive: AtomicU64,
+    pub resolve_import_cold_positive: ObservedU64,
     /// Cold import-route resolutions that returned `None`.
-    pub resolve_import_cold_negative: AtomicU64,
+    pub resolve_import_cold_negative: ObservedU64,
     /// Warm import-route resolutions served with a positive target.
-    pub resolve_import_warm_positive: AtomicU64,
+    pub resolve_import_warm_positive: ObservedU64,
     /// Warm import-route resolutions served with a known-miss target.
-    pub resolve_import_warm_negative: AtomicU64,
+    pub resolve_import_warm_negative: ObservedU64,
     /// Import-route lookups classified as `import_route_is_known_miss`.
-    pub known_miss_route_served: AtomicU64,
+    pub known_miss_route_served: ObservedU64,
     /// Known-miss entries revalidated as still missing.
-    pub known_miss_route_revalidated: AtomicU64,
+    pub known_miss_route_revalidated: ObservedU64,
     /// Known-miss entries recomputed because the `content_generation`
     /// advanced.
-    pub known_miss_route_recomputed: AtomicU64,
+    pub known_miss_route_recomputed: ObservedU64,
     /// Cold imported-registry-symbol resolutions.
-    pub imported_registry_cold: AtomicU64,
+    pub imported_registry_cold: ObservedU64,
     /// Warm imported-registry-symbol resolutions (`peek` hit).
-    pub imported_registry_warm: AtomicU64,
+    pub imported_registry_warm: ObservedU64,
     /// Imported-registry-symbol resolutions that returned `None`.
-    pub imported_registry_negative: AtomicU64,
+    pub imported_registry_negative: ObservedU64,
     /// Cold imported-type-root resolutions (closure body ran).
-    pub imported_root_cold: AtomicU64,
+    pub imported_root_cold: ObservedU64,
     /// Warm imported-type-root resolutions (cached value reused).
-    pub imported_root_warm: AtomicU64,
+    pub imported_root_warm: ObservedU64,
     /// Barrel-export hops traversed during route-frontier resolution.
-    pub route_db_barrel_steps: AtomicU64,
+    pub route_db_barrel_steps: ObservedU64,
     /// `export *` wildcard fan-out expansions observed.
-    pub route_db_wildcard_fanout: AtomicU64,
+    pub route_db_wildcard_fanout: ObservedU64,
     /// Cold prepared-decl bundle materializations.
-    pub prepared_decl_bundle_cold: AtomicU64,
+    pub prepared_decl_bundle_cold: ObservedU64,
     /// Warm prepared-decl bundle cache hits.
-    pub prepared_decl_bundle_warm: AtomicU64,
+    pub prepared_decl_bundle_warm: ObservedU64,
     /// Bundle warm-read rejection — no `DashMap` entry for the canonical.
-    pub prepared_decl_bundle_reject_entry_missing: AtomicU64,
+    pub prepared_decl_bundle_reject_entry_missing: ObservedU64,
     /// Bundle warm-read rejection — self-root canonical not tracked by view.
-    pub prepared_decl_bundle_reject_self_root_untracked: AtomicU64,
+    pub prepared_decl_bundle_reject_self_root_untracked: ObservedU64,
     /// Bundle warm-read rejection — self-root tracked, hash differs.
-    pub prepared_decl_bundle_reject_self_root_hash_mismatch: AtomicU64,
+    pub prepared_decl_bundle_reject_self_root_hash_mismatch: ObservedU64,
     /// Legacy event slot retained for wire compatibility; the deleted
     /// `ImportRoute` digest no longer emits an absent-vs-mismatch split.
-    pub prepared_decl_bundle_reject_import_route_absent: AtomicU64,
+    pub prepared_decl_bundle_reject_import_route_absent: ObservedU64,
     /// Bundle warm-read rejection — a path-precise resolution witness moved.
-    pub prepared_decl_bundle_reject_import_route_mismatch: AtomicU64,
+    pub prepared_decl_bundle_reject_import_route_mismatch: ObservedU64,
     /// Bundle warm-read rejection — unattributed (must stay 0).
-    pub prepared_decl_bundle_reject_other: AtomicU64,
+    pub prepared_decl_bundle_reject_other: ObservedU64,
     // Focused semantic-query counters -----------------------------------
     // Each is per-request, bumped from `ProjectSemanticDispatch`. The
     // mining surface in `ResolverHotPathCounters` carries the `u32`
     // snapshot.
     /// Cold dispatches of `SemanticQueryKey::TypeOf`.
-    pub semantic_query_typeof_cold: AtomicU64,
+    pub semantic_query_typeof_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::TypeOf`.
-    pub semantic_query_typeof_warm: AtomicU64,
+    pub semantic_query_typeof_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::Instantiate`.
-    pub semantic_query_instantiate_cold: AtomicU64,
+    pub semantic_query_instantiate_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::Instantiate`.
-    pub semantic_query_instantiate_warm: AtomicU64,
+    pub semantic_query_instantiate_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::Conditional`.
-    pub semantic_query_conditional_cold: AtomicU64,
+    pub semantic_query_conditional_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::Conditional`.
-    pub semantic_query_conditional_warm: AtomicU64,
+    pub semantic_query_conditional_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::MappedType`.
-    pub semantic_query_mapped_type_cold: AtomicU64,
+    pub semantic_query_mapped_type_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::MappedType`.
-    pub semantic_query_mapped_type_warm: AtomicU64,
+    pub semantic_query_mapped_type_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::IndexedAccess`.
-    pub semantic_query_indexed_access_cold: AtomicU64,
+    pub semantic_query_indexed_access_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::IndexedAccess`.
-    pub semantic_query_indexed_access_warm: AtomicU64,
+    pub semantic_query_indexed_access_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::KeyOf`.
-    pub semantic_query_keyof_cold: AtomicU64,
+    pub semantic_query_keyof_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::KeyOf`.
-    pub semantic_query_keyof_warm: AtomicU64,
+    pub semantic_query_keyof_warm: ObservedU64,
     /// Cold dispatches of `SemanticQueryKey::ProjectPath` /
     /// `ProjectMember`.
-    pub semantic_query_project_path_cold: AtomicU64,
+    pub semantic_query_project_path_cold: ObservedU64,
     /// Warm dispatches of `SemanticQueryKey::ProjectPath` /
     /// `ProjectMember`.
-    pub semantic_query_project_path_warm: AtomicU64,
+    pub semantic_query_project_path_warm: ObservedU64,
     /// Top-level `substitute_semantic_type_param` calls.
-    pub substitute_top_level_calls: AtomicU64,
+    pub substitute_top_level_calls: ObservedU64,
     /// Hits on the `substitute_memo_get` fast path.
-    pub substitute_memo_hits: AtomicU64,
+    pub substitute_memo_hits: ObservedU64,
     /// `TypeOf` opaque returns from
     /// `substitute_with_change_tracking`.
-    pub substitute_typeof_opaque: AtomicU64,
+    pub substitute_typeof_opaque: ObservedU64,
     /// `Conditional` descents in
     /// `substitute_with_change_tracking`.
-    pub substitute_conditional_descend: AtomicU64,
+    pub substitute_conditional_descend: ObservedU64,
     /// `MappedType` descents in
     /// `substitute_with_change_tracking`.
-    pub substitute_mapped_type_descend: AtomicU64,
+    pub substitute_mapped_type_descend: ObservedU64,
     /// Calls to `build_typeof`.
-    pub build_typeof_calls: AtomicU64,
+    pub build_typeof_calls: ObservedU64,
     /// `build_typeof` calls where `ensure_indexed_ready_serve` returned
     /// `None`.
-    pub build_typeof_prepared_value_misses: AtomicU64,
+    pub build_typeof_prepared_value_misses: ObservedU64,
     // Mapped-member materialization counters
     // --------------------------------------
     /// Calls to `materialize_mapped_member_value_for_key` whose
     /// identity tuple is FIRST-SEEN in the active request.
-    pub mapped_member_plain_unique: AtomicU64,
+    pub mapped_member_plain_unique: ObservedU64,
     /// Calls to `materialize_mapped_member_value_for_key` whose
     /// identity tuple was already seen in the active request.
-    pub mapped_member_plain_repeated: AtomicU64,
+    pub mapped_member_plain_repeated: ObservedU64,
     /// Calls to `materialize_selected_key_mapped_value*` whose
     /// identity tuple is FIRST-SEEN in the active request.
-    pub mapped_member_selected_key_unique: AtomicU64,
+    pub mapped_member_selected_key_unique: ObservedU64,
     /// Calls to `materialize_selected_key_mapped_value*` whose
     /// identity tuple was already seen in the active request.
-    pub mapped_member_selected_key_repeated: AtomicU64,
+    pub mapped_member_selected_key_repeated: ObservedU64,
     /// `prepared_decl_bundle` callsite attribution: from
     /// `SessionDispatchHost::scope_payload_for_base`.
-    pub prepared_decl_bundle_callsite_scope_payload: AtomicU64,
+    pub prepared_decl_bundle_callsite_scope_payload: ObservedU64,
     /// `prepared_decl_bundle` callsite attribution: from
     /// `build_instantiate`.
-    pub prepared_decl_bundle_callsite_build_instantiate: AtomicU64,
+    pub prepared_decl_bundle_callsite_build_instantiate: ObservedU64,
     /// `prepared_decl_bundle` callsite attribution: residual sites.
-    pub prepared_decl_bundle_callsite_other: AtomicU64,
+    pub prepared_decl_bundle_callsite_other: ObservedU64,
     /// Mapper-binder-ordinal collisions: the same mapper source
     /// triple interned at different ordinals within one request.
-    pub mapped_binder_ordinal_collision: AtomicU64,
+    pub mapped_binder_ordinal_collision: ObservedU64,
     // Recursive-substitution counters
     // -------------------------------
     // Key insight: the recursive helper
@@ -1290,21 +1334,21 @@ pub struct RequestContext {
     /// Recursive `substitute_with_change_tracking` entries whose
     /// `(node, parameter_node, arg)` triple is FIRST-SEEN in the
     /// active request.
-    pub recursive_substitute_unique: AtomicU64,
+    pub recursive_substitute_unique: ObservedU64,
     /// Recursive `substitute_with_change_tracking` entries whose
     /// `(node, parameter_node, arg)` triple was already seen in
     /// the active request — the recursive memo SHOULD short-circuit.
-    pub recursive_substitute_repeated: AtomicU64,
+    pub recursive_substitute_repeated: ObservedU64,
     /// `Mapped`-arm rebuilds in `substitute_with_change_tracking`
     /// after at least one descendant sub-tree changed.
-    pub substitute_mapped_rebuild: AtomicU64,
+    pub substitute_mapped_rebuild: ObservedU64,
     /// `Conditional`-arm rebuilds in `substitute_with_change_tracking`
     /// after at least one descendant sub-tree changed.
-    pub substitute_conditional_rebuild: AtomicU64,
+    pub substitute_conditional_rebuild: ObservedU64,
     /// Recursive-helper hash-cons memo hits (at the
     /// `substitute_with_change_tracking` entry, not the public
     /// surface).
-    pub recursive_substitute_memo_hits: AtomicU64,
+    pub recursive_substitute_memo_hits: ObservedU64,
     /// Typed-IR macro-surface projection accessor invocations.
     /// Bumped exactly once per public `resolve_root`,
     /// `project_named_member`, or `enumerate_member_names` call.
@@ -1316,12 +1360,13 @@ pub struct RequestContext {
     /// hermetic discriminators in
     /// `tests/imported_macro_surface_bridge.rs` drive it
     /// explicitly.
-    pub imported_macro_surface_projection: AtomicU64,
+    pub imported_macro_surface_projection: ObservedU64,
     /// Per-request observation set for recursive substitution
     /// identity triples — used by the unique/repeated classifier
     /// at the recursive helper's entry. The set is per-request so
     /// the classification resets between component-meta queries.
     /// Held briefly per recursive entry, not held across recursion.
+    #[cfg(feature = "semantic-observe")]
     pub recursive_substitute_seen:
         parking_lot::Mutex<rustc_hash::FxHashSet<RecursiveSubstituteIdentity>>,
     /// Per-request observation set for mapped-member identity tuples
@@ -1330,11 +1375,13 @@ pub struct RequestContext {
     /// ABI: a `parking_lot::Mutex` guards the small `FxHashSet` and
     /// is held briefly per per-K call. The set is per-request so the
     /// classification resets between component-meta queries.
+    #[cfg(feature = "semantic-observe")]
     pub mapped_member_seen: parking_lot::Mutex<rustc_hash::FxHashSet<MappedMemberIdentity>>,
     /// Per-request observation set for mapper-source triples →
     /// observed ordinals, used by the binder-ordinal collision
     /// classifier in
     /// `record_mapper_binder_ordinal_for_classification`.
+    #[cfg(feature = "semantic-observe")]
     pub mapper_source_ordinals:
         parking_lot::Mutex<rustc_hash::FxHashMap<MapperSourceIdentity, u16>>,
     /// Request-scoped POSITIVE-ONLY memo for
@@ -1540,146 +1587,155 @@ impl RequestContext {
         projection_op_budget: usize,
         cancellation: CancellationToken,
     ) -> Arc<Self> {
-        // Sniff the scheduler's TLS slot for an enclosing parent
-        // request. When a sub-request is created inside another
-        // audited request's TLS context (either on the same thread or
-        // after `install_tls` propagated the parent into a worker),
-        // the new context records the parent's id so the audit record
-        // surfaces parent / child correlation. `None` when no
-        // enclosing context is installed.
-        let parent_request_id = verter_execution::request_context::current_request_id();
-        // Per-request trace_id — uuid v4 string, generated once per
-        // request. Propagates through tracing spans the request opens
-        // so structured-event consumers (the dispatch / memo / walker
-        // instrumentation in this crate) can correlate emitted events
-        // back to the originating request.
-        let trace_id = uuid::Uuid::new_v4().to_string();
+        // Without `semantic-observe` the capture selection carries nothing:
+        // there is no record to attribute, no accumulator to feed and no
+        // trace to correlate, so the request keeps only required state.
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (kind, footprint_capture, timing_capture, audit_accumulator);
+        // With capture compiled in, a sub-request created inside another
+        // request's TLS context records the parent's id (read from the
+        // scheduler's TLS) and a fresh uuid v4 trace id correlates the
+        // structured events the request emits.
         Arc::new(Self {
             request_id,
             cancellation,
-            trace_id,
+            #[cfg(feature = "semantic-observe")]
+            trace_id: uuid::Uuid::new_v4().to_string(),
             canonical_id,
+            #[cfg(feature = "semantic-observe")]
             kind,
+            #[cfg(feature = "semantic-observe")]
             footprint_capture,
+            #[cfg(feature = "semantic-observe")]
             timing_capture,
+            #[cfg(feature = "semantic-observe")]
             audit_accumulator,
+            #[cfg(feature = "semantic-observe")]
             audit_registration: std::sync::OnceLock::new(),
-            cold_builds: AtomicU64::new(0),
-            warm_hits: AtomicU64::new(0),
-            joined_waits: AtomicU64::new(0),
-            sentinels: AtomicU64::new(0),
-            inflight_aborted_retries: AtomicU64::new(0),
-            cold_aborts_swept: AtomicU64::new(0),
-            materialize_structure_calls: AtomicU64::new(0),
+            cold_builds: Default::default(),
+            warm_hits: Default::default(),
+            joined_waits: Default::default(),
+            sentinels: Default::default(),
+            inflight_aborted_retries: Default::default(),
+            cold_aborts_swept: Default::default(),
+            materialize_structure_calls: Default::default(),
             projection_budget: RequestBudget::new(projection_op_budget),
-            materialize_structure_cache_hits: AtomicU64::new(0),
-            node_arena_lock_acquisitions: AtomicU64::new(0),
-            family_map_lock_acquisitions: AtomicU64::new(0),
-            lock_wait_ns: AtomicU64::new(0),
-            lock_acquisitions: AtomicU64::new(0),
-            queue_wait_ns: AtomicU64::new(0),
-            dep_signature_merges: AtomicU64::new(0),
-            dep_signature_intern_hits: AtomicU64::new(0),
+            materialize_structure_cache_hits: Default::default(),
+            node_arena_lock_acquisitions: Default::default(),
+            family_map_lock_acquisitions: Default::default(),
+            lock_wait_ns: Default::default(),
+            lock_acquisitions: Default::default(),
+            queue_wait_ns: Default::default(),
+            dep_signature_merges: Default::default(),
+            dep_signature_intern_hits: Default::default(),
             cache_counters: PerRequestCacheCounters::default(),
-            parent_request_id,
+            #[cfg(feature = "semantic-observe")]
+            parent_request_id: verter_execution::request_context::current_request_id(),
+            #[cfg(feature = "semantic-observe")]
             scheduler_audit: Mutex::new(None),
+            #[cfg(feature = "semantic-observe")]
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             import_route_observations: Default::default(),
             normalized_canonicals: Default::default(),
-            type_resolution_hops: AtomicU64::new(0),
-            type_resolution_navigations: AtomicU64::new(0),
-            type_resolution_expansions: AtomicU64::new(0),
-            type_resolution_conditional_decisions: AtomicU64::new(0),
-            type_resolution_ref_root_cycle_hits: AtomicU64::new(0),
-            type_resolution_projection_ops: AtomicU64::new(0),
-            type_resolution_depth_high_water: AtomicU16::new(0),
-            type_resolution_recursion_limit_reached: AtomicBool::new(false),
-            type_resolution_dispatched_query_tags: AtomicU32::new(0),
-            flow_return_cold_computes: AtomicU32::new(0),
-            flow_return_budget_exceeded: AtomicU32::new(0),
-            flow_return_cycle_reentries: AtomicU32::new(0),
-            compile_parse_us: AtomicU64::new(0),
-            compile_transform_us: AtomicU64::new(0),
-            compile_codegen_us: AtomicU64::new(0),
-            compile_css_analysis_us: AtomicU64::new(0),
-            compile_sourcemap_us: AtomicU64::new(0),
-            compile_code_transform_ops: AtomicU64::new(0),
-            expanded_instantiate_calls: AtomicU64::new(0),
+            type_resolution_hops: Default::default(),
+            type_resolution_navigations: Default::default(),
+            type_resolution_expansions: Default::default(),
+            type_resolution_conditional_decisions: Default::default(),
+            type_resolution_ref_root_cycle_hits: Default::default(),
+            type_resolution_projection_ops: Default::default(),
+            type_resolution_depth_high_water: Default::default(),
+            type_resolution_recursion_limit_reached: Default::default(),
+            type_resolution_dispatched_query_tags: Default::default(),
+            flow_return_cold_computes: Default::default(),
+            flow_return_budget_exceeded: Default::default(),
+            flow_return_cycle_reentries: Default::default(),
+            compile_parse_us: Default::default(),
+            compile_transform_us: Default::default(),
+            compile_codegen_us: Default::default(),
+            compile_css_analysis_us: Default::default(),
+            compile_sourcemap_us: Default::default(),
+            compile_code_transform_ops: Default::default(),
+            expanded_instantiate_calls: Default::default(),
+            #[cfg(feature = "semantic-observe")]
             synthesis_active_depth: AtomicU64::new(0),
-            synthesis_expanded_instantiate_calls: AtomicU64::new(0),
-            memo_insertions: AtomicU64::new(0),
-            memo_publish_suppressed: AtomicU64::new(0),
+            synthesis_expanded_instantiate_calls: Default::default(),
+            memo_insertions: Default::default(),
+            memo_publish_suppressed: Default::default(),
             request_result_is_partial: AtomicBool::new(false),
-            frontier_closure_invocations_total: AtomicU64::new(0),
-            frontier_closure_invocations_target_none: AtomicU64::new(0),
-            frontier_closure_redundant_target_none_pairs: AtomicU64::new(0),
-            resolved_external_type_cache_negative_hits: AtomicU64::new(0),
-            resolved_external_type_cache_negative_misses: AtomicU64::new(0),
-            resolve_import_cold_positive: AtomicU64::new(0),
-            resolve_import_cold_negative: AtomicU64::new(0),
-            resolve_import_warm_positive: AtomicU64::new(0),
-            resolve_import_warm_negative: AtomicU64::new(0),
-            known_miss_route_served: AtomicU64::new(0),
-            known_miss_route_revalidated: AtomicU64::new(0),
-            known_miss_route_recomputed: AtomicU64::new(0),
-            imported_registry_cold: AtomicU64::new(0),
-            imported_registry_warm: AtomicU64::new(0),
-            imported_registry_negative: AtomicU64::new(0),
-            imported_root_cold: AtomicU64::new(0),
-            imported_root_warm: AtomicU64::new(0),
-            route_db_barrel_steps: AtomicU64::new(0),
-            route_db_wildcard_fanout: AtomicU64::new(0),
-            prepared_decl_bundle_cold: AtomicU64::new(0),
-            prepared_decl_bundle_warm: AtomicU64::new(0),
-            prepared_decl_bundle_reject_entry_missing: AtomicU64::new(0),
-            prepared_decl_bundle_reject_self_root_untracked: AtomicU64::new(0),
-            prepared_decl_bundle_reject_self_root_hash_mismatch: AtomicU64::new(0),
-            prepared_decl_bundle_reject_import_route_absent: AtomicU64::new(0),
-            prepared_decl_bundle_reject_import_route_mismatch: AtomicU64::new(0),
-            prepared_decl_bundle_reject_other: AtomicU64::new(0),
-            semantic_query_typeof_cold: AtomicU64::new(0),
-            semantic_query_typeof_warm: AtomicU64::new(0),
-            semantic_query_instantiate_cold: AtomicU64::new(0),
-            semantic_query_instantiate_warm: AtomicU64::new(0),
-            semantic_query_conditional_cold: AtomicU64::new(0),
-            semantic_query_conditional_warm: AtomicU64::new(0),
-            semantic_query_mapped_type_cold: AtomicU64::new(0),
-            semantic_query_mapped_type_warm: AtomicU64::new(0),
-            semantic_query_indexed_access_cold: AtomicU64::new(0),
-            semantic_query_indexed_access_warm: AtomicU64::new(0),
-            semantic_query_keyof_cold: AtomicU64::new(0),
-            semantic_query_keyof_warm: AtomicU64::new(0),
-            semantic_query_project_path_cold: AtomicU64::new(0),
-            semantic_query_project_path_warm: AtomicU64::new(0),
-            substitute_top_level_calls: AtomicU64::new(0),
-            substitute_memo_hits: AtomicU64::new(0),
-            substitute_typeof_opaque: AtomicU64::new(0),
-            substitute_conditional_descend: AtomicU64::new(0),
-            substitute_mapped_type_descend: AtomicU64::new(0),
-            build_typeof_calls: AtomicU64::new(0),
-            build_typeof_prepared_value_misses: AtomicU64::new(0),
-            mapped_member_plain_unique: AtomicU64::new(0),
-            mapped_member_plain_repeated: AtomicU64::new(0),
-            mapped_member_selected_key_unique: AtomicU64::new(0),
-            mapped_member_selected_key_repeated: AtomicU64::new(0),
-            prepared_decl_bundle_callsite_scope_payload: AtomicU64::new(0),
-            prepared_decl_bundle_callsite_build_instantiate: AtomicU64::new(0),
-            prepared_decl_bundle_callsite_other: AtomicU64::new(0),
-            mapped_binder_ordinal_collision: AtomicU64::new(0),
-            recursive_substitute_unique: AtomicU64::new(0),
-            recursive_substitute_repeated: AtomicU64::new(0),
-            substitute_mapped_rebuild: AtomicU64::new(0),
-            substitute_conditional_rebuild: AtomicU64::new(0),
-            recursive_substitute_memo_hits: AtomicU64::new(0),
-            imported_macro_surface_projection: AtomicU64::new(0),
+            frontier_closure_invocations_total: Default::default(),
+            frontier_closure_invocations_target_none: Default::default(),
+            frontier_closure_redundant_target_none_pairs: Default::default(),
+            resolved_external_type_cache_negative_hits: Default::default(),
+            resolved_external_type_cache_negative_misses: Default::default(),
+            resolve_import_cold_positive: Default::default(),
+            resolve_import_cold_negative: Default::default(),
+            resolve_import_warm_positive: Default::default(),
+            resolve_import_warm_negative: Default::default(),
+            known_miss_route_served: Default::default(),
+            known_miss_route_revalidated: Default::default(),
+            known_miss_route_recomputed: Default::default(),
+            imported_registry_cold: Default::default(),
+            imported_registry_warm: Default::default(),
+            imported_registry_negative: Default::default(),
+            imported_root_cold: Default::default(),
+            imported_root_warm: Default::default(),
+            route_db_barrel_steps: Default::default(),
+            route_db_wildcard_fanout: Default::default(),
+            prepared_decl_bundle_cold: Default::default(),
+            prepared_decl_bundle_warm: Default::default(),
+            prepared_decl_bundle_reject_entry_missing: Default::default(),
+            prepared_decl_bundle_reject_self_root_untracked: Default::default(),
+            prepared_decl_bundle_reject_self_root_hash_mismatch: Default::default(),
+            prepared_decl_bundle_reject_import_route_absent: Default::default(),
+            prepared_decl_bundle_reject_import_route_mismatch: Default::default(),
+            prepared_decl_bundle_reject_other: Default::default(),
+            semantic_query_typeof_cold: Default::default(),
+            semantic_query_typeof_warm: Default::default(),
+            semantic_query_instantiate_cold: Default::default(),
+            semantic_query_instantiate_warm: Default::default(),
+            semantic_query_conditional_cold: Default::default(),
+            semantic_query_conditional_warm: Default::default(),
+            semantic_query_mapped_type_cold: Default::default(),
+            semantic_query_mapped_type_warm: Default::default(),
+            semantic_query_indexed_access_cold: Default::default(),
+            semantic_query_indexed_access_warm: Default::default(),
+            semantic_query_keyof_cold: Default::default(),
+            semantic_query_keyof_warm: Default::default(),
+            semantic_query_project_path_cold: Default::default(),
+            semantic_query_project_path_warm: Default::default(),
+            substitute_top_level_calls: Default::default(),
+            substitute_memo_hits: Default::default(),
+            substitute_typeof_opaque: Default::default(),
+            substitute_conditional_descend: Default::default(),
+            substitute_mapped_type_descend: Default::default(),
+            build_typeof_calls: Default::default(),
+            build_typeof_prepared_value_misses: Default::default(),
+            mapped_member_plain_unique: Default::default(),
+            mapped_member_plain_repeated: Default::default(),
+            mapped_member_selected_key_unique: Default::default(),
+            mapped_member_selected_key_repeated: Default::default(),
+            prepared_decl_bundle_callsite_scope_payload: Default::default(),
+            prepared_decl_bundle_callsite_build_instantiate: Default::default(),
+            prepared_decl_bundle_callsite_other: Default::default(),
+            mapped_binder_ordinal_collision: Default::default(),
+            recursive_substitute_unique: Default::default(),
+            recursive_substitute_repeated: Default::default(),
+            substitute_mapped_rebuild: Default::default(),
+            substitute_conditional_rebuild: Default::default(),
+            recursive_substitute_memo_hits: Default::default(),
+            imported_macro_surface_projection: Default::default(),
+            #[cfg(feature = "semantic-observe")]
             recursive_substitute_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
+            #[cfg(feature = "semantic-observe")]
             mapped_member_seen: parking_lot::Mutex::new(rustc_hash::FxHashSet::default()),
+            #[cfg(feature = "semantic-observe")]
             mapper_source_ordinals: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             dep_canonical_memo: parking_lot::Mutex::new(rustc_hash::FxHashMap::default()),
             committed_input: std::sync::OnceLock::new(),
         })
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// Plant the audit-record registration handle on this context.
     /// Called by the public audited entry-point after constructing the
     /// `AuditRequestRegistration`. The inner resolver path consults
@@ -1714,6 +1770,7 @@ impl RequestContext {
         self.committed_input.get()
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// Audit-side request kind. Returns the kind set at construction
     /// time. Defaults to [`verter_audit::RequestKind::ComponentMeta`]
     /// when the request was constructed via [`Self::new`]; producers
@@ -1803,6 +1860,7 @@ impl RequestContext {
             .fetch_or(1 << tag.bit_index(), Ordering::Relaxed);
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// The accumulated `SemanticQueryKey` dispatch mask for this request — bit
     /// `i` set iff a tag with `bit_index() == i` dispatched at least once. Decode
     /// with [`SemanticQueryKeyTag::decode_dispatch_mask`](crate::semantic_query::SemanticQueryKeyTag::decode_dispatch_mask).
@@ -1827,7 +1885,7 @@ impl RequestContext {
             .fetch_max(depth, Ordering::Relaxed);
         if depth >= verter_audit::WALKER_DEPTH_CAP {
             self.type_resolution_recursion_limit_reached
-                .store(true, Ordering::Relaxed);
+                .raise(Ordering::Relaxed);
         }
     }
 
@@ -1846,16 +1904,19 @@ impl RequestContext {
     /// is per-request so classification resets between
     /// component-meta queries.
     pub fn classify_mapped_member_materialization(&self, identity: MappedMemberIdentity) {
-        let inserted = self.mapped_member_seen.lock().insert(identity);
-        let event = match (identity.variant, inserted) {
-            (0, true) => verter_audit::AuditEvent::MappedMemberPlainUnique,
-            (0, false) => verter_audit::AuditEvent::MappedMemberPlainRepeated,
-            (_, true) => verter_audit::AuditEvent::MappedMemberSelectedKeyUnique,
-            (_, false) => verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated,
-        };
-        if let Some(obs) = verter_audit::current_observer() {
-            obs.record_event(event);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let inserted = self.mapped_member_seen.lock().insert(identity);
+            let event = match (identity.variant, inserted) {
+                (0, true) => verter_audit::AuditEvent::MappedMemberPlainUnique,
+                (0, false) => verter_audit::AuditEvent::MappedMemberPlainRepeated,
+                (_, true) => verter_audit::AuditEvent::MappedMemberSelectedKeyUnique,
+                (_, false) => verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated,
+            };
+            verter_audit::observe!(|obs| obs.record_event(event));
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = identity;
     }
 
     /// Classify one mapped-binder-ordinal assignment. Records the
@@ -1872,7 +1933,11 @@ impl RequestContext {
     /// the typed mapped-member cache will MISS on what should be a
     /// HIT.
     pub fn classify_mapper_binder_ordinal(&self, identity: MapperSourceIdentity, ordinal: u16) {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = (identity, ordinal);
+        #[cfg(feature = "semantic-observe")]
         let mut map = self.mapper_source_ordinals.lock();
+        #[cfg(feature = "semantic-observe")]
         match map.get(&identity) {
             Some(&existing) if existing == ordinal => {
                 // Same triple, same ordinal — stable. No-op.
@@ -1883,9 +1948,9 @@ impl RequestContext {
                 // first-seen ordinal in place so subsequent
                 // observations still detect drift.
                 drop(map);
-                if let Some(obs) = verter_audit::current_observer() {
-                    obs.record_event(verter_audit::AuditEvent::MappedBinderOrdinalCollision);
-                }
+                verter_audit::observe!(
+                    |obs| obs.record_event(verter_audit::AuditEvent::MappedBinderOrdinalCollision)
+                );
             }
             None => {
                 map.insert(identity, ordinal);
@@ -1905,15 +1970,18 @@ impl RequestContext {
     /// per-request so classification resets between component-meta
     /// queries.
     pub fn classify_recursive_substitute(&self, identity: RecursiveSubstituteIdentity) {
-        let inserted = self.recursive_substitute_seen.lock().insert(identity);
-        let event = if inserted {
-            verter_audit::AuditEvent::RecursiveSubstituteUnique
-        } else {
-            verter_audit::AuditEvent::RecursiveSubstituteRepeated
-        };
-        if let Some(obs) = verter_audit::current_observer() {
-            obs.record_event(event);
+        #[cfg(feature = "semantic-observe")]
+        {
+            let inserted = self.recursive_substitute_seen.lock().insert(identity);
+            let event = if inserted {
+                verter_audit::AuditEvent::RecursiveSubstituteUnique
+            } else {
+                verter_audit::AuditEvent::RecursiveSubstituteRepeated
+            };
+            verter_audit::observe!(|obs| obs.record_event(event));
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = identity;
     }
 }
 
@@ -1921,28 +1989,29 @@ impl RequestContextLike for RequestContext {
     fn request_id(&self) -> u64 {
         self.request_id
     }
+    #[cfg(feature = "semantic-observe")]
     fn capture_enabled(&self) -> bool {
         self.footprint_capture
     }
+    #[cfg(feature = "semantic-observe")]
     fn timing_enabled(&self) -> bool {
         self.timing_capture
     }
     fn cancellation_token(&self) -> Option<CancellationToken> {
         Some(self.cancellation_token())
     }
+    #[cfg(feature = "semantic-observe")]
     fn on_dedup_joiner(
         &self,
-        _canonical_id: Arc<str>,
-        _winner_request_id: u64,
-        _winner_audited: bool,
+        canonical_id: Arc<str>,
+        winner_request_id: u64,
+        winner_audited: bool,
     ) {
-        // Wires this into the accumulator's `push_shared_load_reuse`.
-        // Before the footprint miner is hooked, the callback is a no-op —
-        // the observability surface is not yet consuming these events.
         if let Some(acc) = self.audit_accumulator.as_ref() {
-            acc.push_shared_load_reuse(_canonical_id, _winner_request_id, _winner_audited);
+            acc.push_shared_load_reuse(canonical_id, winner_request_id, winner_audited);
         }
     }
+    #[cfg(feature = "semantic-observe")]
     fn record_cache_event(&self, event: CacheEventKind) {
         let counter = match event {
             CacheEventKind::Hit => &self.warm_hits,
@@ -1961,6 +2030,7 @@ impl RequestContextLike for RequestContext {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for RequestContext {
     /// Counter-style attribution. The session-side
     /// `RequestContext` keeps per-request atomics for each event tag;
@@ -2330,6 +2400,10 @@ impl verter_audit::AuditObserver for RequestContext {
 thread_local! {
     pub(crate) static CURRENT_REQUEST_CONTEXT:
         RefCell<Option<Arc<RequestContext>>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "semantic-observe")]
+thread_local! {
     pub(crate) static CURRENT_ACCUMULATOR:
         RefCell<Option<Arc<RequestFootprintAccumulator>>> = const { RefCell::new(None) };
     pub(crate) static NESTED_AUDIT_GUARD: Cell<bool> = const { Cell::new(false) };
@@ -2352,6 +2426,7 @@ thread_local! {
 /// slot; `Drop` uses `take` + `replace` which also never panic.
 pub struct RequestContextGuard {
     prev_context: Option<Arc<RequestContext>>,
+    #[cfg(feature = "semantic-observe")]
     prev_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     // Installs the opaque context into scheduler TLS so workers see
     // `current_request_id()` return the right value.
@@ -2361,7 +2436,8 @@ pub struct RequestContextGuard {
     // lower crates can emit through `verter_audit::current_observer()`
     // without reaching into `verter_session`. Drops in field order
     // (after the opaque guard) to leave the substrate slot empty
-    // before the session-side TLS slot empties.
+    // before the session-side TLS slot empties. Optional capture.
+    #[cfg(feature = "semantic-observe")]
     _audit_observer_guard: verter_audit::observer::ObserverGuard,
 }
 
@@ -2375,22 +2451,28 @@ impl RequestContextGuard {
     /// `verter_audit::current_observer()`. The returned guard restores
     /// every prior TLS value on drop.
     pub fn install(ctx: Arc<RequestContext>) -> Self {
+        #[cfg(feature = "semantic-observe")]
         let acc = ctx.audit_accumulator.clone();
         let opaque = OpaqueRequestContext(Arc::clone(&ctx) as Arc<dyn RequestContextLike>);
         let opaque_guard = OpaqueContextGuard::install(opaque);
         // Plant the same `RequestContext` into the `verter_audit`
         // substrate's TLS slot. Producers in lower crates retrieve it
-        // via `verter_audit::current_observer()` — they never reach
-        // into `verter_session` for context.
+        // via `verter_audit::observe!` — they never reach into
+        // `verter_session` for context. An instrumented binary captures
+        // every request it runs; a default build has no observer slot.
+        #[cfg(feature = "semantic-observe")]
         let audit_observer_guard = verter_audit::observer::install_observer(
             Arc::clone(&ctx) as Arc<dyn verter_audit::AuditObserver>
         );
         let prev_context = CURRENT_REQUEST_CONTEXT.with(|c| c.replace(Some(ctx)));
+        #[cfg(feature = "semantic-observe")]
         let prev_accumulator = CURRENT_ACCUMULATOR.with(|c| c.replace(acc));
         Self {
             prev_context,
+            #[cfg(feature = "semantic-observe")]
             prev_accumulator,
             _opaque_guard: opaque_guard,
+            #[cfg(feature = "semantic-observe")]
             _audit_observer_guard: audit_observer_guard,
         }
     }
@@ -2399,11 +2481,14 @@ impl RequestContextGuard {
 impl Drop for RequestContextGuard {
     fn drop(&mut self) {
         // Non-panicking restore: `take` + `replace` never panic.
-        let prev_acc = self.prev_accumulator.take();
+        #[cfg(feature = "semantic-observe")]
+        {
+            let prev_acc = self.prev_accumulator.take();
+            CURRENT_ACCUMULATOR.with(|c| {
+                c.replace(prev_acc);
+            });
+        }
         let prev_ctx = self.prev_context.take();
-        CURRENT_ACCUMULATOR.with(|c| {
-            c.replace(prev_acc);
-        });
         CURRENT_REQUEST_CONTEXT.with(|c| {
             c.replace(prev_ctx);
         });
@@ -2439,10 +2524,12 @@ impl TlsUninstall for GuardUninstaller {
 /// the dispatched job has no `winner_ctx`.
 struct SessionAndAuditClearGuard {
     prev_context: Option<Arc<RequestContext>>,
+    #[cfg(feature = "semantic-observe")]
     prev_accumulator: Option<Arc<RequestFootprintAccumulator>>,
     // Drops after the two session slots, restoring the audit observer
     // last so the substrate's slot empties first (mirrors the install
-    // direction in `RequestContextGuard::install`).
+    // direction in `RequestContextGuard::install`). Optional capture.
+    #[cfg(feature = "semantic-observe")]
     _audit_observer_guard: verter_audit::observer::ObserverGuard,
 }
 
@@ -2451,13 +2538,13 @@ impl SessionAndAuditClearGuard {
         // Clear the session-side slots; capture prior values for
         // restoration.
         let prev_context = CURRENT_REQUEST_CONTEXT.with(|c| c.replace(None));
-        let prev_accumulator = CURRENT_ACCUMULATOR.with(|c| c.replace(None));
-        // Clear the audit observer substrate slot.
-        let audit_observer_guard = verter_audit::observer::clear_observer();
         Self {
             prev_context,
-            prev_accumulator,
-            _audit_observer_guard: audit_observer_guard,
+            #[cfg(feature = "semantic-observe")]
+            prev_accumulator: CURRENT_ACCUMULATOR.with(|c| c.replace(None)),
+            // Clear the audit observer substrate slot.
+            #[cfg(feature = "semantic-observe")]
+            _audit_observer_guard: verter_audit::observer::clear_observer(),
         }
     }
 }
@@ -2465,10 +2552,13 @@ impl SessionAndAuditClearGuard {
 impl Drop for SessionAndAuditClearGuard {
     fn drop(&mut self) {
         let prev_ctx = self.prev_context.take();
-        let prev_acc = self.prev_accumulator.take();
-        CURRENT_ACCUMULATOR.with(|c| {
-            c.replace(prev_acc);
-        });
+        #[cfg(feature = "semantic-observe")]
+        {
+            let prev_acc = self.prev_accumulator.take();
+            CURRENT_ACCUMULATOR.with(|c| {
+                c.replace(prev_acc);
+            });
+        }
         CURRENT_REQUEST_CONTEXT.with(|c| {
             c.replace(prev_ctx);
         });
@@ -2524,10 +2614,41 @@ pub fn current_request_context() -> Option<Arc<RequestContext>> {
 /// Run `read` against the request context installed on this thread, in
 /// place: `None` when none is installed. For a caller that only reads or
 /// records into the context, so the context's handle is not cloned.
-pub(crate) fn with_current_request_context<R>(
-    read: impl FnOnce(&RequestContext) -> R,
-) -> Option<R> {
+pub fn with_current_request_context<R>(read: impl FnOnce(&RequestContext) -> R) -> Option<R> {
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
+}
+
+/// Record optional capture into the request context installed on this
+/// thread: `observe_request!(|ctx| ctx.counter.fetch_add(1, Relaxed))`.
+///
+/// With `semantic-observe` the body runs against the installed context (and
+/// not at all when none is installed). Without it the body is type-checked
+/// inside a closure that is never built or called, so the request-context
+/// TLS slot is not read and nothing is recorded.
+#[cfg(feature = "semantic-observe")]
+#[macro_export]
+macro_rules! observe_request {
+    (|$ctx:ident| $body:expr) => {{
+        $crate::request_context::with_current_request_context(|$ctx| {
+            $body;
+        });
+    }};
+}
+
+/// Record optional capture into the request context installed on this
+/// thread. See the `semantic-observe` form; in this default build the body
+/// is type-checked but never evaluated.
+#[cfg(not(feature = "semantic-observe"))]
+#[macro_export]
+macro_rules! observe_request {
+    (|$ctx:ident| $body:expr) => {{
+        #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
+        if false {
+            let _ = |$ctx: &$crate::request_context::RequestContext| {
+                $body;
+            };
+        }
+    }};
 }
 
 /// The canonical id the currently installed request resolves for — the
@@ -2556,6 +2677,7 @@ pub fn install_test_request_for(canonical: &str) -> RequestContextGuard {
     ))
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Return a clone of the currently installed accumulator, or `None`.
 /// Same Arc-clone-out-of-borrow pattern as `current_request_context`.
 #[must_use]
@@ -2563,6 +2685,7 @@ pub fn current_accumulator() -> Option<Arc<RequestFootprintAccumulator>> {
     CURRENT_ACCUMULATOR.with(|c| c.borrow().as_ref().map(Arc::clone))
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Increment the thread-local audited-run request counter. Returns the
 /// value AFTER the increment. Used by the harness to detect multiple
 /// requests in a single `run_custom` closure.
@@ -2574,26 +2697,31 @@ pub fn increment_requests_created() -> u32 {
     })
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Snapshot the current audited-run request counter.
 pub fn requests_created_snapshot() -> u32 {
     REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN.with(|cell| cell.get())
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Reset the audited-run request counter to zero. Harness calls this
 /// on entry to each audited run.
 pub fn reset_requests_created() {
     REQUESTS_CREATED_IN_CURRENT_AUDITED_RUN.with(|cell| cell.set(0));
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Mark the nested-audit guard; returns `true` when a nested audit is
 /// about to run on the same thread (harness rejects this).
 pub fn nested_audit_in_progress() -> bool {
     NESTED_AUDIT_GUARD.with(|cell| cell.get())
 }
 
+#[cfg(feature = "semantic-observe")]
 /// RAII guard that flips the `NESTED_AUDIT_GUARD` flag while alive.
 pub struct NestedAuditGuard;
 
+#[cfg(feature = "semantic-observe")]
 impl NestedAuditGuard {
     /// Try to enter a nested audit guard. Returns `Some(Self)` when no
     /// audit is in progress on this thread and the guard is installed;
@@ -2616,6 +2744,7 @@ impl NestedAuditGuard {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 impl Drop for NestedAuditGuard {
     fn drop(&mut self) {
         NESTED_AUDIT_GUARD.with(|cell| cell.set(false));
@@ -2673,6 +2802,8 @@ mod tests {
         RequestContext::new(id, Arc::from("/x.vue"), capture, None)
     }
 
+    // Reads optional capture state.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn bump_bare_engine_construction_increments_on_installed_context() {
         // Discriminating: a non-request-bound test context requires calling
@@ -2701,6 +2832,8 @@ mod tests {
         );
     }
 
+    // Reads optional capture state.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn bump_resolver_store_view_call_increments_on_installed_context() {
         let ctx = make_ctx(102, false);
@@ -2755,6 +2888,8 @@ mod tests {
             .is_cancelled());
     }
 
+    // Reads optional capture state.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn current_accumulator_cloned_out_of_borrow_no_refcell_held_across_push() {
         // Install a context that HAS an accumulator; read via
@@ -2803,6 +2938,7 @@ mod tests {
             current_request_context().is_some(),
             "outer install must populate session TLS",
         );
+        #[cfg(feature = "semantic-observe")]
         assert!(
             verter_audit::current_observer().is_some(),
             "outer install must populate audit substrate TLS",
@@ -2816,10 +2952,12 @@ mod tests {
                 current_request_context().is_none(),
                 "AllSlotsClearGuard must clear session request-context TLS",
             );
+            #[cfg(feature = "semantic-observe")]
             assert!(
                 current_accumulator().is_none(),
                 "AllSlotsClearGuard must clear session accumulator TLS",
             );
+            #[cfg(feature = "semantic-observe")]
             assert!(
                 verter_audit::current_observer().is_none(),
                 "AllSlotsClearGuard must clear audit observer substrate TLS",
@@ -2831,6 +2969,7 @@ mod tests {
             current_request_context().is_some(),
             "drop must restore session request-context TLS",
         );
+        #[cfg(feature = "semantic-observe")]
         assert!(
             verter_audit::current_observer().is_some(),
             "drop must restore audit observer substrate TLS",

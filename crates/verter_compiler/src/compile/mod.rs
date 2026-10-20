@@ -624,9 +624,9 @@ fn compile_with_parsed_impl(
         Some(vue.is_custom_element.as_slice()),
     );
     let parse_duration_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
-    if let Some(observer) = verter_audit::current_observer() {
-        observer.record_phase_timing("compile.parse", parse_duration_ms);
-    }
+    verter_audit::observe!(
+        |observer| observer.record_phase_timing("compile.parse", parse_duration_ms)
+    );
     // Resolve the backend NOW — the earliest point the implicit `<template
     // vapor>` marker is knowable — before any codegen decision reads it.
     // Fails closed on `SSR x Vapor` / `inline x Vapor` here, the exact two
@@ -1104,9 +1104,8 @@ fn compile_inner(
         // `audit_no_hot_loop_instrumentation`) keeps instrumentation
         // out of the per-block loop.
         if !parsed.style_nodes().is_empty() {
-            if let Some(observer) = verter_audit::current_observer() {
-                observer.record_phase_timing("compile.css_analysis", total_style_duration_ms);
-            }
+            verter_audit::observe!(|observer| observer
+                .record_phase_timing("compile.css_analysis", total_style_duration_ms));
         }
     } // end if needs_style
 
@@ -1525,7 +1524,7 @@ fn compile_inner(
                     export_statement_range: sfc_export_statement_range,
                 })
             };
-        let sourcemap_start = Instant::now();
+        let sourcemap_clock = verter_audit::observe::Stopwatch::start();
         let script_source_map = if verter_options.source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -1536,19 +1535,19 @@ fn compile_inner(
         } else {
             String::new()
         };
-        let sourcemap_duration_ms = sourcemap_start.elapsed().as_secs_f64() * 1000.0;
         let script_duration_ms = script_start.elapsed().as_secs_f64() * 1000.0;
         // Emit phase boundaries: transform (script) excludes the
         // sourcemap chunk so timings stay disjoint and the audit
         // payload's `transform_ms` / `sourcemap_ms` add up to roughly
         // the wall-clock cost of this block.
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(|observer| {
+            let sourcemap_duration_ms = sourcemap_clock.elapsed_ms();
             let transform_only_ms = (script_duration_ms - sourcemap_duration_ms).max(0.0);
             observer.record_phase_timing("compile.transform", transform_only_ms);
             if verter_options.source_map {
                 observer.record_phase_timing("compile.sourcemap", sourcemap_duration_ms);
             }
-        }
+        });
 
         let has_script_setup = parsed.script_setup().is_some();
         let script_attrs = if let Some(ss) = parsed.script_setup() {
@@ -1834,7 +1833,7 @@ fn compile_inner(
                 // Prefix and suffix were removed via CT operations above,
                 // so build_string() produces only the template region.
                 let tpl_code = tpl_ct.build_string();
-                let tpl_sourcemap_start = Instant::now();
+                let tpl_sourcemap_clock = verter_audit::observe::Stopwatch::start();
                 let tpl_source_map = if verter_options.source_map {
                     let sm_opts = SourceMapOptions {
                         source: options.filename.as_deref(),
@@ -1845,15 +1844,15 @@ fn compile_inner(
                 } else {
                     String::new()
                 };
-                let tpl_sourcemap_ms = tpl_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
                 let tpl_duration_ms = tpl_start.elapsed().as_secs_f64() * 1000.0;
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(|observer| {
+                    let tpl_sourcemap_ms = tpl_sourcemap_clock.elapsed_ms();
                     let codegen_only_ms = (tpl_duration_ms - tpl_sourcemap_ms).max(0.0);
                     observer.record_phase_timing("compile.codegen", codegen_only_ms);
                     if verter_options.source_map {
                         observer.record_phase_timing("compile.sourcemap", tpl_sourcemap_ms);
                     }
-                }
+                });
 
                 let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
 
@@ -2266,7 +2265,7 @@ fn compile_inner(
 
         // Build output and source map from the single unified CT
         let tsx_code = tsx_ct.build_string();
-        let tsx_sourcemap_start = Instant::now();
+        let tsx_sourcemap_clock = verter_audit::observe::Stopwatch::start();
         let tsx_sm = if verter_options.ide_source_map {
             let sm_opts = SourceMapOptions {
                 source: options.filename.as_deref(),
@@ -2280,15 +2279,15 @@ fn compile_inner(
         } else {
             String::new()
         };
-        let tsx_sourcemap_ms = tsx_sourcemap_start.elapsed().as_secs_f64() * 1000.0;
         let tsx_dur = tsx_start.elapsed().as_secs_f64() * 1000.0;
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(|observer| {
+            let tsx_sourcemap_ms = tsx_sourcemap_clock.elapsed_ms();
             let codegen_only_ms = (tsx_dur - tsx_sourcemap_ms).max(0.0);
             observer.record_phase_timing("compile.codegen", codegen_only_ms);
             if verter_options.ide_source_map {
                 observer.record_phase_timing("compile.sourcemap", tsx_sourcemap_ms);
             }
-        }
+        });
 
         // Compute block_start/block_end from boundary markers in the final TSX code.
         // The markers are unique constants inserted by script codegen; debug_assert
@@ -2356,9 +2355,7 @@ fn compile_inner(
             &tsc::FallthroughPropsProjection::none(),
         );
         let tsc_dur = tsc_start.elapsed().as_secs_f64() * 1000.0;
-        if let Some(observer) = verter_audit::current_observer() {
-            observer.record_phase_timing("compile.codegen", tsc_dur);
-        }
+        verter_audit::observe!(|observer| observer.record_phase_timing("compile.codegen", tsc_dur));
         match tsc_out {
             Ok(tsc_out) => Some(VerterTsxBlock {
                 code: tsc_out.code,

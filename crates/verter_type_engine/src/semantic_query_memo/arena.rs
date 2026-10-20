@@ -1742,7 +1742,7 @@ impl NodeArena {
         // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
         let (id, is_miss) = {
-            let timing_on = verter_execution::request_context::current_timing_enabled();
+            let timing_on = crate::request_observers::capture_timing_enabled();
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             let lock_start = if timing_on {
@@ -1985,7 +1985,7 @@ impl NodeArena {
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
     pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let timing_on = verter_execution::request_context::current_timing_enabled();
+        let timing_on = crate::request_observers::capture_timing_enabled();
         for shard in self.shards.iter() {
             let lock_start = if timing_on {
                 Some(Instant::now())

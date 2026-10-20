@@ -206,7 +206,7 @@ impl IntrinsicRegistry {
     pub fn lookup(&self, name: &str) -> IntrinsicLookup {
         let entries = self.entries.read();
         let result = entries.get(name).copied();
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|rctx| {
             if result.is_some() {
                 rctx.cache_counters
                     .intrinsic_registry
@@ -218,7 +218,7 @@ impl IntrinsicRegistry {
                     .misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-        }
+        });
         match result {
             Some(impl_id) => IntrinsicLookup::Found(impl_id),
             None => IntrinsicLookup::Unsupported {

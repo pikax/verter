@@ -560,82 +560,84 @@ impl ComponentMetaSession {
         // host config turns capture off, never a label claiming audit ran.
         let capture_enabled = self.inner.audit_capture_enabled();
         if let Err(error) = self.inner.check_alive() {
-            let capture_state = if capture_enabled {
-                verter_audit::AuditCaptureState::FilteredNoop
-            } else {
-                verter_audit::AuditCaptureState::AuditDisabled
-            };
+            let capture_state = crate::capture::uncaptured_state(capture_enabled);
             return verter_audit::AuditedResult::err(
                 ComponentMetaHostError::from(error),
                 cheap_component_meta_record(canonical_or_alias, capture_state),
             );
         }
-        if !capture_enabled {
-            // No audit record is produced when capture is off — carry
-            // the cheap default-filled record marked `AuditDisabled`
-            // so the carrier's always-a-record contract still holds.
-            return verter_audit::AuditedResult::err(
-                ComponentMetaHostError::AuditNotEnabled,
-                cheap_component_meta_record(
-                    canonical_or_alias,
-                    verter_audit::AuditCaptureState::AuditDisabled,
+        #[cfg(feature = "semantic-observe")]
+        if capture_enabled {
+            // Audit capture is instrumented on the host-level path — it
+            // installs the `RequestContext` TLS, stamps the request id, and
+            // publishes the record into the bounded store. The output-bearing
+            // resolution entry materializes the wire envelope INSIDE the same
+            // request-bound validated view the analysis is served under, so
+            // the audit bundle's payload and record describe one snapshot.
+            // EVERY terminal of that entry carries the request id, so the
+            // error path retrieves (and drains) the SAME real record the
+            // resolution published — audited identically to success; the cheap
+            // fallback applies only when no record was produced or the bounded
+            // store evicted it.
+            let (output, request_id) = match self
+                .inner
+                .component_meta_output_with_resolution(canonical_or_alias)
+            {
+                Ok((Some(output), request_id)) => (output, request_id),
+                Ok((None, request_id)) => {
+                    // No analysis behind the request: a non-fault miss rides
+                    // `Ok(None)`. Drain the real record when the resolution
+                    // published one; otherwise carry the cheap default.
+                    let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
+                        cheap_component_meta_record(
+                            canonical_or_alias,
+                            verter_audit::AuditCaptureState::FilteredNoop,
+                        )
+                    });
+                    return verter_audit::AuditedResult::ok(None, record);
+                }
+                Err((err, request_id)) => {
+                    // Typed output-materialization failure (fail-closed) —
+                    // the payload is refused, never collapsed to `Unknown`.
+                    // The resolution itself completed and published its REAL
+                    // record before materialization failed: drain and return
+                    // THAT record (never a fabricated zero-id stand-in, and
+                    // never an orphan left in the store).
+                    let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
+                        cheap_component_meta_record(
+                            canonical_or_alias,
+                            verter_audit::AuditCaptureState::FilteredNoop,
+                        )
+                    });
+                    return verter_audit::AuditedResult::err(
+                        ComponentMetaHostError::from(err),
+                        record,
+                    );
+                }
+            };
+            return match self.inner.take_audit_record(request_id) {
+                Some(record) => verter_audit::AuditedResult::ok(Some(output), record),
+                None => verter_audit::AuditedResult::err(
+                    ComponentMetaHostError::AuditRecordMissing { request_id },
+                    cheap_component_meta_record(
+                        canonical_or_alias,
+                        verter_audit::AuditCaptureState::FilteredNoop,
+                    ),
                 ),
-            );
+            };
         }
-        // Audit capture is instrumented on the host-level path — it
-        // installs the `RequestContext` TLS, stamps the request id, and
-        // publishes the record into the bounded store. The output-bearing
-        // resolution entry materializes the wire envelope INSIDE the same
-        // request-bound validated view the analysis is served under, so
-        // the audit bundle's payload and record describe one snapshot.
-        // EVERY terminal of that entry carries the request id, so the
-        // error path retrieves (and drains) the SAME real record the
-        // resolution published — audited identically to success; the cheap
-        // fallback applies only when no record was produced or the bounded
-        // store evicted it.
-        let (output, request_id) = match self
-            .inner
-            .component_meta_output_with_resolution(canonical_or_alias)
-        {
-            Ok((Some(output), request_id)) => (output, request_id),
-            Ok((None, request_id)) => {
-                // No analysis behind the request: a non-fault miss rides
-                // `Ok(None)`. Drain the real record when the resolution
-                // published one; otherwise carry the cheap default.
-                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
-                    cheap_component_meta_record(
-                        canonical_or_alias,
-                        verter_audit::AuditCaptureState::FilteredNoop,
-                    )
-                });
-                return verter_audit::AuditedResult::ok(None, record);
-            }
-            Err((err, request_id)) => {
-                // Typed output-materialization failure (fail-closed) —
-                // the payload is refused, never collapsed to `Unknown`.
-                // The resolution itself completed and published its REAL
-                // record before materialization failed: drain and return
-                // THAT record (never a fabricated zero-id stand-in, and
-                // never an orphan left in the store).
-                let record = self.inner.take_audit_record(request_id).unwrap_or_else(|| {
-                    cheap_component_meta_record(
-                        canonical_or_alias,
-                        verter_audit::AuditCaptureState::FilteredNoop,
-                    )
-                });
-                return verter_audit::AuditedResult::err(ComponentMetaHostError::from(err), record);
-            }
-        };
-        match self.inner.take_audit_record(request_id) {
-            Some(record) => verter_audit::AuditedResult::ok(Some(output), record),
-            None => verter_audit::AuditedResult::err(
-                ComponentMetaHostError::AuditRecordMissing { request_id },
-                cheap_component_meta_record(
-                    canonical_or_alias,
-                    verter_audit::AuditCaptureState::FilteredNoop,
-                ),
+
+        // Uncaptured: audit disabled by the host, or capture compiled out.
+        // No audit record is produced when capture is off — carry
+        // the cheap default-filled record marked `AuditDisabled`
+        // so the carrier's always-a-record contract still holds.
+        verter_audit::AuditedResult::err(
+            ComponentMetaHostError::AuditNotEnabled,
+            cheap_component_meta_record(
+                canonical_or_alias,
+                crate::capture::uncaptured_state(false),
             ),
-        }
+        )
     }
 
     /// Get component metadata plus the resolved-state sidecar in this session's
