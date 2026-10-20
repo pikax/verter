@@ -611,6 +611,10 @@ fn held_readers_survive_close_and_release_once_in_either_order() {
             "{order}: the same owner is reused"
         );
         drop(again);
+        // The account is process-wide: this host's parse pins must be gone
+        // before the next iteration reads its baseline.
+        host.close();
+        drain(&host);
     }
 }
 
