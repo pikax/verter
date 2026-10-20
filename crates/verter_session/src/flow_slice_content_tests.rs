@@ -376,6 +376,64 @@ fn an_and_chain_classifies_each_operand_a_bounded_number_of_times() {
     );
 }
 
+/// How many tests lowering `g` classifies as guards, when `g` asserts a
+/// condition `depth` receivers deep: each receiver `getObj((assert(c),
+/// obj))` asserts the condition inside it before testing `x`.
+fn nested_asserted_condition_classifications(depth: usize) -> usize {
+    use std::sync::atomic::Ordering;
+    let mut condition = String::from("typeof x === \"string\"");
+    for _ in 0..depth {
+        condition = format!("getObj((assert({condition}), obj)).test(x)");
+    }
+    let source = format!(
+        "export {{}};\n\
+         declare interface Obj {{ test(x: unknown): x is string }}\n\
+         declare function getObj(o: Obj): Obj;\n\
+         function assert(c: unknown): asserts c {{ if (!c) throw 0; }}\n\
+         function g(x: string | number, obj: Obj) {{ assert({condition}); return x; }}"
+    );
+    let memo = memo_for(&source);
+    let index = memo.function_program_index().value;
+    let entry = entry_of(&index, "g");
+    let (selection, skeleton) = selection_for(&memo, entry, &[]);
+    memo.lowering_work
+        .guard_classifications
+        .store(0, Ordering::Relaxed);
+    memo.flow_slice_content(
+        entry,
+        selection,
+        &skeleton,
+        verter_session_query::flow::policy::FlowReturnPolicy::from_compiler_options(
+            &Default::default(),
+        ),
+    )
+    .expect("slice content must build for an indexed function");
+    memo.lowering_work
+        .guard_classifications
+        .load(Ordering::Relaxed)
+}
+
+/// Classifying an asserted condition enters the assertions nested in it,
+/// which the statement's own scan also enters: an assertion entered while
+/// an asserted condition classifies takes the typed gap instead of
+/// classifying its own condition, so a nest of asserted conditions
+/// classifies the same guards per level whatever its depth. Classifying
+/// each nested condition again from every condition around it doubled the
+/// work per level (6,145 classifications at 12 levels).
+#[test]
+fn nested_asserted_conditions_classify_a_bounded_number_of_guards_per_level() {
+    let classifications = [6, 12, 18].map(nested_asserted_condition_classifications);
+    assert!(
+        classifications[0] >= 6,
+        "every asserted condition classifies: {classifications:?}"
+    );
+    assert_eq!(
+        classifications[1] - classifications[0],
+        classifications[2] - classifications[1],
+        "each six levels add the same classifications: {classifications:?}"
+    );
+}
+
 /// How many expressions lowering `pc`, returning `depth` nested calls
 /// `g(g(…g(1)…))` of an unresolved `g`, lowers.
 fn nested_call_lowerings(depth: usize) -> usize {

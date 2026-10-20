@@ -140,37 +140,46 @@ impl VerterHost {
         // resolver is closure-bound to `&self` so a global cache would
         // need a lifetime story; per-invocation suffices because the
         // probe runs once per `Content` request.
-        type ResolveMemo =
-            std::cell::RefCell<rustc_hash::FxHashMap<(Arc<str>, Arc<str>), Option<Arc<str>>>>;
+        type ResolveMemo = std::cell::RefCell<
+            rustc_hash::FxHashMap<
+                (Arc<str>, Arc<str>),
+                crate::host_manage::source_augmentation::AugmentationTarget,
+            >,
+        >;
         let resolve_memo: ResolveMemo = std::cell::RefCell::new(rustc_hash::FxHashMap::default());
         let resolution_refused = std::cell::Cell::new(false);
-        let memoised_resolve = |augmenter_canonical: &str, specifier: &str| -> Option<Arc<str>> {
-            let key = (
-                Arc::<str>::from(augmenter_canonical),
-                Arc::<str>::from(specifier),
-            );
-            if let Some(cached) = resolve_memo.borrow().get(&key).cloned() {
-                return cached;
-            }
-            let resolved =
-                match self.resolve_type_dependency_canonical(augmenter_canonical, specifier) {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                        admitted.into_result().map(Arc::<str>::from)
-                    }
-                    verter_workspace::ResolutionPublication::Refused(_) => {
-                        resolution_refused.set(true);
-                        None
-                    }
-                };
-            resolve_memo.borrow_mut().insert(key, resolved.clone());
-            resolved
+        let memoised_resolve =
+            |augmenter_canonical: &str,
+             specifier: &str|
+             -> crate::host_manage::source_augmentation::AugmentationTarget {
+                let key = (
+                    Arc::<str>::from(augmenter_canonical),
+                    Arc::<str>::from(specifier),
+                );
+                if let Some(cached) = resolve_memo.borrow().get(&key).cloned() {
+                    return cached;
+                }
+                // The complete target of an unretained answer answers the probe;
+                // the mode it selects stays the conservative one, as for a
+                // refusal, and the scan it feeds stores nothing.
+                let resolved =
+                    crate::host_manage::source_augmentation::AugmentationTarget::from_publication(
+                        self.resolve_type_dependency_canonical(augmenter_canonical, specifier),
+                    );
+                if !resolved.retainable {
+                    resolution_refused.set(true);
+                }
+                resolve_memo.borrow_mut().insert(key, resolved.clone());
+                resolved
+            };
+        // The probe's own walk reads the target alone; the index scan also
+        // reads whether its set may be stored.
+        let resolver = |augmenter_canonical: &str, specifier: &str| {
+            memoised_resolve(augmenter_canonical, specifier).target
         };
-        // Bind a shared reference so each probe passes the resolver by
-        // reference without re-borrowing at every call site.
-        let resolver = &memoised_resolve;
         let any_non_empty = |target: AugmentationTargetKind| {
             !crate::host_manage::source_augmentation::AugmentationRequestDriver::new(store)
-                .ensure_populated(&make_key(target), resolver, None)
+                .ensure_populated(&make_key(target), memoised_resolve, None)
                 .entries
                 .is_empty()
         };

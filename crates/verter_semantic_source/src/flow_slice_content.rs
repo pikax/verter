@@ -63,15 +63,15 @@ use verter_session_query::flow::slice::{
     CaptureScope, DefiningFrameDiscovery, DefiningFrameGate, EmptyCompletion, FlowSliceSelection,
     FrameAnswer, GatedLeaf, GatedType, LeafRootOccurrence, NameBinding, NestedFlowContext,
     ParameterDeclaration, ReturnPredicateTest, SignatureParameters, SignatureScope,
-    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceBindingKind, SliceCall,
-    SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
-    SliceCaptureAuthorityLocator, SliceContent, SliceDestructuredElement, SliceEffectCallee,
-    SliceElementKey, SliceEqOperand, SliceEqOther, SliceEvolvingOperation,
-    SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
-    SliceLogical, SliceLoop, SliceLoopBinding, SliceLoopDependency, SliceLoopElement,
-    SliceLoopTest, SliceLoopWrite, SliceMemberWrite, SliceMutationArgument, SliceNarrowRoot,
-    SliceNarrowSubject, SliceObjectEntry, SliceObjectKey, SliceObjectMember, SliceParam,
-    SlicePattern, SlicePatternElement, SlicePatternKey, SliceRegion, SliceStatement,
+    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceAssertionClaim,
+    SliceAssertionCondition, SliceBindingKind, SliceCall, SliceCallArgument, SliceCallArguments,
+    SliceCallSite, SliceCaptureAuthority, SliceCaptureAuthorityLocator, SliceContent,
+    SliceDestructuredElement, SliceEffectCallee, SliceElementKey, SliceEqOperand, SliceEqOther,
+    SliceEvolvingOperation, SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard,
+    SliceGuardLiteral, SliceLogical, SliceLoop, SliceLoopBinding, SliceLoopDependency,
+    SliceLoopElement, SliceLoopTest, SliceLoopWrite, SliceMemberWrite, SliceMutationArgument,
+    SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectKey, SliceObjectMember,
+    SliceParam, SlicePattern, SlicePatternElement, SlicePatternKey, SliceRegion, SliceStatement,
     SliceSwitchCase, SliceThis, SliceTypeParam, SliceTypeofKind, SliceUnsupported, SliceWriteKey,
 };
 
@@ -1190,6 +1190,7 @@ pub(crate) fn build_flow_slice_content(
         ),
         control_test_gap: false,
         entered_assertion_sink: None,
+        classifying_asserted_condition: false,
         narrowing_alias_locals: FxHashSet::default(),
         alias_conditions: rustc_hash::FxHashMap::default(),
         discriminant_aliases: rustc_hash::FxHashMap::default(),
@@ -2002,7 +2003,7 @@ fn member_target_chain<'a>(
 }
 
 /// Whether a member access's object is a flow VALUE with no reference
-/// behind it: a `new` expression, an object literal, a primitive literal
+/// behind it: a `new` expression, an object or array literal, a primitive literal
 /// (read through its apparent type), a call's result, or a static member
 /// chain rooted at one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
@@ -2011,6 +2012,7 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
         match unwrap_parenthesized(object) {
             Expression::NewExpression(_)
             | Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_)
             | Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
             | Expression::BooleanLiteral(_)
@@ -2324,18 +2326,8 @@ fn narrowing_spine_calls<'e, 'a>(
 }
 
 /// The statement one applied `asserts` call lowers to.
-fn assertion_statement(
-    SliceAssertion {
-        subject,
-        target,
-        call,
-    }: SliceAssertion,
-) -> SliceStatement {
-    SliceStatement::Assertion {
-        subject,
-        target,
-        call,
-    }
+fn assertion_statement(SliceAssertion { claim, call }: SliceAssertion) -> SliceStatement {
+    SliceStatement::Assertion { claim, call }
 }
 
 /// A region of entered effects: assertions and joins, which always
@@ -4232,6 +4224,13 @@ struct Lowerer<'a> {
     /// applied after the scanned position, instead of taking the typed
     /// gap.
     entered_assertion_sink: Option<Vec<SliceStatement>>,
+    /// Whether a targetless `asserts` condition is classifying: an
+    /// assertion entered inside it takes the typed gap rather than
+    /// classifying its own condition, so the classification an entered
+    /// assertion starts never re-enters another, however deep the source
+    /// nests them. The statement's own scan still enters each nested
+    /// assertion at the top.
+    classifying_asserted_condition: bool,
     /// The same-frame `const`-kind locals whose initializer is a form the
     /// checker can bind a narrowing FACT to (a comparison, an
     /// `instanceof` / `in` test, a call, a composition of those, or
@@ -8801,11 +8800,53 @@ impl<'a> Lowerer<'a> {
         match self.lower_callee_signature_guard(call, callee) {
             SliceGuard::CalleePredicate {
                 callee, arguments, ..
-            } => Some(SliceStatement::CalleeEffect {
-                callee,
-                arguments,
-                site: call_site(call),
-            }),
+            } => {
+                let conditions = call
+                    .arguments
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(argument, subject)| {
+                        let argument = argument.as_expression()?;
+                        // A reference argument narrows by truthiness, unless
+                        // it names an aliased condition, which narrows as an
+                        // `if` over the alias does.
+                        if subject.is_some() {
+                            return self
+                                .classify_aliased_condition(unwrap_reference_transparent(argument))
+                                .and_then(|disposition| match disposition {
+                                    GuardDisposition::Modeled(guard) => {
+                                        Some(SliceAssertionCondition::Guard(*guard))
+                                    }
+                                    GuardDisposition::NoNarrowing => None,
+                                    GuardDisposition::Unexpressible => {
+                                        Some(SliceAssertionCondition::Unexpressible)
+                                    }
+                                });
+                        }
+                        // A call in the condition is a guard whose evidence
+                        // only its application deposits, and the effects
+                        // signature is not known to assert yet.
+                        if verter_semantic::analysis::flow::expression_contains_call(argument) {
+                            return Some(SliceAssertionCondition::Unexpressible);
+                        }
+                        match self.classify_guard(argument) {
+                            GuardDisposition::Modeled(guard) => {
+                                Some(SliceAssertionCondition::Guard(*guard))
+                            }
+                            GuardDisposition::NoNarrowing => None,
+                            GuardDisposition::Unexpressible => {
+                                Some(SliceAssertionCondition::Unexpressible)
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Some(SliceStatement::CalleeEffect {
+                    callee,
+                    arguments,
+                    conditions: Arc::from(conditions.into_boxed_slice()),
+                    site: call_site(call),
+                })
+            }
             _ => None,
         }
     }
@@ -9857,15 +9898,7 @@ impl<'a> Lowerer<'a> {
                 let nested =
                     self.collecting_entered_assertions(|this| this.scan_call_operands(call));
                 let own = match assertion {
-                    Some(SliceAssertion {
-                        subject,
-                        target,
-                        call,
-                    }) => SliceStatement::Assertion {
-                        subject,
-                        target,
-                        call,
-                    },
+                    Some(assertion) => assertion_statement(assertion),
                     // The statement's OWN call takes the same
                     // prove-or-degrade discipline every other
                     // result-independent position takes, PLUS the
@@ -10138,10 +10171,12 @@ impl<'a> Lowerer<'a> {
 
     /// The `asserts` predicate an ENTERED call applies — a free callee
     /// naming a closed same-file assertion declaration, over an argument
-    /// this half narrows. A closed same-file assertion whose target the
-    /// predicate channel refuses (`asserts x is T` on `assertSame<T>`, or
-    /// over a `T` this frame rebinds) narrows in the checker but cannot be
-    /// applied here: it flags the typed gap.
+    /// this half narrows: a reference, or for a targetless `asserts x` any
+    /// condition the guard vocabulary expresses (the checker narrows by
+    /// the argument as a test that holds). A closed same-file assertion
+    /// whose target the predicate channel refuses (`asserts x is T` on
+    /// `assertSame<T>`, or over a `T` this frame rebinds) narrows in the
+    /// checker but cannot be applied here: it flags the typed gap.
     fn entered_assertion(
         &mut self,
         call: &oxc_ast::ast::CallExpression<'_>,
@@ -10154,25 +10189,88 @@ impl<'a> Lowerer<'a> {
             }
             _ => None,
         };
-        let assertion = free_callee.and_then(|name| {
-            let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
-            let argument = call
-                .arguments
-                .get(ordinal)
-                .and_then(|argument| argument.as_expression())?;
-            let subject = self.narrow_subject_of(argument)?;
-            Some(SliceAssertion {
-                subject,
-                target,
-                call: verter_span::Span::new(call.span.start, call.span.end),
+        let assertion = free_callee
+            .and_then(|name| self.same_file_predicate(name, true, call.span))
+            .and_then(|(ordinal, target)| {
+                let argument = call
+                    .arguments
+                    .get(ordinal)
+                    .and_then(|argument| argument.as_expression())?;
+                Some((argument, target))
             })
-        });
+            .and_then(|(argument, target)| {
+                let claim = match target {
+                    Some(target) => SliceAssertionClaim::Reference {
+                        subject: self.narrow_subject_of(argument)?,
+                        target: Some(target),
+                    },
+                    None => {
+                        let Some(claim) = self.asserted_condition_claim(argument) else {
+                            // The checker narrows by a test this vocabulary
+                            // cannot express: the typed gap, never a clean
+                            // unnarrowed answer.
+                            self.control_test_gap = true;
+                            return None;
+                        };
+                        claim
+                    }
+                };
+                Some(SliceAssertion {
+                    claim,
+                    call: verter_span::Span::new(call.span.start, call.span.end),
+                })
+            });
         if assertion.is_none()
             && free_callee.is_some_and(|name| self.assertion_target_is_refused(name, call.span))
         {
             self.control_test_gap = true;
         }
         assertion
+    }
+
+    /// What a targetless `asserts` call claims of its `argument`, or `None`
+    /// where the checker narrows by a test this half cannot express.
+    /// Classifying the condition enters the assertions nested in it, whose
+    /// claims are the typed gap
+    /// ([`Lowerer::classifying_asserted_condition`]).
+    fn asserted_condition_claim(
+        &mut self,
+        argument: &Expression<'_>,
+    ) -> Option<SliceAssertionClaim> {
+        if std::mem::replace(&mut self.classifying_asserted_condition, true) {
+            return None;
+        }
+        let claim = self.classify_asserted_condition(argument);
+        self.classifying_asserted_condition = false;
+        claim
+    }
+
+    /// An ALIASED CONDITION narrows as an `if` over the alias does: the
+    /// alias by truthiness and what its initializer tests; another
+    /// reference narrows by truthiness, and any other condition as the
+    /// test it is.
+    fn classify_asserted_condition(
+        &mut self,
+        argument: &Expression<'_>,
+    ) -> Option<SliceAssertionClaim> {
+        let disposition =
+            match self.classify_aliased_condition(unwrap_reference_transparent(argument)) {
+                Some(GuardDisposition::NoNarrowing) | None => {
+                    if let Some(subject) = self.narrow_subject_of(argument) {
+                        return Some(SliceAssertionClaim::Reference {
+                            subject,
+                            target: None,
+                        });
+                    }
+                    self.classify_guard(argument)
+                }
+                Some(aliased) => aliased,
+            };
+        match disposition {
+            GuardDisposition::Modeled(guard) => Some(SliceAssertionClaim::Condition(*guard)),
+            GuardDisposition::NoNarrowing => Some(SliceAssertionClaim::Condition(SliceGuard::None)),
+            GuardDisposition::Unexpressible => None,
+        }
     }
 
     /// Scan the effects nested in one modeled call's callee and arguments
