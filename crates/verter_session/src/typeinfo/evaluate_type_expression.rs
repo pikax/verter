@@ -443,7 +443,6 @@ fn evaluate_inner(
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
-    let _ = &scope_node;
     let base = dispatch.type_slot_for(
         Arc::clone(&scratch_canonical),
         verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -517,6 +516,7 @@ fn evaluate_inner(
             &dispatch,
             resolved_alias_node,
             req.mode,
+            &scope_node,
         ) {
             Ok(materialized) => materialized,
             // A hard dispatch fault during nested materialization

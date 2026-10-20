@@ -1173,11 +1173,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 Self::conditional_check_context(context),
                             ),
                             extends: projected(memo, *extends, extends_context),
-                            true_branch: self
-                                .answer_member(projected(memo, *true_branch_ref, context), context),
+                            true_branch: self.answer_member(
+                                projected(memo, *true_branch_ref, context),
+                                context,
+                                inputs,
+                            ),
                             false_branch: self.answer_member(
                                 projected(memo, *false_branch_ref, context),
                                 context,
+                                inputs,
                             ),
                             distributive: *distributive,
                             pending: pending.clone(),
@@ -1297,6 +1301,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             context: argument_context,
                         });
                     } else {
+                        // Reading a closed argument may dispatch.
+                        work_credit.settle();
                         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
                             state
                                 .args
@@ -1309,12 +1315,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     self.canonical_argument_carrier(self.answer_member(
                                         projected(memo, *argument, context),
                                         context,
+                                        inputs,
                                     ))
                                 })
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
-                        work_credit.settle();
                         let deferred = || self.in_deferred_position(frames);
                         let result = match self.plan_carrier_finish(
                             state.continuation,
@@ -2141,13 +2147,14 @@ fn projection_finish_may_dispatch(
     data: &SemanticNodeData,
     context: ProjectionReductionContext,
 ) -> bool {
-    let _ = context;
+    // A published `Expanded` answer reads the closed operators its
+    // composites hold when it finishes them (`answer_member`).
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::InstantiationRef { .. }
-    )
+    ) || (context.mode == ProjectionMode::Expanded && may_reduce_operator(context))
 }
 
 fn projected(

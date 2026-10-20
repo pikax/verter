@@ -449,3 +449,94 @@ fn a_closed_operator_in_an_answer_intersection_reduces() {
         );
     }
 }
+
+/// Measured on TypeScript 7.0.2, with strict null checks on and off: over
+/// `type Y = { c: 1 }` and `type X = { a: { b: Y["c"] } }`, `{ x: X["a"] }`
+/// is `{ x: { b: 1; }; }`, `X["a"] | 3` is `{ b: 1; } | 3` and `X["a"]` is
+/// `{ b: 1; }`; with `type X = { a: [Y["c"]] }`, `[X["a"]]` is `[[1]]`. A
+/// member read through an access answers as it does written in place.
+#[test]
+fn a_member_read_through_an_access_reads_its_own_closed_accesses() {
+    let object = "type Y = { c: 1 };\ntype X = { a: { b: Y[\"c\"] } };\n";
+    let tuple = "type Y = { c: 1 };\ntype X = { a: [Y[\"c\"]] };\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        let answer = |source: &str, probe: &str| {
+            answer_with_options(source, probe, None, strict_null_checks, no_implicit_any)
+        };
+        assert_eq!(
+            display(&answer(object, "{ x: X[\"a\"] }")),
+            "{ x: { b: 1 } }",
+            "{settings}"
+        );
+        assert_eq!(
+            members(&answer(object, "X[\"a\"] | 3")),
+            set(["{ b: 1 }", "3"]),
+            "{settings}"
+        );
+        assert_eq!(
+            display(&answer(object, "X[\"a\"]")),
+            "{ b: 1 }",
+            "{settings}"
+        );
+        assert_eq!(display(&answer(tuple, "[X[\"a\"]]")), "[[1]]", "{settings}");
+    }
+}
+
+/// Measured on TypeScript 7.0.2, with strict null checks on and off: over
+/// `type P = { a: 1; b: 2 }` and `type X = { a: keyof P }`, `{ x: X["a"] }`
+/// is `{ x: keyof P; }` and `X["a"] | 3` is `"a" | "b" | 3`.
+#[test]
+fn an_access_reading_a_keyof_answers_that_keyof() {
+    let source = "type P = { a: 1; b: 2 };\ntype X = { a: keyof P };\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        let answer = |probe: &str| {
+            answer_with_options(source, probe, None, strict_null_checks, no_implicit_any)
+        };
+        assert_eq!(
+            display(&answer("{ x: X[\"a\"] }")),
+            "{ x: keyof P }",
+            "{settings}"
+        );
+        assert_eq!(
+            members(&answer("X[\"a\"] | 3")),
+            set(["'a'", "'b'", "3"]),
+            "{settings}"
+        );
+    }
+}
+
+/// A member whose read reaches the same access again keeps that access
+/// where it reaches it, and the answer completes.
+#[test]
+fn an_access_reading_itself_keeps_the_access_where_it_recurs() {
+    let source = "type X = { a: { b: X[\"a\"] } };\n";
+    let answer = answer(source, "{ x: X[\"a\"] }");
+    let TypeExpr::Object(_) = property(&answer, "x") else {
+        panic!("`x` of `{}` reads the member", display(&answer));
+    };
+}
+
+/// Measured on TypeScript 7.0.2, with strict null checks on and off: over
+/// `interface A { y: 1; x: this["y"] }`, `{ a: A["x"] }` is `{ a: 1; }`:
+/// the member read binds `this` to `A`.
+#[test]
+fn an_access_to_a_member_typed_by_polymorphic_this_reads_through_it() {
+    let source = "interface A { y: 1; x: this[\"y\"] }\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        assert_eq!(
+            display(&answer_with_options(
+                source,
+                "{ a: A[\"x\"] }",
+                None,
+                strict_null_checks,
+                no_implicit_any,
+            )),
+            "{ a: 1 }",
+            "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}"
+        );
+    }
+}

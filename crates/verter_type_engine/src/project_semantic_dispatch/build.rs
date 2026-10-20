@@ -13167,10 +13167,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = walker.walk(start_base, walker_path.as_ref());
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
-        // A member read through a class reference binds the member's
-        // polymorphic `this` to that reference.
+        // A member read through a reference binds the member's polymorphic
+        // `this` to that reference: a class member's `this` binder, and an
+        // interface member's declared `this` (`x: this["y"]` read through
+        // `A` is `A["y"]`), as the checker instantiates a member's `this`
+        // type with the reference it is accessed through.
         let result = if path.len() == 1 && self.is_this_receiver(base) {
-            self.bind_this_receiver(result, base)
+            self.bind_callee_receiver(result, base)
         } else {
             result
         };
