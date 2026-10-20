@@ -600,6 +600,37 @@ fn instantiated_and_constrained_conditionals_decide_as_the_checker_decides_them(
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn distributive_conditionals_split_boolean_and_boolean_union_members() {
+    let source = r#"
+type __BenchInit = 0;
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type F<T> = T extends true ? "t" : "f";
+type Box<T> = T extends unknown ? { value: T } : never;
+type Wrapped<T> = [T] extends [true] ? "t" : "f";
+type Bool = boolean;
+type BoolUnion = boolean | 0;
+type Nested<T> = T extends infer U ? U extends true ? U : never : never;
+"#;
+    let failures = Matrix::new(source).settings(&ALL).types(&[
+        ("F<boolean>", "\"f\" | \"t\""),
+        ("Exclude<boolean | 0, false>", "0 | true"),
+        ("Exclude<boolean | 0, true>", "0 | false"),
+        ("Extract<boolean | 0, true>", "true"),
+        ("F<Bool>", "\"f\" | \"t\""),
+        ("Exclude<BoolUnion, false>", "0 | true"),
+        ("Box<boolean>", "{ value: false; } | { value: true; }"),
+        ("Nested<boolean>", "true"),
+        ("Wrapped<boolean>", "\"f\""),
+        ("[boolean] extends [true] ? \"t\" : \"f\"", "\"f\""),
+        ("boolean extends true ? \"t\" : \"f\"", "\"f\""),
+        ("F<true>", "\"t\""),
+        ("F<false>", "\"f\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Vue's ref unwrapping read through the real `vue` package, whose
 /// `UnwrapRef` and `Ref` reach the probe through the `vue` → runtime-dom →
 /// runtime-core → reactivity re-export chain. `Ref` declares its value as a
@@ -840,6 +871,65 @@ fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
                 read.text(),
                 verdict.class,
                 verdict.lane
+            );
+        }
+    }
+}
+
+/// Named type queries must not publish a whole-boolean branch when an
+/// unreadable extends arm prevents per-member decisions. Return-flow reads
+/// already retain a gap for this input, so exercise the public named demand.
+#[test]
+fn a_written_arm_cannot_select_a_whole_distributive_boolean() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
+
+    let source = format!(
+        "{UNREADABLE_ARM_SOURCE}\n\
+         type Bool = boolean;\n\
+         type FBool<T> = T extends boolean | Dom<1> ? {{ v: T }} : 0;\n\
+         type Direct = FBool<boolean>;\n\
+         type Aliased = FBool<Bool>;\n\
+         type Whole = boolean extends boolean | Dom<1> ? 1 : 2;\n"
+    );
+    let host = Matrix::new(&source).settings(&ALL).host(&[]);
+    for setting in ALL {
+        let canonical = format!("{}/probe.ts", setting.root);
+        for (name, answer) in [
+            ("Whole", "1"),
+            ("Direct", "{ v: false; } | { v: true; }"),
+            ("Aliased", "{ v: false; } | { v: true; }"),
+        ] {
+            let result = host
+                .resolve_named_symbol_with_audit(&canonical, name, None)
+                .into_result()
+                .expect("the named demand does not fault");
+            let Some(node) = result else {
+                assert_ne!(name, "Whole", "the non-distributive control resolves");
+                continue;
+            };
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+            let expected = checker_syntax::parse(answer).expect("valid checker type");
+            let data = dispatch.graph().node_data(node.id());
+            let gap = name != "Whole"
+                && matches!(
+                    data.as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Opaque(
+                                QueryError::IncompleteSemanticOperand { .. }
+                            )
+                    )
+                );
+            assert!(
+                gap || checker_syntax::matches_node(&dispatch, node.id(), &expected, 0),
+                "{name} [{}] must be {answer} or an unresolved conditional, got {data:?}",
+                setting.label
             );
         }
     }
