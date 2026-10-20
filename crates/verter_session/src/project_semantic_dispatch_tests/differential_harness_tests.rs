@@ -64,6 +64,13 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
     options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false }"#,
 };
 
+/// `strict` with `strictFunctionTypes` off.
+pub(super) const STRICT_FUNCTION_TYPES_OFF: Setting = Setting {
+    root: "/strict-loose-function-types",
+    label: "strictFunctionTypes off",
+    options: r#"{ "strict": true, "strictFunctionTypes": false }"#,
+};
+
 /// The four settings, in the order a four-answer row lists them.
 pub(super) const ALL: [Setting; 4] = [STRICT, LOOSE, STRICT_IMPLICIT, LOOSE_IMPLICIT];
 

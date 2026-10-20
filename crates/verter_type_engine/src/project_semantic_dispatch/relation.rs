@@ -161,6 +161,10 @@ pub(crate) enum InferPosition {
     ContravariantParam,
     /// Function return — the enclosing occurrence's rung and orientation.
     Return,
+    /// A callback parameter's own parameter, related from the enclosing
+    /// signature — the `Argument` rung, the enclosing orientation: the two
+    /// parameter positions' flips cancel.
+    CallbackParam,
 }
 
 fn inference_occurrence_for_position(
@@ -188,7 +192,30 @@ fn inference_occurrence_for_position(
         // alone, and a receiver's function member infers beside the
         // arguments the same way.
         InferPosition::Return => ambient,
+        InferPosition::CallbackParam => InferenceOccurrence {
+            priority: InferenceCandidatePriority::Argument,
+            variance: ambient.variance,
+        },
     }
+}
+
+/// How a signature relation relates its parameters and return — the
+/// variance half of the checker's `compareSignaturesRelated` check mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SignatureCheckMode {
+    /// Parameters strictly contravariant under `strictFunctionTypes`,
+    /// bivariant otherwise.
+    Ordinary,
+    /// A target declared as a method: parameters bivariant whatever
+    /// `strictFunctionTypes` says (`strictVariance` excludes methods).
+    Method,
+    /// A callback parameter's signature, related from its enclosing
+    /// signature with the target's callback as the source: parameters
+    /// strictly contravariant and never read as callbacks again; the return
+    /// related in either direction when `bivariant_return` (the checker's
+    /// `BivariantCallback`, under an enclosing relation without
+    /// `strictVariance`), covariantly otherwise (`StrictCallback`).
+    Callback { bivariant_return: bool },
 }
 
 /// What the members of a source infer to a union target's one naked type
@@ -9213,12 +9240,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         parameter: SemanticNodeId,
         bindings: &mut Vec<InferBinding>,
     ) -> Vec<SemanticNodeId> {
-        let application = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) if !args.is_empty() => Some((
-                self.relation_declaration_identity(base.clone(), node),
-                Arc::clone(args.as_arc()),
-            )),
-            _ => None,
+        // A reference a declaration's body makes to the declaration itself
+        // (`PromiseLike<TResult2>` inside `PromiseLike`'s `then`) applies it
+        // as any other reference does.
+        let application = |node: SemanticNodeId| {
+            self.raw_generic_reference(node)
+                .filter(|(_, args)| !args.is_empty())
+                .map(|(base, args)| (self.relation_declaration_identity(base, node), args))
         };
         let fixed: Vec<(DeclIdentity, Arc<[SemanticNodeId]>)> =
             match self.graph().node_data(target).as_deref() {
@@ -12333,10 +12361,52 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         method_target: bool,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        let mode = if method_target {
+            SignatureCheckMode::Method
+        } else {
+            SignatureCheckMode::Ordinary
+        };
+        self.relate_signatures_in_mode(
+            source,
+            source_result,
+            target,
+            target_result,
+            kind,
+            mode,
+            bindings,
+        )
+    }
+
+    /// [`Self::relate_function`] under the check `mode`. A callback
+    /// relation ([`SignatureCheckMode::Callback`]) runs inside its enclosing
+    /// signature's relation frame, so its positions read the enclosing
+    /// occurrence across both parameter flips: its parameters
+    /// [`InferPosition::CallbackParam`], its return
+    /// [`InferPosition::ContravariantParam`].
+    #[allow(clippy::too_many_arguments)]
+    fn relate_signatures_in_mode(
+        &self,
+        source: SemanticNodeId,
+        source_result: FunctionResult,
+        target: SemanticNodeId,
+        target_result: FunctionResult,
+        kind: crate::semantic_query::SignatureKind,
+        mode: SignatureCheckMode,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
         let Ok(plan) =
             self.signature_comparison_plan(source, target, kind, self.strict_subtype_mode())
         else {
             return RelationResult::Unknown;
+        };
+        let callback = matches!(mode, SignatureCheckMode::Callback { .. });
+        let (parameter_position, return_position) = if callback {
+            (
+                InferPosition::CallbackParam,
+                InferPosition::ContravariantParam,
+            )
+        } else {
+            (InferPosition::ContravariantParam, InferPosition::Return)
         };
         // The checker instantiates a rest parameter's type with its
         // unreliable-marker reporter (`compareSignaturesRelated`).
@@ -12347,12 +12417,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.note_relation_unreliable();
         }
         if let (Some(src_this), Some(tgt_this)) = (plan.source_receiver, plan.target_receiver) {
-            let this_rel = self.relate_member(
-                tgt_this,
-                src_this,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let this_rel = self.relate_member(tgt_this, src_this, bindings, parameter_position);
             if matches!(this_rel, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
@@ -12362,11 +12427,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if plan.source_has_more_parameters {
             return RelationResult::NotAssignable;
         }
-        let bivariant = {
-            let txn = self.dispatch_txn.borrow();
-            let strict = txn.relation.strict.unwrap_or(StrictFamilyConfig::TS_STRICT);
-            method_target || !strict.strict_function_types
+        // The checker's `strictVariance`: a callback relation and a method
+        // target are never strict, and only an ordinary relation reads
+        // `strictFunctionTypes`.
+        let strict_variance = match mode {
+            SignatureCheckMode::Ordinary => {
+                let txn = self.dispatch_txn.borrow();
+                txn.relation
+                    .strict
+                    .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                    .strict_function_types
+            }
+            SignatureCheckMode::Method | SignatureCheckMode::Callback { .. } => false,
         };
+        // A callback's own parameters relate strictly contravariantly.
+        let bivariant = !strict_variance && !callback;
         let mut acc = RelationResult::Assignable {
             bindings: Arc::from(Vec::new().into_boxed_slice()),
         };
@@ -12386,15 +12461,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // to the source's, its parameters strictly contravariant. A
             // callback's parameters are output positions, so a method does
             // not make them bivariant: `then(f: (v: T) => void)` is
-            // covariant in `T`.
-            if let Some((target_callback, source_callback)) =
-                self.callback_parameter_pair(s_param, t_param)
+            // covariant in `T`. Without `strictVariance` its return relates
+            // in either direction: `add(cb: () => T)` is bivariant in `T`.
+            if let Some((target_callback, source_callback)) = (!callback)
+                .then(|| self.callback_parameter_pair(s_param, t_param))
+                .flatten()
             {
-                let related = self.relate_member(
+                let related = self.relate_callback_signatures(
                     target_callback,
                     source_callback,
+                    !strict_variance,
                     bindings,
-                    InferPosition::ContravariantParam,
                 );
                 acc = result_and(acc, related);
                 if matches!(acc, RelationResult::NotAssignable) {
@@ -12406,12 +12483,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // bivariant regime either direction discharges the pair.
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
-            let contravariant = self.relate_member(
-                t_param,
-                s_param,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let contravariant = self.relate_member(t_param, s_param, bindings, parameter_position);
             let pair = if bivariant && !matches!(contravariant, RelationResult::Assignable { .. }) {
                 self.relation_session_rollback(&checkpoint);
                 bindings.truncate(bindings_len);
@@ -12433,12 +12505,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if let Some((_, target_rest, source_rest)) = rest_inference {
-            let rest = self.relate_member(
-                target_rest,
-                source_rest,
-                bindings,
-                InferPosition::ContravariantParam,
-            );
+            let rest = self.relate_member(target_rest, source_rest, bindings, parameter_position);
             acc = result_and(acc, rest);
             if matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
@@ -12462,12 +12529,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         && source_predicate.subject == target_predicate.subject =>
                 {
                     match (source_predicate.ty, target_predicate.ty) {
-                        (Some(source_ty), Some(target_ty)) => self.relate_member(
-                            source_ty,
-                            target_ty,
-                            bindings,
-                            InferPosition::Return,
-                        ),
+                        (Some(source_ty), Some(target_ty)) => {
+                            self.relate_member(source_ty, target_ty, bindings, return_position)
+                        }
                         _ => RelationResult::NotAssignable,
                     }
                 }
@@ -12475,14 +12539,79 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             return result_and(acc, related);
         }
-        // Covariant return.
-        let r = self.relate_member(
+        // Covariant return; a bivariant callback's either way round.
+        let checkpoint = self.relation_session_checkpoint();
+        let bindings_len = bindings.len();
+        let covariant = self.relate_member(
             source_result.return_type,
             target_result.return_type,
             bindings,
-            InferPosition::Return,
+            return_position,
         );
+        let r = if mode
+            == (SignatureCheckMode::Callback {
+                bivariant_return: true,
+            })
+            && !matches!(covariant, RelationResult::Assignable { .. })
+        {
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+            let fallback_checkpoint = self.relation_session_checkpoint();
+            let fallback_bindings_len = bindings.len();
+            let fallback = self.relate_member(
+                target_result.return_type,
+                source_result.return_type,
+                bindings,
+                parameter_position,
+            );
+            if !matches!(fallback, RelationResult::Assignable { .. }) {
+                self.relation_session_rollback(&fallback_checkpoint);
+                bindings.truncate(fallback_bindings_len);
+            }
+            result_or(covariant, fallback)
+        } else {
+            covariant
+        };
         result_and(acc, r)
+    }
+
+    /// Relate the target's callback `target_callback` to the source's
+    /// `source_callback` (both one non-generic call signature without a
+    /// predicate, [`Self::callback_parameter_pair`]) as the checker's
+    /// `compareSignaturesRelated` does under `StrictCallback` or, with
+    /// `bivariant_return`, `BivariantCallback`.
+    fn relate_callback_signatures(
+        &self,
+        target_callback: SemanticNodeId,
+        source_callback: SemanticNodeId,
+        bivariant_return: bool,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let result_of = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Signature {
+                return_type,
+                predicate,
+                ..
+            }) => Some(FunctionResult {
+                return_type: *return_type,
+                predicate: *predicate,
+            }),
+            _ => None,
+        };
+        let (Some(target_result), Some(source_result)) =
+            (result_of(target_callback), result_of(source_callback))
+        else {
+            return RelationResult::Unknown;
+        };
+        self.relate_signatures_in_mode(
+            target_callback,
+            target_result,
+            source_callback,
+            source_result,
+            crate::semantic_query::SignatureKind::Call,
+            SignatureCheckMode::Callback { bivariant_return },
+            bindings,
+        )
     }
 
     /// `(target callback, source callback)` when the parameter types

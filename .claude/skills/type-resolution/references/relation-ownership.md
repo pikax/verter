@@ -161,12 +161,21 @@ Generic method relations follow `compareSignaturesRelated`:
   `UnrepresentableCallee` gaps.
 - Two callback parameters (one non-generic call signature each, nullable
   alike, no predicate) relate target-to-source with strictly contravariant
-  parameters, never the method-bivariant fallback (`callback_parameter_pair`).
+  parameters, never the method-bivariant fallback (`callback_parameter_pair`,
+  `SignatureCheckMode::Callback`). Where the enclosing relation is not strict
+  (a method target, or `strictFunctionTypes` off) the callback's RETURN
+  relates in either direction (the checker's `BivariantCallback`): `add(cb:
+  () => T)` is bivariant in `T`; otherwise it is covariant
+  (`StrictCallback`). The callback relation runs inside the enclosing frame,
+  so its parameters infer at `InferPosition::CallbackParam` (the two flips
+  cancel) and its return at `InferPosition::ContravariantParam`.
 - Inference into a union with one naked parameter matches a source member to
   another member referencing the same generic declaration by its type
   arguments (`members_unmatched_by_inference`, the checker's
   `inferToMultipleTypes` + `inferFromTypeArguments`): `PromiseLike<R'>` into
-  `R | PromiseLike<R>` infers `R'`. Only the arguments relate, so two
+  `R | PromiseLike<R>` infers `R'`, a declaration's reference to itself in
+  its own body (a `RecursiveRef` carrier, `raw_generic_reference`) matching
+  like any other reference. Only the arguments relate, so two
   recursive declarations never expand into each other. Matching a member
   through another declaration's structure is not done (the checker's
   `inferFromObjectTypes`); `thenables_of_different_declarations_infer_through_their_structure`

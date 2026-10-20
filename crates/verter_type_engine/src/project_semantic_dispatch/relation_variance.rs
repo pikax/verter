@@ -897,7 +897,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         None
     }
 
-    fn raw_generic_reference(
+    pub(super) fn raw_generic_reference(
         &self,
         node: SemanticNodeId,
     ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {

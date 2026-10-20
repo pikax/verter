@@ -123,6 +123,9 @@ interface C1<T> { m(f: (v: T) => void): void }
 interface C2<T> { m(f?: (v: T) => void): void }
 interface C3<T> { m(f: ((v: T) => void) | null): void }
 interface C4<T> { f: (g: (v: T) => void) => void }
+interface K1<T> { add(cb: () => T): void }
+interface K2<T> { add(cb: (x: T) => T): void }
+interface K3<T> { add: (cb: () => T) => void }
 "#;
 
 /// A method generic in a parameter defaulted to its interface's relates to
@@ -185,6 +188,49 @@ fn callback_parameters_relate_contravariantly_in_methods() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// Where a method — or any signature without `strictFunctionTypes` —
+/// relates its parameters bivariantly, a callback parameter's return
+/// relates in either direction while the callback's own parameters stay
+/// contravariant (the checker's `BivariantCallback`): `add(cb: () => T)`
+/// is bivariant in `T`, `add(cb: (x: T) => T)` covariant, and the property
+/// `add: (cb: () => T) => void` contravariant under `strictFunctionTypes`.
+#[test]
+fn a_method_relates_its_callbacks_returns_bivariantly() {
+    let failures = Matrix::new(METHODS).lib(GLOBALS_LIB).types(&[
+        ("K1<2> extends K1<number> ? 1 : 0", "1"),
+        ("K1<number> extends K1<2> ? 1 : 0", "1"),
+        (
+            "{ m(cb: () => 2): void } extends { m(cb: () => number): void } ? 1 : 0",
+            "1",
+        ),
+        ("K2<2> extends K2<number> ? 1 : 0", "1"),
+        ("K2<number> extends K2<2> ? 1 : 0", "0"),
+        ("K3<2> extends K3<number> ? 1 : 0", "0"),
+        ("K3<number> extends K3<2> ? 1 : 0", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Without `strictFunctionTypes` a callback's parameters still relate
+/// contravariantly — only its return turns bivariant — so `Promise` stays
+/// covariant, as does a method or property taking `(v: T) => void`.
+#[test]
+fn callback_parameters_stay_contravariant_without_strict_function_types() {
+    use super::differential_harness_tests::STRICT_FUNCTION_TYPES_OFF;
+    let failures = Matrix::new(METHODS)
+        .settings(&[STRICT_FUNCTION_TYPES_OFF])
+        .lib(GLOBALS_LIB)
+        .types(&[
+            ("Promise<number> extends Promise<2> ? 1 : 0", "0"),
+            ("Promise<2> extends Promise<number> ? 1 : 0", "1"),
+            ("C1<number> extends C1<2> ? 1 : 0", "0"),
+            ("C4<number> extends C4<2> ? 1 : 0", "0"),
+            ("K2<number> extends K2<2> ? 1 : 0", "0"),
+            ("K3<2> extends K3<number> ? 1 : 0", "1"),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A callback returning `R | Thenable<R>` infers `R` from another
 /// `Thenable<R'>` of the same declaration — by its type arguments, the
 /// checker's `inferToMultipleTypes` — never the whole union.
@@ -240,10 +286,10 @@ fn router(width: usize) -> String {
     source
 }
 
-/// Resolve `__Probe` in a project whose library is [`GLOBALS_LIB`], as the
-/// benchmark's probe does (`resolve_named_symbol_with_audit`), and return
-/// the tag of each `{ tag: "pN"; v: number }` member of the answer.
-fn router_output_tags(source: &str) -> Result<BTreeSet<String>, String> {
+/// Resolve the type alias `name` of `source` in a project whose library is
+/// [`GLOBALS_LIB`], as the benchmark's probe does
+/// (`resolve_named_symbol_with_audit`), and return its wire answer.
+fn resolve_alias(source: &str, name: &str) -> Result<TypeExpr, String> {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig::default(),
         &[("/bench", r#"{ "compilerOptions": { "strict": true } }"#)],
@@ -262,7 +308,7 @@ fn router_output_tags(source: &str) -> Result<BTreeSet<String>, String> {
         crate::FileLanguage::script_ts(),
     );
     let (outcome, _) = host
-        .resolve_named_symbol_with_audit(canonical, "__Probe", None)
+        .resolve_named_symbol_with_audit(canonical, name, None)
         .into_parts();
     let node = outcome
         .map_err(|fault| format!("the probe faulted: {fault:?}"))?
@@ -270,7 +316,13 @@ fn router_output_tags(source: &str) -> Result<BTreeSet<String>, String> {
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
         .ok_or_else(|| "the answer does not project".to_owned())?;
-    let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
+    Ok(serde_json::from_slice(&bytes).expect("a wire answer"))
+}
+
+/// Resolve the router's `__Probe` ([`resolve_alias`]) and return the tag of
+/// each `{ tag: "pN"; v: number }` member of the answer.
+fn router_output_tags(source: &str) -> Result<BTreeSet<String>, String> {
+    let answer = resolve_alias(source, "__Probe")?;
     let TypeExpr::Union(arms) = &answer else {
         return Err(format!("the answer is not a union: {answer:?}"));
     };
@@ -343,4 +395,27 @@ fn an_inference_through_a_generic_method_it_cannot_settle_is_undecided() {
         verdict.class,
         verdict.lane
     );
+}
+
+/// The same inference read as a type alias — directly, and through a
+/// generic alias distributing over `Promise<string>` — answers what the
+/// checker infers (`number`, `string`) or stays a deferred conditional; it
+/// never takes the false branch.
+#[test]
+fn an_inference_through_a_generic_method_read_as_an_alias_never_takes_the_false_branch() {
+    let source = "type R6 = Promise<number> extends PromiseLike<infer U> ? U : 0;\n\
+                  type U1<T> = T extends PromiseLike<infer U> ? U : T;\n\
+                  type R17 = U1<Promise<string>>;\n\
+                  export {};\n";
+    for (name, inferred) in [
+        ("R6", PrimitiveName::Number),
+        ("R17", PrimitiveName::String),
+    ] {
+        let answer = resolve_alias(source, name).unwrap_or_else(|error| panic!("{error}"));
+        assert!(
+            answer == TypeExpr::Primitive(inferred)
+                || matches!(answer, TypeExpr::Conditional { .. }),
+            "{name}: {answer:?}"
+        );
+    }
 }
