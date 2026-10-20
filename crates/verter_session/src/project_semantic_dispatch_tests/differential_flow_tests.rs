@@ -432,14 +432,7 @@ fn a_module_value_read_through_a_computed_key_or_an_optional_chain_is_that_read(
             "string",
         ),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Optional chains that hold a call, measured with tsc 7.0.2 under the four
@@ -646,14 +639,7 @@ fn a_write_to_an_inferred_declared_local_reduces_by_its_declared_type() {
         ("adUnionOk", "number"),
         ("adVar", "string"),
     ]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// Writes in `try`, `catch` and `finally` blocks, and catch variables.

@@ -358,14 +358,7 @@ const s = g(["a", "b"], "c");
 fn a_local_intrinsic_no_infer_alias_is_no_infer() {
     let matrix = Matrix::new(LOCAL_NO_INFER);
     let failures = matrix.types(&[("typeof r", r#""a" | "b""#), ("NoInfer<string>", "string")]);
-    assert!(
-        failures.is_empty(),
-        "{}",
-        failures.join(
-            "
-"
-        )
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The fixture of [`const_type_parameters`].
