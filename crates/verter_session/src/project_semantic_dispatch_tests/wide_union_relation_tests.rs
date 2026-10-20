@@ -79,7 +79,7 @@ fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
     };
 
     let observe =
-        |warm_first: bool, allowance: usize| {
+        |warm_first: bool, allowance: usize, keys_to_read: std::ops::Range<usize>| {
             let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
             let dispatch = ProjectSemanticDispatch::new(&host);
             let _builder = dispatch.enter_construction_scope();
@@ -115,7 +115,7 @@ fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
             };
             let together = {
                 let (_guard, _) = dispatch.enter_connected_demand(false);
-                for key in &keys {
+                for key in &keys[keys_to_read] {
                     read(key);
                 }
                 usage()
@@ -126,11 +126,16 @@ fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
             (together, usage())
         };
     let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
-    let cold = observe(false, full);
-    let partly_warm = observe(true, full);
+    let cold = observe(false, full, 0..2);
+    let partly_warm = observe(true, full, 0..2);
     assert_eq!(partly_warm, cold, "warmth changes neither work nor bytes");
-    assert_eq!(observe(false, cold.0 .0), cold);
-    assert_eq!(observe(true, cold.0 .0), cold);
+    assert_eq!(
+        cold.1,
+        observe(false, full, 1..2).0,
+        "the rebuilt receipt must price work and bytes like an independent cold demand"
+    );
+    assert_eq!(observe(false, cold.0 .0, 0..2), cold);
+    assert_eq!(observe(true, cold.0 .0, 0..2), cold);
 }
 
 #[test]
