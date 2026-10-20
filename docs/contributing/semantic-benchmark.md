@@ -276,11 +276,17 @@ What is deliberately **not** equal, and how it is reported:
 
 ## Correctness first
 
+The `scale-ambient-export-equals` fixture is a reconstructed minimal case of
+the reported ambient namespace export assignment: a named `Opt` import whose
+`Opt["k"]` probe answers `99`. Its four-setting references are measured from
+this in-tree source and companion declaration file.
+
 Expected answers are **measured** on tsc 7.0.2, independently of the
 benchmark's tsc arm, by `scripts/benchmark/semantic-perf/measure-expected.mjs`
 in all four `strictNullChecks` × `noImplicitAny` settings. The default reference is
-`scripts/benchmark/semantic-perf/expected.json`; `--reference <file>` selects a
-fresh measurement outside the checkout. The run records its path and digest,
+`scripts/benchmark/semantic-perf/expected.json`, which holds the catalog's golden
+answers. Add a measured four-setting cell there when adding a scenario.
+`--reference <file>` selects a fresh measurement outside the checkout. The run records its path and digest,
 which the standalone validator checks again. Every cell carries its own
 immutable provenance (the method — measuring suffix, library, verified tsc
 executable, platform, limits, launcher — plus the tsconfig and source digests
@@ -795,8 +801,9 @@ node scripts/benchmark/semantic-perf.mjs --only <ids> --reference <evidence-dir>
 
 On macOS, add `--allow-sampled` to both commands. Measurement `--out` selects
 the reference output file; benchmark `--out` still selects the run directory.
-Keep fresh measurements and transcripts with the run evidence, outside the
-checkout, rather than refreshing a committed record to make a check pass.
+Keep run transcripts and repeat measurements with the run evidence, outside the
+checkout. New catalog scenarios include their initial measured golden answers
+in `expected.json`; do not refresh unrelated committed records to make a check pass.
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.

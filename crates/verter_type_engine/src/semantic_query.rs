@@ -922,6 +922,8 @@ pub enum NodeScopeId {
         /// Exact authored top-level owner within `canonical_id`.
         owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
+        /// For an ambient namespace body, the ordinal of its retained
+        /// `augmentation_namespace_blocks` record in this file generation.
         local_scope: Option<u32>,
     },
 }

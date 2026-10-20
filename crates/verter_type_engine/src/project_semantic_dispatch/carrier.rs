@@ -859,6 +859,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let reduction_context = ctx.reduction_context();
         let mode = ctx.mode();
 
+        if let Some((specifier, decl_name)) = self.ambient_namespace_type_target(scope, name) {
+            return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ExternalModule {
+                specifier,
+                decl_name,
+                name: Arc::clone(name),
+                scope: scope.clone(),
+                context: reduction_context,
+            });
+        }
+
         // Global lib-type fast path: an unshadowed runtime nominal interns a
         // `DeclRef` / `InstantiationRef` carrier in EVERY mode, preserving its
         // declaration identity for semantic classifiers and reducers.

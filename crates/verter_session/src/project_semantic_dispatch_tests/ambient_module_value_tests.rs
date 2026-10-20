@@ -66,7 +66,11 @@ fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
     };
     let host = probe_host(project);
     let source = r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";"#;
-    let edited = ASSIGNED_NAMESPACE.replace("k: 99", "k: 100");
+    let dependent = ASSIGNED_NAMESPACE.replace(
+        "interface Opt { k: 99 }",
+        "interface Base { k: 99 } type Opt = Base;",
+    );
+    let edited = dependent.replace("k: 99", "k: 100");
     let retargeted = edited.replace(
         "export = NS",
         "namespace Other { interface Opt { k: 101 } } export = Other",
@@ -74,6 +78,7 @@ fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
     for probe in ["Opt[\"k\"]", "Pkg.Opt[\"k\"]"] {
         for (ambient, expected) in [
             (ASSIGNED_NAMESPACE, "99"),
+            (dependent.as_str(), "99"),
             (edited.as_str(), "100"),
             (retargeted.as_str(), "101"),
             (ASSIGNED_NAMESPACE, "99"),
@@ -86,6 +91,108 @@ fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
             }
         }
     }
+}
+
+#[test]
+fn an_ambient_assigned_namespace_resolves_sibling_types() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS {
+    interface Base { k: 99 }
+    type Opt = Base;
+    interface Holder { value: Base }
+    type Box<T> = { value: T };
+    type Wrapped<T> = Box<T>;
+    namespace Inner { type Opt = Base; }
+  }
+  export = NS;
+}
+declare module "other-pkg" {
+  namespace NS { interface Base { k: -1 } type Opt = Base; }
+  export = NS;
+}
+interface Base { k: 0 }
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Opt, Holder, Wrapped, Inner } from "pkg";
+import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Holder[\"value\"][\"k\"]", "99"),
+            ("Pkg.Holder[\"value\"][\"k\"]", "99"),
+            ("Wrapped<42>[\"value\"]", "42"),
+            ("Pkg.Wrapped<43>[\"value\"]", "43"),
+            ("Inner.Opt[\"k\"]", "99"),
+            ("OtherOpt[\"k\"]", "-1"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_namespace_type_applies_generic_defaults() {
+    let files = [(
+        "defaults.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { type Box<T = 41, U = T> = { value: U }; }
+  export = NS;
+}
+declare module "plain" { type Box<T = 41, U = T> = { value: U }; }
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Box } from "pkg";
+import * as Pkg from "pkg";
+import type { Box as PlainBox } from "plain";"#,
+        &[
+            ("Box[\"value\"]", "41"),
+            ("Pkg.Box[\"value\"]", "41"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Pkg.Box<42, 43>[\"value\"]", "43"),
+            ("PlainBox[\"value\"]", "41"),
+            ("PlainBox<42>[\"value\"]", "42"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_namespace_recursive_sibling_remains_projectable() {
+    let files = [(
+        "recursive.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { interface Link { k: 99; next: Link } }
+  export = NS;
+}
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Link } from "pkg"; import * as Pkg from "pkg";"#,
+        &[
+            ("Link[\"next\"][\"k\"]", "99"),
+            ("Pkg.Link[\"next\"][\"k\"]", "99"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 const AMBIENT: &str = "\

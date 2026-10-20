@@ -154,23 +154,11 @@ pub(crate) struct PlannedContributorBody {
     /// projection is then the shared miss sentinel).
     shape: Option<SemanticNodeId>,
     owner_symbol: verter_type_expr::OwnedStr,
-    kind: verter_session_query::declarations::TypeDeclKind,
-    type_parameters: Arc<[verter_type_expr::facts::NarrowTypeParam]>,
-    name_resolution: verter_session_query::type_solver::prepared::NameResolutionTable,
-    binding: PlannedBinding,
+    prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
+    augmentation: Option<verter_session_query::declarations::AugmentationScopeKind>,
     scope: NodeScopeId,
     scope_payload: Option<crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: crate::resolver_core::scope_shadowing::ScopeShadowing,
-}
-
-/// How a planned body's type parameters bind to the augmented
-/// declaration's arguments.
-enum PlannedBinding {
-    /// An augmenting block's parameters, bound positionally when planned.
-    Bound(FxHashMap<String, SemanticNodeId>),
-    /// A script declaration's: its arguments bind through its declared
-    /// defaults under the projecting context.
-    Declared(verter_retention::heap_size::OwnedValue<PreparedTypeDecl>),
 }
 
 /// A type-body augmentation fold before projection: the ordered planned
@@ -3889,6 +3877,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &env,
             &scope,
             &mut substitutions,
+            None,
         );
         if context.mode != ProjectionMode::Expanded {
             return Some(shape);
@@ -5622,6 +5611,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload: scope_payload.as_ref(),
             shadowing: &shadowing,
             authored_resolution_debt: authored_resolution_debt.as_ref(),
+            augmentation: None,
         };
         let unbound_parameter = |index: usize, param: &verter_type_expr::facts::NarrowTypeParam| {
             // Skeleton mode preserves open generics: an unbound
@@ -5939,6 +5929,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope_payload: build.scope_payload.as_ref(),
             shadowing: &build.shadowing,
             authored_resolution_debt: build.authored_resolution_debt.as_ref(),
+            augmentation: None,
         };
         let body_mode = build.body_mode;
         let decl_identity = crate::semantic_query::DeclIdentity {
@@ -6513,7 +6504,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 contribution,
                 target,
                 decl_name,
-                type_arguments,
                 context,
                 request_canonical,
                 excluded_contributor,
@@ -6679,34 +6669,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut contributor_nodes = Vec::with_capacity(plan.bodies.len());
         for body in &plan.bodies {
             let mut substitutions: Vec<(Arc<str>, SemanticNodeId)> = Vec::new();
-            let declared_env;
-            let env = match &body.binding {
-                PlannedBinding::Bound(env) => env,
-                PlannedBinding::Declared(prepared) => {
-                    declared_env = self
-                        .bind_declared_type_arguments(
-                            prepared,
-                            type_arguments,
-                            &DeclarationBindingScope {
-                                scope: &body.scope,
-                                scope_payload: body.scope_payload.as_ref(),
-                                shadowing: &body.shadowing,
-                                authored_resolution_debt: None,
-                            },
-                            &mut substitutions,
-                            context,
-                            |_, _| None,
-                        )
-                        .0;
-                    &declared_env
-                }
-            };
+            let (env, _) = self.bind_declared_type_arguments(
+                &body.prepared,
+                type_arguments,
+                &DeclarationBindingScope {
+                    scope: &body.scope,
+                    scope_payload: body.scope_payload.as_ref(),
+                    shadowing: &body.shadowing,
+                    authored_resolution_debt: None,
+                    augmentation: body.augmentation.as_ref(),
+                },
+                &mut substitutions,
+                context,
+                |_, _| None,
+            );
+            let env = &env;
             let mut lowering = match body.shape {
                 Some(shape) => self.begin_shape_lowering(
                     shape,
                     &body.owner_symbol,
-                    body.kind,
-                    &body.type_parameters,
+                    body.prepared.kind,
+                    &body.prepared.type_parameters,
                     env,
                     &body.scope,
                     &mut substitutions,
@@ -6714,13 +6697,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &[],
                     crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam::inline(
                     ),
+                    body.augmentation.as_ref(),
                 ),
                 None => BodyLowering::Ready(self.opaque(QueryError::Miss)),
             };
             let inputs = crate::project_semantic_dispatch::locator_view::LocatorViewInputs {
                 env,
                 scope: &body.scope,
-                name_resolution: &body.name_resolution,
+                name_resolution: &body.prepared.name_resolution,
                 scope_payload: body.scope_payload.as_ref(),
                 shadowing: &body.shadowing,
                 authored_resolution_debt: None,
@@ -6773,12 +6757,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// set fingerprint) intact still moves the augmenter's `FileWholeHash`, so
     /// the per-augmenter whole-hash fact is what catches it.
     ///
-    /// `type_arguments` are the applied arguments of the augmented
-    /// declaration: each contributor binds its OWN declared type parameters to
-    /// them positionally, the same name environment `Instantiate` builds for a
-    /// base body, so a merged `interface Promise<T>` contribution read for
-    /// `Promise<number>` lowers its `T` as `number`. An unbound parameter
-    /// stays unbound, as in `Instantiate`'s published modes.
+    /// Type bodies retain their prepared declarations for projection. Each
+    /// contributor then binds the application's arguments positionally,
+    /// applying its own defaults through the same binder as Instantiate.
+    /// An unsupplied parameter without a default stays unbound.
     ///
     /// `excluded_contributor` names a file whose contribution the caller
     /// already holds as the base body (a global declaration's own file):
@@ -6796,7 +6778,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         contribution: AugmentationContribution,
         target: verter_session_query::resolution::AugmentationTargetKind,
         decl_name: &str,
-        type_arguments: &[SemanticNodeId],
         context: crate::semantic_query::ProjectionReductionContext,
         request_canonical: &str,
         excluded_contributor: Option<&str>,
@@ -7216,6 +7197,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         } else {
                             AugmentationScopeKind::Module(spec.clone())
                         };
+                        let aug_scope = Self::augmentation_body_scope(
+                            aug_scope,
+                            &indexed.shallow_state.headers,
+                            &scope_kind,
+                            decl_name,
+                        );
                         if contribution == AugmentationContribution::EnumBlocks {
                             // The block's members, read in the block's own
                             // scope: a same-named declaration of the file
@@ -7358,12 +7345,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 continue;
                             }
                         };
-                        let aug_env: FxHashMap<String, SemanticNodeId> = aug_prepared
-                            .type_parameters
-                            .iter()
-                            .zip(type_arguments.iter())
-                            .map(|(param, argument)| (param.name.clone(), *argument))
-                            .collect();
                         // Demand the augmenter's RETAINED contribution body through
                         // the augmenter's OWN `LowerLocator` (the augmentation-scoped
                         // locator leaf) — never an inline lowering of another file's
@@ -7400,10 +7381,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         planned_bodies.push(PlannedContributorBody {
                             shape,
                             owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                            kind: aug_prepared.kind,
-                            type_parameters: Arc::from(aug_prepared.type_parameters),
-                            name_resolution: aug_prepared.name_resolution,
-                            binding: PlannedBinding::Bound(aug_env),
+                            prepared: verter_retention::heap_size::OwnedValue::new(aug_prepared),
+                            augmentation: Some(scope_kind),
                             scope: aug_scope,
                             scope_payload: aug_scope_payload,
                             shadowing: aug_shadowing,
@@ -7572,10 +7551,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     planned_bodies.push(PlannedContributorBody {
                         shape,
                         owner_symbol: verter_type_expr::OwnedStr::from(decl_name),
-                        kind: prepared.kind,
-                        type_parameters: Arc::from(prepared.type_parameters.as_slice()),
-                        name_resolution: prepared.name_resolution.clone(),
-                        binding: PlannedBinding::Declared(prepared),
+                        prepared,
+                        augmentation: None,
                         scope: aug_scope,
                         scope_payload: aug_scope_payload,
                         shadowing: aug_shadowing,
@@ -7978,6 +7955,108 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         declared.then(|| (target.source_specifier.clone(), decl_name))
     }
 
+    /// Preserve the retained namespace block addressing an ambient body.
+    /// The local scope is an ordinal in `augmentation_namespace_blocks`,
+    /// pinned by the scope's owner and whole-file hash; it holds no siblings.
+    pub(super) fn augmentation_body_scope(
+        mut scope: NodeScopeId,
+        headers: &verter_session_query::declarations::header_index::DeclHeaderIndex,
+        augmentation: &verter_session_query::declarations::AugmentationScopeKind,
+        symbol: &str,
+    ) -> NodeScopeId {
+        let NodeScopeId::File {
+            owner, local_scope, ..
+        } = &mut scope
+        else {
+            return scope;
+        };
+        if !matches!(
+            augmentation,
+            verter_session_query::declarations::AugmentationScopeKind::Module(_)
+        ) {
+            return scope;
+        }
+        let Some((prefix, _)) = symbol.rsplit_once('.') else {
+            return scope;
+        };
+        let span = headers
+            .augmentation_type_header_in(augmentation, *owner, symbol)
+            .map(|header| header.span)
+            .or_else(|| {
+                headers
+                    .augmentation_value_header_in(augmentation, *owner, symbol)
+                    .map(|header| header.span)
+            });
+        *local_scope = headers
+            .augmentation_namespace_blocks
+            .iter()
+            .position(|(kind, block)| {
+                kind == augmentation
+                    && block.owner == *owner
+                    && block.qualified_name == prefix
+                    && span.is_some_and(|span| {
+                        block.span.start <= span.start && span.end <= block.span.end
+                    })
+            })
+            .and_then(|ordinal| u32::try_from(ordinal).ok());
+        scope
+    }
+
+    /// A lexical type reference in an ambient namespace, before file/import
+    /// lookup. Walk enclosing namespaces within the exact module inventory;
+    /// a private sibling is visible here even when imports cannot name it.
+    pub(super) fn ambient_namespace_type_target(
+        &self,
+        scope: &NodeScopeId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        use verter_session_query::declarations::AugmentationScopeKind;
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            whole_hash,
+            local_scope: Some(ordinal),
+        } = scope
+        else {
+            return None;
+        };
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical_id.as_ref())?
+            .indexed;
+        if indexed.whole_hash != *whole_hash {
+            return None;
+        }
+        let headers = &indexed.shallow_state.headers;
+        let (augmentation, block) = headers
+            .augmentation_namespace_blocks
+            .get(*ordinal as usize)?;
+        let AugmentationScopeKind::Module(specifier) = augmentation else {
+            return None;
+        };
+        if block.owner != *owner {
+            return None;
+        }
+        let mut prefix = block.qualified_name.as_str();
+        loop {
+            let qualified = if prefix.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{prefix}.{name}")
+            };
+            if headers
+                .augmentation_type_header_in(augmentation, *owner, &qualified)
+                .is_some()
+            {
+                return Some((specifier.clone(), qualified));
+            }
+            if prefix.is_empty() {
+                return None;
+            }
+            prefix = prefix.rsplit_once('.').map_or("", |(parent, _)| parent);
+        }
+    }
+
     /// Resolve a type name imported from a NON-FILE (external / ambient)
     /// module specifier through `declare module "<spec>" { ... }` augmentation.
     ///
@@ -8082,6 +8161,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // synthesising a false zero-contributor `MergedDecl`.
         if contributor_nodes.is_empty() {
             return None;
+        }
+        // A type alias contributes its actual type, which may be a scalar or
+        // a reference. Peer surface merging applies only to multiple bodies.
+        if contributor_nodes.len() == 1 {
+            return Some(contributor_nodes[0]);
         }
 
         // Peer-merge carrier from the augmenter contributions ONLY (no base
@@ -8659,7 +8743,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let binding = match (args.get(index).copied(), param.default.as_ref()) {
                 (Some(explicit), _) => Some(explicit),
                 (None, Some(default)) => Some(self.lower_located_body_with_resolution_debt(
-                    verter_type_expr::locators::AuthoredBodyLocator::DeclBody(default.clone()),
+                    scoped_type_body_locator(default, binding_scope.augmentation),
                     prepared.kind,
                     &prepared.type_parameters[..index],
                     &prepared.name_resolution,
@@ -8746,6 +8830,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 scope_payload: scope_payload.as_ref(),
                 shadowing: &shadowing,
                 authored_resolution_debt: None,
+                augmentation: None,
             },
             &mut Vec::new(),
             context,
@@ -8989,6 +9074,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner_symbol: &verter_type_expr::OwnedStr,
         type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
     ) -> Vec<(Arc<str>, SemanticNodeId)> {
+        self.locator_binder_frame_from_narrow_params_in(scope, owner_symbol, type_parameters, None)
+    }
+
+    fn locator_binder_frame_from_narrow_params_in(
+        &self,
+        scope: &NodeScopeId,
+        owner_symbol: &verter_type_expr::OwnedStr,
+        type_parameters: &[verter_type_expr::facts::NarrowTypeParam],
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Vec<(Arc<str>, SemanticNodeId)> {
         use crate::project_semantic_dispatch::locator_shape::{
             BinderIdentityMode, TypeParamBinderSpec,
         };
@@ -9024,9 +9119,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param.default.as_ref()
                     }
                 }?;
-                match self.lower_locator(verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    slot.clone(),
-                )) {
+                match self.lower_locator(scoped_type_body_locator(slot, augmentation)) {
                     QueryResult::Value(node) => Some(node),
                     QueryResult::Recursive(_) | QueryResult::Error(_) => None,
                 }
@@ -9197,6 +9290,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         };
 
+        let augmentation = match &locator {
+            verter_type_expr::locators::AuthoredBodyLocator::AugmentationBody(body) => {
+                Some(match &body.scope {
+                    verter_type_expr::locators::AuthoredAugmentationScope::Global => {
+                        verter_session_query::declarations::AugmentationScopeKind::Global
+                    }
+                    verter_type_expr::locators::AuthoredAugmentationScope::Module { specifier } => {
+                        verter_session_query::declarations::AugmentationScopeKind::Module(
+                            specifier.to_string(),
+                        )
+                    }
+                })
+            }
+            _ => None,
+        };
+
         // 1. Fetch the fixed authored shape (one reusable body-shape family
         //    per locator/source-env).
         let Some(shape) = self.fetch_located_shape(locator) else {
@@ -9213,6 +9322,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
             vue_ignored_heritage,
             seam,
+            augmentation.as_ref(),
         )
     }
 
@@ -9243,6 +9353,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: crate::semantic_query::ProjectionReductionContext,
         vue_ignored_heritage: &[verter_type_expr::facts::VueIgnoredHeritageFact],
         seam: crate::project_semantic_dispatch::locator_view_worklist::ProjectionSeam,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> BodyLowering {
         let shape = if context.suppresses_vue_ignored_heritage() && !vue_ignored_heritage.is_empty()
         {
@@ -9264,6 +9375,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             env,
             scope,
             substitutions,
+            augmentation,
         );
 
         // 3. Plan the projection of the demanded view: per-arm
@@ -9280,6 +9392,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Bind a fixed locator shape without demanding any member value.
     /// Header composition and demanded body projection share this substitution.
+    #[allow(clippy::too_many_arguments)]
     fn bind_located_shape_parameters(
         &self,
         shape: SemanticNodeId,
@@ -9288,9 +9401,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         env: &FxHashMap<String, SemanticNodeId>,
         scope: &NodeScopeId,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> SemanticNodeId {
-        let bindings =
-            self.locator_binder_frame_from_narrow_params(scope, owner_symbol, type_parameters);
+        let bindings = self.locator_binder_frame_from_narrow_params_in(
+            scope,
+            owner_symbol,
+            type_parameters,
+            augmentation,
+        );
         let mut substituted = shape;
         for (name, binder) in bindings {
             let bound = env.get(name.as_ref()).copied();
@@ -20360,7 +20478,36 @@ pub(super) enum BodyPoll {
     Need(crate::semantic_query::SemanticQueryKey),
 }
 
+/// Address one declared body position in its exact inventory.
+fn scoped_type_body_locator(
+    slot: &verter_type_expr::locators::TypeBodySlot,
+    augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+) -> verter_type_expr::locators::AuthoredBodyLocator {
+    use verter_type_expr::locators::{
+        AugmentationBodyLocator, AuthoredAugmentationScope, AuthoredBodyLocator,
+    };
+    let Some(augmentation) = augmentation else {
+        return AuthoredBodyLocator::DeclBody(slot.clone());
+    };
+    let scope = match augmentation {
+        verter_session_query::declarations::AugmentationScopeKind::Global => {
+            AuthoredAugmentationScope::Global
+        }
+        verter_session_query::declarations::AugmentationScopeKind::Module(specifier) => {
+            AuthoredAugmentationScope::Module {
+                specifier: verter_type_expr::OwnedStr::from(specifier.as_str()),
+            }
+        }
+    };
+    AuthoredBodyLocator::AugmentationBody(AugmentationBodyLocator {
+        anchor: slot.anchor.clone(),
+        scope,
+        path: slot.path.clone(),
+    })
+}
+
 struct DeclarationBindingScope<'s> {
+    augmentation: Option<&'s verter_session_query::declarations::AugmentationScopeKind>,
     scope: &'s NodeScopeId,
     scope_payload: Option<&'s crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
     shadowing: &'s crate::resolver_core::scope_shadowing::ScopeShadowing,

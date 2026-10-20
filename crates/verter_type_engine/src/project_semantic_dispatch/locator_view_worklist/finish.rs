@@ -8,10 +8,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
     ) -> ReferenceProjectionPlan {
-        let (name, _bare_scope) = data.bare_ref_head().expect("BareRef head");
+        let (name, bare_scope) = data.bare_ref_head().expect("BareRef head");
         let name = Arc::<str>::from(name);
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
+        // Retain an ambient namespace reference as a declaration back-edge.
+        // Its consumer resolves it in the captured scope; projecting a body
+        // must not unfold every recursive sibling's body as well.
+        if self
+            .ambient_namespace_type_target(bare_scope, &name)
+            .is_some()
+        {
+            let continuation = CarrierArgsContinuation::Intern {
+                head: crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+                name,
+                scope: bare_scope.clone(),
+            };
+            let argument_context = self.reference_argument_context(&continuation, context);
+            return ReferenceProjectionPlan::NeedsArgs {
+                continuation,
+                args: type_args,
+                argument_context,
+            };
+        }
         if type_args.is_empty() {
             if let Some(binding) = inputs
                 .scope_payload

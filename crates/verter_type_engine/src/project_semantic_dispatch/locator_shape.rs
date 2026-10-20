@@ -2552,6 +2552,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None => {}
         }
 
+        // A module namespace's sibling has an augmentation-scoped identity,
+        // not a file slot. Keep its scope on the carrier for the shared fold.
+        if self.ambient_namespace_type_target(scope, name).is_some() {
+            return LocatorRefPlan::Carrier(
+                crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+            );
+        }
+
         // A script-setup generic parameter is NOT a declaration: its bare
         // name stays a `BareRef` carrier so the view projection resolves it
         // to the rich `TypeParam` shell from the scope payload's type
