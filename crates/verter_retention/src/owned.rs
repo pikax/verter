@@ -46,7 +46,7 @@
 //! the measurement that reaches one.
 
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -132,8 +132,6 @@ impl<'a> ChargeCtx<'a> {
 pub(crate) struct Slot {
     /// `None` until a semantic owner first keeps the allocation.
     charge: Option<RetentionCharge>,
-    /// Live cache holds.
-    cache_holds: u32,
     /// The charge on the cell's own block when weak holders (an interner)
     /// may keep the block allocated after its value: shared by the cell and
     /// each such holder, so it lasts until the last of them — whichever
@@ -240,6 +238,11 @@ struct Cell<T> {
     /// sees it set knows the charge exists without taking the slot's lock;
     /// one that sees it clear takes the lock and decides there.
     charged: AtomicBool,
+    /// Live cache holds, read and written only under the slot's lock. It
+    /// sits beside the slot rather than in it so that it and
+    /// [`Self::charged`] share one word: the lock-free charged check costs
+    /// the cell no bytes.
+    cache_holds: AtomicU32,
     value: T,
 }
 
@@ -254,6 +257,8 @@ pub(crate) trait Node: Send + Sync {
     fn slot(&self) -> &Mutex<Slot>;
     /// Set, after the slot's charge is, for the rest of the cell's life.
     fn charged(&self) -> &AtomicBool;
+    /// Live cache holds, read and written only under [`Self::slot`]'s lock.
+    fn cache_holds(&self) -> &AtomicU32;
     /// The cell's block: the counters, the slot and the inline value.
     fn block_bytes(&self) -> usize;
     /// The value's heap, with nested handles offered to `aliases`.
@@ -266,6 +271,9 @@ impl<T: Measured> Node for Cell<T> {
     }
     fn charged(&self) -> &AtomicBool {
         &self.charged
+    }
+    fn cache_holds(&self) -> &AtomicU32 {
+        &self.cache_holds
     }
     fn block_bytes(&self) -> usize {
         arc_block_bytes(std::mem::size_of::<Self>())
@@ -361,7 +369,9 @@ pub(crate) fn hold_node(
     {
         let mut guard = node.slot().lock();
         let slot = &mut *guard;
-        if slot.cache_holds == 0 {
+        // The count changes only under the slot's lock, held here.
+        let cache_holds = node.cache_holds().load(Ordering::Relaxed);
+        if cache_holds == 0 {
             if slot.charge.is_some() {
                 // Only callers hold it: its children and then its own pin
                 // are adopted back into retention. A refusal hands every
@@ -394,7 +404,7 @@ pub(crate) fn hold_node(
                 }
             }
         }
-        slot.cache_holds += 1;
+        node.cache_holds().store(cache_holds + 1, Ordering::Relaxed);
     }
     Ok(OwnedHold(Some(node)))
 }
@@ -594,6 +604,7 @@ impl<T: Measured> Owned<T> {
         Self(Arc::new(Cell {
             slot: Mutex::new(Slot::default()),
             charged: AtomicBool::new(false),
+            cache_holds: AtomicU32::new(0),
             value,
         }))
     }
@@ -613,6 +624,7 @@ impl<T: Measured> Owned<T> {
                 ..Slot::default()
             }),
             charged: AtomicBool::new(false),
+            cache_holds: AtomicU32::new(0),
             value,
         }))
     }
@@ -1195,8 +1207,10 @@ impl Drop for OwnedHold {
         let released = {
             let mut guard = node.slot().lock();
             let slot = &mut *guard;
-            slot.cache_holds -= 1;
-            if slot.cache_holds == 0 {
+            // The count changes only under the slot's lock, held here.
+            let cache_holds = node.cache_holds().load(Ordering::Relaxed) - 1;
+            node.cache_holds().store(cache_holds, Ordering::Relaxed);
+            if cache_holds == 0 {
                 // The remaining handles are callers now: the charge is
                 // theirs. A hold that was the last handle frees the cell
                 // right after, releasing the pin with it.
@@ -1227,7 +1241,7 @@ impl std::fmt::Debug for OwnedHold {
                 "bytes",
                 &slot.charge.as_ref().map_or(0, RetentionCharge::bytes),
             )
-            .field("cache_holds", &slot.cache_holds)
+            .field("cache_holds", &node.cache_holds().load(Ordering::Relaxed))
             .finish()
     }
 }
