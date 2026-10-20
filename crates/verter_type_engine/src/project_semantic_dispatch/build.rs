@@ -26,17 +26,6 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static MAPPED_NAME_REMAP_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Actual per-key remap classifications on this thread, for growth tests.
-#[cfg(any(test, feature = "test-support"))]
-pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
-    MAPPED_NAME_REMAP_EVALUATIONS.get()
-}
-
 #[path = "tuple_product.rs"]
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
@@ -2239,7 +2228,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The type of a value whose declared type is its initializer's
     /// `evaluated` value: a mutable declaration widens the fresh literal its
     /// initializer call returns (`let m = f(1)` over `f<T>(x: T): T` is
-    /// `number`). `None` when the initializer produced no value.
+    /// `number`), and a copy of a value whose read widens (`let x = c` over
+    /// `const c = "a"` is `string`). `None` when the initializer produced no
+    /// value.
     fn expression_source_value_type(
         &self,
         prepared: &verter_session_query::type_solver::PreparedValueDecl,
@@ -2252,7 +2243,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             prepared.kind,
             verter_session_query::declarations::ValueDeclKind::Let
                 | verter_session_query::declarations::ValueDeclKind::Var
-        ) || !self.semantic_expression_source_is_fresh(source, owner)
+        ) || !(self.expression_source_copy_widens(prepared, source, owner)
+            || self.semantic_expression_source_is_fresh(source, owner))
         {
             return Some(node);
         }
@@ -2270,6 +2262,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             None => self.widened_literal(node),
         })
+    }
+
+    /// Whether `prepared`'s initializer is a whole read of a value whose
+    /// read widens ([`Self::value_read_widens`]). A copy written in a
+    /// namespace body reads that body's own scope first, which no file-scope
+    /// read names, so it never widens here.
+    fn expression_source_copy_widens(
+        &self,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        source: &verter_type_expr::facts::SemanticExpressionSource,
+        owner: verter_type_expr::TopLevelOwnerId,
+    ) -> bool {
+        if prepared.root_identity.symbol_name.contains('.') {
+            return false;
+        }
+        self.semantic_expression_source_read(source)
+            .is_some_and(|(canonical, path)| self.value_read_widens(&canonical, owner, &path))
     }
 
     /// The augmenting blocks' function signatures for an exported function
@@ -16036,8 +16045,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(remap_node) = mapper.name_remap else {
             return MappedKeyRemapOutcome::Keep(key.key.clone());
         };
-        #[cfg(any(test, feature = "test-support"))]
-        MAPPED_NAME_REMAP_EVALUATIONS.set(MAPPED_NAME_REMAP_EVALUATIONS.get() + 1);
         // Kind-preserving substitution: the `as` clause sees the key's
         // ORIGINAL literal (probe12: `{ [K in 1 as K extends number ?
         // "n" : "s"]: K }` = `{ n: 1 }` — a stringified K would select

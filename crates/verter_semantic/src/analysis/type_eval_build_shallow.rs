@@ -452,7 +452,19 @@ fn value<'a>(
         }
         Expression::TemplateLiteral(_) => TypeExpr::Primitive(PrimitiveName::String),
         Expression::ArrowFunctionExpression(arrow) => {
-            tasks.push(Task::Arrow(ArrowFrame::new(arrow, true)));
+            // An arrow's own return is no member of the literal around it:
+            // with no contextual return type, its lone fresh literal widens
+            // (`{ f: () => true }` is `{ f: () => boolean }`, and so under
+            // `as const`, whose context ends at the arrow). A call argument
+            // keeps it for the inference deposit, and a `satisfies` member
+            // for its contextual type.
+            let widen_fresh_return = matches!(
+                policy,
+                MemberLiteralPolicy::Widen | MemberLiteralPolicy::ConstAssert
+            );
+            tasks.push(Task::Arrow(
+                ArrowFrame::new(arrow, true).widening_fresh_return(widen_fresh_return),
+            ));
             return Ok(());
         }
         Expression::StaticMemberExpression(member) => {
@@ -1106,6 +1118,10 @@ pub(super) struct ArrowFrame<'a> {
     /// Whether the arrow's value is its function type, rather than the
     /// extracted signature itself.
     as_type: bool,
+    /// Whether an unannotated expression body that is a lone FRESH literal
+    /// returns its widened primitive: the checker widens a body's unit
+    /// literal return when no contextual return type keeps it.
+    widen_fresh_return: bool,
     parameters: Option<Vec<FunctionParam>>,
     awaiting: bool,
 }
@@ -1115,9 +1131,17 @@ impl<'a> ArrowFrame<'a> {
         Self {
             arrow,
             as_type,
+            widen_fresh_return: false,
             parameters: None,
             awaiting: false,
         }
+    }
+
+    /// Widen a lone fresh literal returned by an unannotated expression
+    /// body (see [`Self::widen_fresh_return`]).
+    pub(super) fn widening_fresh_return(mut self, widen: bool) -> Self {
+        self.widen_fresh_return = widen;
+        self
     }
 
     /// The arrow's value, its body inferred to `body_type` (`None` for an
@@ -1132,7 +1156,18 @@ impl<'a> ArrowFrame<'a> {
                 predicate = authored_predicate;
                 Some(return_type)
             }
-            None => body_type,
+            None => match arrow.get_expression() {
+                // Only a unit return widens: `() => b ? 1 : 2` keeps `1 | 2`,
+                // and an assertion or a value read pins its own type.
+                Some(expression)
+                    if self.widen_fresh_return
+                        && initializer_literal_freshness(expression)
+                            == DeclaredLiteralFreshness::Widening =>
+                {
+                    body_type.map(widen_shallow_literal)
+                }
+                _ => body_type,
+            },
         };
         let signature = LoweredSignatureParts {
             parameters: self.parameters.take().expect("the arrow's parameters"),

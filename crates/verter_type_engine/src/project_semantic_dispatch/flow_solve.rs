@@ -41,17 +41,6 @@
 
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "test-support"))]
-thread_local! {
-    static PLANNED_OBLIGATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Actual obligation expansions on this thread, for deterministic growth tests.
-#[cfg(any(test, feature = "test-support"))]
-pub fn planned_obligations_for_tests() -> u64 {
-    PLANNED_OBLIGATIONS.get()
-}
-
 use rustc_hash::{FxHashMap, FxHashSet};
 use verter_identity::encoding::{CanonicalEncode, CanonicalEncoder};
 use verter_identity::identity::{InputBasisId, ResultContractId};
@@ -1173,8 +1162,6 @@ pub fn build_flow_demand_plan_from_execution(
         // Ids are dense spec positions: the runtime finds an obligation's
         // record by its id as an index (`flow_obligation_state::record_of`).
         let id = FlowObligationId(u32::try_from(specs.len()).unwrap_or(u32::MAX));
-        #[cfg(any(test, feature = "test-support"))]
-        PLANNED_OBLIGATIONS.set(PLANNED_OBLIGATIONS.get() + 1);
         specs.push(FlowObligationSpec::new(id, requirement, origin, basis, expected_dependencies, expected_suboperations));
         Ok(id)
     };
@@ -1431,11 +1418,7 @@ pub fn build_flow_demand_plan_from_execution(
                         // capture proves.
                         let value_captures: FxHashSet<_> = record.read_captures.iter().collect();
                         for capture in record.captures.iter() {
-                            // An effect-only callable retains the captured
-                            // cell without consuming its reaching value.
-                            // Its body reads matter only when the callable's
-                            // value contributes to this demand.
-                            let demand = if structural_selection.is_value(*node) && value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
+                            let demand = if value_captures.contains(capture) { FlowCaptureDemand::Value } else { FlowCaptureDemand::Effect };
                             let (basis, dischargeable) = match capture {
                                 FlowBindingRef::Local(binding) => match identities.identity(*binding) {
                                     Some(identity) => (

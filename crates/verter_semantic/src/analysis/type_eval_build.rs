@@ -4730,8 +4730,20 @@ fn lower_identifier_variable_parts(
             enrich_function_signature_with_jsdoc(sig, source, name_offset, has_ts_return);
         }
 
+        // A mutable declaration copying a value widens the copy exactly
+        // when the read would widen as a bare literal (`const c = "a"; let
+        // x = c` is `string`, over `const c: "a"` it stays `"a"`): only
+        // the copied declaration knows, so its value is the evaluated read.
+        let mutable_copy = matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var)
+            && !expr_is_widening_nullish(init)
+            && matches!(
+                initializer_literal_freshness(init),
+                DeclaredLiteralFreshness::Follows(_)
+            );
         if type_annotation.is_none()
-            && (value_type_derives_from_a_call(init, source) || contextual_object_initializer(init))
+            && (value_type_derives_from_a_call(init, source)
+                || contextual_object_initializer(init)
+                || mutable_copy)
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -5220,10 +5232,11 @@ use crate::analysis::function_program::static_property_key_name;
 ///   literal member widens to its primitive (`{ count: 0 }` → `{ count: number }`);
 ///   an array literal is its element-union array.
 /// - [`Preserve`](MemberLiteralPolicy::Preserve): a `satisfies`-constrained
-///   object — members keep their literal types (the engine performs no
-///   contextual typing; the deeper contextual-widening behaviour is a separate
-///   deferred contract) and are NOT `readonly`; an array literal is its
-///   element-union array.
+///   object — members keep their literal types and are NOT `readonly`; an
+///   array literal is its element-union array. A `satisfies` object
+///   declarator's declared type is not this syntactic shape but its
+///   evaluated initializer ([`contextual_object_initializer`]), whose
+///   contextual type decides which member literals widen.
 /// - [`ConstAssert`](MemberLiteralPolicy::ConstAssert): an `as const` object —
 ///   members keep their literals AND are `readonly`; an array literal is a
 ///   `readonly` tuple of its element types.
@@ -7062,8 +7075,12 @@ pub fn indexed_literal_mode(expr: Option<&Expression<'_>>) -> IndexedValueLitera
     }
 }
 
-/// A contextual declarator whose method bodies need the initializer's flow
-/// evaluation. Facts and function discovery use this same classification.
+/// A declarator whose object literal is contextually typed by a `satisfies`
+/// type, so its value needs the initializer's flow evaluation: the
+/// contextual type types its method bodies, and decides which member
+/// literals widen (`{ a: 1 } satisfies { a: number }` is `{ a: number }`,
+/// `{ a: 1 } satisfies { a: 1 }` keeps `{ a: 1 }`). Facts and function
+/// discovery use this same classification.
 pub(super) fn contextual_object_initializer(mut expression: &Expression<'_>) -> bool {
     let mut contextual = false;
     loop {
@@ -7073,11 +7090,7 @@ pub(super) fn contextual_object_initializer(mut expression: &Expression<'_>) -> 
                 contextual = true;
                 &satisfies.expression
             }
-            _ => {
-                return contextual
-                    && matches!(expression, Expression::ObjectExpression(_))
-                    && indexed_context_sensitive(Some(expression))
-            }
+            _ => return contextual && matches!(expression, Expression::ObjectExpression(_)),
         };
     }
 }

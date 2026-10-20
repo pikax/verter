@@ -830,3 +830,92 @@ fn a_readonly_literal_member_read_widens_through_every_receiver() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+const DECLARED_WIDENING: &str = "\
+declare const flag: boolean;
+const c1 = \"a\";
+const cAnn: \"a\" = \"a\";
+const cAs = \"a\" as const;
+const cu = flag ? \"a\" : \"b\";
+let x = c1;
+var vx = c1;
+const cx = c1;
+let lAnn = cAnn;
+let lAs = cAs;
+let lu = cu;
+const sat = { a: 1, b: \"x\", c: [true] } satisfies { a: number; b: string; c: boolean[] };
+const satU = { a: 1, b: \"x\", c: [true] } satisfies { [k: string]: unknown };
+const satLit = { a: 1, b: \"x\" } satisfies { a: 1; b: string };
+const satConst = { a: 1 } as const satisfies { a: number };
+const o = { f: () => true, g: (n: number) => n > 0, h: () => \"s\", i: (): 1 => 1, j: () => 1 as const, k: () => flag ? 1 : 2 };
+const oc = { f: () => true } as const;
+const om = { m() { return true; } };
+declare function keep<T extends string>(f: () => T): T;
+const kept = keep(() => \"s\");
+";
+
+/// A module declaration widens the literals TypeScript widens: a `let` or
+/// `var` copying a value whose read widens, the members of a `satisfies`
+/// object its contextual type does not keep literal, and the lone literal
+/// an object member arrow's body returns. Every other literal is kept.
+///
+/// Measured on TypeScript 7.0.2, alike with `strictNullChecks` and
+/// `noImplicitAny` each on and off: `x` and `vx` are `string`, `cx` and
+/// `c1` `"a"`, `lAnn` and `lAs` `"a"`, `lu` `string`; `sat` is `{ a:
+/// number; b: string; c: true[]; }` (a `boolean` context keeps `true`),
+/// `satU` `{ a: number; b: string; c: boolean[]; }`, `satLit` `{ a: 1;
+/// b: string; }`, `satConst` `{ readonly a: 1; }`; `o` is `{ f: () =>
+/// boolean; g: (n: number) => boolean; h: () => string; i: () => 1; j: () =>
+/// 1; k: () => 1 | 2; }`, `oc` `{ readonly f: () => boolean; }`, `om` `{
+/// m(): boolean; }`; `kept` (an argument's arrow under a `string`
+/// constraint) `"s"`.
+///
+/// Mutation: lowering a mutable copy as the read it names answers `x` `"a"`;
+/// typing a `satisfies` object without its contextual type answers `satU`
+/// `{ a: 1; b: "x"; c: true[]; }`; keeping a member arrow's fresh return
+/// answers `o.f` `() => true`; widening every arrow's return answers `o.k`
+/// `() => number` and `kept` `string`.
+#[test]
+fn a_declaration_widens_the_literals_the_checker_widens() {
+    for compiler_options in [
+        None,
+        Some(LOOSE),
+        Some(r#"{ "strict": true, "noImplicitAny": false }"#),
+        Some(r#"{ "strict": false }"#),
+    ] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            DECLARED_WIDENING,
+            &[
+                ("typeof x", "string"),
+                ("typeof vx", "string"),
+                ("typeof cx", "\"a\""),
+                ("typeof c1", "\"a\""),
+                ("typeof lAnn", "\"a\""),
+                ("typeof lAs", "\"a\""),
+                ("typeof lu", "string"),
+                ("typeof sat", "{ a: number; b: string; c: true[]; }"),
+                ("typeof satU", "{ a: number; b: string; c: boolean[]; }"),
+                ("typeof satLit", "{ a: 1; b: string; }"),
+                ("typeof satConst", "{ readonly a: 1; }"),
+                (
+                    "typeof o",
+                    "{ f: () => boolean; g: (n: number) => boolean; h: () => string; \
+                     i: () => 1; j: () => 1; k: () => 1 | 2; }",
+                ),
+                ("typeof oc", "{ readonly f: () => boolean; }"),
+                ("typeof om", "{ m(): boolean; }"),
+                ("typeof kept", "\"s\""),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
