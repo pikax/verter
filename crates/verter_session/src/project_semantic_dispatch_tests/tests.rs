@@ -673,6 +673,7 @@ fn pending_conditional_arguments_remain_visible_to_mapped_value_demand() {
         source: keys,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: key_parameter,
             key_space: keys,
             value_expr: value,
@@ -2735,6 +2736,7 @@ fn finite_mapped_index_matches_single_key_publication_context() {
                 key_space,
                 value_expr: value,
                 over_type_variable: false,
+                modifiers_type: None,
                 name_remap: None,
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
@@ -2872,6 +2874,7 @@ fn residual_template_application_does_not_force_unused_mapped_argument() {
         key_space,
         value_expr: parameter,
         over_type_variable: false,
+        modifiers_type: None,
         name_remap: None,
         optionality: OptionalityMod::Keep,
         readonly: ReadonlyMod::Keep,
@@ -9113,6 +9116,7 @@ fn homomorphic_mapped_over_resolved_empty_source_publishes_empty_object() {
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: binder,
         key_space,
         value_expr: value_placeholder,
@@ -9179,6 +9183,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_add = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9189,6 +9194,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_remove = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9199,6 +9205,7 @@ fn mapped_type_optionality_and_readonly_modifiers_in_cache_key() {
     };
     let mapper_ro_add = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: make_binder(),
         key_space,
         value_expr,
@@ -9284,6 +9291,7 @@ fn mapped_type_value_materialised_from_source_member_for_known_keys() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9353,6 +9361,7 @@ fn mapped_type_resolves_key_space_via_key_of_subquery() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -9557,6 +9566,7 @@ fn mapped_type_uses_source_member_names_when_object_source() {
 
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10093,6 +10103,7 @@ fn partial_produces_structurally_equivalent_mapped_shape_to_userland() {
     let opaque = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10688,6 +10699,7 @@ fn numeric_literal_keys_enumerate_for_closed_pick_omit_and_mapped() {
     let empty_source = simple_object(&graph, &[]);
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
             decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
             param_index: 0,
@@ -10777,6 +10789,7 @@ fn mapped_k_dependent_values_keep_key_literal_kind() {
                        value_expr: SemanticNodeId,
                        name_remap: Option<SemanticNodeId>| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -11423,6 +11436,7 @@ fn mapped_narrowing_admits_exponent_range_numeric_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -11494,6 +11508,7 @@ fn key_remap_publishes_numeric_literal_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: param,
                 key_space,
                 value_expr: param,
@@ -12117,6 +12132,7 @@ fn object_record_relation_accepts_numeric_literal_keys() {
             source: empty_source,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: graph.intern_node(SemanticNodeData::TypeParam {
                     decl: verter_type_engine::semantic_query::DeclIdentity::synthetic("K"),
                     param_index: 0,
@@ -14735,6 +14751,7 @@ fn reverse_test_target(
         source: infer,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: parameter,
             key_space,
             value_expr: template,
@@ -15400,6 +15417,7 @@ fn reverse_homomorphic_mapped_infers_an_object_property_through_a_template() {
         source: infer_t,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_parameter,
             key_space,
             value_expr: template,
@@ -17559,6 +17577,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
         source: remap_infer,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: remap_parameter,
             key_space: remap_key_space,
             value_expr: boxed(remap_projection),
@@ -18343,6 +18362,7 @@ fn open_mapped_value_body_carrier_stops_in_expanded_and_macro_object_surface() {
 
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18432,6 +18452,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
     // (1) identity `{ [K in keyof T]: T[K] }` (Partial/Required/Readonly).
     let identity_mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr: num,
@@ -18444,6 +18465,7 @@ fn closed_mapped_controls_still_enumerate_no_carrier_over_fire() {
     // binder only; no outer generic ⇒ CLOSED.
     let k_only_mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr: k_param,
@@ -18526,6 +18548,7 @@ fn mapped_binder_bound_outer_generic_open_value_discrimination() {
 
     let make_mapper = |value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18608,6 +18631,7 @@ fn mapped_predicate_each_dimension_opens_independently_with_k_only_controls() {
 
     let mapper_with = |key_space, value_expr, name_remap| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -18805,6 +18829,7 @@ fn mapped_key_domain_judges_instantiations_per_argument_not_by_arg_openness() {
 
     let mapper_with_value = |value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: keyof_foo_of_t,
         value_expr,
@@ -21248,6 +21273,7 @@ fn mapped_name_remap_is_judged_by_key_domain_policy() {
     };
     let mapper_with = |name_remap| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -22012,6 +22038,7 @@ fn mapped_role_split_pins_key_production_and_walks_value_bodies() {
     };
     let mapper = |key_space, value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
@@ -22379,6 +22406,7 @@ fn mapped_type_self_roots_and_origin_edges_include_name_remap() {
     );
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space: string_ty,
         value_expr: string_ty,
@@ -24736,6 +24764,7 @@ fn shallow_mapped_type_enumerates_keyset() {
         source: str_id,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space,
             value_expr: num_id,
@@ -26530,6 +26559,7 @@ fn identity_mapped_build_without_projectable_source_publishes_addressable_carrie
     let placeholder = graph.intern_node(SemanticNodeData::Opaque(QueryError::Miss));
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr: placeholder,
@@ -28667,6 +28697,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
         source: str_id,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space,
             value_expr,
@@ -28758,6 +28789,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
         source: empty_source,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr,
@@ -28970,6 +29002,7 @@ fn mapped_type_over_open_program_source_defers() {
         source: open_source,
         mapper: verter_type_engine::semantic_query::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: mapper_param,
             key_space: key_a,
             value_expr: mapper_param,
@@ -31001,6 +31034,7 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
     });
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space: key_union,
         value_expr: deep_value,
@@ -31209,6 +31243,7 @@ fn frameless_complete_with_cache_suppress_trips_build_frame_escape_assert() {
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -31298,6 +31333,7 @@ fn evaluate_deferred_memo_refuses_complete_with_cache_suppress() {
     let value_expr = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let mapper = verter_type_engine::semantic_query::MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -32941,6 +32977,7 @@ fn mapped_type_over_flow_return_heritage_enumerates_the_composed_key_domain() {
         });
         MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: k_param,
             key_space,
             value_expr,
@@ -33082,6 +33119,7 @@ fn mapped_type_over_degraded_flow_return_heritage_preserves_the_typed_partiality
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: k_param,
         key_space,
         value_expr,
