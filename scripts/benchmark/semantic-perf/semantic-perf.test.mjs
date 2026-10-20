@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -31,6 +31,7 @@ import {
   ROOT,
   TIER_DEFAULTS,
   materialize,
+  parseArgs,
 } from "./run.mjs";
 import {
   allScenarios,
@@ -202,6 +203,18 @@ test("the canonical form fails closed on syntax it does not know", () => {
 });
 
 // ---------------------------------------------------------------- catalog and schedule
+
+test("a run can select a fresh measured reference without changing the committed table", () => {
+  const path = join("local-evidence", "reference.json");
+  assert.equal(parseArgs(["--expected", path]).expected, resolve(path));
+});
+
+test("the array literal normalization reproduction is selectable", () => {
+  const s = allScenarios().find((s) => s.id === "edge-array-literal-normalization");
+  assert.ok(s, "the captured reproduction belongs in the benchmark catalog");
+  assert.equal(s.probe, "typeof arr");
+  assert.match(s.source, /const arr = \[\{ a: 1 \}, \{ b: "x" \}\];/);
+});
 
 test("every scenario entry declares __BenchInit and __Probe once", () => {
   const ids = new Set();

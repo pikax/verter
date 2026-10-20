@@ -21,7 +21,7 @@
 //
 //   node scripts/benchmark/semantic-perf/validate.mjs <results.json> [--require-all-matched]
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSessionRecord } from "./session-record.mjs";
@@ -665,11 +665,15 @@ async function cli(argv) {
     return 2;
   }
   const run = JSON.parse(readFileSync(path, "utf8"));
-  const expectedPath = join(HERE, "expected.json");
+  const recordedReference = run.meta?.expected?.file;
+  const expectedPath =
+    recordedReference && existsSync(recordedReference)
+      ? recordedReference
+      : join(HERE, "expected.json");
   const expected = JSON.parse(readFileSync(expectedPath, "utf8"));
   const failures = [];
   if (sha256File(expectedPath) !== run.meta?.expected?.sha256) {
-    failures.push("the measured reference changed since the run (expected.json digest differs)");
+    failures.push("the measured reference changed since the run (reference digest differs)");
   }
   failures.push(...rawFileProblems(run));
   const result = validateRun(run, expected, allScenarios(), {

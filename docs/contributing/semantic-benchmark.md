@@ -794,6 +794,16 @@ node scripts/benchmark/semantic-perf/measure-expected.mjs --only <ids> --allow-s
 The run fails validation until the reference matches the scenario sources,
 the library and the method.
 
+Keep fresh measurement receipts with the run instead of committing them. The
+measurer's `--out <file>` writes a separate reference; the benchmark's
+`--expected <file>` reads it with the same source, compiler and method validation.
+For the fresh object literal union reproduction:
+
+```bash
+node scripts/benchmark/semantic-perf/measure-expected.mjs --only edge-array-literal-normalization --out .feedback/literal-union-reference.json --work .feedback/literal-union-reference
+node scripts/benchmark/semantic-perf.mjs --only edge-array-literal-normalization --arms verter,tsc-api --settings all --expected .feedback/literal-union-reference.json
+```
+
 ## Evidence runs
 
 An evidence run is a **named, frozen** benchmark invocation: a manifest fixes
