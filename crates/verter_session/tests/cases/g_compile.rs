@@ -3,6 +3,8 @@
 #[path = "g_compile/compile_audit_css_analysis.rs"]
 mod compile_audit_css_analysis;
 #[path = "g_compile/compile_audit_filtered_and_parent.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod compile_audit_filtered_and_parent;
 #[path = "g_compile/compile_audit_ide.rs"]
 mod compile_audit_ide;

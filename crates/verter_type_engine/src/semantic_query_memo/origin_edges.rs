@@ -137,6 +137,7 @@ impl SemanticGraphStore {
             // Audit-mining contract preservation: this push is
             // intentionally unconditional — it runs even on the dedup path
             // so dropped ledger writes still surface in the audit trace.
+            #[cfg(feature = "semantic-observe")]
             if let Some(acc) = crate::request_context::current_accumulator() {
                 acc.push_derivation_edge(result, kind, edge.clone());
             }

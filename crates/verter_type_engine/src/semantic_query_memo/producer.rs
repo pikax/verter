@@ -551,20 +551,13 @@ impl SemanticGraphStore {
             };
             if let Some(hit) = warm {
                 self.stats.hits.fetch_add(1, Ordering::Relaxed);
-                if let Some(sched_ctx) = verter_execution::request_context::current_context() {
-                    sched_ctx
-                        .0
-                        .record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
-                }
+                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Hit);
                 return Claim::Read(hit);
             }
             if !attempt.miss_recorded {
                 // One miss per logical claim, however many attempts it takes.
                 self.stats.misses.fetch_add(1, Ordering::Relaxed);
-                if let Some(ctx) = verter_execution::request_context::current_context() {
-                    ctx.0
-                        .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
-                }
+                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
                 attempt.miss_recorded = true;
             }
 
@@ -575,11 +568,7 @@ impl SemanticGraphStore {
                 self.stats
                     .same_path_sentinel_returns
                     .fetch_add(1, Ordering::Relaxed);
-                if let Some(ctx) = verter_execution::request_context::current_context() {
-                    ctx.0.record_cache_event(
-                        verter_execution::request_context::CacheEventKind::Sentinel,
-                    );
-                }
+                crate::request_observers::record_cache_event(verter_execution::request_context::CacheEventKind::Sentinel);
                 return Claim::Recursive(Recursion::SamePath);
             }
 
@@ -843,10 +832,9 @@ impl Subscription<'_> {
         }
         // Every cooperative wait return counts; a retry may count again.
         store.stats.joined_waits.fetch_add(1, Ordering::Relaxed);
-        if let Some(ctx) = verter_execution::request_context::current_context() {
-            ctx.0
-                .record_cache_event(verter_execution::request_context::CacheEventKind::JoinedWait);
-        }
+        crate::request_observers::record_cache_event(
+            verter_execution::request_context::CacheEventKind::JoinedWait,
+        );
         if flags.is_cancelled() {
             drop(state);
             return Joined::Read(cancelled_cache_read());
@@ -1188,10 +1176,9 @@ impl SemanticGraphStore {
         if !attempt.miss_recorded {
             // The one miss a claim of the key records.
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
-            if let Some(ctx) = verter_execution::request_context::current_context() {
-                ctx.0
-                    .record_cache_event(verter_execution::request_context::CacheEventKind::Miss);
-            }
+            crate::request_observers::record_cache_event(
+                verter_execution::request_context::CacheEventKind::Miss,
+            );
         }
         if flags.is_cancelled() {
             return (cancelled_cache_read(), None);
@@ -1471,9 +1458,9 @@ impl SettledProducer<'_> {
                 key = ?self.prepared.key(),
                 "cache_suppress=true; refusing memo insertion (build-output suppression)"
             );
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            crate::observe_request!(|ctx| {
                 ctx.memo_publish_suppressed.fetch_add(1, Ordering::Relaxed);
-            }
+            });
         }
         if !self.admission_linearized && flags.is_cancelled() {
             if let Some(slot) = capture.publication.as_deref_mut() {

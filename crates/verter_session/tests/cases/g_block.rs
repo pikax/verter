@@ -22,8 +22,12 @@ mod block_6h_architecture_guards;
 #[path = "g_block/block_6i_f1_dep_signature_cross_file.rs"]
 mod block_6i_f1_dep_signature_cross_file;
 #[path = "g_block/block_6i_identity_mapper_unchanged.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_identity_mapper_unchanged;
 #[path = "g_block/block_6i_leak_chatmessages_audit.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_leak_chatmessages_audit;
 #[path = "g_block/block_6i_leak_closure.rs"]
 mod block_6i_leak_closure;
@@ -32,38 +36,64 @@ mod block_6i_leak_option_a_discriminator;
 #[path = "g_block/block_6i_mapped_source_declref_enum.rs"]
 mod block_6i_mapped_source_declref_enum;
 #[path = "g_block/block_6i_round10_chain_x_path_admission_non_emitting.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round10_chain_x_path_admission_non_emitting;
 #[path = "g_block/block_6i_round10_chain_y_routed_surface_demand_split.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round10_chain_y_routed_surface_demand_split;
 #[path = "g_block/block_6i_round10_chain_z_slot_compound_fallback.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round10_chain_z_slot_compound_fallback;
 #[path = "g_block/block_6i_round10_inherited_emits_invariant.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round10_inherited_emits_invariant;
 #[path = "g_block/block_6i_round11_chain_v_generic_carrier_publish.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round11_chain_v_generic_carrier_publish;
 #[path = "g_block/block_6i_round11_inherited_emits_invariant.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round11_inherited_emits_invariant;
 #[path = "g_block/block_6i_round13_chain_w_record_target_normalization.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round13_chain_w_record_target_normalization;
 #[path = "g_block/block_6i_round7_emits_unresolved_diagnostic.rs"]
 mod block_6i_round7_emits_unresolved_diagnostic;
 #[path = "g_block/block_6i_round7_inherited_emits_branch_merge.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round7_inherited_emits_branch_merge;
 #[path = "g_block/block_6i_round7_no_leak_audit_preservation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round7_no_leak_audit_preservation;
 #[path = "g_block/block_6i_round7_selected_key_callable_realization.rs"]
 mod block_6i_round7_selected_key_callable_realization;
 #[path = "g_block/block_6i_round7_slots_unresolved_diagnostic.rs"]
 mod block_6i_round7_slots_unresolved_diagnostic;
 #[path = "g_block/block_6i_round9_inherited_emits_branch_merge_survives.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round9_inherited_emits_branch_merge_survives;
 #[path = "g_block/block_6i_round9_pattern_a_extends_inheritance.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round9_pattern_a_extends_inheritance;
 #[path = "g_block/block_6i_round9_pattern_b_generic_param.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_round9_pattern_b_generic_param;
 #[path = "g_block/block_6i_runtime_arch_guards.rs"]
 mod block_6i_runtime_arch_guards;
 #[path = "g_block/block_6i_slot_callable_realization.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_slot_callable_realization;
 #[path = "g_block/block_6i_static_guards.rs"]
 mod block_6i_static_guards;

@@ -285,14 +285,12 @@ impl VerterHost {
     ///   itself is decided by `validates_domain_aggregate`, which is
     ///   exhaustive and fail-closed per domain.
     fn attribute_prepared_decl_bundle_rejection(
+        obs: &dyn verter_audit::AuditObserver,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         canonical_id: &str,
         rejected_fact: Option<&verter_session_query::facts::fact_cache::FactVersionRef>,
         candidate_count: usize,
     ) {
-        let Some(obs) = verter_audit::current_observer() else {
-            return;
-        };
         let event = match rejected_fact {
             None if candidate_count == 0 => {
                 verter_audit::AuditEvent::PreparedDeclBundleRejectEntryMissing
@@ -436,9 +434,9 @@ impl VerterHost {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Per-request audit attribution: prepared-decl bundle
                 // served from cache (no materialisation).
-                if let Some(obs) = verter_audit::current_observer() {
+                verter_audit::observe!(|obs| {
                     obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleWarm);
-                }
+                });
                 // A warm hit came out of the SHARED cache, so it was
                 // admitted: `Shared` by construction. Nothing was
                 // refused on this read, so there is nothing to replay.
@@ -454,12 +452,13 @@ impl VerterHost {
                 return (Some(bundle), ReuseClass::Shared);
             }
             Err((rejected_fact, candidate_count)) => {
-                Self::attribute_prepared_decl_bundle_rejection(
+                verter_audit::observe!(|obs| Self::attribute_prepared_decl_bundle_rejection(
+                    obs,
                     view,
                     canonical_id,
                     rejected_fact.as_ref(),
                     candidate_count,
-                );
+                ));
             }
         }
 
@@ -492,9 +491,9 @@ impl VerterHost {
             // joiners that block on the leader do not count; a
             // fenced-retry re-run counts again (it genuinely re-runs
             // the cold build).
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCold);
-            }
+            });
             // Deterministic mirror of the audit event above: counts a
             // genuine cold flight-body run regardless of outcome (Built
             // OR surface-empty miss) — the observable that separates a
@@ -2952,9 +2951,9 @@ impl VerterHost {
         if resolution.is_known_miss() {
             // Per-request audit attribution: the caller will recompute
             // the miss against the live workspace.
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::KnownMissRouteRecomputed);
-            }
+            });
             return None;
         }
         Some(resolution)

@@ -376,6 +376,9 @@ impl VerterHost {
         worker_pool_source: HostWorkerPoolSource,
         memo_family_bound: MemoFamilyBound,
     ) -> Self {
+        // A build without optional capture cannot record audits, timings or
+        // footprints: the request-time flags would carry nothing.
+        let config = crate::capture::normalize_host_config(config);
         #[cfg(test)]
         configure_workspace_test_projects(workspace.as_ref());
         #[cfg(target_arch = "wasm32")]
@@ -605,6 +608,7 @@ impl VerterHost {
         // `AuditConfig` snapshot. The substrate-side flag is what
         // `AuditRequestRegistration::new` and the sampler thread read,
         // so the wire-up MUST happen here at construction time.
+        #[cfg(feature = "semantic-observe")]
         let audit_config = verter_audit::AuditConfig {
             audit_timing_capture: config.audit_timing_capture,
             ..verter_audit::AuditConfig::default()
@@ -689,6 +693,7 @@ impl VerterHost {
             query_profile: parking_lot::Mutex::new(query_profile),
             project_type_store,
             request_id_counter: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "semantic-observe")]
             host_audit_runtime: Arc::new(crate::host_audit_runtime::HostAuditRuntime::new(
                 audit_config,
             )),

@@ -47,6 +47,7 @@ impl VerterHost {
         self.host_view_env_hashes_for(canonical_id).parse_env_hash == indexed.parse_env_hash
     }
 
+    #[cfg(feature = "semantic-observe")]
     /// The owner's DIRECT import targets — every authored import
     /// specifier on the owner's shallow surface, resolved through the
     /// shared route-edge policy.

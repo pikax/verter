@@ -29,6 +29,8 @@ use verter_type_engine::instant::Instant;
 // resolved through `meta_resolve`'s private siblings; after the move,
 // they rewrite to `crate::meta_resolve::X` (the parent module's
 // re-exported `pub(crate)` surface).
+#[cfg(feature = "semantic-observe")]
+use crate::meta_resolve::request_source_performed_compute;
 use crate::meta_resolve::slot_binding_graph;
 use crate::meta_resolve::STORE_VIEW_STABILITY_MAX_ATTEMPTS;
 use crate::meta_resolve::{
@@ -36,9 +38,8 @@ use crate::meta_resolve::{
     RegistryMaterialization, ResolvedComponentMetaState,
 };
 use crate::meta_resolve::{
-    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
-    trace_request_source, CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit,
-    ResolvedTypeRegistryMeta,
+    should_skip_imported_registry_seed_refresh, trace_request_source, CapturedComponentMetaInputs,
+    ResolvedComponentMetaComputeAudit, ResolvedTypeRegistryMeta,
 };
 
 // Items that live in the parent shell (`crate::meta_resolve`): the
@@ -185,6 +186,7 @@ impl VerterHost {
             canonical.as_str(),
             self.config.audit_timing_capture && self.config.audit_enabled,
         );
+        #[cfg(feature = "semantic-observe")]
         let audit = self.config.audit_enabled.then(|| {
             // Prefer the request_id stamped by
             // `get_component_meta_with_resolution` (via the installed
@@ -303,6 +305,7 @@ impl VerterHost {
             );
         }
 
+        #[cfg(feature = "semantic-observe")]
         if let Some((
             _request_id,
             request_audit_guard,
@@ -745,7 +748,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<CapturedComponentMetaInputs> {
-        let audit_enabled = self.config.audit_enabled;
+        let audit_enabled = cfg!(feature = "semantic-observe") && self.config.audit_enabled;
         let capture_started = audit_enabled.then(Instant::now);
         // Overlay-priority: when the view carries an **explicit
         // overlay** for the owner canonical, materialise its
@@ -893,7 +896,7 @@ impl VerterHost {
         // `ctx` is required, so every production caller supplies the exact
         // request-bound base or session context. The direct-host fixture
         // wrapper is compile-fenced to test support.
-        let audit_enabled = self.config.audit_enabled;
+        let audit_enabled = cfg!(feature = "semantic-observe") && self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured
                 .map(|captured| crate::component_meta_audit::RequestTimingAudit {
@@ -1174,6 +1177,7 @@ impl VerterHost {
         if let Some(started) = store_merge_started {
             audit_timings.store_merge_ms = started.elapsed().as_secs_f64() * 1000.0;
         }
+        #[cfg(feature = "semantic-observe")]
         if audit_enabled {
             audit_timings.imported_root_proof_ms =
                 crate::component_meta_audit::current_request_audit_snapshot()

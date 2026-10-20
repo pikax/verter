@@ -658,12 +658,13 @@ impl Scheduler {
         loop {
             // Sample DAG depth under the lock so the audit figure
             // matches the depth observed by the entry that is about
-            // to leave.
+            // to leave. Optional capture: without `semantic-observe` the
+            // O(N) depth scan never runs.
             let (job, queue_depth_pre_dequeue) = {
                 let mut dag = self.dag.lock();
-                let depth = dag.pending_len();
+                let depth = verter_audit::observe::Sample::take(|| dag.pending_len() as u32);
                 let dequeued = dag.next_ready_for_pump(caller_kind, active_path);
-                (dequeued, depth as u32)
+                (dequeued, depth)
             };
             let job = match job {
                 Some(j) => j,
@@ -709,28 +710,19 @@ impl Scheduler {
         job: ReadyJob,
         _reason: PumpReason,
         caller_kind: caller_kind::CallerKind,
-        queue_depth_pre_dequeue: u32,
+        queue_depth_pre_dequeue: verter_audit::observe::Sample<u32>,
     ) -> DispatchOutcome {
-        // Compute queue dwell ms: time the entry spent in the DAG
-        // between enqueue and this dispatch.
-        let dequeue_at = Instant::now();
-        let queue_dwell_ms = dequeue_at
-            .saturating_duration_since(job.enqueue_time)
-            .as_secs_f64()
-            * 1000.0;
-        let inbox_depth = self.inbox.sender.len() as u32;
+        // Optional capture: the time the entry spent in the DAG between
+        // enqueue and this dispatch, and the inbox depth. Neither the
+        // clock nor the channel is read without `semantic-observe`.
+        let queue_dwell_ms = verter_audit::observe::Sample::take(|| job.enqueue_time.elapsed_ms());
+        let inbox_depth = verter_audit::observe::Sample::take(|| self.inbox.sender.len() as u32);
         // One dispatch = one executed task; the dwell is the time the entry
         // sat in the DAG, and the pre-dequeue depth is the queue high-water
         // mark this dispatch observed.
         verter_audit::attribute!(TaskExecute);
-        verter_audit::attribute_n!(
-            TaskWait,
-            dequeue_at
-                .saturating_duration_since(job.enqueue_time)
-                .as_nanos()
-                .min(u64::MAX as u128)
-        );
-        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue);
+        verter_audit::attribute_n!(TaskWait, job.enqueue_time.elapsed_nanos());
+        verter_audit::attribute_max!(QueueDepth, queue_depth_pre_dequeue.get());
 
         let inbox_sender = self.inbox.sender.clone();
         let executor = Arc::clone(&self.executor);
@@ -970,10 +962,8 @@ impl Scheduler {
             caller_kind::with_active_path(identity_for_path, || {
                 Self::publish_scheduler_dispatch(
                     inline_pool_tag,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1028,10 +1018,8 @@ impl Scheduler {
                 > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
                     audit_publish::WorkerPoolTag::Io,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1090,10 +1078,8 @@ impl Scheduler {
                 > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
                     audit_publish::WorkerPoolTag::Cpu,
-                    audit_publish::SchedulerDepthsSnapshot {
-                        inbox: inbox_depth,
-                        queue: queue_depth_pre_dequeue,
-                    },
+                    inbox_depth,
+                    queue_depth_pre_dequeue,
                     queue_dwell_ms,
                 );
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1318,22 +1304,30 @@ impl Scheduler {
     /// no-op via [`verter_audit::observer::AuditObserver`]'s default
     /// implementation. Static so it can be called from worker
     /// closures without holding `&self`.
+    ///
+    /// Optional capture: without `semantic-observe` this compiles to
+    /// nothing and the samples are never read.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn publish_scheduler_dispatch(
         pool: audit_publish::WorkerPoolTag,
-        depths: audit_publish::SchedulerDepthsSnapshot,
-        queue_dwell_ms: f64,
+        inbox_depth: verter_audit::observe::Sample<u32>,
+        queue_depth: verter_audit::observe::Sample<u32>,
+        queue_dwell_ms: verter_audit::observe::Sample<f64>,
     ) {
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(|observer| {
             let audit = verter_audit::SchedulerAudit {
                 worker_thread_id: format!("{:?}", std::thread::current().id()),
                 worker_pool: pool.into(),
-                depths: depths.into(),
-                queue_dwell_ms,
+                depths: audit_publish::SchedulerDepthsSnapshot {
+                    inbox: inbox_depth.get(),
+                    queue: queue_depth.get(),
+                }
+                .into(),
+                queue_dwell_ms: queue_dwell_ms.get(),
                 dispatch_count: 1,
             };
             observer.record_scheduler_dispatch(audit);
-        }
+        });
     }
 
     /// Dispatch work inline (used by `drive_one`/`drive_all` in sync mode and WASM).

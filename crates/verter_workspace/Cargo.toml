@@ -17,6 +17,7 @@ publish = false
 # enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_semantic/semantic-observe",
   "verter_session_query/semantic-observe",

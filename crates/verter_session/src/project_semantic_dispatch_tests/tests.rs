@@ -22892,6 +22892,8 @@ fn budget_early_exit_folds_partial_into_enclosing_build_local_frame_and_request_
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// The per-request `SemanticQueryKey` dispatch mask must record tags
 /// dispatched through the shared `execute_via_cold_build_helper` choke point
 /// — INCLUDING nested reducer sub-dispatches that enter ONLY via
@@ -23699,6 +23701,8 @@ fn resolve_macro_payload_resolves_against_current_owner_content_via_content_free
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// **Class A dispatch parity (invisibility proof).** Verifies that
 /// adding the `ResolveMacroPayload` variant + body to the dispatcher
 /// did NOT change existing `ComponentMetaAnalysis` outputs for any

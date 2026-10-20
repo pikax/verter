@@ -31,15 +31,18 @@
 //! / `project_shallow_surface_from_base`). It is NOT a second resolver — it
 //! plans, dispatches to the shared engine, and encodes.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use verter_audit::payloads::typeinfo_graph::{
     FrameworkSurfaceKindSupportTag, GraphOperationTag, TypeInfoGraphPayload,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_audit::WaitAudit;
 use verter_audit::{
     AuditedResult, ProjectionModeTag, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit, WaitAudit,
+    RequestMemoryAudit, RequestStoreAudit, RequestTimingAudit,
 };
 use verter_language::FrameworkAdapterId;
 use verter_protocol::typeinfo::graph::{
@@ -52,6 +55,7 @@ use verter_protocol::verter::v1::{type_info_graph_response, type_info_request_er
 use crate::framework::ctx::FrameworkAdapterCtx;
 use crate::framework::descriptor::ALL_FRAMEWORK_SURFACE_KINDS;
 use crate::framework::registry::SurfaceRegistration;
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::typeinfo::framework_surface::graph_export::{
     encode_framework_surfaces, encode_framework_surfaces_with_unsupported_message,
@@ -65,7 +69,6 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
-use verter_type_engine::instant::Instant;
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 use verter_type_engine::semantic_query::ProjectionMode;
 
@@ -93,6 +96,7 @@ impl VerterHost {
         envelope: TypeInfoGraphRequest,
     ) -> AuditedResult<TypeInfoGraphResponse, TypeInfoRequestError> {
         let request_id = self.next_request_id();
+        #[cfg(feature = "semantic-observe")]
         verter_type_engine::request_context::increment_requests_created();
 
         let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
@@ -110,90 +114,97 @@ impl VerterHost {
             None,
             self.config.projection_op_budget,
         );
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(registration.clone());
-
-        let request_start = Instant::now();
-        let (response, payload) = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                self.execute_framework_surface(envelope)
-            }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                self.execute_framework_surface(envelope)
-            }
+        #[cfg(feature = "semantic-observe")]
+        let registration = {
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            let _ = ctx.install_audit_registration(registration.clone());
+            registration
         };
-        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
+
+        let request_clock = verter_audit::observe::Stopwatch::start();
+        let (response, payload) = {
+            // The request runs under its context whether or not it captures:
+            // the context carries its budget and cancellation.
+            let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+            self.execute_framework_surface(envelope)
+        };
 
         // VALIDATION-FIRST CONTRACT: the response is the `error` arm exactly when
         // validation (or selector resolution) rejected the request. Both arms
         // are audited identically.
         let outcome = framework_response_outcome(&response);
 
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let state = if self.config.audit_enabled {
-                verter_audit::AuditCaptureState::FilteredNoop
-            } else {
-                verter_audit::AuditCaptureState::AuditDisabled
+        #[cfg(feature = "semantic-observe")]
+        if matches!(registration.as_ref(), AuditRequestRegistration::Active(_)) {
+            let total_ms = request_clock.elapsed_ms();
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
             };
-            let record = noop_framework_record(
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
+                ..RequestMemoryAudit::default()
+            };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
+                    lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
+
+            let record = RequestAuditRecord {
                 request_id,
-                &canonical_for_audit,
-                target_identity.clone(),
-                ctx.parent_request_id,
-                ctx.trace_id.clone(),
-                state,
-                payload,
-            );
-            return audited_from_outcome(response, outcome, record);
+                target_identity: Some(target_identity),
+                canonical_id: canonical_for_audit,
+                kind: RequestKind::TypeInfoGraph,
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+                from_cache: false,
+                timings,
+                memory,
+                store,
+                footprint: None,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files: Vec::new(),
+                waits,
+                kind_payload: RequestKindPayload::TypeInfoGraph(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: ctx.trace_id.clone(),
+            };
+
+            let cloned = record.clone();
+            registration.finalize(record);
+            return audited_from_outcome(response, outcome, cloned);
         }
 
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
+        // Uncaptured: filtered or disabled by the host, or capture compiled
+        // out. The answer is the same; the record carries no observation.
+        #[cfg(feature = "semantic-observe")]
+        let (parent_request_id, trace_id) = (ctx.parent_request_id, ctx.trace_id.clone());
+        #[cfg(not(feature = "semantic-observe"))]
+        let (parent_request_id, trace_id) = {
+            let _ = (request_clock, footprint_capture, timing_capture);
+            (None::<u64>, String::new())
         };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx.process_rss_peak_bytes.load(Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(Ordering::Relaxed),
-                lock_acquisitions: ctx.lock_acquisitions.load(Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
-
-        let record = RequestAuditRecord {
+        let state = crate::capture::uncaptured_state(self.config.audit_enabled);
+        let record = noop_framework_record(
             request_id,
-            target_identity: Some(target_identity),
-            canonical_id: canonical_for_audit,
-            kind: RequestKind::TypeInfoGraph,
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-            from_cache: false,
-            timings,
-            memory,
-            store,
-            footprint: None,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
-            waits,
-            kind_payload: RequestKindPayload::TypeInfoGraph(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: ctx.trace_id.clone(),
-        };
-
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_from_outcome(response, outcome, cloned)
+            &canonical_for_audit,
+            target_identity.clone(),
+            parent_request_id,
+            trace_id,
+            state,
+            payload,
+        );
+        audited_from_outcome(response, outcome, record)
     }
 
     /// The validation-first executor body. Returns the wire response plus the

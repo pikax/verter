@@ -1685,7 +1685,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload)
                 })
         });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1697,7 +1697,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1767,7 +1767,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1779,7 +1779,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -1840,7 +1840,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1852,7 +1852,7 @@ impl FileArtifactStore {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -2975,7 +2975,7 @@ impl FileArtifactStore {
         // R23 typed event: a `FileArtifactStore` entry was admitted.
         // Best-effort emission — silent no-op when no observer
         // accumulator is installed on the current thread.
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                 canonical_id: Arc::clone(&canonical),
                 action: verter_audit::FileArtifactCacheAction::Admit,
@@ -3024,7 +3024,7 @@ impl FileArtifactStore {
             self.bump_artifact_generation();
             // R23 typed event: a `FileArtifactStore` entry was
             // evicted. Best-effort emission.
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                     canonical_id: canonical,
                     action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3064,7 +3064,7 @@ impl FileArtifactStore {
             // downstream telemetry can attribute drain footprint
             // per `FileArtifactKey` dimension.
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3101,7 +3101,7 @@ impl FileArtifactStore {
                 .fetch_add(removed as u64, Ordering::Relaxed);
             self.bump_artifact_generation();
             for (key, _payload) in &removed_pairs {
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FileArtifactCache {
                         canonical_id: Arc::clone(&key.canonical),
                         action: verter_audit::FileArtifactCacheAction::Evict,
@@ -3796,7 +3796,7 @@ pub(crate) fn emit_module_augmentation_index_shape_event(
             None,
         ),
     };
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::ModuleAugmentationIndexShape {
             target_kind_tag: tag,
             external_specifier,
@@ -3862,7 +3862,7 @@ pub(crate) fn fact_key_kind_tag_for(key: &fact_registry::FactKey) -> verter_audi
 /// dimension); the parallel `semantic_hash` and `display_hash`
 /// fields carry both lane hashes simultaneously.
 fn emit_fact_registry_writes(canonical_id: &Arc<str>, fact: &fact_registry::Fact) {
-    verter_type_engine::request_observers::push_structured_event(
+    verter_type_engine::component_meta_trace_structured!(
         crate::component_meta_audit::StructuredAuditEvent::FactRegistryWrite {
             canonical_id: Arc::clone(canonical_id),
             fact_key_kind: fact_key_kind_tag_for(&fact.key),

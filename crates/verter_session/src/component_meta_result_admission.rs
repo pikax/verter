@@ -61,12 +61,12 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
             // counter in sync with the `.get()` accessor so
             // joiner-accounting assertions continue to attribute a miss
             // to the cold winner.
-            if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+            verter_type_engine::observe_request!(|ctx| {
                 ctx.cache_counters
                     .component_meta
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
-            }
+            });
         };
         let candidate =
             match self
@@ -81,12 +81,12 @@ impl<'a, 'c, P: Send + Sync, C: ResolverCapabilities> ComponentMetaResultRead<'a
                 }
             };
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             ctx.cache_counters
                 .component_meta
                 .hits
                 .fetch_add(1, Ordering::Relaxed);
-        }
+        });
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.observations
             .component_meta_result_cache_hits
@@ -125,12 +125,12 @@ pub(crate) fn record_component_meta_result_miss(observations: &MetaProvenance) {
         .component_meta_result_cache_misses
         .fetch_add(1, Ordering::Relaxed);
     #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+    verter_type_engine::observe_request!(|ctx| {
         ctx.cache_counters
             .component_meta
             .misses
             .fetch_add(1, Ordering::Relaxed);
-    }
+    });
 }
 
 /// Cold compute plus typed admission into the final component-meta result

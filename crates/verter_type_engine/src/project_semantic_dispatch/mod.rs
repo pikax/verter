@@ -2259,7 +2259,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// choke point (so nested `execute_read`-only sub-dispatches are captured
     /// there); these intent counters stay on the consumer entry. No-op when
     /// no `RequestContext` is installed on the calling thread.
+    ///
+    /// Optional capture: without `semantic-observe` this reads no request
+    /// context and records nothing.
+    #[inline(always)]
     pub(crate) fn record_dispatch_intent_counters(&self, key: &SemanticQueryKey) {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = key;
+        #[cfg(feature = "semantic-observe")]
+        self.record_dispatch_intent_counters_captured(key);
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn record_dispatch_intent_counters_captured(&self, key: &SemanticQueryKey) {
         let Some(ctx) = crate::request_context::current_request_context() else {
             return;
         };
@@ -3860,7 +3872,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             verter_audit::attribute!(SemanticWarmHit);
         }
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(|observer| {
             use verter_audit::AuditEvent;
             let event = match key {
                 SemanticQueryKey::TypeOf { .. } => {
@@ -3925,7 +3937,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if let Some(event) = event {
                 observer.record_event(event);
             }
-        }
+        });
         // UNIVERSAL READ-BOUNDARY FOLD (the single fold point). Every
         // cold-build subquery read — issued through `execute`,
         // `execute_read`, the `execute_type_node` override, OR any direct
@@ -4145,7 +4157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // under-count post-trip dispatches once the
                     // early-exit lands, and bench attribution would lose
                     // the runaway signal.
-                    if let Some(observer) = verter_audit::current_observer() {
+                    verter_audit::observe!(|observer| {
                         use verter_audit::AuditEvent;
                         // The early-exit attribution must mirror EVERY kind
                         // the aggregate work-budget gate counts — including
@@ -4183,7 +4195,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         if let Some(event) = event {
                             observer.record_event(event);
                         }
-                    }
+                    });
                     // CRITICAL: the post-trip budget early-exit is a SECOND
                     // return point of this helper. It must fold its rails into
                     // the request sticky + active build-local frame BEFORE
@@ -4337,9 +4349,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        crate::request_context::with_current_request_context(|ctx| {
-            ctx.record_dispatched_query_tag(key.tag())
-        });
+        crate::observe_request!(|ctx| { ctx.record_dispatched_query_tag(key.tag()) });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
@@ -6089,11 +6099,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
                 // (`resolve_prepared_type_decl`, `resolve_builtin_utility`)
                 // route through this helper — dominant expected source of
                 // the warm-read pressure.
-                if let Some(obs) = verter_audit::current_observer() {
+                verter_audit::observe!(|obs| {
                     obs.record_event(
                         verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
                     );
-                }
+                });
                 let payload = self.ctx.prepared_decl_bundle(canonical_id.as_ref()).map(
                     |bundle| {
                         crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(

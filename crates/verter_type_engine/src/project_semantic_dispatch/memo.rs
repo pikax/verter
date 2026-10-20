@@ -659,7 +659,7 @@ impl MemoRead<'_, ShapeCacheDb> {
         // strict warm-read validation rejects a same-scope content edit.
         // The entry carries its own self-roots, validated strictly.
         let result = single_entry_peek(storage.entries, key, ctx, self.flags);
-        if let Some(rctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|rctx| {
             // Every ShapeCacheDb subject is a member-shape-route identity
             // now that the TypeExpr-START route also keys its LOWERED
             // settled node (`MemberValueNode`) — so all peeks count into
@@ -672,7 +672,7 @@ impl MemoRead<'_, ShapeCacheDb> {
             } else {
                 counter.misses.fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 }

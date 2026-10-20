@@ -255,38 +255,40 @@ fn emit_module_augmentation_stitched_event(
     augmenter_count: u32,
     fingerprint: crate::semantic_query::HashValue,
 ) {
-    use verter_audit::AugmentationTargetKindTag;
-    use verter_session_query::resolution::AugmentationTargetKind;
+    // Optional capture: the event and its payload are built only when an
+    // accumulator is installed, and never in a default build.
+    crate::component_meta_trace_structured!({
+        use verter_audit::AugmentationTargetKindTag;
+        use verter_session_query::resolution::AugmentationTargetKind;
 
-    let (target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
-        match target {
-            AugmentationTargetKind::ExternalSpecifier(specifier) => (
-                AugmentationTargetKindTag::ExternalSpecifier,
-                Some(Arc::<str>::from(specifier.as_ref())),
-                None,
-                None,
-            ),
-            AugmentationTargetKind::ResolvedRelativeCanonical(canonical) => (
-                AugmentationTargetKindTag::ResolvedRelativeCanonical,
-                None,
-                Some(Arc::clone(canonical)),
-                None,
-            ),
-            AugmentationTargetKind::WildcardAmbient(pattern) => (
-                AugmentationTargetKindTag::WildcardAmbient,
-                None,
-                None,
-                Some(Arc::<str>::from(pattern.as_ref())),
-            ),
-            AugmentationTargetKind::GlobalAugmentation => (
-                AugmentationTargetKindTag::GlobalAugmentation,
-                None,
-                None,
-                None,
-            ),
-        };
+        let (target_kind_tag, external_specifier, resolved_relative_canonical, wildcard_pattern) =
+            match target {
+                AugmentationTargetKind::ExternalSpecifier(specifier) => (
+                    AugmentationTargetKindTag::ExternalSpecifier,
+                    Some(Arc::<str>::from(specifier.as_ref())),
+                    None,
+                    None,
+                ),
+                AugmentationTargetKind::ResolvedRelativeCanonical(canonical) => (
+                    AugmentationTargetKindTag::ResolvedRelativeCanonical,
+                    None,
+                    Some(Arc::clone(canonical)),
+                    None,
+                ),
+                AugmentationTargetKind::WildcardAmbient(pattern) => (
+                    AugmentationTargetKindTag::WildcardAmbient,
+                    None,
+                    None,
+                    Some(Arc::<str>::from(pattern.as_ref())),
+                ),
+                AugmentationTargetKind::GlobalAugmentation => (
+                    AugmentationTargetKindTag::GlobalAugmentation,
+                    None,
+                    None,
+                    None,
+                ),
+            };
 
-    crate::request_observers::push_structured_event(
         verter_audit::structured_event::StructuredAuditEvent::ModuleAugmentationStitched {
             target_kind_tag,
             external_specifier,
@@ -294,8 +296,8 @@ fn emit_module_augmentation_stitched_event(
             wildcard_pattern,
             augmenter_count,
             fingerprint,
-        },
-    );
+        }
+    });
 }
 
 /// One resolved heritage base from a class's `extends` clause
@@ -1369,9 +1371,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut suspend: Option<&mut Option<Box<TypeofBuild>>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
-        if let Some(observer) = verter_audit::current_observer() {
+        verter_audit::observe!(|observer| {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
-        }
+        });
         // Self-version rooting: observe the value-root scope
         // canonical.s `IndexedReady` ONCE through the overlay-aware
         // `ensure_indexed_ready_serve` accessor. The single observed
@@ -1388,9 +1390,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(indexed) => indexed,
             None => {
                 // Telemetry: prepared-value miss site.
-                if let Some(observer) = verter_audit::current_observer() {
+                verter_audit::observe!(|observer| {
                     observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
-                }
+                });
                 return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
             }
         };
@@ -5291,10 +5293,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ctx) = crate::request_context::current_request_context() {
+            crate::observe_request!(|ctx| {
                 ctx.expanded_instantiate_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+            });
             // Synthesis-scoped attribution: bump the
             // synthesis-attributable counter ONLY when the slot-binding
             // synthesis phase is active. The request-wide counter above
@@ -5632,9 +5634,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // behaviour at solve.rs:2580.
         // Instrumentation: callsite attribution for
         // `prepared_decl_bundle_warm` reads from `build_instantiate`.
-        if let Some(obs) = verter_audit::current_observer() {
+        verter_audit::observe!(|obs| {
             obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
-        }
+        });
         let scope_payload = self
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
@@ -15864,7 +15866,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // mapped-member materialization cache would key on. The
         // classifier records the tuple in the per-request observed
         // set and bumps the matching unique/repeated counter pair.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -15874,7 +15876,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     variant: 0,
                 },
             );
-        }
+        });
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
         // Object member interiors remain addressable until they are read.
@@ -16016,7 +16018,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -16026,7 +16028,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     variant: 1,
                 },
             );
-        }
+        });
         self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg)
     }
 

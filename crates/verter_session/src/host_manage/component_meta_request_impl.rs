@@ -150,6 +150,7 @@ pub(crate) fn trace_request_source(source: RequestSource) -> &'static str {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 pub(crate) fn request_source_performed_compute(source: RequestSource) -> bool {
     matches!(
         source,

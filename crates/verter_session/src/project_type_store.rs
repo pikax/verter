@@ -486,7 +486,7 @@ impl AnalysisReadyDb {
             return None;
         }
         let result = self.entries.get(key).map(|v| v.clone());
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -498,7 +498,7 @@ impl AnalysisReadyDb {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 
@@ -530,7 +530,7 @@ impl AnalysisReadyDb {
             }
             found
         };
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -542,7 +542,7 @@ impl AnalysisReadyDb {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 

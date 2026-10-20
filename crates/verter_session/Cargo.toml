@@ -20,6 +20,7 @@ default = []
 # enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
+  "verter_execution/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_workspace/semantic-observe",
   "verter_semantic/semantic-observe",

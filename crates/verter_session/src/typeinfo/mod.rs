@@ -40,6 +40,7 @@
 
 pub mod adapters;
 pub mod evaluate_type_expression;
+#[cfg(feature = "semantic-observe")]
 pub(crate) mod footprint_attach;
 pub mod framework_surface;
 pub mod graph_query;

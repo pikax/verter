@@ -910,24 +910,32 @@ impl VerterLanguageServer {
         &self,
         params: GetAuditRecordParams,
     ) -> Result<Option<serde_json::Value>> {
-        use verter_audit::batch::AuditRecordSource;
-        tracing::debug!("$/verter/audit/getRecord: {}", params.request_id);
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (params,);
+            return Err(audit_capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            tracing::debug!("$/verter/audit/getRecord: {}", params.request_id);
 
-        let target_id = match params.request_id.parse::<u64>() {
-            Ok(id) => id,
-            Err(_) => return Ok(None),
-        };
+            let target_id = match params.request_id.parse::<u64>() {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            };
 
-        let host = self.documents.host();
-        let store = host.host_audit_runtime().audit_records_store();
-        let mut found: Option<verter_audit::RequestAuditRecord> = None;
-        store.for_each_record(&mut |_inserted_at, record| {
-            if record.request_id == target_id {
-                found = Some(record.clone());
-            }
-        });
+            let host = self.documents.host();
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut found: Option<verter_audit::RequestAuditRecord> = None;
+            store.for_each_record(&mut |_inserted_at, record| {
+                if record.request_id == target_id {
+                    found = Some(record.clone());
+                }
+            });
 
-        Ok(found.and_then(|record| serde_json::to_value(&record).ok()))
+            Ok(found.and_then(|record| serde_json::to_value(&record).ok()))
+        }
     }
 
     /// Handle `$/verter/audit/getRecent` request.
@@ -945,43 +953,65 @@ impl VerterLanguageServer {
         &self,
         params: Option<GetAuditRecentParams>,
     ) -> Result<Vec<serde_json::Value>> {
-        use verter_audit::batch::AuditRecordSource;
-        let params = params.unwrap_or_default();
-        tracing::debug!(
-            "$/verter/audit/getRecent: kind={:?} limit={:?}",
-            params.kind,
-            params.limit
-        );
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            let _ = (params,);
+            return Err(audit_capture_unavailable_error());
+        }
+        #[cfg(feature = "semantic-observe")]
+        {
+            use verter_audit::batch::AuditRecordSource;
+            let params = params.unwrap_or_default();
+            tracing::debug!(
+                "$/verter/audit/getRecent: kind={:?} limit={:?}",
+                params.kind,
+                params.limit
+            );
 
-        const DEFAULT_LIMIT: usize = 50;
-        const MAX_LIMIT: usize = 1024;
-        let limit = params
-            .limit
-            .map(|n| (n as usize).min(MAX_LIMIT))
-            .unwrap_or(DEFAULT_LIMIT);
-        let kind_filter = params.kind;
+            const DEFAULT_LIMIT: usize = 50;
+            const MAX_LIMIT: usize = 1024;
+            let limit = params
+                .limit
+                .map(|n| (n as usize).min(MAX_LIMIT))
+                .unwrap_or(DEFAULT_LIMIT);
+            let kind_filter = params.kind;
 
-        let host = self.documents.host();
-        let store = host.host_audit_runtime().audit_records_store();
-        let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
-        store.for_each_record(&mut |_inserted_at, record| {
-            if let Some(ref filter) = kind_filter {
-                if !record.kind.matches_filter(filter) {
-                    return;
+            let host = self.documents.host();
+            let store = host.host_audit_runtime().audit_records_store();
+            let mut collected: Vec<verter_audit::RequestAuditRecord> = Vec::new();
+            store.for_each_record(&mut |_inserted_at, record| {
+                if let Some(ref filter) = kind_filter {
+                    if !record.kind.matches_filter(filter) {
+                        return;
+                    }
                 }
-            }
-            collected.push(record.clone());
-        });
+                collected.push(record.clone());
+            });
 
-        // Sort descending by request_id so the newest records lead the
-        // response — the underlying store does not promise iteration
-        // order, so we impose one here for client predictability.
-        collected.sort_by_key(|record| std::cmp::Reverse(record.request_id));
-        collected.truncate(limit);
+            // Sort descending by request_id so the newest records lead the
+            // response — the underlying store does not promise iteration
+            // order, so we impose one here for client predictability.
+            collected.sort_by_key(|record| std::cmp::Reverse(record.request_id));
+            collected.truncate(limit);
 
-        Ok(collected
-            .into_iter()
-            .filter_map(|r| serde_json::to_value(&r).ok())
-            .collect())
+            Ok(collected
+                .into_iter()
+                .filter_map(|r| serde_json::to_value(&r).ok())
+                .collect())
+        }
+    }
+}
+
+/// The JSON-RPC error the audit query methods return from a server built
+/// without `semantic-observe`: capture is unavailable, which is not the
+/// same answer as "no record".
+#[cfg(not(feature = "semantic-observe"))]
+fn audit_capture_unavailable_error() -> tower_lsp_server::jsonrpc::Error {
+    tower_lsp_server::jsonrpc::Error {
+        code: tower_lsp_server::jsonrpc::ErrorCode::MethodNotFound,
+        message: std::borrow::Cow::Borrowed(
+            "audit capture is unavailable: the server was built without the semantic-observe feature",
+        ),
+        data: None,
     }
 }

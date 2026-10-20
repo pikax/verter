@@ -405,6 +405,9 @@ fn qualified_maps_reject_stale_output_bytes_and_input_basis_without_renaming_art
     );
 }
 
+// Counts transform work through the audit observer, which exists only
+// with optional capture compiled in.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn schema_construction_preserves_unavailable_and_opaque_content_without_compile_work() {
     use std::sync::{

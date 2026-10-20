@@ -103,9 +103,10 @@ pub(crate) use origin_graph::build_origin_graph;
 // `host_manage/component_meta_request_impl.rs` (host-impl tier per
 // §10a.0.A). The re-export re-points at the new home so the
 // `crate::meta_resolve::*` public surface stays intact for callers.
+#[cfg(feature = "semantic-observe")]
+pub(crate) use crate::host_manage::component_meta_request_impl::request_source_performed_compute;
 pub(crate) use crate::host_manage::component_meta_request_impl::{
-    request_source_performed_compute, should_skip_imported_registry_seed_refresh,
-    trace_request_source,
+    should_skip_imported_registry_seed_refresh, trace_request_source,
 };
 pub use crate::host_manage::component_meta_request_impl::{
     CapturedComponentMetaInputs, ResolvedComponentMetaComputeAudit, ResolvedJsdocBlock,

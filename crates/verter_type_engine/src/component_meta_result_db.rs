@@ -731,7 +731,7 @@ impl<P> ComponentMetaResultDb<P> {
             .inner
             .get_candidate(key, &owner_whole_hash)
             .map(|c| c.value.clone());
-        if let Some(ctx) = crate::request_context::current_request_context() {
+        crate::observe_request!(|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .component_meta
@@ -743,7 +743,7 @@ impl<P> ComponentMetaResultDb<P> {
                     .misses
                     .fetch_add(1, Ordering::Relaxed);
             }
-        }
+        });
         result
     }
 

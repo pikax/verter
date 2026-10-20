@@ -44,9 +44,11 @@ use web_time::Instant;
 use dashmap::DashMap;
 use parking_lot::{Condvar, Mutex};
 
+#[cfg(feature = "semantic-observe")]
+use crate::dag::DedupJoinerEvent;
 use crate::dag::{
-    profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DedupJoinerEvent, DepKey,
-    FileStageKey, Hash16, PinId, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
+    profile_hash_from_bytes, profile_hash_to_bytes, DagCapacityBudget, DepKey, FileStageKey,
+    Hash16, PinId, ReadyJob, SchedulerDag, WorkKind, WorkNodeIdentity,
 };
 use crate::driver::{QueuedRequest, Submission, SubmissionInbox};
 use crate::edges::EdgeManager;
@@ -2210,17 +2212,9 @@ mod tests {
             self.id
         }
 
-        fn capture_enabled(&self) -> bool {
-            false
-        }
-
         fn cancellation_token(&self) -> Option<CancellationToken> {
             Some(self.cancellation.clone())
         }
-
-        fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {}
-
-        fn record_cache_event(&self, _: verter_execution::request_context::CacheEventKind) {}
 
         fn install_tls(
             self: Arc<Self>,
@@ -5932,7 +5926,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
     use std::sync::Mutex as StdMutex;
     use verter_execution::request_context::{
-        CacheEventKind, OpaqueRequestContext, RequestContextLike, TlsUninstall,
+        OpaqueRequestContext, RequestContextLike, TlsUninstall,
     };
 
     /// Test-only implementation of `RequestContextLike` that captures
@@ -5945,6 +5939,7 @@ mod tests {
     ///   including the winner details.
     /// - `capture_enabled` mirrors the plan's
     ///   `RequestContext::footprint_capture`.
+    #[cfg_attr(not(feature = "semantic-observe"), allow(dead_code))]
     struct TestContext {
         request_id: u64,
         capture: bool,
@@ -5959,6 +5954,7 @@ mod tests {
                 dedup_joiner_calls: StdMutex::new(Vec::new()),
             })
         }
+        #[cfg(feature = "semantic-observe")]
         fn joiner_calls(&self) -> Vec<(Arc<str>, u64, bool)> {
             self.dedup_joiner_calls.lock().unwrap().clone()
         }
@@ -5973,9 +5969,11 @@ mod tests {
         fn request_id(&self) -> u64 {
             self.request_id
         }
+        #[cfg(feature = "semantic-observe")]
         fn capture_enabled(&self) -> bool {
             self.capture
         }
+        #[cfg(feature = "semantic-observe")]
         fn on_dedup_joiner(
             &self,
             canonical_id: Arc<str>,
@@ -5988,7 +5986,6 @@ mod tests {
                 winner_audited,
             ));
         }
-        fn record_cache_event(&self, _event: CacheEventKind) {}
         fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
             let guard = verter_execution::request_context::OpaqueContextGuard::install(
                 OpaqueRequestContext(self as Arc<dyn RequestContextLike>),
@@ -6285,6 +6282,8 @@ mod tests {
     /// Scheduler dedup hook: joiner's `on_dedup_joiner` is called with
     /// `winner_audited = true` when the winner captures. Now exercised
     /// through the DAG-owned waiter group bookkeeping.
+    // The dedup-join callback is optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_true_when_winner_captures() {
         let mut dag = SchedulerDag::new();
@@ -6339,6 +6338,8 @@ mod tests {
     /// Dedup hook: `winner_audited = false` when the winner does NOT
     /// capture. Now exercised through the DAG-owned waiter group
     /// bookkeeping.
+    // The dedup-join callback is optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn scheduler_dedup_calls_on_dedup_joiner_with_winner_audited_false_when_winner_does_not_capture(
     ) {
@@ -9885,6 +9886,8 @@ mod tests {
         }
     }
 
+    // The reset is injected through the dedup-join callback, which is optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn dependency_registration_reset_during_backpressure_cannot_recreate_work() {
         struct ResetJoiner {
@@ -9895,15 +9898,11 @@ mod tests {
             fn request_id(&self) -> u64 {
                 42
             }
-            fn capture_enabled(&self) -> bool {
-                false
-            }
             fn on_dedup_joiner(&self, _: Arc<str>, _: u64, _: bool) {
                 if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
                     self.scheduler.upgrade().unwrap().reset();
                 }
             }
-            fn record_cache_event(&self, _: CacheEventKind) {}
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 struct Guard;
                 impl TlsUninstall for Guard {
@@ -14121,6 +14120,8 @@ mod tests {
     /// the test asserts at least one dispatch landed with
     /// `WorkerPool::Io`.
     #[cfg(not(target_arch = "wasm32"))]
+    // Reads the scheduler dispatch audit, which is optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn inline_execute_io_worker_source_publishes_io_pool_tag() {
         use crate::caller_kind::CallerKind;
@@ -14195,8 +14196,6 @@ mod tests {
             fn capture_enabled(&self) -> bool {
                 true
             }
-            fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
-            fn record_cache_event(&self, _e: CacheEventKind) {}
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 let ctx_guard = verter_execution::request_context::OpaqueContextGuard::install(
                     OpaqueRequestContext(Arc::clone(&self) as Arc<dyn RequestContextLike>),
@@ -14348,7 +14347,9 @@ mod tests {
         // None-winner_ctx path. The hook records what the inner
         // stage saw for each slot — a 1 means "context was
         // visible", 0 means "slot was empty as required".
+        #[cfg(feature = "semantic-observe")]
         let inner_audit_observer_visible = Arc::new(AtomicUsize::new(0));
+        #[cfg(feature = "semantic-observe")]
         let inner_audit_observer_visible_for_hook = Arc::clone(&inner_audit_observer_visible);
 
         let hook: Box<dyn Fn(&str) + Send + Sync> = Box::new(move |canonical: &str| {
@@ -14383,6 +14384,7 @@ mod tests {
                 // inline-execute None-winner_ctx path. A non-None
                 // observer here means the outer's audit TLS bled
                 // through despite the scheduler-side opaque clear.
+                #[cfg(feature = "semantic-observe")]
                 if verter_audit::current_observer().is_some() {
                     inner_audit_observer_visible_for_hook.store(1, MOrd::SeqCst);
                 }
@@ -14447,7 +14449,9 @@ mod tests {
         // (the outer context here is a `TestContext`, not a
         // `RequestContext`), so the slot is None going in and
         // stays None — the assertion guards against a future
-        // path where the slot is populated but not cleared.
+        // path where the slot is populated but not cleared. A default
+        // build has no observer slot to bleed.
+        #[cfg(feature = "semantic-observe")]
         assert_eq!(
             inner_audit_observer_visible.load(MOrd::SeqCst),
             0,
@@ -14485,15 +14489,6 @@ mod tests {
         impl RequestContextLike for DummyCtx {
             fn request_id(&self) -> u64 {
                 self.id
-            }
-            fn capture_enabled(&self) -> bool {
-                false
-            }
-            fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {}
-            fn record_cache_event(
-                &self,
-                _event: verter_execution::request_context::CacheEventKind,
-            ) {
             }
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 struct NoopUninstall;
@@ -15364,6 +15359,8 @@ mod tests {
     /// That alias is compile-enforced; this test's lock/unlock contract
     /// is identical for both backends and is not a DagMutex-vs-Mutex
     /// discriminator.
+    // The dedup-join callback is optional capture.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn dedup_callbacks_run_after_dag_unlock() {
         let canonical = "/dup.vue";
@@ -15382,9 +15379,6 @@ mod tests {
             fn request_id(&self) -> u64 {
                 self.id
             }
-            fn capture_enabled(&self) -> bool {
-                false
-            }
             fn on_dedup_joiner(&self, _c: Arc<str>, _w: u64, _a: bool) {
                 // Count every firing so a DOUBLE-fire is caught: a
                 // boolean flag would silently collapse two callbacks into
@@ -15396,11 +15390,6 @@ mod tests {
                 let got = self.dag.try_lock();
                 self.try_lock_succeeded
                     .store(got.is_some(), std::sync::atomic::Ordering::SeqCst);
-            }
-            fn record_cache_event(
-                &self,
-                _event: verter_execution::request_context::CacheEventKind,
-            ) {
             }
             fn install_tls(
                 self: Arc<Self>,

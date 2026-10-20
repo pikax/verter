@@ -1867,6 +1867,8 @@ export interface UnusedProps {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn ensure_indexed_ready_defers_prepared_decl_materialization_until_lookup() {
     let host = make_host();

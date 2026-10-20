@@ -72,9 +72,9 @@ impl<'a> ImportedRootRequestDriver<'a> {
         if let Some(hit) = self.db.roots.get_if_valid_with_facts(&key, view) {
             // Per-request audit attribution: warm-cache hit. The
             // closure body did not run — this is a true reuse.
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRootWarm);
-            }
+            });
             return Some(hit);
         }
 
@@ -139,9 +139,9 @@ impl<'a> ImportedRootRequestDriver<'a> {
             // expensive `resolve()` closure. Joiners that block on
             // this singleflight do NOT re-enter — the counter
             // reflects unique cold work, not per-waiter overhead.
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRootCold);
-            }
+            });
             match resolve() {
                 Some((result, facts)) => {
                     let arc = crate::resolver_core::CachedValue::new(result);

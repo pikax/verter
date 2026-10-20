@@ -32,14 +32,19 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
+use verter_audit::WaitAudit;
 use verter_audit::{
     AuditedResult, McpToolPayload, RequestAuditRecord, RequestKind, RequestKindPayload,
-    RequestMemoryAudit, RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit, WaitAudit,
+    RequestMemoryAudit, RequestStoreAudit, RequestTargetIdentity, RequestTimingAudit,
 };
 
+#[cfg(feature = "semantic-observe")]
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::instant::Instant;
+#[cfg(feature = "semantic-observe")]
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
 /// Success payload a caller closure produces. Carries the tool's value
@@ -116,149 +121,153 @@ impl VerterHost {
         // current_observer() returns None and the instrumentation
         // short-circuits. The carrier still carries a cheap
         // default-filled record marked `AuditDisabled`.
-        if !self.config.audit_enabled {
+        #[cfg(feature = "semantic-observe")]
+        if self.config.audit_enabled {
+            // 1. Stamp request id and bump the harness multi-request guard.
             let request_id = self.next_request_id();
-            let outcome = f(self);
-            let parent_request_id =
-                verter_execution::request_context::current_request_id().map(|id| id.to_string());
-            let record = noop_mcp_record(
+            #[cfg(feature = "semantic-observe")]
+            verter_type_engine::request_context::increment_requests_created();
+
+            // 2. Build the per-request context. Footprint capture is
+            //    disabled — MCP tools do not collect semantic-footprint
+            //    events the way component-meta does. Timing capture
+            //    follows the host config.
+            let footprint_capture = false;
+            let timing_capture = self.config.audit_timing_capture;
+            let ctx = RequestContext::with_kind_and_timing(
                 request_id,
-                canonical_id,
-                parent_request_id,
-                tool_name,
-                args_size_bytes,
-                verter_audit::AuditCaptureState::AuditDisabled,
+                Arc::<str>::from(canonical_id),
+                RequestKind::Mcp {
+                    tool: tool_name.to_string(),
+                },
+                footprint_capture,
+                timing_capture,
+                None,
             );
-            return audited_mcp_outcome(outcome, record);
-        }
 
-        // 1. Stamp request id and bump the harness multi-request guard.
-        let request_id = self.next_request_id();
-        verter_type_engine::request_context::increment_requests_created();
+            // 3. Construct the registration BEFORE installing the TLS
+            //    guard so the active-request registry slot precedes the
+            //    closure body. The `Noop` arm returns when the consumer
+            //    filter rejects `RequestKind::Mcp`.
+            let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
+            let _ = ctx.install_audit_registration(registration.clone());
 
-        // 2. Build the per-request context. Footprint capture is
-        //    disabled — MCP tools do not collect semantic-footprint
-        //    events the way component-meta does. Timing capture
-        //    follows the host config.
-        let footprint_capture = false;
-        let timing_capture = self.config.audit_timing_capture;
-        let ctx = RequestContext::with_kind_and_timing(
-            request_id,
-            Arc::<str>::from(canonical_id),
-            RequestKind::Mcp {
-                tool: tool_name.to_string(),
-            },
-            footprint_capture,
-            timing_capture,
-            None,
-        );
+            // 4. Install the matching TLS observer. The active arm uses
+            //    the real RequestContextGuard so sub-requests spawned by
+            //    the closure inherit `parent_request_id` from this MCP
+            //    request via the scheduler-side TLS slot. The filtered
+            //    arm installs a no-op observer; downstream emit sites
+            //    short-circuit but child requests can still observe the
+            //    parent id.
+            let total_start = Instant::now();
+            let outcome = match registration.as_ref() {
+                AuditRequestRegistration::Active(_) => {
+                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+                    f(self)
+                }
+                AuditRequestRegistration::Noop => {
+                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+                    f(self)
+                }
+            };
+            let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 3. Construct the registration BEFORE installing the TLS
-        //    guard so the active-request registry slot precedes the
-        //    closure body. The `Noop` arm returns when the consumer
-        //    filter rejects `RequestKind::Mcp`.
-        let registration = Arc::new(AuditRequestRegistration::new(self, Arc::clone(&ctx)));
-        let _ = ctx.install_audit_registration(registration.clone());
-
-        // 4. Install the matching TLS observer. The active arm uses
-        //    the real RequestContextGuard so sub-requests spawned by
-        //    the closure inherit `parent_request_id` from this MCP
-        //    request via the scheduler-side TLS slot. The filtered
-        //    arm installs a no-op observer; downstream emit sites
-        //    short-circuit but child requests can still observe the
-        //    parent id.
-        let total_start = Instant::now();
-        let outcome = match registration.as_ref() {
-            AuditRequestRegistration::Active(_) => {
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                f(self)
+            // 5. Filtered kinds: return the cheap default-filled record.
+            //    The tool's work still ran; no payload is collected.
+            if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
+                let record = noop_mcp_record(
+                    request_id,
+                    canonical_id,
+                    ctx.parent_request_id.map(|id| id.to_string()),
+                    tool_name,
+                    args_size_bytes,
+                    verter_audit::AuditCaptureState::FilteredNoop,
+                );
+                return audited_mcp_outcome(outcome, record);
             }
-            AuditRequestRegistration::Noop => {
-                let _noop_guard = verter_audit::install_noop_observer();
-                f(self)
-            }
-        };
-        let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-        // 5. Filtered kinds: return the cheap default-filled record.
-        //    The tool's work still ran; no payload is collected.
-        if matches!(registration.as_ref(), AuditRequestRegistration::Noop) {
-            let record = noop_mcp_record(
-                request_id,
-                canonical_id,
-                ctx.parent_request_id.map(|id| id.to_string()),
-                tool_name,
+            // 6. Assemble the payload and the envelope. The success arm
+            //    contributes `result_size_bytes`; the error arm contributes
+            //    the payload error string via `Debug`.
+            let (result_size_bytes, error) = match &outcome {
+                Ok(success) => (success.result_size_bytes, None),
+                Err(err) => (0, Some(format!("{err:?}"))),
+            };
+            let payload = McpToolPayload {
+                tool_name: tool_name.to_string(),
                 args_size_bytes,
-                verter_audit::AuditCaptureState::FilteredNoop,
-            );
-            return audited_mcp_outcome(outcome, record);
-        }
+                result_size_bytes,
+                error,
+            };
 
-        // 6. Assemble the payload and the envelope. The success arm
-        //    contributes `result_size_bytes`; the error arm contributes
-        //    the payload error string via `Debug`.
-        let (result_size_bytes, error) = match &outcome {
-            Ok(success) => (success.result_size_bytes, None),
-            Err(err) => (0, Some(format!("{err:?}"))),
-        };
-        let payload = McpToolPayload {
-            tool_name: tool_name.to_string(),
-            args_size_bytes,
-            result_size_bytes,
-            error,
-        };
-
-        let timings = RequestTimingAudit {
-            total_ms,
-            ..RequestTimingAudit::default()
-        };
-        let store = RequestStoreAudit {
-            cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-            bypass_diagnostics: crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-            ..RequestStoreAudit::default()
-        };
-        let memory = RequestMemoryAudit {
-            process_rss_peak_bytes: ctx
-                .process_rss_peak_bytes
-                .load(std::sync::atomic::Ordering::Relaxed),
-            ..RequestMemoryAudit::default()
-        };
-        let waits = if ctx.timing_capture {
-            Some(WaitAudit {
-                lock_wait_ns: ctx.lock_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
-                queue_wait_ns: ctx.queue_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
-                lock_acquisitions: ctx
-                    .lock_acquisitions
+            let timings = RequestTimingAudit {
+                total_ms,
+                ..RequestTimingAudit::default()
+            };
+            let store = RequestStoreAudit {
+                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                bypass_diagnostics:
+                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                ..RequestStoreAudit::default()
+            };
+            let memory = RequestMemoryAudit {
+                process_rss_peak_bytes: ctx
+                    .process_rss_peak_bytes
                     .load(std::sync::atomic::Ordering::Relaxed),
-            })
-        } else {
-            None
-        };
+                ..RequestMemoryAudit::default()
+            };
+            let waits = if ctx.timing_capture {
+                Some(WaitAudit {
+                    lock_wait_ns: ctx.lock_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
+                    queue_wait_ns: ctx.queue_wait_ns.load(std::sync::atomic::Ordering::Relaxed),
+                    lock_acquisitions: ctx
+                        .lock_acquisitions
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                })
+            } else {
+                None
+            };
 
-        let record = RequestAuditRecord {
+            let record = RequestAuditRecord {
+                request_id,
+                canonical_id: canonical_id.to_string(),
+                target_identity: Some(mcp_target_identity(canonical_id)),
+                kind: RequestKind::Mcp {
+                    tool: tool_name.to_string(),
+                },
+                parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
+                from_cache: false,
+                timings,
+                memory,
+                store,
+                footprint: None,
+                scheduler: ctx.scheduler_audit.lock().clone(),
+                files: Vec::new(),
+                waits,
+                kind_payload: RequestKindPayload::Mcp(payload),
+                capture_state: verter_audit::AuditCaptureState::ActiveStored,
+                trace_id: String::new(),
+            };
+
+            let cloned = record.clone();
+            registration.finalize(record);
+            return audited_mcp_outcome(outcome, cloned);
+        }
+
+        // Uncaptured: audit disabled by the host, or capture compiled out.
+        let request_id = self.next_request_id();
+        let outcome = f(self);
+        let parent_request_id =
+            verter_execution::request_context::current_request_id().map(|id| id.to_string());
+        let record = noop_mcp_record(
             request_id,
-            canonical_id: canonical_id.to_string(),
-            target_identity: Some(mcp_target_identity(canonical_id)),
-            kind: RequestKind::Mcp {
-                tool: tool_name.to_string(),
-            },
-            parent_request_id: ctx.parent_request_id.map(|id| id.to_string()),
-            from_cache: false,
-            timings,
-            memory,
-            store,
-            footprint: None,
-            scheduler: ctx.scheduler_audit.lock().clone(),
-            files: Vec::new(),
-            waits,
-            kind_payload: RequestKindPayload::Mcp(payload),
-            capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            trace_id: String::new(),
-        };
-
-        let cloned = record.clone();
-        registration.finalize(record);
-        audited_mcp_outcome(outcome, cloned)
+            canonical_id,
+            parent_request_id,
+            tool_name,
+            args_size_bytes,
+            crate::capture::uncaptured_state(false),
+        );
+        audited_mcp_outcome(outcome, record)
     }
 }
 

@@ -1243,7 +1243,7 @@ where
             if facts.is_empty() {
                 self.admission_refused
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                verter_type_engine::request_observers::push_structured_event(
+                verter_type_engine::component_meta_trace_structured!(
                     crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                         cache_kind: Arc::from(cache_kind),
                         reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1384,7 +1384,7 @@ where
         if facts.is_empty() {
             self.admission_refused
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            verter_type_engine::request_observers::push_structured_event(
+            verter_type_engine::component_meta_trace_structured!(
                 crate::component_meta_audit::StructuredAuditEvent::FactSignatureAdmissionRefused {
                     cache_kind: Arc::from(cache_kind),
                     reason: verter_audit::AdmissionRefusalReason::EmptySignature,
@@ -1672,7 +1672,7 @@ where
         let archive_checks = self
             .archive_checks
             .swap(0, std::sync::atomic::Ordering::Relaxed) as u32;
-        verter_type_engine::request_observers::push_structured_event(
+        verter_type_engine::component_meta_trace_structured!(
             crate::component_meta_audit::StructuredAuditEvent::FactValidationSummary {
                 request_id,
                 cache_kind: Arc::from(cache_kind),

@@ -54,7 +54,7 @@ impl VerterHost {
             //
             // Per-request audit attribution: classify the warm hit as
             // positive vs negative (known-miss).
-            if let Some(obs) = verter_audit::current_observer() {
+            verter_audit::observe!(|obs| {
                 let known_miss = Self::import_route_is_known_miss(&resolution);
                 let event = if known_miss {
                     verter_audit::AuditEvent::ResolveImportWarmNegative
@@ -65,7 +65,7 @@ impl VerterHost {
                 if known_miss {
                     obs.record_event(verter_audit::AuditEvent::KnownMissRouteServed);
                 }
-            }
+            });
             (Some(resolution), "host-cache")
         } else {
             // No artifact fallback exists any more: `IndexedReady` is a

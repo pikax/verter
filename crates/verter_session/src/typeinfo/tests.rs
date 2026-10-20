@@ -507,6 +507,8 @@ export type Wrap<T> = { wrapped: T };
     let _ = def_node;
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_with_audit_emits_one_record() {
     let host = make_host_with_audit();
@@ -792,6 +794,8 @@ fn evaluate_evicts_oldest_at_cache_limit() {
     assert!(cache.get("verter://typeinfo/k0.ts").is_none());
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_with_audit_emits_one_record() {
     let host = make_host_with_audit();

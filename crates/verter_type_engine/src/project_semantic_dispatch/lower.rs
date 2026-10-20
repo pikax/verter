@@ -2308,7 +2308,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // 258K-collision count tracks 258K cold MappedType
                 // dispatches, indicating (b) — the registry is
                 // doing what it can.
-                if let Some(ctx) = crate::request_context::current_request_context() {
+                crate::observe_request!(|ctx| {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
@@ -2321,7 +2321,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         display_name: Arc::clone(&mapper_display_name),
                     };
                     ctx.classify_mapper_binder_ordinal(identity, mapper_ordinal);
-                }
+                });
                 let parameter_id = graph.intern_node_with_scope(
                     SemanticNodeData::TypeParam {
                         decl: mapper_decl,

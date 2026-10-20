@@ -337,6 +337,7 @@ pub fn dump_from_host_call_sites() -> Vec<(String, u64)> {
     rows
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Per-request component-meta store counters captured by
 /// [`VerterHost::component_meta_audit_store_snapshot`]. The fields
 /// live on [`crate::component_meta_audit::ComponentMetaPayload`]
@@ -1571,12 +1572,12 @@ impl HostStoreView {
             .fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         HOST_STORE_VIEW_FROM_HOST_BUILDS.with(|c| c.set(c.get().saturating_add(1)));
-        if let Some(ctx) = verter_type_engine::request_context::current_request_context() {
+        verter_type_engine::observe_request!(|ctx| {
             ctx.cache_counters
                 .bypass_diagnostics
                 .host_store_view_from_host_builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        });
         host.store_view_manager().base_view(host)
     }
 
@@ -4632,6 +4633,7 @@ impl VerterHost {
             .external_supersession_fingerprint()
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_store_snapshot(
         &self,
         store_view: Option<&HostStoreView>,
@@ -4709,6 +4711,7 @@ impl VerterHost {
         (store_audit, component_meta_counters)
     }
 
+    #[cfg(feature = "semantic-observe")]
     pub(crate) fn component_meta_audit_memory_bytes(&self) -> (u64, u64) {
         let host_cache_bytes: u64 = self
             .project_type_store

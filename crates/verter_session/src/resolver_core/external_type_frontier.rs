@@ -322,9 +322,9 @@ impl ExternalTypeFrontier {
                 // as one barrel step, including refs whose target is
                 // later deduplicated by the `seen` set — the counter
                 // measures raw walk work, not unique-target count.
-                if let Some(obs) = verter_audit::current_observer() {
+                verter_audit::observe!(|obs| {
                     obs.record_event(verter_audit::AuditEvent::RouteDbBarrelStep);
-                }
+                });
                 let target_canonical = host
                     .resolve_type_edge_canonical(&resolved.canonical_id, &ext_ref.source_specifier);
                 let Some(target_canonical) = target_canonical else {

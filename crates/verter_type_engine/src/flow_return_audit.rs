@@ -17,9 +17,16 @@
 //! zero-allocation half, and the warm-hit behavioral test pins the
 //! no-`FlowReturnStarted` half.
 
+//!
+//! All three are optional capture: without `semantic-observe` they read no
+//! request context and build no event.
+
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
+#[cfg(feature = "semantic-observe")]
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{FlowSliceBudgetAxisTag, StructuredAuditEvent};
 
 use verter_session_query::flow::peeker::FlowSliceBudgetExceeded;
@@ -27,6 +34,7 @@ use verter_session_query::flow::peeker::FlowSliceBudgetExceeded;
 /// `true` when a structured-event accumulator is installed for the
 /// current request. The event-construction gate: all payload
 /// allocation for the three flow events happens strictly behind it.
+#[cfg(feature = "semantic-observe")]
 fn accumulator_installed() -> bool {
     crate::request_context::current_accumulator().is_some()
 }
@@ -38,7 +46,16 @@ fn accumulator_installed() -> bool {
 ///
 /// COLD-PATH ONLY caller contract — the warm family hit must return
 /// before reaching this helper.
+#[inline(always)]
 pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (canonical_id, function_symbol);
+    #[cfg(feature = "semantic-observe")]
+    record_flow_return_started_captured(canonical_id, function_symbol);
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_return_started_captured(canonical_id: &str, function_symbol: &str) {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.flow_return_cold_computes
             .fetch_add(1, Ordering::Relaxed);
@@ -56,7 +73,16 @@ pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
 /// `flow_return_budget_exceeded` counter and, when an accumulator is
 /// installed, push a
 /// [`StructuredAuditEvent::FlowSliceBudgetExceeded`].
+#[inline(always)]
 pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = exceeded;
+    #[cfg(feature = "semantic-observe")]
+    record_flow_slice_budget_exceeded_captured(exceeded);
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_slice_budget_exceeded_captured(exceeded: &FlowSliceBudgetExceeded) {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.flow_return_budget_exceeded
             .fetch_add(1, Ordering::Relaxed);
@@ -87,7 +113,16 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
 ///
 /// `cycle_id` is the request-scoped in-flight obligation frame index
 /// the re-entry targeted.
+#[inline(always)]
 pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &str) {
+    #[cfg(not(feature = "semantic-observe"))]
+    let _ = (cycle_id, function_symbol);
+    #[cfg(feature = "semantic-observe")]
+    record_flow_cycle_reentry_captured(cycle_id, function_symbol);
+}
+
+#[cfg(feature = "semantic-observe")]
+fn record_flow_cycle_reentry_captured(cycle_id: u32, function_symbol: &str) {
     if let Some(ctx) = crate::request_context::current_request_context() {
         ctx.flow_return_cycle_reentries
             .fetch_add(1, Ordering::Relaxed);

@@ -1,9 +1,13 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+#[cfg(feature = "semantic-observe")]
 use verter_audit::files::{FileAudit, FileRole};
+#[cfg(feature = "semantic-observe")]
 use verter_audit::origin_graph::VfsLayer;
+#[cfg(feature = "semantic-observe")]
 use verter_audit::payloads::WorkspacePayload;
+#[cfg(feature = "semantic-observe")]
 use verter_audit::{
     RequestAuditRecord, RequestKind, RequestKindPayload, RequestMemoryAudit, RequestStoreAudit,
     RequestTargetIdentity, RequestTimingAudit, WorkspaceOp,
@@ -19,9 +23,10 @@ use verter_language::FileLanguage;
 use verter_session_query::resolution::ProjectId;
 use verter_session_query::resolution::ProjectStableKey;
 use verter_session_query::resolution::{
-    AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolvePhase, ResolveRequestKind,
-    ResolveResult,
+    AmbientSymbolHit, ProjectOwnership, ResolutionContext, ResolveResult,
 };
+#[cfg(feature = "semantic-observe")]
+use verter_session_query::resolution::{ResolvePhase, ResolveRequestKind};
 
 /// Lightweight resource snapshot for first-class Rust audit.
 #[derive(Debug, Clone, Default)]
@@ -1068,6 +1073,8 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Register a VFS audit sink. The returned handle is deregister-able
     /// via [`deregister_audit_sink`]. Default: `NotSupported`.
     /// Concrete workspaces override to maintain a per-sink registry.
+    /// Optional capture: exists only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     fn register_audit_sink(
         &self,
         _sink: Arc<dyn crate::audit_sink::VfsAuditSink>,
@@ -1078,6 +1085,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// Deregister a previously-registered VFS audit sink. Default:
     /// `NotSupported`. Concrete workspaces override to complete the
     /// RAII-style registration lifecycle.
+    #[cfg(feature = "semantic-observe")]
     fn deregister_audit_sink(
         &self,
         _handle: crate::audit_sink::SinkHandle,
@@ -1227,6 +1235,9 @@ pub trait WorkspaceAccess: WorkspaceRead {
     /// [`verter_execution::request_context::current_request_id`]
     /// so a registration installed by the host will already be
     /// visible when the trait method runs.
+    ///
+    /// Optional capture: exists only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
     fn audit_op(&self, op: WorkspaceOp) -> RequestAuditRecord {
         let request_id = verter_execution::request_context::current_request_id().unwrap_or(0);
         let (canonical_id, target_identity) = match &op {
@@ -1347,6 +1358,7 @@ pub trait WorkspaceAccess: WorkspaceRead {
 /// workspace operation visited. Bytes/timing are zero because
 /// `audit_op` does not load file content; the bytes/timing surfaces
 /// belong to the read-loop producers (Slices 3.A/3.B/3.C).
+#[cfg(feature = "semantic-observe")]
 fn workspace_audit_file_entry(canonical_id: &str, role: FileRole) -> FileAudit {
     FileAudit {
         canonical_id: canonical_id.to_string(),

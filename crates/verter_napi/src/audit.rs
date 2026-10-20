@@ -42,9 +42,9 @@ use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 
-use verter_audit::{
-    payloads::tags::BundlerKindTag, AuditCaptureState, RequestAuditRecord, RequestKind, WorkspaceOp,
-};
+#[cfg(feature = "semantic-observe")]
+use verter_audit::{payloads::tags::BundlerKindTag, RequestKind};
+use verter_audit::{AuditCaptureState, RequestAuditRecord, WorkspaceOp};
 use verter_session::CompileTarget;
 
 /// Encode a record only when it represents real stored capture
@@ -60,8 +60,20 @@ use verter_session::CompileTarget;
 pub(crate) fn encode_stored_record(record: &RequestAuditRecord) -> Result<Option<Buffer>> {
     match record.capture_state {
         AuditCaptureState::ActiveStored => encode_record(record).map(Some),
-        AuditCaptureState::FilteredNoop | AuditCaptureState::AuditDisabled => Ok(None),
+        AuditCaptureState::FilteredNoop
+        | AuditCaptureState::AuditDisabled
+        | AuditCaptureState::Unavailable => Ok(None),
     }
+}
+
+/// Message every audit method reports when this binding was built
+/// without `semantic-observe`: capture is unavailable, not empty.
+pub(crate) const CAPTURE_UNAVAILABLE: &str =
+    "audit capture is unavailable: this binding was built without the semantic-observe feature";
+
+/// The error an audit method returns when capture is compiled out.
+pub(crate) fn capture_unavailable_error() -> Error {
+    Error::new(Status::GenericFailure, CAPTURE_UNAVAILABLE)
 }
 
 /// Encode a `RequestAuditRecord` to a `Buffer` (JSON UTF-8).
@@ -76,6 +88,7 @@ pub(crate) fn encode_record(record: &RequestAuditRecord) -> Result<Buffer> {
     Ok(Buffer::from(bytes))
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Encode a list of records to a `Buffer` (JSON UTF-8 array).
 pub(crate) fn encode_record_list(records: &[RequestAuditRecord]) -> Result<Buffer> {
     let bytes = serde_json::to_vec(records).map_err(|e| {
@@ -202,6 +215,7 @@ pub struct NapiBundlerBatchSummaryArgs {
     pub since_request_id: Option<String>,
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Match the textual `kind` filter against a `RequestKind`.
 ///
 /// Delegates to [`RequestKind::matches_filter`] so the NAPI surface
@@ -211,6 +225,7 @@ pub(crate) fn kind_matches(filter: &str, kind: &RequestKind) -> bool {
     kind.matches_filter(filter)
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map a textual bundler-kind tag.
 pub(crate) fn parse_bundler_kind(name: Option<&str>) -> BundlerKindTag {
     match name.unwrap_or("Vite") {
@@ -223,6 +238,7 @@ pub(crate) fn parse_bundler_kind(name: Option<&str>) -> BundlerKindTag {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Parse a decimal-string request id (matching the JSON
 /// serialization on the record) into a `u64`.
 pub(crate) fn parse_request_id_str(s: &str) -> Result<u64> {
@@ -232,4 +248,33 @@ pub(crate) fn parse_request_id_str(s: &str) -> Result<u64> {
             format!("expected decimal request id, got '{s}': {e}"),
         )
     })
+}
+
+/// Whether this binding can capture audit records: `"Available"` when it
+/// was built with `semantic-observe`, `"Unavailable"` otherwise. Every
+/// audit method of an unavailable binding reports that capture is
+/// unavailable instead of returning empty or zero records.
+#[napi(js_name = "captureAvailability")]
+pub fn capture_availability() -> String {
+    match verter_session::capture::availability() {
+        verter_audit::CaptureAvailability::Available => "Available",
+        verter_audit::CaptureAvailability::Unavailable => "Unavailable",
+    }
+    .to_string()
+}
+
+#[cfg(test)]
+mod capture_availability_tests {
+    #[test]
+    fn availability_names_the_build_and_unavailable_capture_is_an_error() {
+        let expected = if cfg!(feature = "semantic-observe") {
+            "Available"
+        } else {
+            "Unavailable"
+        };
+        assert_eq!(super::capture_availability(), expected);
+        assert!(super::capture_unavailable_error()
+            .to_string()
+            .contains("built without the semantic-observe feature"));
+    }
 }
