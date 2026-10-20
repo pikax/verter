@@ -554,11 +554,15 @@ impl CheckerDiagnosticRecipe {
     fn subject_span(&self, site: &CheckerDiagnosticSite) -> Option<(u32, u32)> {
         match self.subject {
             CheckerDiagnosticSubject::Operation => site.operation_start.zip(site.operation_end),
-            CheckerDiagnosticSubject::Argument(ordinal)
-            | CheckerDiagnosticSubject::ExcessArguments(ordinal) => site
+            CheckerDiagnosticSubject::Argument(ordinal) => site
                 .arguments
                 .get(ordinal as usize)
                 .map(|argument| (argument.point, argument.end)),
+            CheckerDiagnosticSubject::ExcessArguments(ordinal) => {
+                let first = site.arguments.get(ordinal as usize)?;
+                let last = site.arguments.last()?;
+                Some((first.point, last.end))
+            }
         }
     }
 }
@@ -853,6 +857,25 @@ mod tests {
             "No overload matches this call.\n  The last overload gave the following error.\n    \
              Argument of type 'T1' is not assignable to parameter of type 'T2'.\n      child"
         );
+    }
+
+    /// An arity error spans every authored argument from the first excess
+    /// one through the last (`getArgumentArityError`).
+    #[test]
+    fn excess_arguments_span_through_the_last_authored_argument() {
+        let recipe = CheckerDiagnosticRecipe::call(
+            CheckerDiagnosticCode::ArgumentCount,
+            CheckerDiagnosticArguments::ArgumentCount {
+                min: 1,
+                max: Some(1),
+                got: 3,
+            },
+            CheckerDiagnosticSubject::ExcessArguments(1),
+        );
+        let bound = recipe
+            .bind(&site(10, &[14, 17, 20]), &OrdinalPrinter)
+            .unwrap();
+        assert_eq!((bound[0].start(), bound[0].end), (17, 21));
     }
 
     /// A subject the site does not record is not reported anywhere else.

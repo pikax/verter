@@ -4798,14 +4798,6 @@ enum RestShape {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Classify one rest parameter's type. Reference carriers and alias
-    /// chains of ANY authored depth resolve through the shared cycle-safe
-    /// structural unwrap before classification, so a named alias
-    /// (`...xs: ArgsAlias`) is seen as the tuple it is; an uninstantiated
-    /// type parameter is reported AS the parameter, never through its
-    /// constraint. Only a genuinely unresolvable shape (a carrier cycle,
-    /// an unresolved reference) is `Unresolved` — which caps no arity but
-    /// supplies no per-argument target either.
     /// The position of the one candidate of `visible` whose arity fits the
     /// call's `arguments`, when it is also the first that takes at least
     /// as many parameters as there are arguments (or has a rest). `None`
@@ -4874,7 +4866,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// relation target adds (`optional_parameter_target`) — the checker
     /// prints it without the optionality's `undefined`, even where the
     /// declaration spells one (`x?: string | undefined` is `'string'`).
-    fn declared_report_target(
+    pub(super) fn declared_report_target(
         &self,
         params: &[FunctionParam],
         index: usize,
@@ -4909,6 +4901,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.intern_normalized_union_or_intersection(&rest, true)
     }
 
+    /// Classify one rest parameter's type. Reference carriers and alias
+    /// chains of ANY authored depth resolve through the shared cycle-safe
+    /// structural unwrap before classification, so a named alias
+    /// (`...xs: ArgsAlias`) is seen as the tuple it is; an uninstantiated
+    /// type parameter is reported AS the parameter, never through its
+    /// constraint. Only a genuinely unresolvable shape (a carrier cycle,
+    /// an unresolved reference) is `Unresolved` — which caps no arity but
+    /// supplies no per-argument target either.
     fn rest_shape(&self, ty: SemanticNodeId) -> RestShape {
         let graph = self.graph();
         let resolved = match self.unwrap_identity_carrier_for_relation(ty) {
