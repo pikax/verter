@@ -436,6 +436,20 @@ fn extracts_interface_with_methods() {
     let headers = &env.type_symbols["Logger"].primary().direct_member_headers;
     assert_eq!(headers.len(), 2);
     assert!(headers.iter().all(|h| h.method_kind.is_some()));
+
+    // An overload adds no second header: each key keeps its first header,
+    // in member order.
+    let env = parse_and_build_env(
+        "interface Logger { log(msg: string): void; warn(msg: string): void; \
+         log(msg: string, level: number): void }",
+    );
+    let keys: Vec<_> = env.type_symbols["Logger"]
+        .primary()
+        .direct_member_headers
+        .iter()
+        .map(|header| header.key.as_string().map(str::to_owned))
+        .collect();
+    assert_eq!(keys, [Some("log".to_owned()), Some("warn".to_owned())]);
 }
 
 // =============================================================================
