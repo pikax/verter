@@ -50,6 +50,10 @@ impl AttemptOutput {
         &mut self,
         fact: verter_session_query::facts::version::FactVersionRef,
     ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+        // An idempotent write must not detach shared immutable witnesses.
+        if Arc::strong_count(&self.data) > 1 && self.data.observed_fact_set.contains(&fact) {
+            return Ok(());
+        }
         Arc::make_mut(&mut self.data).record_fact(fact)
     }
 
@@ -59,6 +63,17 @@ impl AttemptOutput {
         consumer_canonical: CanonicalId,
         virtual_id: CanonicalId,
     ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+        if Arc::strong_count(&self.data) > 1
+            && self
+                .data
+                .ambient_dependency_set
+                .contains(&AmbientDependency {
+                    consumer_canonical: consumer_canonical.clone(),
+                    virtual_id: virtual_id.clone(),
+                })
+        {
+            return Ok(());
+        }
         Arc::make_mut(&mut self.data).record_ambient_dependency(consumer_canonical, virtual_id)
     }
 
@@ -67,6 +82,11 @@ impl AttemptOutput {
         &mut self,
         key: ConsumedResolutionObservationKey,
     ) -> Result<(), verter_session_query::resolution::AttemptFailure> {
+        if Arc::strong_count(&self.data) > 1
+            && self.data.consumed_resolution_observation_set.contains(&key)
+        {
+            return Ok(());
+        }
         Arc::make_mut(&mut self.data).record_consumed_resolution_observation(key)
     }
 
@@ -98,6 +118,29 @@ impl AttemptOutput {
         }
         if self.is_empty() && self.data.retention.same_operation(&other.data.retention) {
             self.data = other.data;
+            return Ok(());
+        }
+        if Arc::strong_count(&self.data) > 1
+            && other
+                .data
+                .observed_facts
+                .iter()
+                .all(|fact| self.data.observed_fact_set.contains(fact))
+            && other
+                .data
+                .ambient_dependencies
+                .iter()
+                .all(|dependency| self.data.ambient_dependency_set.contains(dependency))
+            && other
+                .data
+                .consumed_resolution_observations
+                .iter()
+                .all(|observation| {
+                    self.data
+                        .consumed_resolution_observation_set
+                        .contains(observation)
+                })
+        {
             return Ok(());
         }
         let parent = Arc::make_mut(&mut self.data);

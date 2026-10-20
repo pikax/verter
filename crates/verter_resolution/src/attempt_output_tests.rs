@@ -320,6 +320,15 @@ fn shared_operation_merge_transfers_all_categories_and_releases_duplicates() {
             })
             .unwrap();
         let expected = child.clone();
+        child.record_fact(fact(1)).unwrap();
+        child
+            .record_ambient_dependency(Arc::from("/ws/a.ts"), Arc::from("virtual:/a"))
+            .unwrap();
+        child
+            .record_consumed_resolution_observation(ConsumedResolutionObservationKey::PathProbe {
+                path: Arc::from("/ws/a.ts"),
+            })
+            .unwrap();
         let mut forwarded = AttemptOutput::new();
         forwarded
             .merge(child)
@@ -327,10 +336,13 @@ fn shared_operation_merge_transfers_all_categories_and_releases_duplicates() {
         parent
             .merge(forwarded)
             .expect("already reserved witnesses fit at the inclusive limit");
+        let unchanged = parent.clone();
         parent
             .merge(expected.clone())
             .expect("duplicates add no distinct charge");
+        assert_eq!(parent, unchanged);
         assert_eq!(parent, expected);
+        drop(unchanged);
         drop(expected);
         assert_eq!(retention.retained_for_test().2, 3);
         drop(parent);
