@@ -106,6 +106,7 @@ mod local_declaration_tests;
 mod mapped_expand_tests;
 mod mapped_key_domain_carrier_tests;
 mod member_accessibility_relation_tests;
+mod member_read_scale_tests;
 mod merged_declaration_signature_tests;
 mod module_export_table_tests;
 mod module_object_tests;
