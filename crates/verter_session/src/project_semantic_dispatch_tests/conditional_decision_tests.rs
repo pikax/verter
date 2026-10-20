@@ -40,7 +40,10 @@ export function tuple() { return null! as (TextFactory extends Wrapped<infer V> 
 /// Equivalent call-result demands over the pinned Vue definitions. The
 /// expected signatures and prop types were measured with TypeScript 7.0.2's
 /// native compiler with `--lib es2020` in all four strictness settings.
-fn vue_call_result_fixture(emits: bool, strict: bool) {
+/// Both demands share one SDK-registered host per setting. Dependencies keep
+/// a single project owner, and neither SDK nor package discovery is repeated
+/// for the second demand.
+fn vue_call_result_fixture(setting: Setting, strict: bool) {
     let mut events = String::new();
     let mut strict_emits = Vec::new();
     let mut loose_emits = Vec::new();
@@ -120,67 +123,52 @@ fn vue_call_result_fixture(emits: bool, strict: bool) {
     let loose_emits = loose_emits.join(" & ");
     let strict_props = format!("{{ {required} {strict_optional} }}");
     let loose_props = format!("{{ {required} {loose_optional} }}");
-    let settings = if strict {
-        [ALL[0], ALL[2]]
-    } else {
-        [ALL[1], ALL[3]]
-    };
-    let (read, expected) = if emits {
-        (
-            "typeof e",
-            if strict { &strict_emits } else { &loose_emits },
-        )
-    } else {
-        (
-            "{ readonly [K in keyof typeof p]: (typeof p)[K] }",
-            if strict { &strict_props } else { &loose_props },
-        )
-    };
-    let failures: Vec<String> = settings
-        .iter()
-        .flat_map(|setting| {
-            let settings = [*setting];
-            Matrix::new(&source)
-                .installed_packages()
-                .installed_typescript_libs(&["es2020"])
-                .settings(&settings)
-                .types(&[
-                    (read, expected),
-                    ("typeof a.value", "number"),
-                    ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
-                    (
-                        "[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2",
-                        "2",
-                    ),
-                    (
-                        "[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2",
-                        "2",
-                    ),
-                    (
-                        "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
-                        "2",
-                    ),
-                ])
-        })
-        .collect();
+    let failures = Matrix::new(&source)
+        .installed_packages()
+        .installed_typescript_libs(&["es2020"])
+        .settings(&[setting])
+        .types(&[
+            (
+                "typeof e",
+                if strict { &strict_emits } else { &loose_emits },
+            ),
+            (
+                "{ readonly [K in keyof typeof p]: (typeof p)[K] }",
+                if strict { &strict_props } else { &loose_props },
+            ),
+            ("typeof a.value", "number"),
+            ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
+            (
+                "[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2",
+                "2",
+            ),
+            (
+                "[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2",
+                "2",
+            ),
+            (
+                "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
+                "2",
+            ),
+        ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
-fn vue_callable_and_prop_aliases_in_call_results_emits_strict() {
-    vue_call_result_fixture(true, true);
+fn vue_callable_and_prop_aliases_in_call_results_strict() {
+    vue_call_result_fixture(ALL[0], true);
 }
 #[test]
-fn vue_callable_and_prop_aliases_in_call_results_emits_loose() {
-    vue_call_result_fixture(true, false);
+fn vue_callable_and_prop_aliases_in_call_results_loose() {
+    vue_call_result_fixture(ALL[1], false);
 }
 #[test]
-fn vue_callable_and_prop_aliases_in_call_results_props_strict() {
-    vue_call_result_fixture(false, true);
+fn vue_callable_and_prop_aliases_in_call_results_strict_without_no_implicit_any() {
+    vue_call_result_fixture(ALL[2], true);
 }
 #[test]
-fn vue_callable_and_prop_aliases_in_call_results_props_loose() {
-    vue_call_result_fixture(false, false);
+fn vue_callable_and_prop_aliases_in_call_results_loose_without_no_implicit_any() {
+    vue_call_result_fixture(ALL[3], false);
 }
 
 #[test]
