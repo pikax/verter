@@ -145,6 +145,9 @@ impl VerterLanguageServer {
             .resolve_import_specifier_for_publication(&parent_canonical_id, import_source)
         {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(_) => return None,
         };
         let candidates = imported_component_canonical_candidates(

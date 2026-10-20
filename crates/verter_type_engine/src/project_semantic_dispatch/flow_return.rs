@@ -14394,6 +14394,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        None,
                     ) {
                         return step;
                     }
@@ -14490,6 +14491,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.holds.len(),
                         false,
                         Positional::Value(any),
+                        None,
                     ) {
                         return step;
                     }
@@ -14627,6 +14629,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        Some(member_context),
                     ) {
                         return step;
                     }
@@ -14743,6 +14746,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         holds_before: usize,
         widens_unique_symbols: bool,
         outcome: Positional<SemanticNodeId>,
+        contextual: Option<SemanticNodeId>,
     ) -> Option<ObjectEvalStep<'e>> {
         let value = self.settle_composite_part(outcome, holds_before);
         // Selective object widening (BL02-class): a member read of a
@@ -14751,8 +14755,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // publishes `b: number`), while `as const` / annotated
         // literal locals stay pinned. Direct literal members already
         // widened (or stayed pinned under a const assertion) at IR
-        // lowering.
-        let value = self.widen_value_position_read(member_value, value);
+        // lowering. A member's contextual type that is a literal context
+        // for the read keeps it (`{ a: c } satisfies { a: "a" }` is
+        // `{ a: "a" }`, the checker's
+        // `getWidenedLiteralLikeTypeForContextualType`).
+        let value = match contextual {
+            Some(contextual) if self.literal_of_contextual_type(value, contextual) => value,
+            _ => self.widen_value_position_read(member_value, value),
+        };
         let value = if widens_unique_symbols {
             widen_unique_symbols(self.dispatch, value, self.nullability)
         } else {
@@ -15410,6 +15420,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
+            // A mapped type's members are its template at each key it
+            // produces (`Partial<{ a: 1 }>` types `a` as `1`), which
+            // only a path projection materialises: its one-level surface
+            // lists none of them.
+            SemanticNodeData::Mapped { .. } => {
+                drop(data);
+                self.contextual_mapped_property_type(contextual, name)
+            }
             _ => {
                 drop(data);
                 let surface = match graph.node_data(contextual).as_deref() {
@@ -15439,6 +15457,40 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .map(|signature| signature.value_type)
             }
         }
+    }
+
+    /// The member `name` of the mapped type `contextual` through the
+    /// shared path projection; `None` when the projection does not answer
+    /// it with a modelled type.
+    fn contextual_mapped_property_type(
+        &self,
+        contextual: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        let crate::semantic_query::QueryResult::Value(output) =
+            self.dispatch
+                .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: contextual,
+                    path: verter_type_expr::OwnedSlice::from([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from(name)),
+                        ),
+                    ]),
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                })
+        else {
+            return None;
+        };
+        (!matches!(
+            self.dispatch.graph().node_data(output.value).as_deref(),
+            None | Some(SemanticNodeData::Opaque(_))
+        ))
+        .then_some(output.value)
     }
 
     /// The checker's contextual type of the element at `position` of an
@@ -15758,7 +15810,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     } else if widening_nullish {
                         frame.parts.push((ReductionArm::plain(node), true));
                     } else {
-                        let read = self.widen_value_position_read(value, node);
+                        let read = match element_context {
+                            Some(context) if self.literal_of_contextual_type(node, context) => node,
+                            _ => self.widen_value_position_read(value, node),
+                        };
                         let read = if element_context.is_none() {
                             widen_unique_symbols(self.dispatch, read, self.nullability)
                         } else {
@@ -19934,14 +19989,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Apply one entered `asserts` call: the call is a throw point first
     /// (if it throws, the narrow never happened), then its predicate
     /// narrows the subject for the rest of the path — to the target, or by
-    /// truthiness for a targetless `asserts v`.
+    /// truthiness for a targetless `asserts v` — or, for a targetless
+    /// assertion passed a condition, the condition holds.
     fn apply_assertion(
         &mut self,
-        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
-        target: Option<&verter_session_query::flow::slice::GatedType>,
+        claim: &verter_session_query::flow::slice::SliceAssertionClaim,
         call: verter_span::Span,
     ) {
+        use verter_session_query::flow::slice::SliceAssertionClaim;
         self.capture_throw_point();
+        let (subject, target) = match claim {
+            SliceAssertionClaim::Reference { subject, target } => (subject, target.as_ref()),
+            SliceAssertionClaim::Condition(guard) => {
+                // A targetless assertion over a condition: the condition
+                // holds past the call (`narrowType(…, assumeTrue)`), its
+                // positive reading landing for the rest of the region as a
+                // reference assertion's narrow does.
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.apply_guard_scoped(guard, true);
+                return;
+            }
+        };
         // The assertion call's evidence, with the same discipline a
         // predicate call's narrowing takes: the call was evaluated, and
         // its relation decided (or not) the narrow it established. A
@@ -20011,12 +20082,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &verter_session_query::flow::slice::SliceStatement) {
         match effect {
-            verter_session_query::flow::slice::SliceStatement::Assertion {
-                subject,
-                target,
-                call,
-            } => {
-                self.apply_assertion(subject, target.as_ref(), *call);
+            verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
+                self.apply_assertion(claim, *call);
             }
             verter_session_query::flow::slice::SliceStatement::If {
                 guard,
@@ -26158,11 +26225,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                verter_session_query::flow::slice::SliceStatement::Assertion {
-                    subject,
-                    target,
-                    call,
-                } => {
+                verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -26172,11 +26235,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref(), *call);
+                    self.apply_assertion(claim, *call);
                 }
                 verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
                     arguments,
+                    conditions,
                     site,
                 } => {
                     // The call throws before any effect it asserts.
@@ -26190,15 +26254,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {
-                            if let Some(Some(subject)) = arguments.get(parameter) {
-                                let fact = match target {
-                                    Some(target) => {
-                                        self.narrow_to_predicate_node(subject, target, false).0
+                            // A targetless assertion over a condition (an
+                            // aliased one included): the condition holds
+                            // past the call.
+                            let condition = match target {
+                                None => conditions.get(parameter).and_then(Option::as_ref),
+                                Some(_) => None,
+                            };
+                            match condition {
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Guard(
+                                        guard,
+                                    ),
+                                ) => self.apply_guard_scoped(guard, true),
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
+                                ) => self.record_degradation(
+                                    crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                                    ),
+                                ),
+                                None => {
+                                    if let Some(Some(subject)) = arguments.get(parameter) {
+                                        let fact = match target {
+                                            Some(target) => {
+                                                self.narrow_to_predicate_node(subject, target, false)
+                                                    .0
+                                            }
+                                            None => self.narrow_truthy(subject, false),
+                                        };
+                                        if let GuardNarrowing::Narrowed(subject, node) = fact {
+                                            self.push_narrowing(&subject, node);
+                                        }
                                     }
-                                    None => self.narrow_truthy(subject, false),
-                                };
-                                if let GuardNarrowing::Narrowed(subject, node) = fact {
-                                    self.push_narrowing(&subject, node);
                                 }
                             }
                         }
@@ -27539,11 +27627,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(
-                                &assertion.subject,
-                                assertion.target.as_ref(),
-                                assertion.call,
-                            );
+                            self.apply_assertion(&assertion.claim, assertion.call);
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -28191,11 +28275,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(
-                        &assertion.subject,
-                        assertion.target.as_ref(),
-                        assertion.call,
-                    );
+                    self.apply_assertion(&assertion.claim, assertion.call);
                 }
                 outcome
             }
@@ -29417,10 +29497,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // The binding's own reaching definition wins; the
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
-                // runs (mirrors the `Local` read).
-                let node = self.read_local(binding).or_else(|| {
-                    param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                });
+                // runs (mirrors the `Local` read). A narrowing standing on
+                // the binding is what the callee reads, as any read of it
+                // does: `typeof f === "function"` leaves `f()` calling the
+                // callable arms alone.
+                let node = self
+                    .frame_binding_read(binding)
+                    .or_else(|| self.read_local(binding))
+                    .or_else(|| {
+                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                    });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
                     // has no honest value: the POSITION carries the marker

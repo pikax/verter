@@ -11,6 +11,7 @@
 use verter_session_query::resolution::ProjectStableKey;
 use verter_session_query::type_solver::host::ResolvedRootIdentity;
 
+use crate::resolver_core::request_ports::AmbientSymbolSpace;
 use crate::resolver_core::ResolverContext;
 
 /// Resolve a bare-name symbol against the consumer project's ambient lib
@@ -29,12 +30,13 @@ pub fn resolve_ambient_global<C: crate::resolver_core::ResolverCapabilities>(
     consumer_canonical: &str,
     consumer_project_stable_key: ProjectStableKey,
     symbol: &str,
+    space: AmbientSymbolSpace,
 ) -> Option<ResolvedRootIdentity> {
     // workspace mutators are NOT exposed on `ResolverContext`.
     // The two narrow ambient capabilities `lookup_ambient_symbol` and
     // `record_ambient_dependency` replace the broad `workspace()` accessor
     // that the previous `&VerterHost` callsite consulted.
-    let hit = ctx.lookup_ambient_symbol(consumer_project_stable_key, symbol)?;
+    let hit = ctx.lookup_ambient_symbol(consumer_project_stable_key, symbol, space)?;
     ctx.record_ambient_dependency(consumer_canonical, hit.virtual_id.as_ref());
     Some(ResolvedRootIdentity::new_in_owner(
         hit.virtual_id.as_ref(),
