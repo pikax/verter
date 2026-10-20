@@ -2133,6 +2133,10 @@ export function n62() { return kcn(c ? "a" : "b"); }
 export function n63() { return kcn(s); }
 declare function kt<const T>(x: [T]): T;
 export function n64() { return kt(["a"]); }
+export function n65() { return kt([s]); }
+export function n66() { return kc({ v: c ? s : "b" }); }
+declare function kx<const T>(x: { v: (T & {}) | undefined }): T;
+export function n67() { return kx({ v: "a" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2465,18 +2469,24 @@ fn nested_regular_literals_keep_their_type() {
     // A fresh literal beside a regular read keeps its type in a const
     // context: the array literal's contextual type is a `const` type
     // parameter, whatever the parameters the argument reaches. So does a
-    // fresh literal or read whose own contextual type is a `const` type
-    // parameter: alone, as a conditional's arms or as a tuple element.
+    // fresh literal whose own contextual type is a `const` type parameter,
+    // alone, as a tuple element or under a union or intersection naming
+    // the parameter. A read or a conditional in a member or element
+    // position is no literal of its own and widens there, while a naked
+    // `const T` argument infers its literals as written.
     failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
         (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
         (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
         (Read::Return(r#"n58"#), r#""a""#),
         (Read::Return(r#"n59"#), r#""a""#),
-        (Read::Return(r#"n60"#), r#""a" | "b""#),
-        (Read::Return(r#"n61"#), r#""a""#),
+        (Read::Return(r#"n60"#), r#"string"#),
+        (Read::Return(r#"n61"#), r#"string"#),
         (Read::Return(r#"n62"#), r#""a" | "b""#),
         (Read::Return(r#"n63"#), r#""a""#),
         (Read::Return(r#"n64"#), r#""a""#),
+        (Read::Return(r#"n65"#), r#"string"#),
+        (Read::Return(r#"n66"#), r#"string"#),
+        (Read::Return(r#"n67"#), r#""a""#),
     ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
