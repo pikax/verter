@@ -174,17 +174,6 @@ impl SemanticGraphStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Test-only work counter: how many candidates reverse-index reads
-    /// have inspected while registering unindexed candidates, so a test
-    /// can bound the registration work one read does.
-    #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)]
-    #[must_use]
-    pub fn test_reverse_index_registration_visits(&self) -> usize {
-        self.reverse_index_registration_visits
-            .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
     /// Test-only observability accessor: how many joiners forked away from
     /// a completed winner whose value they could not share (a carrier that
     /// does not validate for their view, or a retired kernel epoch).
