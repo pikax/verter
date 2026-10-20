@@ -39,7 +39,7 @@ export function tuple() { return null! as (TextFactory extends Wrapped<infer V> 
 
 /// Equivalent call-result demands over the pinned Vue definitions. The
 /// expected signatures and prop types were measured with TypeScript 7.0.2's
-/// native API in all four strictness settings.
+/// native compiler with `--lib es2020` in all four strictness settings.
 fn vue_call_result_fixture(emits: bool, strict: bool) {
     let mut events = String::new();
     let mut strict_emits = Vec::new();
@@ -136,28 +136,33 @@ fn vue_call_result_fixture(emits: bool, strict: bool) {
             if strict { &strict_props } else { &loose_props },
         )
     };
-    let failures: Vec<String> =
-        settings
-            .iter()
-            .flat_map(|setting| {
-                let settings = [*setting];
-                Matrix::new(&source)
-        .installed_packages()
-        .installed_typescript_libs()
-        .settings(&settings)
-        .types(&[
-            (read, expected),
-            ("typeof a.value", "number"),
-            ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
-            ("[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2", "2"),
-            ("[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2", "2"),
-            (
-                "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
-                "2",
-            ),
-        ])
-            })
-            .collect();
+    let failures: Vec<String> = settings
+        .iter()
+        .flat_map(|setting| {
+            let settings = [*setting];
+            Matrix::new(&source)
+                .installed_packages()
+                .installed_typescript_libs(&["es2020"])
+                .settings(&settings)
+                .types(&[
+                    (read, expected),
+                    ("typeof a.value", "number"),
+                    ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
+                    (
+                        "[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2",
+                        "2",
+                    ),
+                    (
+                        "[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2",
+                        "2",
+                    ),
+                    (
+                        "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
+                        "2",
+                    ),
+                ])
+        })
+        .collect();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

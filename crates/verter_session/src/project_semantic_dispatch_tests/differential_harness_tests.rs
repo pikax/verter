@@ -142,7 +142,7 @@ pub(super) struct Matrix<'a> {
     /// `node_modules` — or the dependency directory the named chain of
     /// installed packages reaches — so the probe imports real packages.
     installed_packages: Option<&'a [&'a str]>,
-    installed_typescript_libs: bool,
+    installed_typescript_libs: Option<&'a [&'a str]>,
 }
 
 impl<'a> Matrix<'a> {
@@ -156,7 +156,7 @@ impl<'a> Matrix<'a> {
             files: &[],
             file_per_setting: None,
             installed_packages: None,
-            installed_typescript_libs: false,
+            installed_typescript_libs: None,
         }
     }
 
@@ -169,12 +169,10 @@ impl<'a> Matrix<'a> {
         self
     }
 
-    /// Register the installed SDK's libraries. The project's target and lib
-    /// options select the reference closure; unselected libraries contribute
-    /// nothing, just as with an explicitly registered fixture library.
-    pub(super) fn installed_typescript_libs(mut self) -> Self {
+    /// Register the selected installed SDK libraries and their reference closure.
+    pub(super) fn installed_typescript_libs(mut self, libs: &'a [&'a str]) -> Self {
         assert!(self.installed_packages.is_some());
-        self.installed_typescript_libs = true;
+        self.installed_typescript_libs = Some(libs);
         self
     }
 
@@ -375,10 +373,18 @@ impl<'a> Matrix<'a> {
                 .trim_end()
                 .strip_suffix('}')
                 .expect("a setting's options are a JSON object");
+            let libs = self
+                .installed_typescript_libs
+                .map_or_else(String::new, |libs| {
+                    format!(
+                        ", \"lib\": {}",
+                        serde_json::to_string(libs).expect("SDK lib names")
+                    )
+                });
             std::fs::write(
                 dir.join("tsconfig.json"),
                 format!(
-                    r#"{{ "compilerOptions": {options}, "module": "esnext", "moduleResolution": "bundler", "target": "es2020", "skipLibCheck": true }} }}"#
+                    r#"{{ "compilerOptions": {options}, "module": "esnext", "moduleResolution": "bundler", "target": "es2020", "skipLibCheck": true{libs} }} }}"#
                 ),
             )
             .expect("write the project's tsconfig");
@@ -403,38 +409,68 @@ impl<'a> Matrix<'a> {
             workspace,
         ));
         host.configure_projects(configs);
-        if self.installed_typescript_libs {
+        if self.installed_typescript_libs.is_some() {
             use verter_workspace::IntrinsicLibraryAccess;
             let sdk = verter_workspace::NativeIntrinsicLibrary::discover(std::path::Path::new(
                 &workspace_root,
             ));
-            let libraries = sdk.list_intrinsic_libs();
             assert!(
-                !libraries.is_empty(),
+                !sdk.list_intrinsic_libs().is_empty(),
                 "an SDK matrix needs the installed TypeScript libraries (run pnpm install)"
             );
-            let libraries: Vec<(Arc<str>, Arc<str>)> = libraries
-                .into_iter()
-                .map(|name| {
-                    let source = sdk
-                        .read_intrinsic_lib(&name)
-                        .expect("read the installed SDK library");
-                    (Arc::from(name), Arc::from(source))
-                })
-                .collect();
             for root in &roots {
-                for (name, source) in &libraries {
-                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
-                        &host, &format!("{root}/probe.ts"), name, source,
-                    );
-                }
-                let workspace = host.workspace();
                 let project = host
                     .resolve_project_for_canonical(&format!("{root}/probe.ts"))
                     .expect("the probe belongs to its SDK project");
+                let workspace = host.workspace();
                 let key = workspace
                     .project_stable_key(project)
                     .expect("the SDK project has a stable key");
+                let options = workspace
+                    .semantic_compiler_options_for_project(project)
+                    .expect("the SDK project has compiler options");
+                let mut pending: Vec<String> = options
+                    .effective_lib_file_names()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                let mut seen = rustc_hash::FxHashSet::default();
+                while let Some(name) = pending.pop() {
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    let source = sdk
+                        .read_intrinsic_lib(&name)
+                        .expect("read a selected SDK library");
+                    // Registration supplies bytes and global names. The shared
+                    // program loader indexes only the configured lib closure;
+                    // eagerly upserting every SDK file also analyzes unselected
+                    // libraries and repeats that work for each project.
+                    workspace
+                        .register_ambient_lib(verter_workspace::AmbientLibSpec {
+                            project_id: Some(project),
+                            canonical_id: Arc::from(name.as_str()),
+                            source: Arc::from(source),
+                        })
+                        .expect("the SDK library registers against its project");
+                    let canonical = verter_workspace::ambient_virtual_canonical_id(key, &name);
+                    let serve = host
+                        .ensure_indexed_ready_serve_unobserved(&canonical)
+                        .expect("the selected SDK library indexes through the shared loader");
+                    pending.extend(
+                        serve
+                            .indexed
+                            .route_inventory
+                            .program_references
+                            .libs
+                            .iter()
+                            .map(|lib| {
+                                verter_session_query::inputs::program_order::library_file_name(lib)
+                                    .expect("the SDK reference names a known library")
+                                    .to_owned()
+                            }),
+                    );
+                }
                 for symbol in ["Object", "StringConstructor", "Symbol"] {
                     assert!(
                         workspace.lookup_ambient_symbol(key, symbol).is_some(),

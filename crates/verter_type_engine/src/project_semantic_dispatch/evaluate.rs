@@ -385,6 +385,8 @@ pub(crate) enum DeferredEvaluationDemand {
     /// A mapped index consumes the instantiated value, rather than retaining
     /// a named application for a later member demand or call-return display.
     MappedIndexValue,
+    /// Select a mapped helper result while leaving its interiors addressable.
+    MappedMemberValue,
     /// Resolve a closed mapped source without visiting its member interiors.
     MappedSource,
 }
@@ -2505,7 +2507,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        let evaluated = self.evaluate_selected_value_outcome(node, context);
+        let evaluated = self.evaluate_deferred_demand(
+            node,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         if evaluated.completeness.is_partial() {
             return evaluated;
         }
@@ -2543,7 +2549,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let QueryResult::Value(instantiated) = read.value else {
             return evaluated;
         };
-        let body = self.evaluate_selected_value_outcome(instantiated, context);
+        let body = self.evaluate_deferred_demand(
+            instantiated,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         EvaluateDeferredOutcome {
             node: if matches!(
                 self.graph().node_data(body.node).as_deref(),
@@ -2879,7 +2889,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             SemanticNodeData::Mapped { source, mapper } => {
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                if crate::semantic_query::may_reduce_operator(frame.context) {
+                                if frame.demand != DeferredEvaluationDemand::Shell
+                                    && crate::semantic_query::may_reduce_operator(frame.context)
+                                {
                                     frame.stage = DeferredEvaluationStage::AwaitMappedSource {
                                         source: *source,
                                         mapper: mapper.clone(),
@@ -2980,7 +2992,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 if (demand == DeferredEvaluationDemand::MappedIndexValue
                                     || (demand == DeferredEvaluationDemand::MappedSource
                                         && !self.type_is_generic(current))
-                                    || (demand == DeferredEvaluationDemand::SelectedValue
+                                    || (matches!(demand, DeferredEvaluationDemand::SelectedValue | DeferredEvaluationDemand::MappedMemberValue)
                                         && self.selected_value_has_closed_conditional_body(current, base)))
                                     && !matches!(
                                         self.prepared_decl_kind(base),
@@ -3292,7 +3304,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<Vec<SemanticNodeId>> {
         let whole = crate::semantic_query::may_reduce_operator(context)
             && context.mode == ProjectionMode::Expanded
-            && demand != DeferredEvaluationDemand::MappedSource;
+            && !matches!(
+                demand,
+                DeferredEvaluationDemand::MappedSource
+                    | DeferredEvaluationDemand::MappedMemberValue
+            );
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
