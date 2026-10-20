@@ -6262,6 +6262,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return result;
         }
+        // A heritage body represents one declaration's resolved members.
+        // Authored intersections keep their composite identity instead.
+        let heritage_surface = |node| {
+            if matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(members))
+                    if members.origin_category()
+                        == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+            ) {
+                self.resolve_typeinfo_surface_view_with_node(
+                    node,
+                    ProjectionReductionContext::structural_transit(),
+                )
+                .map(|(_, terminal)| terminal)
+            } else {
+                Some(node)
+            }
+        };
+        let (Some(source), Some(target)) = (heritage_surface(source), heritage_surface(target))
+        else {
+            return RelationResult::Unknown;
+        };
         self.reduce_structural_identity(source, target)
     }
 
@@ -6336,7 +6358,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         return RelationResult::NotAssignable;
                     }
-                    result = result_and(result, identity(member.value, other.value));
+                    let strict = self.relation_strict_config();
+                    let member_type = |value| {
+                        if member.optional && !strict.exact_optional_property_types {
+                            let undefined = graph
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                            self.intern_normalized_union(
+                                &[value, undefined],
+                                verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                                    strict.strict_null_checks,
+                                ),
+                            )
+                        } else {
+                            value
+                        }
+                    };
+                    result = result_and(
+                        result,
+                        identity(member_type(member.value), member_type(other.value)),
+                    );
                     if matches!(result, RelationResult::NotAssignable) {
                         return result;
                     }
@@ -6430,6 +6470,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (SemanticNodeData::Intersection(a), SemanticNodeData::Intersection(b)) => {
                 self.identical_composite_members(a, b)
             }
+            (SemanticNodeData::Conditional { .. }, SemanticNodeData::Conditional { .. }) => {
+                match (
+                    exact_reading(self.conditional_outcome(source)),
+                    exact_reading(self.conditional_outcome(target)),
+                ) {
+                    (Some(ConditionalReading::Reduced(a)), _) => identity(a, target),
+                    (_, Some(ConditionalReading::Reduced(b))) => identity(source, b),
+                    (
+                        Some(ConditionalReading::Deferred(a)),
+                        Some(ConditionalReading::Deferred(b)),
+                    ) => {
+                        if a.distributive != b.distributive {
+                            return RelationResult::NotAssignable;
+                        }
+                        let mut result = assignable(&[]);
+                        for (a, b) in [
+                            (a.check, b.check),
+                            (a.extends, b.extends),
+                            (a.true_branch, b.true_branch),
+                            (a.false_branch, b.false_branch),
+                        ] {
+                            result = result_and(result, identity(a, b));
+                        }
+                        result
+                    }
+                    _ => RelationResult::Unknown,
+                }
+            }
             _ => {
                 let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
                 let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
@@ -6444,7 +6512,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match result {
                     super::canonical_algebra::StructuralIdentity::Equal => assignable(&[]),
                     super::canonical_algebra::StructuralIdentity::Distinct => {
-                        RelationResult::NotAssignable
+                        if is_deferred(a.as_ref()) || is_deferred(b.as_ref()) {
+                            RelationResult::Unknown
+                        } else {
+                            RelationResult::NotAssignable
+                        }
                     }
                     super::canonical_algebra::StructuralIdentity::Incomplete => {
                         RelationResult::Unknown

@@ -746,9 +746,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let take_true = selection != ConditionalBranchSelection::False;
                 let winner = branches.branch(self, take_true);
                 let winner = if both {
-                    self.intern_normalized_union_or_intersection(
+                    self.intern_normalized_union(
                         &[winner, branches.branch(self, false)],
-                        true,
+                        verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                            self.relation_strict_config().strict_null_checks,
+                        ),
                     )
                 } else {
                     winner

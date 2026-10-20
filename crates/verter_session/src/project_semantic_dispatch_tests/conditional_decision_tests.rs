@@ -56,6 +56,8 @@ fn generic_signature_identity_ignores_operand_construction_details() {
 type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
 type Left = { a: 1; b: 2 };
 type Right = { b: 2; a: 1 };
+interface Base { a: 1 }
+interface Derived extends Base { b: 2 }
 declare const key: unique symbol;
 declare const otherKey: unique symbol;
 export function reordered() { return null! as Eq<Left, Right>; }
@@ -72,6 +74,11 @@ export function keySpelling() { return null! as Eq<{ 1: 2 }, { "1": 2 }>; }
 export function nominal() { return null! as Eq<typeof key, typeof key>; }
 export function nominalBroad() { return null! as Eq<typeof key, symbol>; }
 export function nominalDifferent() { return null! as Eq<typeof key, typeof otherKey>; }
+export function optionalUndefined() { return null! as Eq<{ a?: 1 }, { a?: 1 | undefined }>; }
+export function inherited() { return null! as Eq<Derived, { a: 1; b: 2 }>; }
+export function authoredIntersection() { return null! as Eq<{ a: 1 } & { b: 2 }, { a: 1; b: 2 }>; }
+export function conditionalSignature() { return null! as Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 1 ? 1 : 2>; }
+export function differentConditionalSignature() { return null! as Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 2 ? 1 : 2>; }
 "#;
     let failures = Matrix::new(source).settings(&ALL).returns(&[
         ("reordered", "true"),
@@ -88,6 +95,11 @@ export function nominalDifferent() { return null! as Eq<typeof key, typeof other
         ("nominal", "true"),
         ("nominalBroad", "false"),
         ("nominalDifferent", "false"),
+        ("optionalUndefined", "true"),
+        ("inherited", "true"),
+        ("authoredIntersection", "false"),
+        ("conditionalSignature", "true"),
+        ("differentConditionalSignature", "false"),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -98,11 +110,15 @@ fn named_generic_signature_identity_is_stable_when_warm() {
     use std::sync::Arc;
     use verter_type_expr::{LiteralValue, TypeExpr};
 
-    for (strict_null_checks, no_implicit_any) in
-        [(true, true), (true, false), (false, true), (false, false)]
-    {
+    for (strict_null_checks, no_implicit_any, exact_optional) in [
+        (true, true, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, false),
+        (true, true, true),
+    ] {
         let config = format!(
-            r#"{{ "compilerOptions": {{ "strictNullChecks": {strict_null_checks}, "noImplicitAny": {no_implicit_any} }} }}"#
+            r#"{{ "compilerOptions": {{ "strictNullChecks": {strict_null_checks}, "noImplicitAny": {no_implicit_any}, "exactOptionalPropertyTypes": {exact_optional} }} }}"#
         );
         let host = VerterHost::new_standalone_with_tsconfig_projects(
             HostConfig::default(),
@@ -123,6 +139,11 @@ export type TupleLabels = Eq<[x: 1], [y: 1]>;
 export type ParameterNames = Eq<(x: 1) => 2, (y: 1) => 2>;
 export type ImportedAliases = Eq<{ v: Left }, { v: Right }>;
 export type Unequal = Eq<{ a: 1 }, { a: 2 }>;
+export type OptionalUndefined = Eq<{ a?: 1 }, { a?: 1 | undefined }>;
+interface Base { a: 1 }
+interface Derived extends Base { b: 2 }
+export type Inherited = Eq<Derived, { a: 1; b: 2 }>;
+export type ConditionalSignature = Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 1 ? 1 : 2>;
 "#,
             ),
         ] {
@@ -156,6 +177,9 @@ export type Unequal = Eq<{ a: 1 }, { a: 2 }>;
             ("ParameterNames", true),
             ("ImportedAliases", true),
             ("Unequal", false),
+            ("OptionalUndefined", !exact_optional),
+            ("Inherited", true),
+            ("ConditionalSignature", true),
         ] {
             for _ in 0..2 {
                 let answer = read(symbol);
@@ -196,6 +220,50 @@ export function open<T>() { return null! as (T extends [infer A] ? A : 0); }
         ("unknown extends [infer A] ? A : 0", "0"),
     ]);
     failures.extend(matrix.returns(&[("open", "T extends [infer A] ? A : 0")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn generic_signature_context_infers_composite_arguments() {
+    let failures = Matrix::new("").settings(&ALL).types(&[
+        (
+            "(<T>(x: T) => void) extends (<U>(x: U[]) => void) ? 1 : 0",
+            "1",
+        ),
+        ("(<T>(x: T) => T) extends (<U>(x: U[]) => U[]) ? 1 : 0", "1"),
+        ("(<T>() => T) extends (<U>() => U[]) ? 1 : 0", "1"),
+        (
+            "(<T>(x: T, y: T) => void) extends (<U>(x: U, y: string) => void) ? 1 : 0",
+            "0",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn any_infer_branch_union_uses_project_nullability() {
+    let failures = Matrix::new("").settings(&ALL).nullness(&[
+        (
+            Read::Type("any extends [infer A] ? [A] : undefined"),
+            "[unknown] | undefined",
+            "[unknown]",
+        ),
+        (
+            Read::Type("any extends [infer A] ? [A] : null"),
+            "[unknown] | null",
+            "[unknown]",
+        ),
+        (
+            Read::Type("keyof (any extends [infer A] ? { v: A } : undefined)"),
+            "never",
+            "\"v\"",
+        ),
+        (
+            Read::Type("keyof (any extends [infer A] ? { v: A } : null)"),
+            "never",
+            "\"v\"",
+        ),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

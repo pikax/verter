@@ -1,24 +1,26 @@
 //! The checker's `instantiateSignatureInContextOf` for a relation: a
-//! generic source signature first aligns matching binder spaces, otherwise
-//! its type parameters are inferred from the target's parameter types, and,
-//! for a type parameter no parameter infers, from the target's return type.
+//! generic source signature's type parameters are inferred from the target's
+//! parameter types, and, for a type parameter no parameter infers, from the
+//! target's return type.
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
+
+use super::conditional_decision::{exact_reading, ConditionalReading};
 use super::dispatch_txn::RelationStep;
 use super::inference::session::{FixationInput, InferenceInfoSetup, InferenceSessionSetup};
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{
-    CanonicalTypeSubstitution, ConstParamPolicy, ContextualInferenceMode,
-    InferenceCandidatePriority, InferencePassKind, NoInferMask, SemanticNodeData, SemanticNodeId,
-    SignatureKind, SignatureReturnCarrier, TypeParamDecl, VariancePhase,
+    ConstParamPolicy, ContextualInferenceMode, InferenceCandidatePriority, InferencePassKind,
+    NoInferMask, SemanticNodeData, SemanticNodeId, SignatureKind, SignatureReturnCarrier,
+    TypeParamDecl, VariancePhase,
 };
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
-    /// matching clauses align through the kernel's binder correspondence;
-    /// otherwise each type parameter fixes, as a call's does, from the candidates the
+    /// each type parameter fixes, as a call's does, from the candidates the
     /// target's parameter types give the source's parameter types, else
     /// those the target's return gives the source's return, else its
     /// default, else `unknown`, and an inference its constraint does not
@@ -58,16 +60,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let plan = self
             .signature_comparison_plan(source, target, kind, false)
             .ok()?;
-        // Matching generic clauses compare in one binder space before
-        // contextual inference. Inferring an unused binder from a deferred
-        // return would erase the very conditional the relation must compare.
-        if let Some(correspondence) = plan.binder_correspondence {
-            let substitution = CanonicalTypeSubstitution::new(graph, correspondence);
-            return Some(self.substitute_canonical(
-                self.signature_without_type_parameters(source),
-                &substitution,
-            ));
-        }
         let pairs: Vec<(SemanticNodeId, SemanticNodeId)> = plan
             .positions
             .iter()
@@ -159,9 +151,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .dispatch_txn
             .borrow_mut()
             .push_collecting_session(setup, None);
-        let settled = pairs
-            .iter()
-            .all(|&(from, into)| settled_relation(self.relate_collecting(from, into)).is_some());
+        // Inference between conditional types visits corresponding operands
+        // independently (`inferFromTypes`). A failed extends comparison must
+        // not roll back the check position's candidate. The conditional
+        // authority supplies branches with their pending substitutions applied.
+        let settled = (|| {
+            let mut pending: Vec<_> = pairs.iter().rev().copied().collect();
+            let mut seen = FxHashSet::default();
+            while let Some((from, into)) = pending.pop() {
+                if !seen.insert((from, into)) {
+                    continue;
+                }
+                match (
+                    exact_reading(self.conditional_outcome(from))?,
+                    exact_reading(self.conditional_outcome(into))?,
+                ) {
+                    (ConditionalReading::Reduced(from), _) => pending.push((from, into)),
+                    (_, ConditionalReading::Reduced(into)) => pending.push((from, into)),
+                    (ConditionalReading::Deferred(from), ConditionalReading::Deferred(into)) => {
+                        pending.extend([
+                            (from.false_branch, into.false_branch),
+                            (from.true_branch, into.true_branch),
+                            (from.extends, into.extends),
+                            (from.check, into.check),
+                        ]);
+                    }
+                    _ => {
+                        settled_relation(self.relate_collecting(from, into))?;
+                    }
+                }
+            }
+            Some(())
+        })()
+        .is_some();
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation

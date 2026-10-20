@@ -527,17 +527,6 @@ fn binders_identical(
     Ok(Some(corr))
 }
 
-/// The positional binder correspondence of two matching generic clauses,
-/// using the same constraint/default identity as signature comparison.
-pub fn signature_binder_correspondence(
-    view: &SemanticReadView,
-    types: &dyn DiscoveryTypes,
-    source: SignatureCandidate,
-    target: SignatureCandidate,
-) -> Res<Option<Vec<(SemanticNodeId, SemanticNodeId)>>> {
-    binders_identical(types, &load(view, source)?, &load(view, target)?)
-}
-
 /// `compareSignaturesIdentical`: arity match (or partial), binder
 /// constraint/default equality under a positional binder correspondence,
 /// receiver, every target position, and (unless ignored) the result.
