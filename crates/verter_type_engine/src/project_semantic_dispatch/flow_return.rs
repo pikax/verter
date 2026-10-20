@@ -12254,6 +12254,10 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
 }
 
+/// A memo one root evaluation shares with every nested evaluator and drops
+/// with them.
+type SharedEvaluationMemo<K, V> = std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<K, V>>>;
+
 /// The per-frame evaluator state.
 struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     dispatch: &'d FlowCx<'d, D>,
@@ -12308,29 +12312,19 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// at every guard; this keeps each arm's unwrap to one read per
     /// evaluation rather than one per guard. Request-scoped: it holds only
     /// nodes this evaluation read.
-    carrier_unwraps: std::rc::Rc<
-        std::cell::RefCell<
-            rustc_hash::FxHashMap<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
-        >,
-    >,
+    carrier_unwraps: SharedEvaluationMemo<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
     /// Every union arm's member a discriminant test has read
     /// ([`FlowEvaluator::discriminant_member`]), by arm and member name,
     /// shared by every nested evaluator of one root evaluation and dropped
     /// with it: a chain of discriminant tests reads the tested member of
     /// every remaining arm at every test. Request-scoped: it holds only
     /// members this evaluation read.
-    discriminant_members: std::rc::Rc<
-        std::cell::RefCell<
-            rustc_hash::FxHashMap<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
-        >,
-    >,
+    discriminant_members: SharedEvaluationMemo<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
     /// Every assignability a guard's narrow asked
     /// ([`FlowEvaluator::narrowing_assignable`]), by source and target,
     /// shared by every nested evaluator of one root evaluation and dropped
     /// with it. Request-scoped: it holds only pairs this evaluation related.
-    guard_relations: std::rc::Rc<
-        std::cell::RefCell<rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), Option<bool>>>,
-    >,
+    guard_relations: SharedEvaluationMemo<(SemanticNodeId, SemanticNodeId), Option<bool>>,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
