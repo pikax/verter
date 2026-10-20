@@ -2673,44 +2673,91 @@ fn primitive_union_members(
 /// The members every one of `unions` (each a union of primitive types, as
 /// [`primitive_union_members`] holds it) contains, in first-seen order — a
 /// literal counting as contained where a union holds its primitive.
+///
+/// Membership is a hashed payload lookup per union, so the work is linear
+/// in the members, as the checker's sorted containment is.
 fn shared_primitive_members<'u>(
     graph: &SemanticGraphStore,
     unions: impl Iterator<Item = &'u [SemanticNodeId]> + Clone,
 ) -> Vec<SemanticNodeId> {
-    let same = |a: SemanticNodeId, b: SemanticNodeId| {
-        a == b
-            || graph
-                .node_data(a)
-                .is_some_and(|x| graph.node_data(b).is_some_and(|y| x == y))
-    };
-    let primitive_of = |member: SemanticNodeId| match graph.node_data(member).as_deref() {
-        Some(SemanticNodeData::Literal(LiteralValue::String(_))) => Some(PrimitiveKind::String),
-        Some(
-            SemanticNodeData::Literal(LiteralValue::Number(_)) | SemanticNodeData::EnumLiteral(_),
-        ) => Some(PrimitiveKind::Number),
-        Some(SemanticNodeData::Literal(LiteralValue::BigInt(_))) => Some(PrimitiveKind::BigInt),
-        Some(SemanticNodeData::TypeOfNominal(_)) => Some(PrimitiveKind::Symbol),
+    let primitive_of = |data: &SemanticNodeData| match data {
+        SemanticNodeData::Literal(LiteralValue::String(_)) => Some(PrimitiveKind::String),
+        SemanticNodeData::Literal(LiteralValue::Number(_)) | SemanticNodeData::EnumLiteral(_) => {
+            Some(PrimitiveKind::Number)
+        }
+        SemanticNodeData::Literal(LiteralValue::BigInt(_)) => Some(PrimitiveKind::BigInt),
+        SemanticNodeData::TypeOfNominal(_) => Some(PrimitiveKind::Symbol),
         _ => None,
     };
-    let contains = |members: &[SemanticNodeId], member: SemanticNodeId| {
-        members.iter().any(|m| same(*m, member))
-            || primitive_of(member)
-                .is_some_and(|primitive| members.iter().any(|m| is_primitive(graph, *m, primitive)))
+    let key = |member: SemanticNodeId| match graph.node_data(member) {
+        Some(data) => MemberIdentity::Payload(PayloadIdentity(data)),
+        None => MemberIdentity::Dangling(member),
     };
-    let mut checked: Vec<SemanticNodeId> = Vec::new();
-    let mut result: Vec<SemanticNodeId> = Vec::new();
-    for members in unions.clone() {
-        for member in members {
-            if checked.iter().any(|seen| same(*seen, *member)) {
-                continue;
+    // Each union's member identities, and the primitives it holds whole.
+    let sets: Vec<(FxHashSet<MemberIdentity>, Vec<PrimitiveKind>)> = unions
+        .clone()
+        .map(|members| {
+            let mut identities = FxHashSet::default();
+            let mut primitives = Vec::new();
+            for member in members {
+                let identity = key(*member);
+                if let MemberIdentity::Payload(PayloadIdentity(data)) = &identity {
+                    if let SemanticNodeData::Primitive(primitive) = &**data {
+                        if !primitives.contains(primitive) {
+                            primitives.push(*primitive);
+                        }
+                    }
+                }
+                identities.insert(identity);
             }
-            checked.push(*member);
-            if unions.clone().all(|other| contains(other, *member)) {
+            (identities, primitives)
+        })
+        .collect();
+    let mut checked: FxHashSet<MemberIdentity> = FxHashSet::default();
+    let mut result: Vec<SemanticNodeId> = Vec::new();
+    for members in unions {
+        for member in members {
+            let identity = key(*member);
+            let primitive = match &identity {
+                MemberIdentity::Payload(PayloadIdentity(data)) => primitive_of(data),
+                MemberIdentity::Dangling(_) => None,
+            };
+            let shared = sets.iter().all(|(identities, primitives)| {
+                identities.contains(&identity)
+                    || primitive.is_some_and(|primitive| primitives.contains(&primitive))
+            });
+            if checked.insert(identity) && shared {
                 result.push(*member);
             }
         }
     }
     result
+}
+
+/// A union member's identity when unions of primitive types intersect: its
+/// payload, or — for a member whose payload is gone — its id alone.
+#[derive(PartialEq, Eq, Hash)]
+enum MemberIdentity {
+    Payload(PayloadIdentity),
+    Dangling(SemanticNodeId),
+}
+
+/// A node payload compared and hashed by content, so two ids interned for
+/// one payload under different scopes are one member.
+struct PayloadIdentity(crate::semantic_query_memo::NodeData);
+
+impl PartialEq for PayloadIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for PayloadIdentity {}
+
+impl std::hash::Hash for PayloadIdentity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (*self.0).hash(state);
+    }
 }
 
 /// The nullish member every one of `unions` holds — `undefined` first, then
