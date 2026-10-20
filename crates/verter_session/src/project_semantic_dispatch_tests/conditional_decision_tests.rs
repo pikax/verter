@@ -624,3 +624,62 @@ fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
         }
     }
 }
+
+/// Named type queries must not publish a whole-boolean branch when an
+/// unreadable extends arm prevents per-member decisions. Return-flow reads
+/// already retain a gap for this input, so exercise the public named demand.
+#[test]
+fn a_written_arm_cannot_select_a_whole_distributive_boolean() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
+
+    let source = format!(
+        "{UNREADABLE_ARM_SOURCE}\n\
+         type Bool = boolean;\n\
+         type FBool<T> = T extends boolean | Dom<1> ? {{ v: T }} : 0;\n\
+         type Direct = FBool<boolean>;\n\
+         type Aliased = FBool<Bool>;\n\
+         type Whole = boolean extends boolean | Dom<1> ? 1 : 2;\n"
+    );
+    let host = Matrix::new(&source).settings(&ALL).host(&[]);
+    for setting in ALL {
+        let canonical = format!("{}/probe.ts", setting.root);
+        for (name, answer) in [
+            ("Whole", "1"),
+            ("Direct", "{ v: false; } | { v: true; }"),
+            ("Aliased", "{ v: false; } | { v: true; }"),
+        ] {
+            let result = host
+                .resolve_named_symbol_with_audit(&canonical, name, None)
+                .into_result()
+                .expect("the named demand does not fault");
+            let Some(node) = result else {
+                assert_ne!(name, "Whole", "the non-distributive control resolves");
+                continue;
+            };
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+            let expected = checker_syntax::parse(answer).expect("valid checker type");
+            let data = dispatch.graph().node_data(node.id());
+            let gap = name != "Whole"
+                && matches!(
+                    data.as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Opaque(
+                                QueryError::IncompleteSemanticOperand { .. }
+                            )
+                    )
+                );
+            assert!(
+                gap || checker_syntax::matches_node(&dispatch, node.id(), &expected, 0),
+                "{name} [{}] must be {answer} or an unresolved conditional, got {data:?}",
+                setting.label
+            );
+        }
+    }
+}

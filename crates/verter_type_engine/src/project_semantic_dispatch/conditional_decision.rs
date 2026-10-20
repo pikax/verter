@@ -575,7 +575,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             && operand_read.value().0 == authored_check
             && !self.decision_waits()
         {
-            if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+            if let Some(arm) = self.true_through_written_arm(authored_check, extends, distributive)
+            {
                 // An arm relation that waits on a read proves nothing yet:
                 // the frame runs the decision again once it is delivered.
                 if self.decision_waits() {
@@ -791,6 +792,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
+        distributive: bool,
     ) -> Option<super::flow_return_fact::ObservedRead<super::dispatch_txn::RelationStep>> {
         let arms = match self.graph().node_data(extends).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc(),
@@ -805,7 +807,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         // Whether the check absorbs or distributes is read off the type it
         // names; that read is evidence of the decision only when complete.
-        let plain = self.observe_read(|| self.check_neither_absorbs_nor_distributes(check));
+        let plain =
+            self.observe_read(|| self.check_neither_absorbs_nor_distributes(check, distributive));
         if !plain.observations_are_complete() || !*plain.value() {
             let _ = plain.discard();
             return None;
@@ -835,8 +838,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// reference to an interface or a class names an object type. Every
     /// other check — a union, an intersection (`1 & Id<any>` is `any`), an
     /// indexed access, a `keyof`, a conditional, a template, a tuple, or a
-    /// name the lane cannot read completely — is not proven plain.
-    fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
+    /// name the lane cannot read completely — is not proven plain. Boolean
+    /// is plain only when the conditional is non-distributive.
+    fn check_neither_absorbs_nor_distributes(
+        &self,
+        check: SemanticNodeId,
+        distributive: bool,
+    ) -> bool {
         let named = match self.graph().node_data(check).as_deref() {
             Some(
                 SemanticNodeData::DeclRef { identity }
@@ -866,17 +874,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => check,
         };
         self.peek_special(named).is_none()
-            && matches!(
-                self.graph().node_data(named).as_deref(),
+            && match self.graph().node_data(named).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => !distributive,
                 Some(
                     SemanticNodeData::Primitive(_)
-                        | SemanticNodeData::Literal(_)
-                        | SemanticNodeData::EnumLiteral(_)
-                        | SemanticNodeData::Object(_)
-                        | SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Signature { .. }
-                )
-            )
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Signature { .. },
+                ) => true,
+                _ => false,
+            }
     }
 
     /// What a decision that waits on a read returns: a typed gap its frame
