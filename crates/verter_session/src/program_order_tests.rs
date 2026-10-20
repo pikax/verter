@@ -381,3 +381,50 @@ fn a_superseded_snapshot_cannot_publish_program_membership() {
     assert!(current.lists(&format!("{ROOT}/b.ts")));
     assert!(!current.lists(&format!("{ROOT}/a.ts")));
 }
+
+/// Opening a program whose files import each other in a chain reads each
+/// file's references a bounded number of times: an upsert extends discovery
+/// from the changed file to files the program has not discovered yet, never
+/// re-reading the import closure an earlier upsert already settled. The
+/// first order built afterwards still lists the whole chain.
+///
+/// Mutation: descending into every child a fresh read returns re-reads the
+/// whole chain below each upserted file, `n²/2` reads for `n` files.
+#[test]
+fn opening_an_import_chain_reads_each_file_a_bounded_number_of_times() {
+    for n in [16, 32, 64] {
+        let names: Vec<String> = (0..n).map(|i| format!("m{i}.ts")).collect();
+        let sources: Vec<String> = (0..n)
+            .map(|i| match i {
+                0 => "export const v = 0;\n".to_owned(),
+                _ => format!("export * from './m{}';\n", i - 1),
+            })
+            .collect();
+        let files: Vec<(&str, &str)> = names
+            .iter()
+            .zip(&sources)
+            .map(|(name, source)| (name.as_str(), source.as_str()))
+            .chain([("main.ts", "export {};\n")])
+            .collect();
+        let mut listed_files = names.clone();
+        listed_files.push("main.ts".to_owned());
+        let host = host(
+            serde_json::json!({ "compilerOptions": { "noLib": true }, "files": listed_files }),
+            &files,
+        );
+        let order = host.program_file_order(&format!("{ROOT}/main.ts"), &mut std::iter::empty());
+        let ranks: Vec<u32> = names
+            .iter()
+            .map(|name| order.rank(&format!("{ROOT}/{name}")))
+            .collect();
+        assert!(
+            ranks.windows(2).all(|pair| pair[0] < pair[1]) && ranks[n - 1] != u32::MAX,
+            "the chain is listed in import order: {ranks:?}"
+        );
+        let reads = reads(&host);
+        assert!(
+            reads <= 4 * n as u64,
+            "{reads} reference reads to open a {n}-file import chain"
+        );
+    }
+}
