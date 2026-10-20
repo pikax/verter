@@ -737,17 +737,46 @@ export function verdict(verterValues, tscValues, resolution = 0) {
 /** Printed answers longer than this are embedded in results.json as their digest. */
 export const ELIDE_TEXT_ABOVE = 4096;
 
+/** Request audit records serialised longer than this are embedded in results.json as their digest. */
+export const ELIDE_AUDIT_ABOVE = 4096;
+
+/**
+ * A request record (cold or warm) as embedded in results.json: an audit
+ * record (the observability-on arm's footprint, megabytes per request on
+ * large scenarios) longer than ELIDE_AUDIT_ABOVE serialised is replaced by
+ * its length and sha256, so every embedded copy together stays a writable
+ * string. No summary or validation reads the audit; it stays on disk.
+ */
+function compactRequestRecord(request) {
+  if (!request || typeof request !== "object" || request.audit == null) return request;
+  const serialised = JSON.stringify(request.audit);
+  if (serialised.length <= ELIDE_AUDIT_ABOVE) return request;
+  return {
+    ...request,
+    audit: null,
+    auditElided: true,
+    auditLength: serialised.length,
+    auditSha256: createHash("sha256").update(serialised).digest("hex"),
+  };
+}
+
 /**
  * The copy of a probe record embedded in results.json: identical except
  * that an answer text longer than ELIDE_TEXT_ABOVE is replaced by its
- * canonical digest and the raw text's sha256. The raw record stays on disk;
+ * canonical digest and the raw text's sha256, and a request audit record
+ * longer than ELIDE_AUDIT_ABOVE by its sha256. The raw record stays on disk;
  * the validator recomputes this compaction from it and compares.
  */
 export function compactProbeRecord(record) {
   if (!record || !Array.isArray(record.probes)) return record;
   return {
     ...record,
-    probes: record.probes.map((probe) => {
+    probes: record.probes.map((raw) => {
+      const probe = {
+        ...raw,
+        ...(raw.cold ? { cold: compactRequestRecord(raw.cold) } : {}),
+        ...(Array.isArray(raw.warm) ? { warm: raw.warm.map(compactRequestRecord) } : {}),
+      };
       const obs = probe.observation;
       if (!obs || typeof obs.text !== "string" || obs.text.length <= ELIDE_TEXT_ABOVE) return probe;
       let canonical = null;
