@@ -751,11 +751,11 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
-  "edge-equal-identity-idiom": "quick",
-  "edge-any-infer-pattern": "quick",
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
+  "edge-equal-identity-idiom": "quick",
+  "edge-any-infer-pattern": "quick",
   "mapped-expand-mixins-10": "quick",
   "mapped-expand-mixins-25": "standard",
   "mapped-expand-mixins-40": "standard",
