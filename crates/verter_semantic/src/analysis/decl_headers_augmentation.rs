@@ -51,9 +51,8 @@ pub(crate) fn ambient_block_module_exports(
 ///
 /// Inner interfaces / type-aliases register under the TYPE augmentation
 /// scope; inner value statements (`const`/`let`/`var`, `function`,
-/// `class`) register under the VALUE augmentation scope. An inner class
-/// registers ONLY its value side (the env walk drops the throwaway type
-/// side).
+/// `class`) register under the VALUE augmentation scope. Classes also
+/// retain their instance type in the TYPE augmentation scope.
 pub(super) fn index_augmentation_block(
     block: &TSModuleBlock<'_>,
     ctx: HeaderStatementContext<'_>,
@@ -88,7 +87,7 @@ pub(super) fn index_augmentation_block(
                 oxc_ast::ast::ExportDefaultDeclarationKind::ClassDeclaration(cls)
                     if cls.id.is_some() =>
                 {
-                    index_augmentation_class_value(cls, ctx, index, scope);
+                    index_augmentation_class_value(cls, ctx, index, scope, None);
                 }
                 _ => {}
             }
@@ -143,7 +142,7 @@ pub(super) fn index_augmentation_block(
                         index_function(func, ctx, scoped);
                     }
                     Declaration::ClassDeclaration(cls) => {
-                        index_augmentation_class_value(cls, ctx, index, scope);
+                        index_augmentation_class_value(cls, ctx, index, scope, None);
                     }
                     Declaration::TSEnumDeclaration(enum_decl) => {
                         index_augmentation_enum(
@@ -177,7 +176,7 @@ pub(super) fn index_augmentation_block(
                 index_function(func, ctx, scoped);
             }
             Statement::ClassDeclaration(cls) => {
-                index_augmentation_class_value(cls, ctx, index, scope);
+                index_augmentation_class_value(cls, ctx, index, scope, None);
             }
             Statement::TSEnumDeclaration(enum_decl) => {
                 index_augmentation_enum(enum_decl, enum_decl.id.name.as_str(), ctx, index, scope);
@@ -356,6 +355,9 @@ fn index_namespaced_statement_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Statement::ClassDeclaration(cls) if implicit_export => {
+            index_augmentation_class_value(cls, ctx, index, scope, Some(namespace));
+        }
         Statement::TSEnumDeclaration(enum_decl) if implicit_export => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
             index_augmentation_enum(enum_decl, &name, ctx, index, scope);
@@ -408,6 +410,9 @@ fn index_namespaced_declaration_into_augmentation(
                 .or_default();
             index_function_in(func, ctx, scoped, Some(namespace));
         }
+        Declaration::ClassDeclaration(cls) => {
+            index_augmentation_class_value(cls, ctx, index, scope, Some(namespace));
+        }
         Declaration::TSEnumDeclaration(enum_decl) => {
             let name = format!("{namespace}.{}", enum_decl.id.name);
             index_augmentation_enum(enum_decl, &name, ctx, index, scope);
@@ -455,25 +460,23 @@ fn index_augmentation_class_value(
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
     scope: &AugmentationScopeKind,
+    namespace: Option<&str>,
 ) {
     let Some(id) = &cls.id else {
         return;
     };
+    let name = namespace.map_or_else(|| id.name.to_string(), |ns| format!("{ns}.{}", id.name));
     // The file-scope class walk computes the instance type header; it is
     // re-homed into the block's type scope.
     let mut scratch = DeclHeaderIndex::default();
-    index_named_class(cls, id.name.as_str(), ctx, &mut scratch);
-    if let Some(header) = scratch
-        .type_headers
-        .get(&ctx.key(id.name.as_str()))
-        .cloned()
-    {
+    index_named_class(cls, name.as_str(), ctx, &mut scratch);
+    if let Some(header) = scratch.type_headers.get(&ctx.key(name.as_str())).cloned() {
         upsert_type_header(
             index
                 .augmentation_type_headers
                 .entry(scope.clone())
                 .or_default(),
-            id.name.as_str(),
+            name.as_str(),
             header.kind,
             header.span,
             header.name_span,
@@ -488,7 +491,7 @@ fn index_augmentation_class_value(
         .entry(scope.clone())
         .or_default();
     let entry = scoped
-        .entry(ctx.key(id.name.as_str()))
+        .entry(ctx.key(name.as_str()))
         .or_insert_with(|| ValueDeclHeader {
             kind: ValueDeclKind::Class,
             span: verter_span::Span::new(cls.span.start, cls.span.end),

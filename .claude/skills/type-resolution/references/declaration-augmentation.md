@@ -71,8 +71,10 @@ type, including supplied generic arguments. No sibling map or second resolver
 is stored on a carrier. Contribution parameters use the shared positional/default
 binder; their defaults are read through `AugmentationBody` locators in the
 contributor scope, so earlier parameters can feed later defaults.
-Body projection preserves these scoped references as back-edges, lowering their
-arguments without unfolding sibling bodies. The consumer's reference demand
+Body projection preserves scoped member references as back-edges, lowering their
+arguments without unfolding sibling bodies. Alias roots and conditional operands
+resolve siblings through the contribution folder rather than retaining a bare
+reference as their answer. The consumer's reference demand
 uses the same ambient folder, so recursive interfaces remain projectable without
 adding a separate recursive resolver or a second cycle table.
 The bound locators used to reconstruct declaration binder identities must carry
@@ -80,3 +82,12 @@ that same augmentation scope: embedded constraints/defaults are part of the
 binder node, so a file-scope retry can break even explicit-argument substitution.
 A single contribution retains its actual type (including an alias reference or
 scalar); only multiple contributors require peer surface merging.
+
+Namespace `typeof` roots bind values in that same inventory before file/global
+lookup. Their qualified name and augmentation binder identity reach the shared
+value builder, which prepares the exact module-scoped declaration and reads its
+authored value position through an `AugmentationBody` locator even when another
+module declares the same namespace and value names. Enum member types
+follow the shared ambient import value route before enum projection. Namespace
+classes retain both their instance type and constructor value through the ordinary
+class header and body lowerers, including explicit exports and generic defaults.

@@ -2422,6 +2422,9 @@ fn collect_namespaced_statement_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Statement::ClassDeclaration(class) if implicit_export => {
+            collect_class_into_augmentation(class, source, out, namespace, scope);
+        }
         Statement::TSEnumDeclaration(decl) if implicit_export => {
             collect_enum_into_augmentation(
                 decl,
@@ -2486,6 +2489,9 @@ fn collect_namespaced_declaration_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Declaration::ClassDeclaration(class) => {
+            collect_class_into_augmentation(class, source, out, namespace, scope);
+        }
         Declaration::TSEnumDeclaration(decl) => {
             collect_enum_into_augmentation(
                 decl,
@@ -2496,6 +2502,26 @@ fn collect_namespaced_declaration_into_augmentation(
         }
         _ => {}
     }
+}
+
+fn collect_class_into_augmentation(
+    class: &Class<'_>,
+    source: &str,
+    out: &mut LoweredStatementParts,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    let Some(id) = &class.id else {
+        return;
+    };
+    let mut inner = LoweredStatementParts::reading(&out.class_fields);
+    collect_named_class(
+        class,
+        source,
+        &mut inner,
+        qualified_name(namespace, &id.name),
+    );
+    move_value_parts_into_augmentation(inner, out, scope);
 }
 
 /// An enum an ambient augmentation block declares, under `name` (qualified
@@ -7205,9 +7231,7 @@ fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
         Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
-        Expression::BigIntLiteral(b) => {
-            TypeExpr::Literal(LiteralValue::BigInt(b.value.to_string()))
-        }
+        Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(false, &b.value),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => TypeExpr::string_literal(
             tpl.quasis
                 .iter()
@@ -7219,9 +7243,7 @@ fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
                 TypeExpr::number_literal(-n.value)
             }
             Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-            Expression::BigIntLiteral(b) => {
-                TypeExpr::Literal(LiteralValue::BigInt(format!("-{}", b.value)))
-            }
+            Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(true, &b.value),
             _ => return None,
         },
         _ => return None,

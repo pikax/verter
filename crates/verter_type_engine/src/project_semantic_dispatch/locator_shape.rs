@@ -1953,9 +1953,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
+                let (root_scope, root_name) = match self.ambient_namespace_target(
+                    scope,
+                    root,
+                    super::build::GlobalSpace::Value,
+                ) {
+                    Some((specifier, qualified)) => {
+                        let mut root_scope = root_scope;
+                        root_scope.binder_scope_id =
+                            crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                                root_scope.owner,
+                                verter_type_expr::OwnedStr::from(specifier.as_str()),
+                            );
+                        (root_scope, verter_type_expr::OwnedStr::from(qualified))
+                    }
+                    None => (root_scope, verter_type_expr::OwnedStr::from(root.as_str())),
+                };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: verter_type_expr::OwnedStr::from(root.as_str()),
+                    name: root_name,
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);

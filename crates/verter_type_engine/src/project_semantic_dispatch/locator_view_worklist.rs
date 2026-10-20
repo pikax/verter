@@ -493,6 +493,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then(|| self.recursive_ref_sentinel(identity, Arc::from([])))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_reference_projection(
         &self,
         node: SemanticNodeId,
@@ -501,6 +502,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         suspend: bool,
+        deferred_interior: bool,
     ) -> ReferenceProjectionPlan {
         match data {
             // The terminal nominal carrier IS the type it denotes: resolving
@@ -612,9 +614,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ))
             }
-            SemanticNodeData::BareRef(_) => {
-                self.plan_bare_reference_projection(data, context, inputs, substitutions)
-            }
+            SemanticNodeData::BareRef(_) => self.plan_bare_reference_projection(
+                data,
+                context,
+                inputs,
+                substitutions,
+                deferred_interior,
+            ),
             SemanticNodeData::ImportType(_) => {
                 self.plan_import_reference_projection(data, context, inputs)
             }
@@ -1784,6 +1790,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inputs,
                     substitutions,
                     seam.suspend,
+                    self.in_deferred_interior(frames),
                 );
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {

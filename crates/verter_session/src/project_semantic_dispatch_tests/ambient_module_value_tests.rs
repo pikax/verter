@@ -195,6 +195,127 @@ declare module "pkg" {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn an_ambient_assigned_namespace_resolves_alias_consumers() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS {
+    interface Base { k: 99 }
+    type Opt = Base;
+    type Scalar = 99;
+    type Alias = Scalar;
+  }
+  export = NS;
+}
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Base, Opt, Alias } from "pkg"; import * as Pkg from "pkg";"#,
+        &[
+            ("Opt extends { k: 99 } ? true : false", "true"),
+            ("Pkg.Opt extends { k: 99 } ? true : false", "true"),
+            ("Alias", "99"),
+            ("Pkg.Alias", "99"),
+            ("Base extends { k: 99 } ? true : false", "true"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_typeof_reads_its_lexical_value() {
+    for global in ["", "declare const value: 0;"] {
+        let ambient = format!(
+            r#"
+declare module "pkg" {{
+  namespace NS {{ const value: 99; type Opt = {{ k: typeof value }}; }}
+  export = NS;
+}}
+declare module "other-pkg" {{
+  namespace NS {{ const value: 7; type Opt = {{ k: typeof value }}; }}
+  export = NS;
+}}
+{global}
+"#
+        );
+        let files = [("assigned.d.ts", ambient.as_str())];
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &files,
+                ..ProbeProject::default()
+            },
+            r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";
+import type { Opt as OtherOpt } from "other-pkg";"#,
+            &[
+                ("Opt[\"k\"]", "99"),
+                ("Pkg.Opt[\"k\"]", "99"),
+                ("OtherOpt[\"k\"]", "7"),
+            ],
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}
+
+#[test]
+fn an_ambient_assigned_namespace_exports_enum_member_types() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" { namespace NS { enum E { X = 99 } } export = NS; }
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { E } from "pkg"; import * as Pkg from "pkg";"#,
+        &[
+            ("E.X extends 99 ? true : false", "true"),
+            ("Pkg.E.X extends 99 ? true : false", "true"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn an_ambient_assigned_namespace_exports_class_instance_types() {
+    let files = [(
+        "assigned.d.ts",
+        r#"
+declare module "pkg" {
+  namespace NS { class Opt { k: 99 } }
+  export = NS;
+}
+declare module "explicit" {
+  namespace NS { export class Box<T = 41> { value: T } }
+  export = NS;
+}
+"#,
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        },
+        r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";
+import type { Box } from "explicit"; import * as Explicit from "explicit";"#,
+        &[
+            ("Opt[\"k\"]", "99"),
+            ("Pkg.Opt[\"k\"]", "99"),
+            ("Box<42>[\"value\"]", "42"),
+            ("Explicit.Box[\"value\"]", "41"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 const AMBIENT: &str = "\
 declare module \"amb\" {
   export function x(): \"x\";

@@ -1,5 +1,17 @@
 ## Flow-Return Substrate (U6)
 
+Capture obligations follow the callable site's retained selection. A value-selected
+callable requires reaching-value evidence for its read captures. An effect-only
+callable retains its exact captured cells and effect dependencies without demanding
+their unused values; this includes sibling actions excluded by a return-member
+projection. Capture enumeration, correlation gaps and completion checks still apply.
+
+Return-member projection first checks for an already completed, validated whole
+return. Its ordinary signature-utility unwrap and PathWalker can reuse that value
+without installing a new member flow plan. This probe never starts a cold whole
+return and never substitutes an unfinished whole value for an independent member
+proof. Mapped remaps therefore reuse one body inference across their member reads.
+
 Whole-return spread programs retain their immutable construction carriers and
 shared inferred callee operands when the flow completion is sealed. Each body
 is inferred once; no intermediate return prefix is projected into a complete

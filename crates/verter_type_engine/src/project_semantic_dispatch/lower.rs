@@ -692,6 +692,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         dotted_name: &str,
     ) -> Option<SemanticNodeId> {
         let (prefix, member) = dotted_name.rsplit_once('.')?;
+        let (head, rest) = prefix.split_once('.').unwrap_or((prefix, ""));
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(scope_canonical)?
+            .indexed;
+        if let Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(target)) =
+            indexed
+                .shallow_state
+                .visible_value_binding(scope_owner, head)
+        {
+            if self
+                .ctx
+                .resolve_type_dependency_canonical(scope_canonical, &target.source_specifier)
+                .is_none()
+            {
+                let path: Vec<verter_type_expr::OwnedStr> = if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    rest.split('.')
+                        .map(verter_type_expr::OwnedStr::from)
+                        .collect()
+                };
+                let (root, consumed) =
+                    self.ambient_import_member_root(scope_canonical, target, &path)?;
+                if consumed != path.len() {
+                    return None;
+                }
+                let enumeration =
+                    self.enum_declaration(&root.scope.canonical_id, root.scope.owner, &root.name)?;
+                return self.enum_member_type(&enumeration, member);
+            }
+        }
         let identity = match prefix.split_once('.') {
             None => match name_resolution.get(prefix) {
                 Some(direct) => direct.clone(),

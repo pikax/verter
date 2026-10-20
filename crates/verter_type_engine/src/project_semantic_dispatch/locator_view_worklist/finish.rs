@@ -7,22 +7,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
+        deferred_interior: bool,
     ) -> ReferenceProjectionPlan {
         let (name, bare_scope) = data.bare_ref_head().expect("BareRef head");
         let name = Arc::<str>::from(name);
         let type_args: Arc<[SemanticNodeId]> =
             Arc::from(data.carrier_type_args().to_vec().into_boxed_slice());
-        // Retain an ambient namespace reference as a declaration back-edge.
-        // Its consumer resolves it in the captured scope; projecting a body
-        // must not unfold every recursive sibling's body as well.
-        if self
-            .ambient_namespace_type_target(bare_scope, &name)
-            .is_some()
+        // Members retain back-edges; an alias root or conditional operand
+        // demands the sibling's type through the same contribution folder.
+        if let Some((specifier, decl_name)) = self.ambient_namespace_type_target(bare_scope, &name)
         {
-            let continuation = CarrierArgsContinuation::Intern {
-                head: crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
-                name,
-                scope: bare_scope.clone(),
+            let continuation = if deferred_interior {
+                CarrierArgsContinuation::Intern {
+                    head: crate::project_semantic_dispatch::carrier::RefHeadResolution::Unresolved,
+                    name,
+                    scope: bare_scope.clone(),
+                }
+            } else {
+                CarrierArgsContinuation::ExternalModule {
+                    specifier,
+                    decl_name,
+                    name,
+                    scope: bare_scope.clone(),
+                    context,
+                }
             };
             let argument_context = self.reference_argument_context(&continuation, context);
             return ReferenceProjectionPlan::NeedsArgs {
