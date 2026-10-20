@@ -26101,33 +26101,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {
-                            if let Some(Some(subject)) = arguments.get(parameter) {
-                                let fact = match target {
-                                    Some(target) => {
-                                        self.narrow_to_predicate_node(subject, target, false).0
-                                    }
-                                    None => self.narrow_truthy(subject, false),
-                                };
-                                if let GuardNarrowing::Narrowed(subject, node) = fact {
-                                    self.push_narrowing(&subject, node);
-                                }
-                            } else if target.is_none() {
-                                // A targetless assertion over a condition:
-                                // the condition holds past the call.
-                                match conditions.get(parameter) {
-                                    Some(Some(
-                                        verter_session_query::flow::slice::SliceAssertionCondition::Guard(
-                                            guard,
-                                        ),
-                                    )) => self.apply_guard_scoped(guard, true),
-                                    Some(Some(
-                                        verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
-                                    )) => self.record_degradation(
-                                        crate::semantic_query::FlowReturnDegradation::FlowGap(
-                                            verter_session_query::flow::policy::FlowGap::GuardNarrowing,
-                                        ),
+                            // A targetless assertion over a condition (an
+                            // aliased one included): the condition holds
+                            // past the call.
+                            let condition = match target {
+                                None => conditions.get(parameter).and_then(Option::as_ref),
+                                Some(_) => None,
+                            };
+                            match condition {
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Guard(
+                                        guard,
                                     ),
-                                    _ => {}
+                                ) => self.apply_guard_scoped(guard, true),
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
+                                ) => self.record_degradation(
+                                    crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                                    ),
+                                ),
+                                None => {
+                                    if let Some(Some(subject)) = arguments.get(parameter) {
+                                        let fact = match target {
+                                            Some(target) => {
+                                                self.narrow_to_predicate_node(subject, target, false)
+                                                    .0
+                                            }
+                                            None => self.narrow_truthy(subject, false),
+                                        };
+                                        if let GuardNarrowing::Narrowed(subject, node) = fact {
+                                            self.push_narrowing(&subject, node);
+                                        }
+                                    }
                                 }
                             }
                         }

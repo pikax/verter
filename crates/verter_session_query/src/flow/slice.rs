@@ -369,10 +369,12 @@ pub enum SliceStatement {
         callee: GatedType,
         /// Each argument's narrowable reference, positionally.
         arguments: Arc<[Option<SliceNarrowSubject>]>,
-        /// Each argument that is no reference, positionally, as the
-        /// condition a targetless `asserts x` effects signature narrows by
-        /// (`None` for a reference argument or a condition that narrows
-        /// nothing).
+        /// Each argument that is a condition, positionally, as the
+        /// condition a targetless `asserts x` effects signature narrows by:
+        /// a non-reference argument, or a reference naming an aliased
+        /// condition (`const isS = typeof z === "string"`). `None` for any
+        /// other reference, which narrows by truthiness, or a condition
+        /// that narrows nothing.
         conditions: Arc<[Option<SliceAssertionCondition>]>,
         /// The call expression, whose arguments resolve an overloaded or
         /// generic effects signature.
@@ -1076,13 +1078,16 @@ pub enum SliceAssertionClaim {
         target: Option<GatedType>,
     },
     /// A TARGETLESS `asserts x` whose argument is a condition rather than a
-    /// reference (`assert(typeof z === "string")`): the condition's
+    /// reference (`assert(typeof z === "string")`), or a reference naming an
+    /// aliased condition (`const isS = typeof z === "string"; assert(isS)`)
+    /// — the alias's own truthiness beside what its initializer tests: the
+    /// condition's
     /// positive reading holds past the call, exactly as an `if` over it
     /// whose false branch throws.
     Condition(SliceGuard),
 }
 
-/// A non-reference argument of a [`SliceStatement::CalleeEffect`] call, as
+/// A condition argument of a [`SliceStatement::CalleeEffect`] call, as
 /// the condition its callee narrows by when the callee's effects signature
 /// turns out to be a targetless `asserts x`.
 #[derive(Debug, Clone, PartialEq)]

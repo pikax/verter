@@ -197,6 +197,7 @@ verter_semantic_source/src/flow_slice_content.rs collect_maybe_default_write_tar
 verter_semantic_source/src/flow_slice_content.rs collect_pattern_identifier_spans
 verter_semantic_source/src/flow_slice_content.rs collect_write_targets
 verter_semantic_source/src/flow_slice_content.rs discarded_value_holds_write
+verter_semantic_source/src/flow_slice_content.rs entered_assertion # an asserted condition classifies as an `if` test does, on classify_guard's cycle
 verter_semantic_source/src/flow_slice_content.rs expression_freshness
 verter_semantic_source/src/flow_slice_content.rs expression_root_identifier
 verter_semantic_source/src/flow_slice_content.rs free_rooted_value

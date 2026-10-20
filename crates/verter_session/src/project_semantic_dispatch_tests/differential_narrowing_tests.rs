@@ -604,6 +604,8 @@ export function pAssertUnion(x: string | number) { assertString(x); return x; }
 export function pAssertTruthy(x: string | undefined) { assertTruthy(x); return x; }
 export function pAssertCondition(x: string | number) { assertTruthy(typeof x === "string"); return x; }
 export function pAssertConstCondition(x: string | number) { assertConst(typeof x === "string"); return x; }
+export function pAssertAlias(x: string | number) { const isS = typeof x === "string"; assertTruthy(isS); return x; }
+export function pAssertConstAlias(x: string | number) { const isS = typeof x === "string"; assertConst(isS); return x; }
 export function pGenericDefined(x: string | undefined) { if (isDefined(x)) return x; throw 0; }
 export function pGenericElse(x: string | undefined) { if (isDefined(x)) throw 0; return x; }
 export function pGenericArr(x: number | number[]) { if (isArr(x)) return x; throw 0; }
@@ -623,7 +625,7 @@ export function pMemberArg(o: { p: Fish | Bird }) { if (isFish(o.p)) return o.p;
 /// A call to a type predicate narrows its argument (a member reference too) in
 /// the true branch and filters it out in the false branch; an assertion narrows
 /// what follows it, by the condition it is passed for a targetless `asserts
-/// x`; a `this is` predicate narrows the receiver; an inferred predicate of a
+/// x`, an aliased condition included; a `this is` predicate narrows the receiver; an inferred predicate of a
 /// function or arrow narrows like a declared one.
 #[test]
 fn predicates_and_assertions_narrow_as_the_checker_narrows() {
@@ -640,6 +642,8 @@ fn predicates_and_assertions_narrow_as_the_checker_narrows() {
         ("pAssertTruthy", "string"),
         ("pAssertCondition", "string"),
         ("pAssertConstCondition", "string"),
+        ("pAssertAlias", "string"),
+        ("pAssertConstAlias", "string"),
         ("pGenericKey", "\"k\""),
         ("pThis", "Box2 & { v: string; }"),
         ("pThisMember", "string"),

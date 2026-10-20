@@ -8798,10 +8798,23 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .zip(arguments.iter())
                     .map(|(argument, subject)| {
-                        if subject.is_some() {
-                            return None;
-                        }
                         let argument = argument.as_expression()?;
+                        // A reference argument narrows by truthiness, unless
+                        // it names an aliased condition, which narrows as an
+                        // `if` over the alias does.
+                        if subject.is_some() {
+                            return self
+                                .classify_aliased_condition(unwrap_reference_transparent(argument))
+                                .and_then(|disposition| match disposition {
+                                    GuardDisposition::Modeled(guard) => {
+                                        Some(SliceAssertionCondition::Guard(*guard))
+                                    }
+                                    GuardDisposition::NoNarrowing => None,
+                                    GuardDisposition::Unexpressible => {
+                                        Some(SliceAssertionCondition::Unexpressible)
+                                    }
+                                });
+                        }
                         // A call in the condition is a guard whose evidence
                         // only its application deposits, and the effects
                         // signature is not known to assert yet.
@@ -10178,6 +10191,24 @@ impl<'a> Lowerer<'a> {
                 Some((argument, target))
             })
             .and_then(|(argument, target)| {
+                // A targetless assertion over an ALIASED CONDITION narrows
+                // as an `if` over the alias does: the alias by truthiness
+                // and what its initializer tests.
+                if target.is_none() {
+                    match self.classify_aliased_condition(unwrap_reference_transparent(argument)) {
+                        Some(GuardDisposition::Modeled(guard)) => {
+                            return Some(SliceAssertion {
+                                claim: SliceAssertionClaim::Condition(*guard),
+                                call: verter_span::Span::new(call.span.start, call.span.end),
+                            });
+                        }
+                        Some(GuardDisposition::Unexpressible) => {
+                            self.control_test_gap = true;
+                            return None;
+                        }
+                        Some(GuardDisposition::NoNarrowing) | None => {}
+                    }
+                }
                 let claim = match (self.narrow_subject_of(argument), target) {
                     (Some(subject), target) => SliceAssertionClaim::Reference { subject, target },
                     (None, None) => match self.classify_guard(argument) {
