@@ -5167,20 +5167,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         self.relation_session_rollback(&checkpoint);
         bindings.truncate(bindings_len);
-        // A call's inference reads the last signature whatever its
-        // assignability, as the checker's `inferFromSignature` does before
-        // applicability is checked: `callS(o)` over `callS<R>(f: (x:
-        // string) => R)` with `o` overloaded `(x: string): 1; (x: number):
-        // 0` infers `R` as `0`, and the call then fails with that
-        // inference. A conditional type's `infer` keeps the relation's own
-        // verdict, which its true branch is read under.
-        if self.call_session_active() {
-            self.infer_from_signature_parts(*last_source, *last_target, bindings);
-        }
+        // Inference reads the last signature whatever its assignability, as
+        // the checker's `inferFromSignature` does before assignability is
+        // checked: `callS(o)` over `callS<R>(f: (x: string) => R)` with `o`
+        // overloaded `(x: string): 1; (x: number): 0` infers `R` as `0`,
+        // and the call then fails with that inference. A conditional type's
+        // `infer` then relates the other overloads to its `extends` type
+        // instantiated with that inference: over `f` overloaded `(x:
+        // string): 1; (x: number): 2`, `typeof f extends (x: string) =>
+        // infer R ? R : 0` infers `R` as `2`, no overload is assignable to
+        // `(x: string) => 2`, and the false branch answers `0`.
+        // A parameter the last signature binds several times keeps the
+        // relation's own verdict: its fixation is the session's.
+        let inferred_from = bindings.len();
+        let before_inference = self.relation_session_checkpoint();
+        self.infer_from_signature_parts(*last_source, *last_target, bindings);
+        let instantiated = if self.call_session_active() {
+            None
+        } else {
+            let single = self.single_deposit_bindings(&bindings[inferred_from..]);
+            if single.is_none() {
+                self.relation_session_rollback(&before_inference);
+                bindings.truncate(inferred_from);
+            }
+            single
+        };
         let bindings_len = bindings.len();
         for (source, target) in rest {
+            let target = match &instantiated {
+                Some(inferred) => self.substitute_bindings(*target, inferred),
+                None => *target,
+            };
             let checkpoint = self.relation_session_checkpoint();
-            let result = self.relate_member(*source, *target, bindings, position);
+            let result = self.relate_member(*source, target, bindings, position);
             self.relation_session_rollback(&checkpoint);
             bindings.truncate(bindings_len);
             match result {
@@ -5194,6 +5213,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             RelationResult::NotAssignable
         }
+    }
+
+    /// `deposits` when they bind each parameter once, the instantiation a
+    /// conditional type's `extends` type is then read under; `None` when a
+    /// parameter holds several candidates, whose fixation is the session's.
+    fn single_deposit_bindings(&self, deposits: &[InferBinding]) -> Option<Vec<InferBinding>> {
+        let mut seen = FxHashSet::default();
+        deposits
+            .iter()
+            .all(|binding| seen.insert(binding.param))
+            .then(|| deposits.to_vec())
     }
 
     /// Whether the active inference session infers a call's type

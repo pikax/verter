@@ -952,8 +952,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `hc({ s: 1, r: { inc(a) {} } })` over `hc<S, R extends { inc: (a: S)
     /// => void }>(o: { s: S; r: R })` reads `r` as a placeholder for `R`;
     /// `f({ a: anyv, m(x) { return x; } })` over `f<T, U>(o: { a: T; m: (x:
-    /// T) => U })` reads `a` as authored. A member related to a type
-    /// parameter whole relates nothing nested.
+    /// T) => U })` reads `a` as authored. A parameter an authored `any`
+    /// also lands in is none of them: `f({ a: anyv, b(x) { return x; }, m(x)
+    /// { return x; } })` over `f<T, U>(o: { a: T; b: T; m: (x: T) => U })`
+    /// infers `any` for `T`. A member related to a type parameter whole
+    /// relates nothing nested.
     pub(super) fn first_pass_withheld_targets(
         &self,
         reading: SemanticNodeId,
@@ -983,6 +986,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => None,
         };
         let mut withheld = Vec::new();
+        let mut authored = Vec::new();
         let mut pending = vec![(reading, argument, target)];
         let mut seen = FxHashSet::default();
         while let Some((reading, argument, target)) = pending.pop() {
@@ -990,7 +994,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 continue;
             }
             if is_any(reading) {
-                if !is_any(argument) {
+                if is_any(argument) {
+                    authored.extend(self.top_level_type_param_targets(target));
+                } else {
                     withheld.extend(self.top_level_type_param_targets(target));
                 }
                 continue;
@@ -1033,6 +1039,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 );
             }
         }
+        // A parameter an authored `any` also lands in holds that `any` as a
+        // candidate already, which the placeholder's `any` only repeats.
+        withheld.retain(|param| !authored.contains(param));
         withheld.sort_unstable();
         withheld.dedup();
         withheld
