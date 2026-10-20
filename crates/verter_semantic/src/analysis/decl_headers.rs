@@ -975,27 +975,27 @@ fn constructor_visibility(decl: &Class<'_>) -> Option<verter_type_expr::MemberVi
 fn index_class_field_value(
     class: &Class<'_>,
     name: &str,
-    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    field: crate::analysis::class_field_value::ClassField<'_, '_>,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
     let classified = crate::analysis::class_field_value::classify_class_field(
         std::sync::Arc::make_mut(&mut index.class_field_values),
         class,
-        prop,
+        field,
         ctx.source,
     );
     if let (Some(_), Some(field_name), Some(value)) = (
         classified,
-        crate::analysis::type_eval_build::class_field_value_name(name, prop),
-        prop.value.as_ref(),
+        crate::analysis::type_eval_build::class_field_value_name(name, field),
+        field.value,
     ) {
         let span: Span = verter_span::Span::new(value.span().start, value.span().end);
         let entry = index
             .value_headers
             .entry(ctx.key(&field_name))
             .or_insert_with(|| ValueDeclHeader {
-                kind: if prop.readonly {
+                kind: if field.readonly {
                     ValueDeclKind::Const
                 } else {
                     ValueDeclKind::Let
@@ -1061,7 +1061,9 @@ fn index_named_class(
                 if matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                index_class_field_value(decl, name, prop, ctx, index);
+                if let Some(field) = crate::analysis::class_field_value::ClassField::of(element) {
+                    index_class_field_value(decl, name, field, ctx, index);
+                }
                 let header = MemberHeader {
                     key: lower_property_key(&prop.key, ctx.source),
                     method_kind: None,
@@ -1079,6 +1081,9 @@ fn index_named_class(
                 // An `accessor` field is one mutable property to its readers.
                 if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
+                }
+                if let Some(field) = crate::analysis::class_field_value::ClassField::of(element) {
+                    index_class_field_value(decl, name, field, ctx, index);
                 }
                 let header = MemberHeader {
                     key: lower_property_key(&property.key, ctx.source),

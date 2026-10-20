@@ -4675,36 +4675,49 @@ fn known_key_accessor<'a>(
     (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
 }
 
-/// The accessors among a mapping source's `members`, by the key each names:
-/// for every key whose public members are all `get` / `set`, whether the
-/// accessor is `readonly` (it has no setter). A mapping maps such a key as
-/// the one property its readers see, reading its value through the key
-/// ([`SurfaceView::project_known_key_accessor`]) only when the mapping needs
-/// it, never as the accessor function.
-pub(crate) fn accessor_readonly_by_key(
-    members: &[SurfaceMember],
-) -> rustc_hash::FxHashMap<PropertyKey, bool> {
-    let mut groups: rustc_hash::FxHashMap<PropertyKey, Option<bool>> =
-        rustc_hash::FxHashMap::default();
-    for member in members
-        .iter()
-        .filter(|member| member.visibility.is_public())
-    {
-        let Some(key) = member.key.cloned_known() else {
-            continue;
-        };
-        let kind = member.method_kind;
-        let group = groups.entry(key).or_insert(Some(true));
-        *group = match (*group, kind) {
-            (Some(readonly), Some(verter_type_expr::ObjectMethodKind::Get)) => Some(readonly),
-            (Some(_), Some(verter_type_expr::ObjectMethodKind::Set)) => Some(false),
-            _ => None,
-        };
+/// The accessors among a mapping source's `members`, by the property each
+/// names: for every property whose public members are all `get` / `set`,
+/// whether the accessor is `readonly` (it has no setter). Keys that spell
+/// one property ([`property_spelling`]: `get 1` and `set "1"`) are one
+/// accessor, as [`accessor_property_slots`] reads them. A mapping maps such
+/// a key as the one property its readers see, reading its value through the
+/// key ([`SurfaceView::project_known_key_accessor`]) only when the mapping
+/// needs it, never as the accessor function.
+#[derive(Default)]
+pub(crate) struct AccessorReadonlyByProperty(std::collections::HashMap<PropertyKey, bool>);
+
+impl AccessorReadonlyByProperty {
+    pub(crate) fn of(members: &[SurfaceMember]) -> Self {
+        let mut groups: std::collections::HashMap<PropertyKey, Option<bool>> =
+            std::collections::HashMap::new();
+        for member in members
+            .iter()
+            .filter(|member| member.visibility.is_public())
+        {
+            let Some(key) = member.key.cloned_known().map(property_spelling) else {
+                continue;
+            };
+            let kind = member.method_kind;
+            let group = groups.entry(key).or_insert(Some(true));
+            *group = match (*group, kind) {
+                (Some(readonly), Some(verter_type_expr::ObjectMethodKind::Get)) => Some(readonly),
+                (Some(_), Some(verter_type_expr::ObjectMethodKind::Set)) => Some(false),
+                _ => None,
+            };
+        }
+        Self(
+            groups
+                .into_iter()
+                .filter_map(|(key, readonly)| Some((key, readonly?)))
+                .collect(),
+        )
     }
-    groups
-        .into_iter()
-        .filter_map(|(key, readonly)| Some((key, readonly?)))
-        .collect()
+
+    /// Whether the accessor `key` names is `readonly`; `None` when no
+    /// accessor names it.
+    pub(crate) fn readonly(&self, key: &PropertyKey) -> Option<bool> {
+        self.0.get(&property_spelling(key.clone())).copied()
+    }
 }
 
 /// `members` with every accessor read as the one PROPERTY its readers see
@@ -4749,8 +4762,8 @@ pub(crate) fn accessor_property_slots(
         return None;
     }
     let spelling = |member: &SurfaceMember| member.key.cloned_known().map(property_spelling);
-    let mut by_spelling: rustc_hash::FxHashMap<PropertyKey, Vec<usize>> =
-        rustc_hash::FxHashMap::default();
+    let mut by_spelling: std::collections::HashMap<PropertyKey, Vec<usize>> =
+        std::collections::HashMap::new();
     for (ordinal, member) in members.iter().enumerate() {
         if member.visibility.is_public() {
             if let Some(key) = spelling(member) {
@@ -4758,7 +4771,7 @@ pub(crate) fn accessor_property_slots(
             }
         }
     }
-    let mut collapsed: rustc_hash::FxHashSet<PropertyKey> = rustc_hash::FxHashSet::default();
+    let mut collapsed: std::collections::HashSet<PropertyKey> = std::collections::HashSet::new();
     let slots = members
         .iter()
         .map(|member| {

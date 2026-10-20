@@ -534,6 +534,44 @@ pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<S
         .collect()
 }
 
+/// Per member of the object `probe` evaluates to under the publication
+/// demand [`evaluated_mismatches`] makes: whether it is `readonly`, and
+/// whether its value matches the checker type `value`.
+pub(super) fn evaluated_member_modifiers(
+    source: &str,
+    probe: &str,
+    value: &str,
+) -> Vec<(bool, bool)> {
+    let expected = checker_syntax::parse(value)
+        .unwrap_or_else(|err| panic!("the checker type `{value}` must parse: {err}"));
+    with_probe(source, probe, |dispatch, node| {
+        let evaluated = dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+        let data = dispatch.graph().node_data(evaluated);
+        let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+            panic!(
+                "`{probe}` must evaluate to an object, measured `{}`",
+                render_node(dispatch, evaluated, 0)
+            );
+        };
+        surface
+            .positive_members()
+            .iter()
+            .map(|member| {
+                (
+                    member.readonly,
+                    checker_syntax::matches_node(dispatch, member.value, &expected, 0),
+                )
+            })
+            .collect()
+    })
+}
+
 /// The label of each element of the tuple `probe` settles on — the
 /// parameter NAMES a `Parameters<…>` answer carries.
 pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {

@@ -15335,7 +15335,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source_member_index.entry(key).or_insert(member);
             }
         }
-        let source_accessors = crate::semantic_query::accessor_readonly_by_key(&source_members);
+        let source_accessors =
+            crate::semantic_query::AccessorReadonlyByProperty::of(&source_members);
         // A kept modifier is read off the modifiers type
         // (`getModifiersTypeFromMappedType`): `source` itself, or the `X` of
         // a key parameter constrained to `keyof X`. One that does not
@@ -15361,7 +15362,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         });
         let modifiers_accessors = modifiers_members
             .as_deref()
-            .map(crate::semantic_query::accessor_readonly_by_key);
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of);
         // `X[P]` over the modifiers type `X` is the property read `X[P]` — an
         // overloaded method's whole signature group, an accessor's read
         // type — under the member's kept `?`, which carries the `undefined`
@@ -15411,13 +15412,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let source_member = source_member_index.get(&key.key).copied();
             // An accessor maps as the property it is: `readonly` without a
             // setter, its value read through the key, never the accessor.
-            let source_accessor_readonly = source_accessors.get(&key.key).copied();
+            let source_accessor_readonly = source_accessors.readonly(&key.key);
             let modifiers_member = match &modifiers_member_index {
                 Some(index) => index.get(&key.key).copied(),
                 None => source_member,
             };
             let modifiers_accessor_readonly = match &modifiers_accessors {
-                Some(accessors) => accessors.get(&key.key).copied(),
+                Some(accessors) => accessors.readonly(&key.key),
                 None => source_accessor_readonly,
             };
             let optional = match mapper.optionality {

@@ -9,7 +9,9 @@
 //! API (`getTypeAtPosition` + `typeToString` on the alias) in a `strict`
 //! project.
 
-use super::checker_probe_lane_tests::{evaluated_mismatches, mismatches};
+use super::checker_probe_lane_tests::{
+    evaluated_member_modifiers, evaluated_mismatches, mismatches,
+};
 
 const FIXTURE: &str = "\
 interface R<T, S = T> { get value(): T; set value(_: S); }
@@ -25,6 +27,10 @@ class D { accessor n = 1; accessor t: \"x\" | \"y\" = \"x\"; static accessor z =
 class Box<T> { constructor(private v: T) {} get value(): T { return this.v; } set value(x: T) { this.v = x; } }
 declare const b: Box<string>;
 declare const c: C;
+interface N { get 1(): \"s\"; set \"1\"(v: \"s\"); }
+declare function id<T>(v: T): T;
+class Pt { x = 1; }
+class E { a = 1; accessor generic = id(1); accessor fieldThis = this.a; accessor p = new Pt(); accessor f = () => 1; static accessor sp = new Pt(); plain = id(1); }
 ";
 
 /// A mapped type over a type with accessors maps each accessor as the
@@ -82,6 +88,22 @@ fn a_mapping_maps_an_accessor_as_its_property() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A getter and a setter whose keys spell one property (`1` and `"1"`)
+/// are one accessor: a mapping over them publishes ONE property, mutable
+/// because it has a setter.
+///
+/// Measured on TypeScript 7.0.2: `Id<N>` is `{ 1: "s"; }`, and
+/// `declare const n: Id<N>; n[1] = "s";` compiles.
+#[test]
+fn equivalent_accessor_key_spellings_map_as_one_mutable_property() {
+    let members = evaluated_member_modifiers(FIXTURE, "Id<N>", "\"s\"");
+    assert_eq!(
+        members,
+        vec![(false, true)],
+        "`get 1` / `set \"1\"` map as one mutable `\"s\"` property, (readonly, value matches) per member"
+    );
+}
+
 /// A read of an accessor reads its property type, through the
 /// instantiation of a generic interface or class; a setter alone reads its
 /// parameter; a method reads as the method. These are the reads the
@@ -133,6 +155,9 @@ fn an_accessor_read_is_its_property_type() {
 /// | `(typeof D)['z']` | `string` |
 /// | `Exclude<keyof C, "r" \| "rw" \| "m">` | `"f"` |
 /// | `Exclude<keyof D, "n">` | `"t"` |
+/// | `E['generic']`, `E['fieldThis']`, `E['plain']` | `number` |
+/// | `E['p']`, `(typeof E)['sp']` | `Pt` |
+/// | `E['f']` | `() => number` |
 #[test]
 fn an_accessor_field_is_a_property_of_its_class() {
     let failures = mismatches(
@@ -146,6 +171,12 @@ fn an_accessor_field_is_a_property_of_its_class() {
             ("(typeof D)['z']", "string"),
             ("Exclude<keyof C, \"r\" | \"rw\" | \"m\">", "\"f\""),
             ("Exclude<keyof D, \"n\">", "\"t\""),
+            ("E['generic']", "number"),
+            ("E['fieldThis']", "number"),
+            ("E['plain']", "number"),
+            ("E['p']", "Pt"),
+            ("(typeof E)['sp']", "Pt"),
+            ("E['f']", "() => number"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));

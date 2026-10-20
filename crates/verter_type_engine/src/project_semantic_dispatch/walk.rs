@@ -9464,7 +9464,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         });
         let source_accessors = source_members
             .as_deref()
-            .map(crate::semantic_query::accessor_readonly_by_key)
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of)
             .unwrap_or_default();
         // A kept modifier is read off the modifiers type — the
         // `build_mapped_type` mirror: `source` itself, or the `X` of a key
@@ -9505,7 +9505,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             });
         let modifiers_accessors = modifiers_members
             .as_deref()
-            .map(crate::semantic_query::accessor_readonly_by_key);
+            .map(crate::semantic_query::AccessorReadonlyByProperty::of);
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9577,9 +9577,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 };
                 // An accessor maps as the property it is: `readonly`
                 // without a setter, its value read through the key.
-                let source_accessor_readonly = source_accessors.get(&key.key).copied();
+                let source_accessor_readonly = source_accessors.readonly(&key.key);
                 let modifiers_accessor_readonly = match &modifiers_accessors {
-                    Some(accessors) => accessors.get(&key.key).copied(),
+                    Some(accessors) => accessors.readonly(&key.key),
                     None => source_accessor_readonly,
                 };
                 let readonly = match readonly_mod {

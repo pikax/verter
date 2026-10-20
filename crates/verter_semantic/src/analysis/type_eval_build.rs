@@ -12,6 +12,7 @@ use verter_session_query::analysis::signature_params::narrow_signature_type_para
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
+use crate::analysis::class_field_value::ClassField;
 use verter_session_query::declarations::class_fields::ClassFieldValues;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1991,10 +1992,10 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 /// without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
-    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    field: crate::analysis::class_field_value::ClassField<'_, '_>,
 ) -> Option<String> {
-    let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
-    let side = if prop.r#static { "static" } else { "field" };
+    let key = crate::analysis::function_program::static_property_key_name(field.key)?;
+    let side = if field.r#static { "static" } else { "field" };
     Some(format!("{class_name}:{side}:{key}"))
 }
 
@@ -2941,6 +2942,139 @@ struct ClassElementSelection<'a> {
     lowered: usize,
 }
 
+/// The type a class field's initializer gives it through a served
+/// position, when one does, for a property definition and an `accessor`
+/// field alike. A function-valued initializer with NO authored annotation
+/// is a served class-member position (the index discovers it as
+/// `Member{[raw ordinal]}`); an initializer whose type derives from a call
+/// or reads `this` is read through a synthetic value declaration
+/// ([`class_field_value_name`]). `None` for a field its annotation or
+/// syntactic inference types.
+fn class_field_initializer_type(
+    decl: &Class<'_>,
+    field: ClassField<'_, '_>,
+    class_name: &str,
+    raw_member_ordinal: u32,
+    source: &str,
+    out: &mut LoweredStatementParts,
+) -> Option<TypeExpr> {
+    // A function-valued field initializer with NO authored
+    // annotation is a served class-member position (the index
+    // discovers it as `Member{[raw ordinal]}`): its body-derived
+    // return is demanded through the whole-function producer
+    // exactly like a method's. An authored TS annotation — on
+    // the field or on the function itself — stays the declared
+    // carrier.
+    let function_value = match field.value {
+        Some(Expression::ArrowFunctionExpression(arrow))
+            if field.type_annotation.is_none() && arrow.return_type.is_none() =>
+        {
+            let sig = extract_arrow_signature(arrow, source);
+            let mut function_expr = FunctionExpr::with_spans(
+                sig.parameters,
+                sig.return_type.map(Arc::new),
+                sig.type_parameters,
+                FunctionSpans {
+                    signature: Some(verter_span::Span::new(arrow.span.start, arrow.span.end)),
+                    return_type: None,
+                },
+            );
+            function_expr.flow_return = static_property_key_name(field.key).map(|_| {
+                Box::new(FlowFunctionReturnIdentity {
+                    anchor: AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(""),
+                        owner: TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(class_name),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::Member {
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            vec![raw_member_ordinal].into_boxed_slice(),
+                        ),
+                    },
+                    overload_ordinal: 0,
+                })
+            });
+            Some(TypeExpr::Function(Arc::new(function_expr)))
+        }
+        Some(Expression::FunctionExpression(func))
+            if field.type_annotation.is_none() && func.return_type.is_none() =>
+        {
+            let sig = extract_function_signature(func, source);
+            let mut function_expr = FunctionExpr::with_spans(
+                sig.parameters,
+                sig.return_type.map(Arc::new),
+                sig.type_parameters,
+                FunctionSpans {
+                    signature: Some(verter_span::Span::new(func.span.start, func.span.end)),
+                    return_type: None,
+                },
+            );
+            function_expr.flow_return = static_property_key_name(field.key).map(|_| {
+                Box::new(FlowFunctionReturnIdentity {
+                    anchor: AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(""),
+                        owner: TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(class_name),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::Member {
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            vec![raw_member_ordinal].into_boxed_slice(),
+                        ),
+                    },
+                    overload_ordinal: 0,
+                })
+            });
+            Some(TypeExpr::Function(Arc::new(function_expr)))
+        }
+        _ => None,
+    };
+    // A field whose initializer's type derives from a call reads
+    // it through a synthetic value declaration indexed at the
+    // initializer; a mutable field widens a fresh result as a
+    // `let` does.
+    let field_value = function_value
+        .is_none()
+        .then(|| {
+            crate::analysis::class_field_value::class_field_value(
+                &out.class_fields,
+                decl,
+                field,
+                source,
+            )
+        })
+        .flatten()
+        .and_then(|_| class_field_value_name(class_name, field))
+        .map(|field_name| {
+            out.value_decls.push(LoweredValueDeclParts {
+                name: field_name.clone(),
+                kind: if field.readonly {
+                    ValueDeclKind::Const
+                } else {
+                    ValueDeclKind::Let
+                },
+                is_unique_symbol: false,
+                unique_symbol_members: Vec::new(),
+                type_annotation: None,
+                annotation_is_authored: false,
+                inference_unavailable: None,
+                expression_source_offset: field.value.map(|value| value.span().start),
+                signatures: Vec::new(),
+                object_shape: None,
+                enum_members: None,
+                enum_member_names: None,
+                literal_freshness: DeclaredLiteralFreshness::Regular,
+                read_provenance: None,
+            });
+            TypeExpr::TypeOf(ValueRef {
+                path: vec![field_name],
+                type_args: Vec::new(),
+            })
+        });
+    field_value.or(function_value)
+}
+
 /// [`collect_named_class`], or — with `selection` — only the instance
 /// members the listed raw `ClassBody.body` elements declare, delivered to
 /// the selection's member list. An element outside the list lowers nothing
@@ -3010,130 +3144,17 @@ fn collect_named_class_selecting(
                     continue;
                 }
                 let prop_key = class_member_key(&prop.key, source);
-                // A function-valued field initializer with NO authored
-                // annotation is a served class-member position (the index
-                // discovers it as `Member{[raw ordinal]}`): its body-derived
-                // return is demanded through the whole-function producer
-                // exactly like a method's. An authored TS annotation — on
-                // the field or on the function itself — stays the declared
-                // carrier.
-                let function_value = match prop.value.as_ref() {
-                    Some(Expression::ArrowFunctionExpression(arrow))
-                        if prop.type_annotation.is_none() && arrow.return_type.is_none() =>
-                    {
-                        let sig = extract_arrow_signature(arrow, source);
-                        let mut function_expr = FunctionExpr::with_spans(
-                            sig.parameters,
-                            sig.return_type.map(Arc::new),
-                            sig.type_parameters,
-                            FunctionSpans {
-                                signature: Some(verter_span::Span::new(
-                                    arrow.span.start,
-                                    arrow.span.end,
-                                )),
-                                return_type: None,
-                            },
-                        );
-                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
-                            Box::new(FlowFunctionReturnIdentity {
-                                anchor: AuthoredAnchor {
-                                    canonical_id: verter_type_expr::OwnedStr::from(""),
-                                    owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                                    space: LocatorSymbolSpace::Value,
-                                },
-                                function_part: FunctionPartIdentity::Member {
-                                    member_path: verter_type_expr::OwnedSlice::from(
-                                        vec![raw_member_ordinal].into_boxed_slice(),
-                                    ),
-                                },
-                                overload_ordinal: 0,
-                            })
-                        });
-                        Some(TypeExpr::Function(Arc::new(function_expr)))
-                    }
-                    Some(Expression::FunctionExpression(func))
-                        if prop.type_annotation.is_none() && func.return_type.is_none() =>
-                    {
-                        let sig = extract_function_signature(func, source);
-                        let mut function_expr = FunctionExpr::with_spans(
-                            sig.parameters,
-                            sig.return_type.map(Arc::new),
-                            sig.type_parameters,
-                            FunctionSpans {
-                                signature: Some(verter_span::Span::new(
-                                    func.span.start,
-                                    func.span.end,
-                                )),
-                                return_type: None,
-                            },
-                        );
-                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
-                            Box::new(FlowFunctionReturnIdentity {
-                                anchor: AuthoredAnchor {
-                                    canonical_id: verter_type_expr::OwnedStr::from(""),
-                                    owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                                    space: LocatorSymbolSpace::Value,
-                                },
-                                function_part: FunctionPartIdentity::Member {
-                                    member_path: verter_type_expr::OwnedSlice::from(
-                                        vec![raw_member_ordinal].into_boxed_slice(),
-                                    ),
-                                },
-                                overload_ordinal: 0,
-                            })
-                        });
-                        Some(TypeExpr::Function(Arc::new(function_expr)))
-                    }
-                    _ => None,
-                };
-                // A field whose initializer's type derives from a call reads
-                // it through a synthetic value declaration indexed at the
-                // initializer; a mutable field widens a fresh result as a
-                // `let` does.
-                let field_value = function_value
-                    .is_none()
-                    .then(|| {
-                        crate::analysis::class_field_value::class_field_value(
-                            &out.class_fields,
-                            decl,
-                            prop,
-                            source,
-                        )
-                    })
-                    .flatten()
-                    .and_then(|_| class_field_value_name(&name, prop))
-                    .map(|field_name| {
-                        out.value_decls.push(LoweredValueDeclParts {
-                            name: field_name.clone(),
-                            kind: if prop.readonly {
-                                ValueDeclKind::Const
-                            } else {
-                                ValueDeclKind::Let
-                            },
-                            is_unique_symbol: false,
-                            unique_symbol_members: Vec::new(),
-                            type_annotation: None,
-                            annotation_is_authored: false,
-                            inference_unavailable: None,
-                            expression_source_offset: prop
-                                .value
-                                .as_ref()
-                                .map(|value| value.span().start),
-                            signatures: Vec::new(),
-                            object_shape: None,
-                            enum_members: None,
-                            enum_member_names: None,
-                            literal_freshness: DeclaredLiteralFreshness::Regular,
-                            read_provenance: None,
-                        });
-                        TypeExpr::TypeOf(ValueRef {
-                            path: vec![field_name],
-                            type_args: Vec::new(),
-                        })
-                    });
-                let ty = field_value.or(function_value).unwrap_or_else(|| {
+                let field =
+                    ClassField::of(element).expect("a property definition is a class field");
+                let ty = class_field_initializer_type(
+                    decl,
+                    field,
+                    &name,
+                    raw_member_ordinal,
+                    source,
+                    out,
+                )
+                .unwrap_or_else(|| {
                     prop.type_annotation
                         .as_ref()
                         .map(|ta| lower_ts_type(&ta.type_annotation, source))
@@ -3408,26 +3429,38 @@ fn collect_named_class_selecting(
                 // An `accessor` field declares a get / set pair over private
                 // storage: to every reader it is one mutable PROPERTY of its
                 // annotated type, else its initializer's widened type, else
-                // `any`. `static` selects the constructor shape; a
-                // `#private` one is a private member, never a static one.
+                // `any`, its initializer typed as a mutable field's is.
+                // `static` selects the constructor shape; a `#private` one
+                // is a private member, never a static one.
                 if property.r#static && matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
                     continue;
                 }
-                let ty = property
-                    .type_annotation
-                    .as_ref()
-                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
-                    .or_else(|| {
-                        property.value.as_ref().map(|value| {
-                            infer_declaration_or_unknown(
-                                value,
-                                source,
-                                TopLevelLiteralPolicy::Widen,
-                                &mut inference_unavailable,
-                            )
-                        })
+                let field = ClassField::of(element).expect("an `accessor` field is a class field");
+                let ty = class_field_initializer_type(
+                    decl,
+                    field,
+                    &name,
+                    raw_member_ordinal,
+                    source,
+                    out,
+                )
+                .or_else(|| {
+                    property
+                        .type_annotation
+                        .as_ref()
+                        .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                })
+                .or_else(|| {
+                    property.value.as_ref().map(|value| {
+                        infer_declaration_or_unknown(
+                            value,
+                            source,
+                            TopLevelLiteralPolicy::Widen,
+                            &mut inference_unavailable,
+                        )
                     })
-                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+                })
+                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
                 let spans = MemberSpans {
                     declaration: Some(verter_span::Span::new(
                         property.span.start,
