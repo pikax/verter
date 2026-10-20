@@ -14557,31 +14557,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         source_optional: impl Fn() -> Option<bool>,
     ) -> SemanticNodeId {
-        let (strict_null_checks, exact_optional) = self
-            .graph()
-            .node_scope(source)
-            .and_then(|scope| scope.canonical_file())
-            .map_or((true, false), |canonical| {
-                let options = self.ctx.semantic_compiler_options_for(&canonical);
-                (
-                    options.strict_null_checks,
-                    options.exact_optional_property_types,
-                )
-            });
+        let (strict_null_checks, exact_optional) = self.optional_member_compiler_options(source);
         if !strict_null_checks {
             return value;
         }
-        let graph = self.graph();
-        let arms: Vec<SemanticNodeId> = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
-            _ => vec![value],
-        };
-        let is_undefined = |arm: &SemanticNodeId| {
-            matches!(
-                graph.node_data(*arm).as_deref(),
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
-            )
-        };
+        let arms = self.union_arms(value);
+        let is_undefined = |arm: &SemanticNodeId| self.is_undefined_node(*arm);
         match mapper.optionality {
             crate::semantic_query::OptionalityMod::Add
                 if !exact_optional && !arms.iter().any(is_undefined) =>
@@ -14605,15 +14586,78 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && arms.iter().any(is_undefined)
                     && source_optional() == Some(true) =>
             {
-                let kept: Vec<SemanticNodeId> =
-                    arms.into_iter().filter(|arm| !is_undefined(arm)).collect();
-                match kept.as_slice() {
-                    [] => self.primitive_node(PrimitiveKind::Never),
-                    [only] => *only,
-                    _ => self.intern_normalized_union_or_intersection(&kept, true),
-                }
+                self.without_undefined_arms(arms)
             }
             _ => value,
+        }
+    }
+
+    /// The read `value` of an optional member whose kept `?` carries the
+    /// `undefined` the read added (`removeMissingType`): `value` without
+    /// its `undefined` arm, unless the member's `declared` type holds one
+    /// itself. Without `strictNullChecks`, or under
+    /// `exactOptionalPropertyTypes`, a read adds none and `value` is kept.
+    /// `scope` is the node whose file's options decide.
+    pub(super) fn read_without_optional_member_undefined(
+        &self,
+        value: SemanticNodeId,
+        declared: SemanticNodeId,
+        scope: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let (strict_null_checks, exact_optional) = self.optional_member_compiler_options(scope);
+        if !strict_null_checks || exact_optional {
+            return value;
+        }
+        let arms = self.union_arms(value);
+        if !arms.iter().any(|arm| self.is_undefined_node(*arm))
+            || self
+                .union_arms(declared)
+                .iter()
+                .any(|arm| self.is_undefined_node(*arm))
+        {
+            return value;
+        }
+        self.without_undefined_arms(arms)
+    }
+
+    /// `(strictNullChecks, exactOptionalPropertyTypes)` of the file `node`
+    /// is scoped to; a node with no file scope reads the strict defaults.
+    fn optional_member_compiler_options(&self, node: SemanticNodeId) -> (bool, bool) {
+        self.graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .map_or((true, false), |canonical| {
+                let options = self.ctx.semantic_compiler_options_for(&canonical);
+                (
+                    options.strict_null_checks,
+                    options.exact_optional_property_types,
+                )
+            })
+    }
+
+    fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            _ => vec![node],
+        }
+    }
+
+    fn is_undefined_node(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+        )
+    }
+
+    fn without_undefined_arms(&self, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
+        let kept: Vec<SemanticNodeId> = arms
+            .into_iter()
+            .filter(|arm| !self.is_undefined_node(*arm))
+            .collect();
+        match kept.as_slice() {
+            [] => self.primitive_node(PrimitiveKind::Never),
+            [only] => *only,
+            _ => self.intern_normalized_union_or_intersection(&kept, true),
         }
     }
 
@@ -15248,9 +15292,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             index
         });
-        // `X[P]` over the modifiers type `X` reads `X`'s member itself, as
-        // `Pick` does: its value is the member's, never the member read that
-        // adds the optional member's `undefined`.
+        // `X[P]` over the modifiers type `X` is the property read `X[P]` — an
+        // overloaded method's whole signature group, an accessor's read
+        // type — under the member's kept `?`, which carries the `undefined`
+        // the read adds for an optional member.
         let value_reads_modifiers_member = modifiers_member_index.is_some()
             && mapper.modifiers_type.is_some_and(|modifiers| {
                 crate::semantic_query::MapperKind::classify_value_expr(
@@ -15352,10 +15397,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
                 source_member.value
-            } else if let (Some(modifiers_member), true) =
-                (modifiers_member, value_reads_modifiers_member)
-            {
-                modifiers_member.value
             } else if value_is_identity {
                 let read = self.execute_read(SemanticQueryKey::IndexedAccess {
                     base: source,
@@ -15406,7 +15447,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.mapped_member_optionality(mapper, value, source, key_node)
                 })
             } else {
-                value
+                match (modifiers_member, mapper.modifiers_type) {
+                    (Some(member), Some(modifiers))
+                        if value_reads_modifiers_member && optional && member.optional =>
+                    {
+                        self.read_without_optional_member_undefined(value, member.value, modifiers)
+                    }
+                    _ => value,
+                }
             };
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
@@ -15436,7 +15484,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 // Rationale on [`mapped_produced_key_inherits_declaration_site`]
                 // — the one shared predicate both rails judge inheritance with.
-                let identity_source = source_member.filter(|_| {
+                // A member taking its modifiers from the modifiers type links
+                // to that member's declaration (`shouldLinkPropDeclarations`).
+                let identity_source = source_member.or(modifiers_member).filter(|_| {
                     mapped_produced_key_inherits_declaration_site(&produced_name, &key.key)
                 });
                 // SAFETY: mapped-type member synthesis (e.g.,

@@ -1613,6 +1613,7 @@ fn userland_pick_props_keep_the_picked_members_optionality() {
             r#"
 export type PickOf<T, K extends keyof T> = { [P in K]: T[P] };
 export interface BaseInputProps {
+  /** The input's id. */
   id?: string
   name?: string
   placeholder?: string
@@ -1662,6 +1663,26 @@ defineProps<InputMenuProps>()
             ("required", true),
         ],
         "picked optional members publish optional, required ones required"
+    );
+    let id = meta
+        .props
+        .iter()
+        .find(|prop| prop.name == "id")
+        .expect("id is picked");
+    let id_ty = shallow_published_type(
+        project.host(),
+        "/src/InputMenu.vue",
+        id.publication.result().selected_source(),
+        "id prop",
+    );
+    assert!(
+        matches!(id_ty, TypeExpr::Primitive(PrimitiveName::String)),
+        "an optional picked member's `?` carries its absence, not its value: {id_ty:?}"
+    );
+    assert_eq!(
+        id.description.as_deref(),
+        Some("The input's id."),
+        "a picked member keeps its base declaration's JSDoc, as the builtin Pick does"
     );
 
     // The picked members' modifiers come from the base declaration: making
