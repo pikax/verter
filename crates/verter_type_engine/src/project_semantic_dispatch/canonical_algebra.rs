@@ -1100,6 +1100,18 @@ fn canonicalize_with(
     meter: ConstructionMeter<'_>,
 ) -> CanonicalComposite {
     let mut evidence = CanonicalEvidence::default();
+    // The checker keeps `string & {}` only when the WRITTEN node is that
+    // pair: `{} & string & {}` and `(string & {}) & {}` flatten to it and
+    // still reduce.
+    let supertype_reduction = match supertype_reduction {
+        SupertypeReduction::ExceptPrimitiveOverEmptyObject
+            if !is_union
+                && !is_written_kept_pair(graph, members, nullability, meter, &mut evidence) =>
+        {
+            SupertypeReduction::Always
+        }
+        other => other,
+    };
 
     // 1. Recursive same-kind flattening: a union is never an arm of a union,
     //    an intersection never an arm of an intersection (mirrors the
@@ -1851,6 +1863,29 @@ pub(crate) fn is_kept_primitive_over_empty_object(
             (keeps_pair(*first) && is_empty_object(*second))
                 || (is_empty_object(*first) && keeps_pair(*second))
         }
+        _ => false,
+    }
+}
+
+/// Whether the written intersection arms `members` are the pair the checker
+/// keeps ([`is_kept_primitive_over_empty_object`]), each arm the type the
+/// checker holds for it under `nullability` (with `strictNullChecks` off,
+/// `(string | null) & {}` is the written `string & {}`). Decided before
+/// flattening, as `getTypeFromIntersectionTypeNode` decides it on the type
+/// node's own arms.
+fn is_written_kept_pair(
+    graph: &SemanticGraphStore,
+    members: &[SemanticNodeId],
+    nullability: NullabilityPolicy,
+    meter: ConstructionMeter<'_>,
+    evidence: &mut CanonicalEvidence,
+) -> bool {
+    match members {
+        [_, _] if nullability == NullabilityPolicy::Erased => is_kept_primitive_over_empty_object(
+            graph,
+            &erase_nullable_union_arms(graph, members.to_vec(), meter, evidence),
+        ),
+        [_, _] => is_kept_primitive_over_empty_object(graph, members),
         _ => false,
     }
 }

@@ -88,7 +88,9 @@ const NULLS_ERASED: &str = r#"{ "strict": true, "strictNullChecks": false }"#;
 /// "b"; y: 2; } & { k: "b"; }`; `(string & {}) | "a" | "b"` keeps all three
 /// members, and so does `({} & string) | "a"`; `{ p: (string & {}) | "a" }`
 /// keeps its property's union; `(A & B) & (A | B)` is `A & B`; `string &
-/// {}` and `A & B` stay as written.
+/// {}` and `A & B` stay as written. The kept pair is decided on the
+/// written arms: `{} & string & {}`, `(string & {}) & {}`, `string &
+/// unknown & {}` and `string & {} & string` are each `string`.
 const IN_EVERY_NULL_SETTING: &[(&str, &str)] = &[
     (r#"{ kind: "a"; x: 1 } & { kind: "b" }"#, "never"),
     (
@@ -105,6 +107,10 @@ const IN_EVERY_NULL_SETTING: &[(&str, &str)] = &[
     ("(A & B) & (A | B)", "A & B"),
     ("string & {}", "string & {}"),
     ("A & B", "A & B"),
+    ("{} & string & {}", "string"),
+    ("(string & {}) & {}", "string"),
+    ("string & unknown & {}", "string"),
+    ("string & {} & string", "string"),
 ];
 
 #[test]
