@@ -13607,10 +13607,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|arm| self.resolve_signature_source_carrier(*arm, published))
             .collect();
-        super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
             self.graph(),
             &surfaces,
-        )
+            self.construction_meter(),
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        conflicts
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -16705,7 +16710,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_audit::attribute!(ReduceUnion);
             self.build_normalize_composite(
                 members,
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability),
+                super::canonical_algebra::intern_ordered_union_charged(
+                    self.graph(),
+                    members,
+                    nullability,
+                    self.construction_meter(),
+                ),
             )
         }
     }
@@ -16751,13 +16761,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
                 self.build_normalize_composite(
                     &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
+                    super::canonical_algebra::intern_ordered_intersection_charged(
+                        self.graph(),
+                        &members,
+                        self.construction_meter(),
+                    ),
                 )
             } else {
                 let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
                 self.build_normalize_composite(
                     &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
+                    super::canonical_algebra::intern_ordered_intersection_charged(
+                        self.graph(),
+                        &members,
+                        self.construction_meter(),
+                    ),
                 )
             }
         }
@@ -16806,6 +16824,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A distribution the connected demand could not pay for is the
+        // written composite, a partial of the rails it exhausted.
+        if !composite.evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(composite.evidence.exhausted);
         }
         output
     }
@@ -19385,6 +19408,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             arms,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
             super::canonical_algebra::DistributionOrigin::Distributed,
+            self.construction_meter(),
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
@@ -19415,10 +19439,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::QueryResult::Value(node) => node,
                     crate::semantic_query::QueryResult::Recursive(node) => node,
                     crate::semantic_query::QueryResult::Error(_) => {
-                        let composite = super::canonical_algebra::intern_ordered_intersection(
-                            self.graph(),
-                            members,
-                        );
+                        let composite =
+                            super::canonical_algebra::intern_ordered_intersection_charged(
+                                self.graph(),
+                                members,
+                                self.construction_meter(),
+                            );
                         self.deposit_canonical_evidence(composite.evidence);
                         composite.node
                     }
@@ -19439,8 +19465,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             members: &[SemanticNodeId],
             nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ) -> SemanticNodeId {
-            let composite =
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+            let composite = super::canonical_algebra::intern_ordered_union_charged(
+                self.graph(),
+                members,
+                nullability,
+                self.construction_meter(),
+            );
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
         }

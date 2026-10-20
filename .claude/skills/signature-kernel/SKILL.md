@@ -39,7 +39,7 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | Path | Owns |
 |---|---|
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
-| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union` / `intern_ordered_intersection` — the two crate-private canonical builders, plus `compare_structural` and `CanonicalEvidence`. |
+| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
 | `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. |
 
@@ -54,8 +54,21 @@ and **exactly two** crate-private builders:
 SemanticQueryKey::ReduceUnion { members, nullability }      → build_reduce_union
 SemanticQueryKey::ReduceIntersection { input, purpose, ctx } → build_reduce_intersection
         ↓                                                           ↓
-canonical_algebra::intern_ordered_union          canonical_algebra::intern_ordered_intersection
+canonical_algebra::intern_ordered_union_charged  canonical_algebra::intern_ordered_intersection_charged
+        └──────────── admit_cross_product(meter) ──────────────────┘
 ```
+
+The builders called inside a connected demand take the demand's
+`ConstructionMeter` (`ConstructionMeter::charged(ledger)`): every
+distribution a construction runs is weighed by `admit_cross_product` against
+the checker's cross-product limit from the counts alone, then paid to the
+ledger before its first constituent is built, so a refusal stops it before it
+allocates. The unmetered forms are not production seams for a demand:
+`intern_ordered_union` (`ConstructionMeter::UNMETERED`) serves a construction
+outside any connected demand — its distributions are still weighed, but
+charged to no ledger — and `intern_ordered_intersection` /
+`intern_ordered_intersection_paying_for_tests` exist only under `test` /
+`test-support`.
 
 Both builders perform recursive same-kind flattening, the lattice absorption
 laws, literal subsumption on unions, structural `T | T = T` / `T & T = T`
