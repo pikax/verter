@@ -139,11 +139,12 @@ pub struct InferenceInfoSetup {
     /// Call inference owns const policy per declaration parameter. Other
     /// inference domains use the neutral ordinary policy.
     pub(in crate::project_semantic_dispatch) const_policy: ConstParamPolicy,
-    /// Whether the declared parameter carries a constraint. A FRESH
-    /// primitive-literal candidate stays fresh only for an UNCONSTRAINED
-    /// parameter (a constrained parameter's preserved literal is regular
-    /// — the upper-bound check regularizes it).
-    pub(in crate::project_semantic_dispatch) has_constraint: bool,
+    /// The declared parameter's constraint. A FRESH primitive-literal
+    /// candidate stays fresh only for an UNCONSTRAINED parameter (a
+    /// constrained parameter's preserved literal is regular — the
+    /// upper-bound check regularizes it); the tuple plan reads a variadic
+    /// parameter's fixed arity from it.
+    pub(in crate::project_semantic_dispatch) constraint: Option<SemanticNodeId>,
 }
 
 impl InferenceInfoSetup {
@@ -152,7 +153,7 @@ impl InferenceInfoSetup {
             param_node,
             param_name,
             const_policy: ConstParamPolicy::NonConst,
-            has_constraint: false,
+            constraint: None,
         }
     }
 
@@ -160,13 +161,13 @@ impl InferenceInfoSetup {
         param_node: SemanticNodeId,
         param_name: Arc<str>,
         const_policy: ConstParamPolicy,
-        has_constraint: bool,
+        constraint: Option<SemanticNodeId>,
     ) -> Self {
         Self {
             param_node,
             param_name,
             const_policy,
-            has_constraint,
+            constraint,
         }
     }
 }
@@ -240,7 +241,7 @@ struct InferenceInfo {
     param_node: SemanticNodeId,
     param_name: Arc<str>,
     const_policy: ConstParamPolicy,
-    has_constraint: bool,
+    constraint: Option<SemanticNodeId>,
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
@@ -303,7 +304,7 @@ impl InferenceSession {
                 param_node: info.param_node,
                 param_name: Arc::clone(&info.param_name),
                 const_policy: info.const_policy,
-                has_constraint: info.has_constraint,
+                constraint: info.constraint,
                 candidates: Vec::new(),
                 implied_arity: None,
             })
@@ -610,7 +611,7 @@ impl InferenceSession {
         let unconstrained = self
             .infos
             .iter()
-            .any(|info| info.param_node == param_node && !info.has_constraint);
+            .any(|info| info.param_node == param_node && info.constraint.is_none());
         if unconstrained {
             self.fresh_literal_deposits.push((param_node, literal));
         }
@@ -671,6 +672,15 @@ impl InferenceSession {
             .iter()
             .find(|info| info.param_node == param_node)
             .and_then(|info| info.implied_arity)
+    }
+
+    /// The declared constraint of `param_node`, when the session's setup
+    /// carries it (a call's type parameters).
+    pub(crate) fn declared_constraint(&self, param_node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.info_positions
+            .get(&param_node)
+            .and_then(|&position| self.infos.get(position))
+            .and_then(|info| info.constraint)
     }
 
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {

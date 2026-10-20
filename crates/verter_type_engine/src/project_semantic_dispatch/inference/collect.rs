@@ -103,6 +103,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     } else {
                         self.call_inference_candidate(bound, policy)
                     };
+                    if policy == crate::semantic_query::ConstParamPolicy::Const
+                        && deposit_is_top_level
+                    {
+                        bound = self.const_tuple_in_context(param_node, bound);
+                    }
                 } else {
                     // A preserved literal at a naked position is FRESH
                     // provenance for an unconstrained parameter (the note
@@ -116,6 +121,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         }
+        self.relation_deposit_candidate(param_node, bound, occurrence)
+    }
+
+    /// Deposit `bound` as it stands: the session write every candidate
+    /// deposit ends in.
+    pub(in crate::project_semantic_dispatch) fn relation_deposit_candidate(
+        &self,
+        param_node: SemanticNodeId,
+        bound: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
         let mut txn = self.dispatch_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
         let accepted = txn.active_session_mut().is_some_and(|session| {

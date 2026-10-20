@@ -348,6 +348,9 @@ declare function c4<const T extends { a: unknown }>(x: T): T;
 declare function c5<const T>(...xs: T[]): T;
 declare function c6<const T extends readonly string[]>(x: [...T]): T;
 declare function c7<const T extends Record<string, unknown>>(x: T): T;
+declare function c8<const T extends readonly unknown[]>(x: [...T]): T;
+declare function c9<const T extends unknown[]>(x: readonly [...T]): T;
+declare function c10<const T extends unknown[]>(...xs: T): T;
 export function k1() { return c1([1, "a"]); }
 export function k2() { return c1({ a: 1, b: [true] }); }
 export function k3() { return c2([1, 2]); }
@@ -360,6 +363,9 @@ export function k9() { return c1(1); }
 export function k10() { return c1(null); }
 export function k11() { return c7({ n: { m: [1] } }); }
 export function k12() { return c2([]); }
+export function k13() { return c8([1, "b"]); }
+export function k14() { return c9([1, "b"]); }
+export function k15() { return c10(1, "b"); }
 "##;
 
 /// `const` type parameters infer literal, readonly arrays, tuples and objects.
@@ -448,11 +454,24 @@ declare function concat<A extends unknown[], B extends unknown[]>(a: [...A], b: 
 declare function pushF<T extends unknown[], U>(t: [...T], u: U): [...T, U];
 declare function args<A extends unknown[]>(f: (...a: A) => void): A;
 declare function fn2(a: string, b?: number): void;
+declare function suffix<T extends unknown[], U>(x: [...T, U]): [T, U];
+declare function mid<T extends unknown[]>(x: [string, ...T, number]): T;
+declare function optSuffix<T extends unknown[]>(x: [...T, number?]): T;
+declare function curry<A extends unknown[], B extends unknown[], R>(f: (...args: [...A, ...B]) => R, ...a: A): (...b: B) => R;
+declare function leading<T extends [unknown, unknown]>(x: [...T, ...string[]]): T;
+declare function trailing<T extends [unknown]>(x: [...string[], ...T]): T;
+declare const fx: (x: number, y: string, z: boolean) => 0;
 export function v1() { return tail([1, "a", true]); }
 export function v2() { return concat([1], ["a"]); }
 export function v3() { return pushF([1, 2], "x"); }
 export function v4() { return args(fn2); }
 export function v5() { return args((a: 1, ...r: string[]) => {}); }
+export function v6() { return suffix([1, "a", 2]); }
+export function v7() { return mid(["s", 1, true, 2]); }
+export function v8() { return optSuffix([1, "a", 2]); }
+export function v9() { return curry(fx, 1); }
+export function v10() { return leading([1, true, "a", "b"]); }
+export function v11() { return trailing(["a", "b", 1]); }
 "##;
 
 /// Variadic tuple types spread, infer and instantiate as the checker's do.
@@ -2685,54 +2704,163 @@ fn declared_reads_reach_their_stored_uses() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A `const` type parameter inferred through a rest parameter keeps the argument tuple's literals.
+/// An array literal in a `const` type parameter's context is a readonly
+/// tuple only when that context is not mutable array-like: a parameter
+/// constrained to a mutable array, a mutable variadic tuple parameter and a
+/// rest parameter over a mutable array keep a mutable tuple, and a slice a
+/// variadic element infers is mutable whatever the tuple it came from.
 #[test]
-#[ignore = "typed gap in the lane: a rest parameter over a const type parameter is an UnrepresentableCallee"]
-fn pinned_const_type_parameters_through_rest_parameters() {
-    let failures = Matrix::new(CONST_TYPE_PARAMETERS).four(&[
-        (
-            Read::Return(r#"k4"#),
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-            r#"[1, 2]"#,
-        ),
-        (
-            Read::Return(r#"k7"#),
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-            r#"["a", "b"]"#,
-        ),
+fn const_type_parameters_in_mutable_array_contexts() {
+    let failures = Matrix::new(CONST_TYPE_PARAMETERS).same(&[
+        (Read::Return(r#"k4"#), r#"[1, 2]"#),
+        (Read::Return(r#"k7"#), r#"["a", "b"]"#),
+        (Read::Return(r#"k13"#), r#"[1, "b"]"#),
+        (Read::Return(r#"k14"#), r#"[1, "b"]"#),
+        (Read::Return(r#"k15"#), r#"[1, "b"]"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A call infers a variadic tuple type parameter from the arguments it spreads over.
+/// A call infers a variadic tuple type parameter from the slice of the
+/// argument tuple between the parameter's fixed prefix and suffix; two
+/// variadics split at the arity the call's arguments imply for the first,
+/// and a variadic beside a rest splits at its fixed constraint arity.
 #[test]
-#[ignore = "typed gap in the lane: a variadic tuple parameter is an UnrepresentableCallee"]
-fn pinned_variadic_tuple_inference_in_calls() {
+fn variadic_tuple_inference_in_calls() {
+    let failures = Matrix::new(VARIADIC_TUPLES).same(&[
+        (Read::Return(r#"v1"#), r#"[string, boolean]"#),
+        (Read::Return(r#"v2"#), r#"[number, string]"#),
+        (Read::Return(r#"v3"#), r#"[number, number, string]"#),
+        (Read::Return(r#"v6"#), r#"[[number, string], number]"#),
+        (Read::Return(r#"v7"#), r#"[number, boolean]"#),
+        (Read::Return(r#"v8"#), r#"[number, string]"#),
+        (Read::Return(r#"v9"#), r#"(y: string, z: boolean) => 0"#),
+        (Read::Return(r#"v10"#), r#"[number, boolean]"#),
+        (Read::Return(r#"v11"#), r#"[number]"#),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A conditional's `infer` declarations in a tuple pattern take the same
+/// positional plan as a call: the fixed ends pair, a lone variadic takes
+/// the slice (a lone source rest the array of its element), two variadics
+/// infer nothing without an implied arity and fall back to their
+/// constraints, and a variadic beside a rest splits at its constraint arity.
+#[test]
+fn variadic_tuple_infer_patterns() {
     let failures = Matrix::new(VARIADIC_TUPLES).four(&[
         (
-            Read::Return(r#"v1"#),
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
-            r#"[string, boolean]"#,
+            Read::Type(r#"[1, 2] extends [...infer A, ...infer B] ? [A, B] : 0"#),
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
+            r#"[unknown[], unknown[]]"#,
         ),
         (
-            Read::Return(r#"v2"#),
-            r#"[number, string]"#,
-            r#"[number, string]"#,
-            r#"[number, string]"#,
-            r#"[number, string]"#,
+            Read::Type(r#"[1, ...string[]] extends [infer H, ...infer R] ? R : 0"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
         ),
         (
-            Read::Return(r#"v3"#),
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
-            r#"[number, number, string]"#,
+            Read::Type(r#"string[] extends [...infer R] ? R : 0"#),
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+            r#"string[]"#,
+        ),
+        (
+            Read::Type(r#"number[] extends [infer H, ...infer R] ? R : 0"#),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[], 2] extends [...infer A, infer L] ? [A, L] : 0"#),
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+            r#"[[1, ...string[]], 2]"#,
+        ),
+        (
+            Read::Type(r#"[1, 2?] extends [infer A, ...infer R] ? R : 0"#),
+            r#"[(2 | undefined)?]"#,
+            r#"[2?]"#,
+            r#"[(2 | undefined)?]"#,
+            r#"[2?]"#,
+        ),
+        (
+            Read::Type(r#"[a: 1, b: 2] extends [infer A, ...infer R] ? R : 0"#),
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+            r#"[b: 2]"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown], ...infer B] ? [A, B] : 0"#,
+            ),
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+            r#"[[unknown], unknown[]]"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown, unknown], ...string[]] ? A : 0"#,
+            ),
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+            r#"0"#,
+        ),
+        (
+            Read::Type(
+                r#"[1, 2, 3] extends [...infer A extends [unknown, unknown], ...number[]] ? A : 0"#,
+            ),
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+        ),
+        (
+            Read::Type(
+                r#"["a", "b", 1] extends [...string[], ...infer A extends [unknown]] ? A : 0"#,
+            ),
+            r#"[1]"#,
+            r#"[1]"#,
+            r#"[1]"#,
+            r#"[1]"#,
+        ),
+        (
+            Read::Type(r#"[1, 2, 3] extends [...infer A, number?] ? A : 0"#),
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+            r#"[1, 2]"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[]] extends [...infer R] ? R : 0"#),
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+            r#"[1, ...string[]]"#,
+        ),
+        (
+            Read::Type(r#"[1, ...string[]] extends [infer A, ...(infer R)[]] ? R : 0"#),
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+            r#"string"#,
+        ),
+        (
+            Read::Type(r#"[1, 2, 3] extends [1, ...(infer R)[]] ? R : 0"#),
+            r#"2 | 3"#,
+            r#"2 | 3"#,
+            r#"2 | 3"#,
+            r#"2 | 3"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

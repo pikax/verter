@@ -348,3 +348,226 @@ impl<'a> PositionalShape<'a> {
             && a.receiver.as_ref().map(strip) == b.receiver.as_ref().map(strip)
     }
 }
+
+/// The position kind of one tuple element, in the checker's element-flag
+/// vocabulary. An array is one [`Self::Rest`] position.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TupleElementKind {
+    Required,
+    Optional,
+    /// `...X[]`: a rest element over an array.
+    Rest,
+    /// `...T`: a variadic element over a generic.
+    Variadic,
+}
+
+impl TupleElementKind {
+    const fn is_fixed(self) -> bool {
+        matches!(self, Self::Required | Self::Optional)
+    }
+    const fn is_variable(self) -> bool {
+        matches!(self, Self::Rest | Self::Variadic)
+    }
+}
+
+/// Arity facts the plan reads for the generic side's variadic elements; the
+/// plan itself never inspects types.
+pub trait VariadicArityFacts {
+    /// The arity the call's arguments imply for the variadic element at
+    /// `index` — a bare rest type parameter's `impliedArity`.
+    fn implied_arity(&self, index: usize) -> Option<usize>;
+    /// The length of the variadic element's constraint at `index` when that
+    /// constraint is a tuple with no rest or variadic element.
+    fn fixed_constraint_arity(&self, index: usize) -> Option<usize>;
+}
+
+/// One inference a concrete array or tuple makes to a generic tuple. Every
+/// index is a position of the side it names: `source` of the concrete
+/// side, `target` of the generic side.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum TupleInferenceStep {
+    /// The source element infers to the target element.
+    Element { source: usize, target: usize },
+    /// The source's single remaining rest element infers to the target
+    /// element: its element type, or an array of it for a variadic target.
+    RestElement { source: usize, target: usize },
+    /// The source slice `[start, len - end)`, as a mutable tuple keeping
+    /// labels, optionality and rest (`sliceTupleType`), infers to the
+    /// variadic target element; `speculative` when the target ends in an
+    /// optional element (`InferencePriority.SpeculativeTuple`).
+    Slice {
+        start: usize,
+        end: usize,
+        target: usize,
+        speculative: bool,
+    },
+    /// The union of the element types of the source slice `[start, len -
+    /// end)` infers to the rest target element's element type.
+    SliceElementType {
+        start: usize,
+        end: usize,
+        target: usize,
+    },
+}
+
+/// The inferences a concrete `source` (a tuple, or an array when
+/// `source_is_tuple` is false) makes to a generic tuple `target` — the
+/// checker's tuple arm of `inferFromObjectTypes`. Positions pair from the
+/// front over the shared fixed prefix and from the back over the shared
+/// fixed suffix; the middle is inferred whole: a lone variadic takes the
+/// slice, a lone rest the union of the slice, two variadics split at the
+/// first's implied arity, and a variadic beside a rest splits at its fixed
+/// constraint arity. A middle the plan cannot split infers nothing.
+#[must_use]
+pub fn tuple_inference_plan(
+    source: &[TupleElementKind],
+    source_is_tuple: bool,
+    target: &[TupleElementKind],
+    facts: &dyn VariadicArityFacts,
+) -> Vec<TupleInferenceStep> {
+    let source_arity = source.len();
+    let target_arity = target.len();
+    let mut steps = Vec::new();
+    let structure_matches = source_arity == target_arity
+        && source
+            .iter()
+            .zip(target)
+            .all(|(s, t)| s.is_variable() == t.is_variable() && (*s == *t || !s.is_variable()));
+    if source_is_tuple && structure_matches {
+        steps.extend((0..target_arity).map(|i| TupleInferenceStep::Element {
+            source: i,
+            target: i,
+        }));
+        return steps;
+    }
+    let fixed_length =
+        |kinds: &[TupleElementKind]| kinds.iter().take_while(|k| k.is_fixed()).count();
+    let end_fixed =
+        |kinds: &[TupleElementKind]| kinds.iter().rev().take_while(|k| k.is_fixed()).count();
+    let target_has_variable = target.iter().any(|k| k.is_variable());
+    let start = if source_is_tuple {
+        fixed_length(source).min(fixed_length(target))
+    } else {
+        0
+    };
+    let end = if source_is_tuple && target_has_variable {
+        end_fixed(source).min(end_fixed(target))
+    } else {
+        0
+    };
+    steps.extend((0..start).map(|i| TupleInferenceStep::Element {
+        source: i,
+        target: i,
+    }));
+    let middle_target_end = target_arity.saturating_sub(end);
+    let single_source_rest =
+        source_arity.checked_sub(start + end) == Some(1) && source[start] == TupleElementKind::Rest;
+    if !source_is_tuple || single_source_rest {
+        steps.extend(
+            (start..middle_target_end).map(|target| TupleInferenceStep::RestElement {
+                source: start,
+                target,
+            }),
+        );
+    } else {
+        let slice =
+            |start: usize, end: usize| (start + end <= source_arity).then_some((start, end));
+        match target.get(start..middle_target_end) {
+            Some([TupleElementKind::Variadic, TupleElementKind::Variadic]) => {
+                if let Some(arity) = facts.implied_arity(start) {
+                    let first = (end + source_arity)
+                        .checked_sub(arity)
+                        .and_then(|first_end| slice(start, first_end));
+                    if let (Some((s0, e0)), Some((s1, e1))) = (first, slice(start + arity, end)) {
+                        steps.push(TupleInferenceStep::Slice {
+                            start: s0,
+                            end: e0,
+                            target: start,
+                            speculative: false,
+                        });
+                        steps.push(TupleInferenceStep::Slice {
+                            start: s1,
+                            end: e1,
+                            target: start + 1,
+                            speculative: false,
+                        });
+                    }
+                }
+            }
+            Some([TupleElementKind::Variadic, TupleElementKind::Rest]) => {
+                if let Some(arity) = facts.fixed_constraint_arity(start) {
+                    let first = source_arity
+                        .checked_sub(start + arity)
+                        .and_then(|first_end| slice(start, first_end));
+                    if let Some((s0, e0)) = first {
+                        steps.push(TupleInferenceStep::Slice {
+                            start: s0,
+                            end: e0,
+                            target: start,
+                            speculative: false,
+                        });
+                        if let Some((s1, e1)) =
+                            slice(start + arity, end).filter(|(s, e)| s + e < source_arity)
+                        {
+                            steps.push(TupleInferenceStep::SliceElementType {
+                                start: s1,
+                                end: e1,
+                                target: start + 1,
+                            });
+                        }
+                    }
+                }
+            }
+            Some([TupleElementKind::Rest, TupleElementKind::Variadic]) => {
+                if let Some(arity) = facts.fixed_constraint_arity(start + 1) {
+                    let end_index = source_arity.checked_sub(end_fixed(target));
+                    let start_index = end_index.and_then(|index| index.checked_sub(arity));
+                    if let (Some(end_index), Some(start_index)) = (end_index, start_index) {
+                        if start_index >= start {
+                            if let Some((s0, e0)) =
+                                slice(start, end + arity).filter(|(s, e)| s + e < source_arity)
+                            {
+                                steps.push(TupleInferenceStep::SliceElementType {
+                                    start: s0,
+                                    end: e0,
+                                    target: start,
+                                });
+                            }
+                            steps.push(TupleInferenceStep::Slice {
+                                start: start_index,
+                                end: source_arity - end_index,
+                                target: start + 1,
+                                speculative: false,
+                            });
+                        }
+                    }
+                }
+            }
+            Some([TupleElementKind::Variadic]) => {
+                if let Some((s, e)) = slice(start, end) {
+                    steps.push(TupleInferenceStep::Slice {
+                        start: s,
+                        end: e,
+                        target: start,
+                        speculative: target.last() == Some(&TupleElementKind::Optional),
+                    });
+                }
+            }
+            Some([TupleElementKind::Rest]) => {
+                if let Some((s, e)) = slice(start, end).filter(|(s, e)| s + e < source_arity) {
+                    steps.push(TupleInferenceStep::SliceElementType {
+                        start: s,
+                        end: e,
+                        target: start,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    steps.extend((0..end).map(|i| TupleInferenceStep::Element {
+        source: source_arity - i - 1,
+        target: target_arity - i - 1,
+    }));
+    steps
+}

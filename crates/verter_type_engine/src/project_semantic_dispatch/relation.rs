@@ -5179,59 +5179,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
     }
 
-    /// The two slices a fixed-length `remainder` tuple splits into against
-    /// an `inference` tuple of exactly two variadic elements the active
-    /// session infers (`[...A, ...B]`), at the arity the call's arguments
-    /// imply for the first: `(A, A's slice, B, B's slice)`. `None` for
-    /// every other shape, or when the first's arity is unknown or longer
-    /// than the remainder.
-    #[allow(clippy::type_complexity)]
-    fn implied_arity_split(
-        &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        let [first, second] = inference else {
-            return None;
-        };
-        if !first.rest || !second.rest || remainder.iter().any(|element| element.rest) {
-            return None;
-        }
-        let graph = self.graph();
-        let txn = self.dispatch_txn.borrow();
-        let session = txn.active_session()?;
-        let inferred = |node: SemanticNodeId| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::TypeParam { .. })
-            ) && session.infers(node)
-        };
-        if !inferred(first.value) || !inferred(second.value) {
-            return None;
-        }
-        let arity = session.implied_arity(first.value)?;
-        if arity > remainder.len() {
-            return None;
-        }
-        Some((
-            first.value,
-            remainder[..arity]
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect::<Vec<_>>(),
-            second.value,
-            remainder[arity..]
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect::<Vec<_>>(),
-        ))
-    }
-
     /// Recover the input of an exact homomorphic mapped target. The only
     /// externally visible output is the normal relation verdict; recovered
     /// values and the aggregate candidate stay in the active session.
@@ -12941,16 +12888,10 @@ trait RelationDemandDriver {
     ) -> Option<PairStep>;
     fn charge_relation_work(&self, units: u64) -> bool;
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool;
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )>;
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts>;
     fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -13081,6 +13022,12 @@ trait RelationDemandDriver {
         bound: SemanticNodeId,
         occurrence: InferenceOccurrence,
     ) -> bool;
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool;
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -13174,17 +13121,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         ProjectSemanticDispatch::implicit_index_rejects(self, source, target)
     }
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        ProjectSemanticDispatch::implied_arity_split(self, inference, remainder)
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts> {
+        ProjectSemanticDispatch::inferable_variadics(self, elements)
     }
     fn intern_normalized_union_or_intersection(
         &self,
@@ -13417,6 +13358,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     ) -> bool {
         ProjectSemanticDispatch::relation_deposit(self, param_node, bound, occurrence)
     }
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
+        ProjectSemanticDispatch::relation_deposit_slice(self, param_node, slice, occurrence)
+    }
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -13613,17 +13562,11 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         self.driver.implicit_index_rejects(source, target)
     }
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        self.driver.implied_arity_split(inference, remainder)
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts> {
+        self.driver.inferable_variadics(elements)
     }
     fn intern_normalized_union_or_intersection(
         &self,
@@ -13827,6 +13770,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> bool {
         self.driver.relation_deposit(param_node, bound, occurrence)
     }
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
+        self.driver
+            .relation_deposit_slice(param_node, slice, occurrence)
+    }
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -13996,6 +13948,162 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         };
         is_carrier(&source_data) || is_carrier(&target_data)
     }
+    /// Relate a concrete array or tuple to a generic tuple whose variadic
+    /// elements the active session infers, by the shared positional plan
+    /// ([`crate::signature_kernel::tuple_inference_plan`]): each slice the
+    /// plan assigns an inferable variadic deposits, and the concrete side
+    /// relates position by position to the generic tuple with each such
+    /// element replaced by its slice — or, when the plan infers nothing to
+    /// it, by its constraint, as the checker relates the check to the
+    /// pattern instantiated with the fixed inferences. `concrete` is `None`
+    /// for an array, whose one rest position `concrete_slots` holds.
+    #[allow(clippy::too_many_arguments)]
+    fn relate_generic_tuple(
+        &self,
+        (concrete, concrete_slots): (
+            Option<&Arc<[crate::semantic_query::TupleElement]>>,
+            Vec<TupleSlot>,
+        ),
+        generic: &[crate::semantic_query::TupleElement],
+        facts: &super::inference::VariadicElementFacts,
+        generic_is_source: bool,
+        bindings: &[InferBinding],
+        work: &mut Vec<RelateWork>,
+        results: &mut Vec<RelationResult>,
+    ) {
+        use crate::signature_kernel::{TupleElementKind, TupleInferenceStep};
+        let graph = self.graph();
+        let occurrence = self.relation_current_occurrence();
+        let kind_of = |slot: &TupleSlot| match slot.kind {
+            TupleSlotKind::Required => TupleElementKind::Required,
+            TupleSlotKind::Optional => TupleElementKind::Optional,
+            TupleSlotKind::Rest => TupleElementKind::Rest,
+            TupleSlotKind::Variadic => TupleElementKind::Variadic,
+        };
+        let generic_slots = self.tuple_slots(generic);
+        let concrete_kinds: Vec<TupleElementKind> = concrete_slots.iter().map(kind_of).collect();
+        let generic_kinds: Vec<TupleElementKind> = generic_slots.iter().map(kind_of).collect();
+        let plan = crate::signature_kernel::tuple_inference_plan(
+            &concrete_kinds,
+            concrete.is_some(),
+            &generic_kinds,
+            facts,
+        );
+        let mut inferred: Vec<Option<Vec<crate::semantic_query::TupleElement>>> =
+            generic.iter().map(|_| None).collect();
+        for step in plan {
+            let (target, slice, slice_elements, speculative) = match step {
+                TupleInferenceStep::Slice {
+                    start,
+                    end,
+                    target,
+                    speculative,
+                } => {
+                    let Some(concrete) = concrete else { continue };
+                    let elements: Vec<crate::semantic_query::TupleElement> = concrete
+                        [start..concrete.len() - end]
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect();
+                    let slice = graph.intern_node(SemanticNodeData::Tuple {
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements
+                                .iter()
+                                .map(crate::semantic_query::TupleElement::copy)
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        ),
+                        readonly: false,
+                    });
+                    (target, slice, elements, speculative)
+                }
+                TupleInferenceStep::RestElement { source, target }
+                    if generic_kinds[target] == TupleElementKind::Variadic =>
+                {
+                    let slice = graph.intern_node(SemanticNodeData::Array {
+                        element: concrete_slots[source].type_argument,
+                        readonly: false,
+                    });
+                    let label = concrete.and_then(|concrete| concrete[source].label.clone());
+                    let element = crate::semantic_query::TupleElement {
+                        label,
+                        value: slice,
+                        optional: false,
+                        rest: true,
+                    };
+                    (target, slice, vec![element], false)
+                }
+                // Every other inference is a positional one the relation below
+                // makes as it relates the pair.
+                _ => continue,
+            };
+            let Some(variadic) = facts.elements[target] else {
+                continue;
+            };
+            if !self.relation_deposit_slice(
+                variadic.param,
+                slice,
+                super::inference::slice_occurrence(occurrence, speculative),
+            ) {
+                results.push(RelationResult::Unknown);
+                return;
+            }
+            inferred[target] = Some(slice_elements);
+        }
+        let mut instantiated: Vec<crate::semantic_query::TupleElement> =
+            Vec::with_capacity(generic.len());
+        for (index, element) in generic.iter().enumerate() {
+            if let Some(elements) = inferred[index].take() {
+                instantiated.extend(elements);
+                continue;
+            }
+            let Some(variadic) = facts.elements[index] else {
+                instantiated.push(element.copy());
+                continue;
+            };
+            let fallback = variadic.fallback;
+            match graph.node_data(fallback).as_deref() {
+                Some(SemanticNodeData::Tuple { elements, .. }) => instantiated.extend(
+                    elements
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy),
+                ),
+                Some(SemanticNodeData::Array { .. }) => {
+                    instantiated.push(crate::semantic_query::TupleElement {
+                        label: element.label.clone(),
+                        value: fallback,
+                        optional: false,
+                        rest: true,
+                    })
+                }
+                _ => {
+                    results.push(RelationResult::Unknown);
+                    return;
+                }
+            }
+        }
+        let instantiated_slots = self.tuple_slots(&instantiated);
+        let pairs = if generic_is_source {
+            tuple_position_pairs(&instantiated_slots, true, &concrete_slots)
+        } else {
+            tuple_position_pairs(&concrete_slots, concrete.is_some(), &instantiated_slots)
+        };
+        let Some(pairs) = pairs else {
+            results.push(RelationResult::NotAssignable);
+            return;
+        };
+        if pairs.is_empty() {
+            results.push(assignable(bindings));
+            return;
+        }
+        push_all_of(
+            work,
+            pairs
+                .into_iter()
+                .map(|(source, target)| RelateWork::Descend(source, target, DescendKind::Eval))
+                .collect(),
+        );
+    }
     fn expand_array_tuple_pair(
         &self,
         (source, target): (SemanticNodeId, SemanticNodeId),
@@ -14004,7 +14112,6 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         work: &mut Vec<RelateWork>,
         results: &mut Vec<RelationResult>,
     ) -> bool {
-        let graph = self.graph();
         let occurrence = self.relation_current_occurrence();
         match (source_data, target_data) {
             (
@@ -14048,149 +14155,39 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     results.push(RelationResult::NotAssignable);
                     return true;
                 }
-                // Tuple-inference rest tail (RI-6 in-scope): a trailing
-                // `...infer Rest` element binds the remaining source
-                // elements as a tuple through the active session.
+                // A generic tuple whose variadic elements the active session
+                // infers takes the shared positional plan: the concrete
+                // tuple's slices infer to them, and the concrete tuple relates
+                // to the generic one instantiated with what they inferred.
+                // In a contravariant position (a parameter list) the generic
+                // tuple is the source.
                 let rest_on_source = matches!(occurrence.variance, VariancePhase::Contravariant);
-                // Exactly two variadic elements the session infers
-                // (`[...A, ...B]`) split a fixed-length tuple at the first's
-                // implied arity, the checker's slice by `impliedArity`.
-                if let Some(split) = self.implied_arity_split(
-                    if rest_on_source { &s_els } else { &t_els },
-                    if rest_on_source { &t_els } else { &s_els },
-                ) {
-                    let (first, first_slice, second, second_slice) = split;
-                    let first_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            first_slice.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    let second_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            second_slice.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    results.push(
-                        if self.relation_deposit(first, first_slice, occurrence)
-                            && self.relation_deposit(second, second_slice, occurrence)
-                        {
-                            assignable(bindings)
-                        } else {
-                            RelationResult::Unknown
-                        },
+                let (concrete, generic) = if rest_on_source {
+                    (&t_els, &s_els)
+                } else {
+                    (&s_els, &t_els)
+                };
+                if let Some(facts) = self.inferable_variadics(generic) {
+                    let concrete_slots = self.tuple_slots(concrete);
+                    self.relate_generic_tuple(
+                        (Some(concrete), concrete_slots),
+                        generic,
+                        &facts,
+                        rest_on_source,
+                        bindings,
+                        work,
+                        results,
                     );
                     return true;
                 }
-                let session_rest = if self.relation_session_active() {
-                    let inference_elements = if rest_on_source { &s_els } else { &t_els };
-                    inference_elements.iter().position(|e| {
-                        e.rest
-                            && matches!(
-                                graph.node_data(e.value).as_deref(),
-                                Some(SemanticNodeData::Infer { .. })
-                            )
-                    })
-                } else {
-                    None
-                };
-                if session_rest.is_some() {
-                    let required_source_len =
-                        s_els.iter().filter(|e| !e.optional && !e.rest).count();
-                    let required_target_len =
-                        t_els.iter().filter(|e| !e.optional && !e.rest).count();
-                    let (required_inference_len, required_remainder_len) = if rest_on_source {
-                        (required_source_len, required_target_len)
-                    } else {
-                        (required_target_len, required_source_len)
-                    };
-                    if required_remainder_len < required_inference_len {
-                        results.push(RelationResult::NotAssignable);
-                        return true;
-                    }
-                }
                 let mut pairs: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
-                if let Some(rest_index) = session_rest {
-                    let (inference_elements, remainder_elements) = if rest_on_source {
-                        (&s_els, &t_els)
-                    } else {
-                        (&t_els, &s_els)
-                    };
-                    let infer_element = inference_elements[rest_index].value;
-                    let prefix = &inference_elements[..rest_index];
-                    let suffix = &inference_elements[rest_index + 1..];
-                    let required_prefix_len =
-                        prefix.iter().filter(|element| !element.optional).count();
-                    let required_suffix_len =
-                        suffix.iter().filter(|element| !element.optional).count();
-                    if remainder_elements.len() < required_prefix_len + required_suffix_len {
+                let source_slots = self.tuple_slots(&s_els);
+                let target_slots = self.tuple_slots(&t_els);
+                match tuple_position_pairs(&source_slots, true, &target_slots) {
+                    Some(positions) => pairs.extend(positions),
+                    None => {
                         results.push(RelationResult::NotAssignable);
                         return true;
-                    }
-                    // Reserve the full fixed suffix when present; when the
-                    // concrete tuple is shorter, only optional trailing suffix
-                    // slots may disappear. The same rule applies to the fixed
-                    // prefix before the variadic capture.
-                    let suffix_len = suffix
-                        .len()
-                        .min(remainder_elements.len().saturating_sub(required_prefix_len));
-                    let prefix_len = prefix
-                        .len()
-                        .min(remainder_elements.len().saturating_sub(suffix_len));
-                    if prefix[prefix_len..].iter().any(|element| !element.optional)
-                        || suffix[suffix_len..].iter().any(|element| !element.optional)
-                    {
-                        results.push(RelationResult::NotAssignable);
-                        return true;
-                    }
-                    let remainder_end = remainder_elements.len() - suffix_len;
-                    let remainder: Vec<crate::semantic_query::TupleElement> = remainder_elements
-                        .iter()
-                        .skip(prefix_len)
-                        .take(remainder_end - prefix_len)
-                        .map(crate::semantic_query::TupleElement::copy)
-                        .collect();
-                    // The capture is the slice of the concrete tuple, its
-                    // labels, optionality and rest kept and never readonly
-                    // (`sliceTupleType`).
-                    let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            remainder.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
-                        results.push(RelationResult::Unknown);
-                        return true;
-                    }
-                    for position in 0..prefix_len {
-                        pairs.push((s_els[position].value, t_els[position].value));
-                    }
-                    for offset in 0..suffix_len {
-                        let inference_position = rest_index + 1 + offset;
-                        let remainder_position = remainder_elements.len() - suffix_len + offset;
-                        if rest_on_source {
-                            pairs.push((
-                                inference_elements[inference_position].value,
-                                remainder_elements[remainder_position].value,
-                            ));
-                        } else {
-                            pairs.push((
-                                remainder_elements[remainder_position].value,
-                                inference_elements[inference_position].value,
-                            ));
-                        }
-                    }
-                } else {
-                    let source_slots = self.tuple_slots(&s_els);
-                    let target_slots = self.tuple_slots(&t_els);
-                    match tuple_position_pairs(&source_slots, true, &target_slots) {
-                        Some(positions) => pairs.extend(positions),
-                        None => {
-                            results.push(RelationResult::NotAssignable);
-                            return true;
-                        }
                     }
                 }
                 if pairs.is_empty() {
@@ -14287,6 +14284,20 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     missing_removed: s_el,
                     value: source,
                 }];
+                if !matches!(occurrence.variance, VariancePhase::Contravariant) {
+                    if let Some(facts) = self.inferable_variadics(&t_els) {
+                        self.relate_generic_tuple(
+                            (None, source_slots.to_vec()),
+                            &t_els,
+                            &facts,
+                            false,
+                            bindings,
+                            work,
+                            results,
+                        );
+                        return true;
+                    }
+                }
                 let target_slots = self.tuple_slots(&t_els);
                 let Some(pairs) = tuple_position_pairs(&source_slots, false, &target_slots) else {
                     results.push(RelationResult::NotAssignable);
