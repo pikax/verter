@@ -177,14 +177,22 @@ fn inference_occurrence_for_position(
 }
 
 /// What the members of a source infer to a union target's one naked type
-/// variable (`inferToMultipleTypes`).
+/// variable (`inferToMultipleTypes`). `closely` pairs each source member a
+/// fixed target member closely matches — two references to one declaration
+/// (`isTypeCloselyMatchedBy`) — with that member: each pair infers and
+/// relates on its own, and neither side takes part in the rest.
 enum NakedUnionInference {
     /// The unmatched members, related to the variable (the inference and
     /// the relation of those members at once).
-    Relate(SemanticNodeId, SemanticNodeId),
+    Relate {
+        closely: Vec<(SemanticNodeId, SemanticNodeId)>,
+        inferred: SemanticNodeId,
+        parameter: SemanticNodeId,
+    },
     /// Every member matched a fixed target member: the whole source is a
     /// lower-priority inference to the variable.
     Matched {
+        closely: Vec<(SemanticNodeId, SemanticNodeId)>,
         source: SemanticNodeId,
         parameter: SemanticNodeId,
     },
@@ -1482,7 +1490,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.checker_recursion_entry(concrete[0], concrete[1]) {
             return None;
         }
-        let identities = carriers.map(|carrier| self.relation_recursion_identity(carrier));
+        let identities = [
+            self.relation_recursion_identity(carriers[0], carriers[1]),
+            self.relation_recursion_identity(carriers[1], carriers[0]),
+        ];
         let (top, chain) = {
             let txn = self.dispatch_txn.borrow();
             let reentry = txn.reentry();
@@ -2342,16 +2353,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The checker's recursion identity of a relation operand read through
     /// a type alias — the alias applied (`InstantiationRef`) or named
     /// (`DeclRef`): the checker's identity of the type an alias names is
-    /// its declaration's symbol, shared by every instantiation. An interface
-    /// or class reference has none here: two references to one generic
-    /// interface or class relate by their type arguments' variance
-    /// ([`Self::relate_by_variance`]) before any structural comparison; one whose
-    /// variance is unmeasurable here falls back to structure, where
-    /// identifying it would stop as deeply nested a finite recursion the
-    /// checker decides by variance.
+    /// its declaration's symbol, shared by every instantiation.
+    ///
+    /// An interface or class reference is identified by its declaration
+    /// too (`getRecursionIdentity` reads a reference's symbol) when the
+    /// pair relates references to TWO declarations, which never relate by
+    /// variance: `C<R1 | R2>` against `D<R1 | R2>` over methods whose type
+    /// parameters default to the reference's own (`then<R1 = T>`) mints a
+    /// new instantiation at every level, and the checker stops it as deeply
+    /// nested. Two references to one generic interface or class relate by
+    /// their type arguments' variance ([`Self::relate_by_variance`]) before
+    /// any structural comparison; one whose variance is unmeasurable here
+    /// falls back to structure, where identifying it would stop as deeply
+    /// nested a finite recursion the checker decides by variance, so such a
+    /// pair keeps no identity. A runtime nominal (`Promise<T>`) is
+    /// identified by the global declaration it refers to.
     fn relation_recursion_identity(
         &self,
         carrier: SemanticNodeId,
+        other: SemanticNodeId,
     ) -> Option<(crate::semantic_query::DeclIdentity, Arc<[SemanticNodeId]>)> {
         let (identity, arguments) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::InstantiationRef { base, args }) => {
@@ -2361,13 +2381,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // which never makes three.
             _ => return None,
         };
+        let identity = self
+            .runtime_nominal_declaration(carrier, &identity)
+            .unwrap_or(identity);
         let prepared = self.ctx.prepared_type_decl_return_only(
             identity.canonical_id.as_ref(),
             identity.owner,
             identity.decl_name.as_ref(),
         )?;
-        (prepared.kind == verter_session_query::declarations::TypeDeclKind::Alias)
-            .then_some((identity, arguments))
+        match prepared.kind {
+            verter_session_query::declarations::TypeDeclKind::Alias => Some((identity, arguments)),
+            verter_session_query::declarations::TypeDeclKind::Interface
+            | verter_session_query::declarations::TypeDeclKind::Class => {
+                (!self.references_one_declaration(carrier, other)).then_some((identity, arguments))
+            }
+        }
     }
 
     /// A pair of literal types relates, under every relation kind and
@@ -3310,6 +3338,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // binding result to enter this branch again would recursively
             // redischarge forever.
             if cyclic && (any_negative || has_binding_member || has_return_member) {
+                // A component that closes cyclic INSIDE a re-discharge met a
+                // back-edge the substitution does not answer (a pair reached
+                // again under another occurrence): re-discharging it would
+                // open the same component again, without end. Its verdict is
+                // not stable, so the batch is released without publish.
+                if self.relation_redischarge_active() {
+                    self.relation_abort_discharged_flights(&discharged);
+                    self.flow_return_abort_drained_flights(&flow_members);
+                    self.resolve_call_abort_drained_flights(&call_members);
+                    return Err(None);
+                }
                 let mut substitution: ProvisionalSubstitution = discharged
                     .iter()
                     .map(|(key, occurrence, verdict, _, _, _, _)| {
@@ -4402,9 +4441,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.extend(members.members_arc().iter().copied());
                 }
                 // A builtin utility (`Uppercase<infer U>`, `Partial<infer T>`)
-                // is an operation the relation does not infer through.
+                // is an operation the relation does not infer through. A
+                // runtime nominal (`Promise<infer U>`) is a reference, whose
+                // arguments infer like any other reference's.
                 SemanticNodeData::InstantiationRef { base, .. }
-                    if base.canonical_id.as_ref() == "__builtin__" =>
+                    if base.canonical_id.as_ref() == "__builtin__"
+                        && self.runtime_nominal_identity(base).is_none() =>
                 {
                     if self.subtree_contains_infer(node) {
                         return InferInventory::Unsupported;
@@ -4988,6 +5030,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         position: InferPosition,
         excess_prepass_completed: bool,
     ) -> RelationResult {
+        let relate =
+            |source: SemanticNodeId, target: SemanticNodeId, bindings: &mut Vec<InferBinding>| {
+                if excess_prepass_completed {
+                    self.relate_union_arm_after_excess_prepass(source, target, bindings, position)
+                } else {
+                    self.relate_member(source, target, bindings, position)
+                }
+            };
+        let session = self.relation_session_active();
+        // The one alternative the source may relate to infers as the
+        // checker infers to a union's members (`inferToMultipleTypes`): an
+        // undecided alternative's candidates stand while no other
+        // alternative relates or stays undecided — `((value: U) => R) |
+        // null | undefined` against a callback still infers `R` when `U` is
+        // an outer `infer`. The verdict stays undecided.
+        let mut standing: Option<(Option<SessionCheckpoint>, usize)> = None;
         let mut any_unknown = false;
         for (source, target) in alternatives {
             // Each alternative is relation work of its own, whether or not
@@ -4997,16 +5055,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             let checkpoint = self.relation_session_checkpoint();
             let bindings_len = bindings.len();
-            let result = if excess_prepass_completed {
-                self.relate_union_arm_after_excess_prepass(*source, *target, bindings, position)
-            } else {
-                self.relate_member(*source, *target, bindings, position)
-            };
-            match result {
-                result @ RelationResult::Assignable { .. } => return result,
+            match relate(*source, *target, bindings) {
+                result @ RelationResult::Assignable { .. } => {
+                    let Some((standing, standing_len)) = standing.take() else {
+                        return result;
+                    };
+                    // The relating alternative's candidates stand alone.
+                    self.relation_session_rollback(&standing);
+                    bindings.truncate(standing_len);
+                    return relate(*source, *target, bindings);
+                }
                 RelationResult::Unknown => {
-                    self.relation_session_rollback(&checkpoint);
-                    bindings.truncate(bindings_len);
+                    if session && !any_unknown {
+                        standing = Some((checkpoint, bindings_len));
+                    } else {
+                        self.relation_session_rollback(&checkpoint);
+                        bindings.truncate(bindings_len);
+                        if let Some((standing, standing_len)) = standing.take() {
+                            self.relation_session_rollback(&standing);
+                            bindings.truncate(standing_len);
+                        }
+                    }
                     any_unknown = true;
                 }
                 RelationResult::NotAssignable => {
@@ -9072,7 +9141,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// removed, `boolean` on either side being its two literals, as the
     /// checker's union holds it, and what remains is inferred to the variable as ONE union
     /// candidate (`string | number | undefined` against `T | undefined`
-    /// infers `T` as `string | number`). When every member matched, the
+    /// infers `T` as `string | number`). A member that is no identical
+    /// match but a reference to the declaration a fixed member references
+    /// (`isTypeCloselyMatchedBy`) is then paired with that member: `R |
+    /// PromiseLike<R>` against `T | PromiseLike<T>` infers `T` from the
+    /// two references and from `R` alone. When every member matched, the
     /// whole source is a lower-priority inference to the variable
     /// ([`NakedUnionInference::Matched`]). `None` when no inference session
     /// collects or the target is no such union — a type parameter the
@@ -9165,19 +9238,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if undecided {
             return None;
         }
+        // The second matching pass: each remaining fixed member takes the
+        // remaining source members that reference its declaration.
+        let mut closely = Vec::new();
+        let mut unmatched = unmatched;
+        for target_member in &fixed {
+            let (paired, rest): (Vec<_>, Vec<_>) = unmatched.into_iter().partition(|member| {
+                member != target_member && self.references_one_declaration(*member, *target_member)
+            });
+            closely.extend(paired.into_iter().map(|member| (member, *target_member)));
+            unmatched = rest;
+        }
         Some(match unmatched.as_slice() {
             [] => NakedUnionInference::Matched {
+                closely,
                 source: match source {
                     [single] => *single,
                     _ => self.intern_normalized_union_or_intersection(source, true),
                 },
                 parameter: *parameter,
             },
-            [single] => NakedUnionInference::Relate(*single, *parameter),
-            _ => NakedUnionInference::Relate(
-                self.intern_normalized_union_or_intersection(&unmatched, true),
-                *parameter,
-            ),
+            [single] => NakedUnionInference::Relate {
+                closely,
+                inferred: *single,
+                parameter: *parameter,
+            },
+            _ => NakedUnionInference::Relate {
+                closely,
+                inferred: self.intern_normalized_union_or_intersection(&unmatched, true),
+                parameter: *parameter,
+            },
         })
     }
 
@@ -10357,6 +10447,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return IdentityCarrierUnwrap::Concrete(id);
         }
+        let identity = self
+            .runtime_nominal_declaration(id, &identity)
+            .unwrap_or(identity);
         let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
             self.type_slot_for(
                 identity.canonical_id.clone(),
@@ -10648,6 +10741,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if self.string_mapping_of(current).is_some() {
                     return IdentityCarrierUnwrap::Concrete(current);
                 }
+                // A runtime nominal the project declares is a reference to
+                // that global declaration: it relates through its members.
+                let identity = self
+                    .runtime_nominal_declaration(current, &identity)
+                    .unwrap_or(identity);
                 let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                     self.type_slot_for(
                         identity.canonical_id.clone(),
@@ -15636,12 +15734,36 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             drop(target_data);
             let members = self.relation_union_members(&members);
             match self.union_source_inferred_to_naked_parameter(&members, target) {
-                Some(NakedUnionInference::Relate(inferred, parameter)) => {
-                    work.push(RelateWork::Eval(inferred, parameter));
+                Some(NakedUnionInference::Relate {
+                    closely,
+                    inferred,
+                    parameter,
+                }) => {
+                    let mut items: Vec<RelateWork> = closely
+                        .into_iter()
+                        .map(|(member, fixed)| RelateWork::Eval(member, fixed))
+                        .collect();
+                    items.push(RelateWork::Eval(inferred, parameter));
+                    push_all_of(work, items);
                     return;
                 }
-                Some(NakedUnionInference::Matched { source, parameter }) => {
-                    results.push(self.matched_union_inference(source, parameter, bindings));
+                Some(NakedUnionInference::Matched {
+                    closely,
+                    source,
+                    parameter,
+                }) => {
+                    let whole = self.matched_union_inference(source, parameter, bindings);
+                    if closely.is_empty() || !matches!(whole, RelationResult::Assignable { .. }) {
+                        results.push(whole);
+                    } else {
+                        push_all_of(
+                            work,
+                            closely
+                                .into_iter()
+                                .map(|(member, fixed)| RelateWork::Eval(member, fixed))
+                                .collect(),
+                        );
+                    }
                     return;
                 }
                 None => {}
@@ -15696,9 +15818,18 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             let members = self.relation_union_members(&members);
             // A source a fixed member matches infers nothing directly to the
             // target's naked type variable: only the lower-priority whole.
-            if let Some(NakedUnionInference::Matched { source, parameter }) =
-                self.union_source_inferred_to_naked_parameter(&[source], target)
+            // A source closely matching a fixed member relates to the union
+            // as any other source does.
+            if let Some(NakedUnionInference::Matched {
+                closely,
+                source,
+                parameter,
+            }) = self.union_source_inferred_to_naked_parameter(&[source], target)
             {
+                if !closely.is_empty() {
+                    results.push(self.relate_to_union_target(source, &members, bindings));
+                    return;
+                }
                 results.push(self.matched_union_inference(source, parameter, bindings));
                 return;
             }

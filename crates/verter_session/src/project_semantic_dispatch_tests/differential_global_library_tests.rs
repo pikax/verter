@@ -351,6 +351,7 @@ export async function pReturnPromise() { return p; }
 export async function pReturnValue() { return 1; }
 export function pThen() { return p.then((v) => "" + v); }
 export function pThenNoArg() { return p.then(); }
+export function pThenChain() { return p.then((n) => "" + n).then((s) => s.length > 0); }
 export function pCatch() { return p.catch(() => "e" as const); }
 export function pResolve() { return Promise.resolve("x"); }
 export function pResolveVoid() { return Promise.resolve(); }
@@ -416,34 +417,17 @@ export function rejectedExecutor() {
 
 /// Method calls on `Promise<number>`, `Map<string, number>` and `Set<string>`
 /// resolve through the instantiated interface: `p.then((v) => "" + v)` is
-/// `Promise<string>`, `p.then()` `Promise<number>`, `p.catch(() => "e" as
-/// const)` `Promise<number | "e">`, `m.get` `number | undefined`, `m.set` the
-/// map, `s.has` `boolean`, `s.add` the set.
-///
-/// What the lane gives:
-/// - `pThen`: the checker answers `Promise<string>`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `pThenNoArg`: the checker answers `Promise<number>`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `pCatch`: the checker answers `Promise<number | "e">`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `mGet`: the checker answers `number | undefined` (strict), `number`
-///   (strictNullChecks off), `number | undefined` (noImplicitAny off), `number`
-///   (both off); the lane measured `<opaque UnmodeledPosition>` degraded by
-///   UnrepresentableCallee.
-/// - `mSet`: the checker answers `Map<string, number>`; the lane measured
-///   `<opaque UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `sHas`: the checker answers `boolean`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-/// - `sAdd`: the checker answers `Set<string>`; the lane measured `<opaque
-///   UnmodeledPosition>` degraded by UnrepresentableCallee.
-
+/// `Promise<string>` — the callback typed by the function arm of the optional
+/// `onfulfilled` union — and chained again `Promise<boolean>`, `p.then()`
+/// `Promise<number>` (the interface's `Promise<…>` return is a reference to
+/// itself), `p.catch(() => "e" as const)` `Promise<number | "e">`, `m.get`
+/// `number | undefined`, `m.set` the map, `s.has` `boolean`, `s.add` the set.
 #[test]
-#[ignore = "a method call on an instantiated library generic interface resolves its signature"]
 fn a_method_call_on_a_library_generic_instance_resolves() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let mut failures = matrix.returns(&[
         ("pThen", "Promise<string>"),
+        ("pThenChain", "Promise<boolean>"),
         ("pThenNoArg", "Promise<number>"),
         ("pCatch", "Promise<number | \"e\">"),
         ("mSet", "Map<string, number>"),
@@ -487,22 +471,60 @@ fn promise_resolve_awaits_its_argument() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// `Promise.all([p, "s"] as const)` is `Promise<[number, "s"]>` (a homomorphic
-/// mapped type over the tuple) and `Promise.race([p, pp])` is `Promise<string |
-/// number>`.
-///
-/// What the lane gives:
-/// - `pAll`: the checker answers `Promise<[number, "s"]>`; the lane measured
-///   `Promise<<unreduced mapped>>`.
-/// - `pRace`: the checker answers `Promise<string | number>`; the lane measured
-///   `Promise<Awaited<<unreduced indexed access>>>`.
+/// `Promise.race([p, pp])` is `Promise<string | number>`: `Awaited` over the
+/// tuple argument's element union.
 #[test]
-#[ignore = "Promise.all and Promise.race resolve their mapped and indexed return types"]
-fn promise_all_and_race_map_their_tuple_argument() {
+fn promise_race_awaits_its_tuple_arguments_elements() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
-    let failures = matrix.returns(&[
-        ("pAll", "Promise<[number, \"s\"]>"),
-        ("pRace", "Promise<string | number>"),
+    let failures = matrix.returns(&[("pRace", "Promise<string | number>")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Promise.all([p, "s"] as const)` is `Promise<[number, "s"]>`: a homomorphic
+/// mapped type over the tuple whose template applies `Awaited` to `T[P]`.
+///
+/// What the lane gives: `Promise<[Awaited<<unreduced indexed access>>,
+/// Awaited<<unreduced indexed access>>]>`. An application template over a
+/// tuple element keeps its `T["0"]` argument as written (`{ [P in keyof T]:
+/// Box<T[P]> }` over `[1, 2]` prints the same way), where the checker reads
+/// the element.
+#[test]
+#[ignore = "an application template of a mapped type over a tuple keeps its element read unreduced"]
+fn promise_all_maps_its_tuple_argument() {
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.returns(&[("pAll", "Promise<[number, \"s\"]>")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// References to the library's runtime globals infer and relate through the
+/// global declarations they refer to, as the checker's `Promise<T>` refers to
+/// its global interface: `Promise<infer U>` infers ONE layer (where `Awaited`
+/// unwraps every layer), `PromiseLike<infer U>` infers structurally through
+/// `then`, `Map<infer K, infer V>` and `Set<infer T>` read their arguments,
+/// and an object whose `then` returns `void` is no `PromiseLike`.
+/// TypeScript 7.0.2, all four settings alike.
+#[test]
+fn library_references_infer_through_their_global_declarations() {
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
+    let failures = matrix.types(&[
+        (
+            "Promise<Promise<1>> extends Promise<infer U> ? U : 0",
+            "Promise<1>",
+        ),
+        ("Awaited<Promise<Promise<1>>>", "1"),
+        (
+            "Promise<Promise<1>> extends PromiseLike<infer U> ? U : 0",
+            "Promise<1>",
+        ),
+        (
+            "Map<string, number[]> extends Map<infer K, infer V> ? [K, V] : never",
+            "[string, number[]]",
+        ),
+        ("Set<\"a\"> extends Set<infer T> ? T : never", "\"a\""),
+        (
+            "{ then(f: (v: 2) => void): void } extends PromiseLike<infer U> ? U : 0",
+            "0",
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -818,14 +818,84 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if let Some(SemanticNodeData::DeclRef { identity }) =
             self.graph().node_data(node).as_deref()
         {
+            let identity = self
+                .runtime_nominal_declaration(node, identity)
+                .unwrap_or_else(|| identity.clone());
             return Some((
                 identity.clone(),
-                self.declared_application_arguments(identity, &[], context)?,
+                self.declared_application_arguments(&identity, &[], context)?,
             ));
         }
         let (declaration, args) = self.raw_generic_reference(node)?;
+        let declaration = self
+            .runtime_nominal_declaration(node, &declaration)
+            .unwrap_or(declaration);
         let args = self.declared_application_arguments(&declaration, &args, context)?;
         Some((declaration, args))
+    }
+
+    /// Whether `left` and `right` are two references to one generic
+    /// declaration — the checker's `isTypeCloselyMatchedBy` over two
+    /// instantiations of one interface, class or alias.
+    pub(super) fn references_one_declaration(
+        &self,
+        left: SemanticNodeId,
+        right: SemanticNodeId,
+    ) -> bool {
+        let raw = |node| {
+            self.raw_generic_reference(node)
+                .map(|(declaration, _)| declaration)
+                .map(|declaration| {
+                    self.runtime_nominal_declaration(node, &declaration)
+                        .unwrap_or(declaration)
+                })
+        };
+        matches!((raw(left), raw(right)), (Some(a), Some(b)) if same_declaration(&a, &b))
+    }
+
+    /// The global declaration a runtime-nominal application (`Promise<T>`,
+    /// `Map<K, V>`) refers to: the merged global interface of that name the
+    /// project its node is written in reads
+    /// ([`Self::first_global_declaration`]) — the library's declaration, or
+    /// the program's. The application is a reference to that declaration,
+    /// as the checker's `Promise<T>` is a reference to its global `Promise`
+    /// interface, so it relates, infers and expands through the
+    /// declaration's type parameters and members. `None` for any other
+    /// identity, and when the project declares no such global: the carrier
+    /// then stays the terminal nominal Verter implements natively.
+    ///
+    /// A carrier with no file of its own is read in the demand's project,
+    /// which the enclosing key does not name, so that read keeps its build
+    /// out of the shared memo.
+    pub(super) fn runtime_nominal_declaration(
+        &self,
+        node: SemanticNodeId,
+        identity: &DeclIdentity,
+    ) -> Option<DeclIdentity> {
+        let nominal = self.runtime_nominal_identity(identity)?;
+        let canonical = match self
+            .graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+        {
+            Some(canonical) => canonical,
+            None => {
+                self.fold_into_top_build_local_taint(false, true);
+                self.wrapper_demand_canonical()?
+            }
+        };
+        let declaration =
+            self.first_global_declaration(canonical.as_ref(), nominal.global_name())?;
+        let whole_hash = self
+            .transaction_indexed_record(declaration.canonical_id.as_ref())
+            .map(|indexed| indexed.whole_hash)
+            .unwrap_or_default();
+        Some(DeclIdentity {
+            canonical_id: declaration.canonical_id,
+            owner: declaration.owner,
+            whole_hash,
+            decl_name: declaration.symbol_name,
+        })
     }
 
     /// The interface or class reference a type-alias application stands

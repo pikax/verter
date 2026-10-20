@@ -120,7 +120,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// The fixation inputs of `type_parameters` after relating every
     /// `(from, into)` pair under one collecting session; `None` when a
-    /// relation does not settle.
+    /// relation stops at its budget or a conditional reading does not
+    /// settle.
     fn signature_inference_inputs(
         &self,
         type_parameters: &[TypeParamDecl],
@@ -176,8 +177,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             (from.check, into.check),
                         ]);
                     }
+                    // Inference reads what the pair deposits, whatever its
+                    // verdict (`inferTypes` never fails): a pair the session
+                    // cannot decide — an outer `infer` or call parameter in
+                    // the target's positions — still infers the source's own
+                    // parameters. Only a budget stop leaves the inference
+                    // incomplete.
                     _ => {
-                        settled_relation(self.relate_collecting(from, into))?;
+                        if let RelationStep::BudgetExceeded(_) = self.relate_collecting(from, into)
+                        {
+                            return None;
+                        }
                     }
                 }
             }

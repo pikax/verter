@@ -3124,9 +3124,8 @@ fn pinned_key_remapped_mapped_type_relations() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The library's `Promise` relates to `PromiseLike`, its `then` infers a callback's return, `Promise.resolve` unwraps a nested promise and `Promise.all` awaits each element.
+/// The library's `Promise` relates to `PromiseLike`, its `then` infers a callback's return and `Promise.resolve` unwraps a nested promise.
 #[test]
-#[ignore = "typed gap / print gap in the lane: the library's `Promise` is a builtin carrier the relation cannot expand (UNDECIDED_CONDITIONAL, UnrepresentableCallee), and a named application keeps an `Awaited<…>` argument unreduced in print"]
 fn pinned_library_promise_relations_and_calls() {
     let failures = Matrix::new(AWAITED_AND_PROMISES).lib(GLOBALS_LIB).four(&[
         (
@@ -3157,14 +3156,21 @@ fn pinned_library_promise_relations_and_calls() {
             r#"Promise<string>"#,
             r#"Promise<string>"#,
         ),
-        (
-            Read::Return(r#"a9"#),
-            r#"Promise<[number, 1]>"#,
-            r#"Promise<[number, 1]>"#,
-            r#"Promise<[number, 1]>"#,
-            r#"Promise<[number, 1]>"#,
-        ),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `Promise.all` awaits each element of its tuple argument.
+#[test]
+#[ignore = "print gap in the lane: an application template of a mapped type over a tuple keeps its `T[\"0\"]` argument unreduced"]
+fn pinned_library_promise_all() {
+    let failures = Matrix::new(AWAITED_AND_PROMISES).lib(GLOBALS_LIB).four(&[(
+        Read::Return(r#"a9"#),
+        r#"Promise<[number, 1]>"#,
+        r#"Promise<[number, 1]>"#,
+        r#"Promise<[number, 1]>"#,
+        r#"Promise<[number, 1]>"#,
+    )]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -3227,4 +3233,80 @@ fn pinned_recursive_template_length() {
         (Read::Type(r#"L<"p\\nq">"#), r#"4"#, r#"4"#, r#"4"#, r#"4"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Interfaces declaring a generic `then` method, as `Promise` and
+/// `PromiseLike` do.
+const GENERIC_METHOD_INTERFACES: &str = r##"
+interface Like<T> { then<R1 = T, R2 = never>(f?: ((v: T) => R1 | Like<R1>) | null | undefined, g?: ((e: any) => R2 | Like<R2>) | null | undefined): Like<R1 | R2>; }
+interface Eager<T> { then<R1 = T, R2 = never>(f?: ((v: T) => R1 | Like<R1>) | null | undefined, g?: ((e: any) => R2 | Like<R2>) | null | undefined): Eager<R1 | R2>; catch<R = never>(g?: ((e: any) => R | Like<R>) | null | undefined): Eager<T | R>; }
+interface Box<T> { then<R>(f: (v: T) => R | Box<R>): R }
+interface Crate<T> { then<R>(f: (v: T) => R | Box<R>): R }
+interface Map1<T> { then<R>(f: (v: T) => R): Map1<R> }
+interface Map2<T> { then<R>(f: (v: T) => R): Map2<R> }
+interface Read<T> { m(f: (v: T) => void): Read<T> }
+interface Peek<T> { m(f: (v: T) => void): Peek<T> }
+"##;
+
+/// Two interfaces relate through their generic methods: a source method is
+/// instantiated in the target's context, inferring its type parameter from a
+/// callback returning `R | Box<R>` through the two references to `Box`
+/// (`isTypeCloselyMatchedBy`) and the naked `R`, and a return referencing the
+/// source interface again stops as deeply nested even when each level's
+/// defaults (`R1 = T`) mint a new instantiation. A conditional infers through
+/// the same methods. A callback parameter is related covariantly, so
+/// `Map1<number>` does not relate to `Map2<1>`. TypeScript 7.0.2, all four
+/// settings alike.
+#[test]
+fn generic_method_interfaces_relate_and_infer_structurally() {
+    let failures = Matrix::new(GENERIC_METHOD_INTERFACES).same(&[
+        (
+            Read::Type(r#"[Box<1>] extends [Crate<number>] ? 1 : 2"#),
+            r#"1"#,
+        ),
+        (
+            Read::Type(r#"[Eager<1>] extends [Like<number>] ? 1 : 2"#),
+            r#"1"#,
+        ),
+        (
+            Read::Type(r#"[Map1<1>] extends [Map2<number>] ? 1 : 2"#),
+            r#"1"#,
+        ),
+        (
+            Read::Type(r#"[Map1<number>] extends [Map2<1>] ? 1 : 2"#),
+            r#"2"#,
+        ),
+        (
+            Read::Type(r#"Eager<Eager<1>> extends Like<infer U> ? U : 0"#),
+            r#"Eager<1>"#,
+        ),
+        (
+            Read::Type(r#"Map1<Map1<1>> extends Map2<infer U> ? U : 0"#),
+            r#"Map1<1>"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Inferring `Peek<infer U>` from `Read<Read<1>>`, whose method returns the
+/// source itself, closes a component whose re-discharge meets the same
+/// component again under another occurrence. The checker answers
+/// `Read<1>`; the lane answers or reports a typed gap — it never re-enters
+/// the re-discharge without end (which overflowed the stack).
+#[test]
+fn a_self_returning_method_inference_terminates() {
+    let rows = vec![(
+        Read::Type(r#"Read<Read<1>> extends Peek<infer U> ? U : 0"#),
+        vec![r#"Read<1>"#],
+    )];
+    let verdicts = Matrix::new(GENERIC_METHOD_INTERFACES)
+        .settings(&[super::differential_harness_tests::STRICT])
+        .verdicts(&rows);
+    let verdict = &verdicts[0][0];
+    assert!(
+        verdict.matched || verdict.class == "GAP",
+        "{} {}",
+        verdict.class,
+        verdict.lane
+    );
 }

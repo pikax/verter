@@ -17570,7 +17570,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The `Instantiate` key [`Self::declaration_carrier_body`] reads for a
-    /// declaration carrier, or `None` for any other node.
+    /// declaration carrier, or `None` for any other node. A runtime nominal
+    /// the project declares (`Promise<T>`) reads the global declaration it
+    /// refers to.
     fn declaration_carrier_key(&self, carrier: SemanticNodeId) -> Option<SemanticQueryKey> {
         let (identity, args) = match self.graph().node_data(carrier).as_deref() {
             Some(SemanticNodeData::DeclRef { identity }) => (
@@ -17582,6 +17584,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => return None,
         };
+        let identity = self
+            .runtime_nominal_declaration(carrier, &identity)
+            .unwrap_or(identity);
         let slot = self.type_slot_for(
             identity.canonical_id.clone(),
             identity.owner,
@@ -18102,11 +18107,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.intern_normalized_union_or_intersection(&reduced, true),
                 ))
             }
+            // Verter's own `Promise<V>`, which no declaration of the project
+            // describes: its `then`'s `onfulfilled` is the optional, nullable
+            // `((value: V) => ...) | null | undefined`, a callback union. A
+            // `Promise` the project declares is a reference to that
+            // declaration and reads its `then` like any other carrier below.
             SemanticNodeData::InstantiationRef { base, args }
-                if args.len() == 1 && self.is_promise_global_identity(base) =>
+                if args.len() == 1
+                    && self.is_promise_global_identity(base)
+                    && self.runtime_nominal_declaration(resolved, base).is_none() =>
             {
-                // `Promise<V>.then`'s `onfulfilled` is the optional, nullable
-                // `((value: V) => ...) | null | undefined`: a callback union.
                 let value = args[0];
                 drop(data);
                 LibStep::Done(self.lib_awaited_nested(value, walk, true))

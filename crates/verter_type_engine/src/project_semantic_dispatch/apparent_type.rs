@@ -128,9 +128,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     crate::semantic_query::InstantiateKey::new(
                         slot,
                         Arc::from(args.to_vec().into_boxed_slice()),
+                        // A member read through the interface, as through any
+                        // interface reference: carrier-preserving transit, so
+                        // the interface's references to itself
+                        // (`then(...): Promise<TResult1 | TResult2>`) stay
+                        // references to it.
                         self.instantiate_context_for(
                             declaration.canonical_id.as_ref(),
-                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                            ProjectionReductionContext::structural_transit_with_mode(
+                                ProjectionMode::Navigate,
+                            ),
                         ),
                     ),
                 ))
