@@ -224,7 +224,6 @@ impl OneLevelSurface {
     ) -> SurfaceResolution<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
-            PropertyKey,
         };
 
         fn union_value(
@@ -257,7 +256,6 @@ impl OneLevelSurface {
         }
 
         struct MemberJoin {
-            key: PropertyKey,
             present_in: usize,
             optional_somewhere: bool,
             values: Vec<SemanticNodeId>,
@@ -267,9 +265,10 @@ impl OneLevelSurface {
         }
 
         let alternative_count = alternatives.len();
-        let mut joins: Vec<MemberJoin> = Vec::new();
+        let mut joins = crate::projection::aggregation::OrderedMemberAggregation::new();
         let mut call_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut construct_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut seen_signatures = rustc_hash::FxHashSet::default();
         let mut index_joins: Vec<(usize, SemanticNodeId, Vec<SemanticNodeId>, bool)> = Vec::new();
         for alternative in alternatives {
             alternative.positive().visit(|fact| {
@@ -277,24 +276,17 @@ impl OneLevelSurface {
                 // join into ONE row (matching the walker and macro
                 // merges), so a colliding second alternative unions the
                 // value instead of publishing a mis-optionaled duplicate.
-                let join = match joins
-                    .iter_mut()
-                    .find(|join| join.key.element_access_collides(fact.key()))
-                {
-                    Some(join) => join,
-                    None => {
-                        joins.push(MemberJoin {
-                            key: fact.key().clone(),
+                let join =
+                    joins.entry(&AuthoredPropertyKey::from_known(fact.key().clone()), || {
+                        MemberJoin {
                             present_in: 0,
                             optional_somewhere: false,
                             values: Vec::new(),
                             readonly_all: true,
                             method_kind: None,
                             has_implementation_body: false,
-                        });
-                        joins.last_mut().expect("just pushed")
-                    }
-                };
+                        }
+                    });
                 join.present_in += 1;
                 join.optional_somewhere |= fact.presence() == PositiveKeyPresence::Optional;
                 if let ProjectionEvidence::Proven(value) = fact.value() {
@@ -318,7 +310,10 @@ impl OneLevelSurface {
                     ObjectSignatureKind::Call => &mut call_nodes,
                     ObjectSignatureKind::Construct => &mut construct_nodes,
                 };
-                if !bucket.contains(&signature.node()) {
+                if seen_signatures.insert((
+                    signature.kind() == ObjectSignatureKind::Call,
+                    signature.node(),
+                )) {
                     bucket.push(signature.node());
                 }
             }
@@ -350,7 +345,7 @@ impl OneLevelSurface {
         let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(
             joins.len() + call_nodes.len() + construct_nodes.len() + index_count,
         );
-        for join in joins {
+        for (key, join) in joins.into_entries() {
             // A definitely-present key whose value is Indeterminate in
             // EVERY alternative (an open residual may overwrite it)
             // still publishes its row — with the honest open value,
@@ -364,7 +359,7 @@ impl OneLevelSurface {
                 union_value(graph, join.values, evidence)
             };
             entries.push(SurfaceEntry::Member(SurfaceMember {
-                key: AuthoredPropertyKey::from_known(join.key),
+                key,
                 value,
                 optional: join.optional_somewhere || join.present_in < alternative_count,
                 readonly: join.readonly_all,

@@ -577,32 +577,34 @@ pub(crate) fn resolve_payload_surface_with_scope(
 /// restrictive across both branches (an open conditional can resolve to
 /// either branch, so a member is only safely public when public in
 /// both). Dual spellings of one JS property (`Number(1)` / `String("1")`)
-/// merge under element-access collision. Branch member lists are small
-/// (emit rows), so a linear collides scan replaces the strict-key map.
+/// merge under element-access collision, found through one canonical
+/// property-identity probe per row; a computed key is never merged.
 pub(crate) fn merge_emit_branch_members(
     true_members: Vec<SurfaceMember>,
     false_members: Vec<SurfaceMember>,
 ) -> Vec<SurfaceMember> {
     let mut merged: Vec<SurfaceMember> =
         Vec::with_capacity(true_members.len() + false_members.len());
+    let mut known_rows =
+        verter_type_engine::projection::aggregation::OrderedMemberAggregation::new();
     for member in true_members.into_iter().chain(false_members) {
         let Some(key) = member.key.cloned_known() else {
             merged.push(member);
             continue;
         };
-        if let Some(existing) = merged.iter_mut().find(|existing| {
-            existing
-                .key
-                .cloned_known()
-                .is_some_and(|known| known.element_access_collides(&key))
-        }) {
+        let next = merged.len();
+        let slot = *known_rows.entry(
+            &verter_type_engine::semantic_query::AuthoredPropertyKey::from_known(key),
+            || next,
+        );
+        if slot == next {
+            merged.push(member);
+        } else {
             // Already represented (true-branch row wins for the
             // value/optional/readonly fields); fold in this
             // contributor's visibility to the most restrictive.
-            let folded = existing.visibility.most_restrictive(member.visibility);
-            existing.visibility = folded;
-        } else {
-            merged.push(member);
+            let existing = &mut merged[slot];
+            existing.visibility = existing.visibility.most_restrictive(member.visibility);
         }
     }
     merged
