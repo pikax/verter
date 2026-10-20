@@ -47,6 +47,27 @@ Pinned by `instantiated_and_constrained_conditionals_decide_as_the_checker_decid
 
 `accessor_kinds_survive_interface_and_type_literal_headers_and_bodies` directly checks getter, setter and ordinary-method kinds in both shallow headers and lowered bodies. The interface and type-literal fixtures exercise all three syntax ingress sites independently of the relation engine.
 
+### Accessor property reads and mappings
+
+Member and indexed reads use `KnownKeyAccessor::read_value` through the shared
+path walker, including instantiated interfaces and classes. Mapped types read
+that property value rather than copying the stored accessor signature. A
+getter-only key preserves `readonly`; a key with a setter is mutable unless
+the mapping explicitly changes the modifier. Builtin `Pick` and `Omit` publish
+one property for the selected getter/setter pair. Key enumeration and mappings
+that do not read the source value do not force the getter's inferred return.
+
+Class `accessor` fields contribute property headers and lazy property bodies on
+their instance or static surface. Their read type is the annotation, otherwise
+the widened initializer, otherwise `any`; normal visibility rules apply.
+Selective instance-member lowering includes these fields, so `keyof`, member
+reads and indexed reads agree. `accessor_property_tests` covers these rules,
+mapped modifiers, generic reads, and ordinary-method/call-signature controls;
+the semantic lowering and accessor-decorator tests cover the producer and
+typeinfo publication boundaries. Reducing an indexed reference retained inside
+a composite answer belongs to the shared projection/evaluation demand rules
+above; accessor reads do not add a separate recursive expansion route.
+
 Known open rows, measured against TypeScript 7.0.2 and left unavailable rather than answered: every operand that needs the standard library (`UnwrapRef<Date>`, `UnwrapRef<Node>`) stays unavailable until a library is registered for the project; and `VNode extends RefUnwrapBailTypes[keyof RefUnwrapBailTypes]` read through an alias (no written union) stays unavailable on the unreadable DOM member.
 
 > **Superseding note (declaration augmentation):** `declaration-augmentation.md` describes cross-file augmentation discovery as relative-specifier only ("Relative-augmenter discovery …"). That is superseded: the resolved-file target covers package specifiers too, as described above. Fold this into `declaration-augmentation.md` at documentation closure.
