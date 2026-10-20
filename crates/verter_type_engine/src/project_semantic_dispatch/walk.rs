@@ -9431,6 +9431,43 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             index
         });
+        // A kept modifier is read off the modifiers type — the
+        // `build_mapped_type` mirror: `source` itself, or the `X` of a key
+        // parameter constrained to `keyof X`, whose `X[P]` read leaves a
+        // kept-optional member's `undefined` to its `?`.
+        let inherits_modifiers = optionality == crate::semantic_query::OptionalityMod::Keep
+            || readonly_mod == crate::semantic_query::ReadonlyMod::Keep;
+        let modifiers_members = mapper
+            .modifiers_type
+            .filter(|_| inherits_modifiers)
+            .and_then(|modifiers| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(modifiers, self.context)
+            })
+            .map(|(members, partial_classes)| {
+                if !partial_classes.is_empty() {
+                    self.mark_partial_with(partial_classes);
+                }
+                members
+            });
+        let modifiers_member_index = modifiers_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
+        let value_reads_modifiers_member = modifiers_member_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    self.graph(),
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9482,6 +9519,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let source_member = source_member_index
                     .as_ref()
                     .and_then(|index| index.get(&key.key).copied());
+                let modifiers_member = match &modifiers_member_index {
+                    Some(index) => index.get(&key.key).copied(),
+                    None => source_member,
+                };
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -9493,14 +9534,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     crate::semantic_query::OptionalityMod::Add => true,
                     crate::semantic_query::OptionalityMod::Remove => false,
                     crate::semantic_query::OptionalityMod::Keep => {
-                        source_member.map(|m| m.optional).unwrap_or(false)
+                        modifiers_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
                     crate::semantic_query::ReadonlyMod::Keep => {
-                        source_member.map(|m| m.readonly).unwrap_or(false)
+                        modifiers_member.map(|m| m.readonly).unwrap_or(false)
                     }
                 };
                 // Identity fast path — use source_member.value
@@ -9585,25 +9626,38 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 .mapped_member_optionality(mapper, value, source, key_node)
                         })
                 } else {
-                    value
+                    match (modifiers_member, mapper.modifiers_type) {
+                        (Some(member), Some(modifiers))
+                            if value_reads_modifiers_member && optional && member.optional =>
+                        {
+                            self.dispatch.read_without_optional_member_undefined(
+                                value,
+                                member.value,
+                                modifiers,
+                            )
+                        }
+                        _ => value,
+                    }
                 };
                 let visibility = source_member
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
                         sm.visibility
                     });
-                // The matched source member's declaration site — whether a
-                // produced member inherits it is judged PER PRODUCED NAME
-                // inside the loop below (mirrors the Expanded path in
+                // The matched source member's declaration site — or the
+                // modifiers member's, which the produced member links to —
+                // whether a produced member inherits it is judged PER PRODUCED
+                // NAME inside the loop below (mirrors the Expanded path in
                 // `build.rs`).
-                let source_spans = source_member.map(|sm| sm.spans).unwrap_or_default();
+                let declaring_member = source_member.or(modifiers_member);
+                let source_spans = declaring_member.map(|sm| sm.spans).unwrap_or_default();
                 let source_declaration_origin =
-                    source_member.and_then(|sm| sm.declaration_origin.clone());
+                    declaring_member.and_then(|sm| sm.declaration_origin.clone());
                 (
                     value,
                     optional,
                     readonly,
                     visibility,
-                    source_member.is_some(),
+                    declaring_member.is_some(),
                     source_spans,
                     source_declaration_origin,
                 )
