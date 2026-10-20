@@ -1739,6 +1739,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             optionality: mapper.optionality,
             readonly: mapper.readonly,
             over_type_variable: mapper.over_type_variable,
+            modifiers_type: mapper.modifiers_type,
             name_remap,
             kind: mapper.kind,
         };
