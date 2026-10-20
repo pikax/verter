@@ -1083,16 +1083,10 @@ pub(crate) fn materialize_through_aliases(
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                let nullability = match store.node_scope_in_scope(current) {
-                    Some(NodeScopeId::File { canonical_id, .. }) => {
-                        dispatch.nullability_for(&canonical_id)
-                    }
-                    _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                };
                 let key = SemanticQueryKey::reduce_written_intersection_operands(
                     store,
                     members,
-                    nullability,
+                    root_nullability(store, dispatch, current),
                 );
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
@@ -1113,7 +1107,8 @@ pub(crate) fn materialize_through_aliases(
             // checker constructs from it when that construction absorbs a
             // literal (`type X = "a" | string` is `string`, also when the
             // literal or its supertype is written through an alias), reduced
-            // by the shared `ReduceUnion` algebra. Any other written union
+            // by the shared `ReduceUnion` algebra under the root file's
+            // `strictNullChecks`, as the intersection below. Any other written union
             // stays as written, and so does one the reducer misses; a reducer
             // fault propagates through the same fault/miss split as the
             // operator bridge. `Skeleton` / `Identity` keep it.
@@ -1125,7 +1120,7 @@ pub(crate) fn materialize_through_aliases(
             {
                 let Some(step_result) = dispatch
                     .owning()
-                    .reduced_written_union(current)
+                    .reduced_written_union(current, root_nullability(store, dispatch, current))
                     .into_value_in(&scope)
                 else {
                     return Ok(current);
@@ -1209,6 +1204,20 @@ pub(crate) fn classify_base_surfacing(
             Ok(fallback) => Ok(fallback.unwrap_or(base)),
             Err(fault) => Err(fault),
         },
+    }
+}
+
+/// The `null` / `undefined` algebra a composite written in `node`'s file
+/// is constructed under: that file's `strictNullChecks`, and the strict
+/// algebra for a node no file owns.
+fn root_nullability(
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> verter_session_query::flow::policy::NullabilityPolicy {
+    match store.node_scope_in_scope(node) {
+        Some(NodeScopeId::File { canonical_id, .. }) => dispatch.nullability_for(&canonical_id),
+        _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
     }
 }
 

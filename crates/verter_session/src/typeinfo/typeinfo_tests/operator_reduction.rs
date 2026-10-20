@@ -389,11 +389,16 @@ fn render(answer: &TypeExpr) -> String {
 /// `a${number}``, `"a" | string` is `string`, `1 | number | "x"` is `number
 /// | "x"`, `string & "a"` is `"a"`, and with `type A = "a"`, `type AB = "a" |
 /// "b"`, `type S = string`: `A | string` is `string`, `AB | S | 1` is
-/// `string | 1`, while `A | "b"` keeps `A` by its name.
+/// `string | 1`, while `A | "b"` keeps `A` by its name. A literal named
+/// through a long alias chain (`type A0 = "a"; type A1 = A0; …; type A20 =
+/// A19`) is absorbed the same way: `A20 | string` is `string`.
 #[test]
 fn a_written_composite_publishes_the_type_the_checker_constructs() {
     let host = make_host_with_footprint();
-    let absorbed: [(&str, &str, &[&str]); 6] = [
+    let alias_chain: String = std::iter::once("type A0 = \"a\";\n".to_owned())
+        .chain((1..=20).map(|hop| format!("type A{hop} = A{};\n", hop - 1)))
+        .collect();
+    let absorbed: [(&str, &str, &[&str]); 7] = [
         (
             BENCH_LIB_PRELUDE,
             "\"a1\" | `a${number}` | \"ab\"",
@@ -408,6 +413,7 @@ fn a_written_composite_publishes_the_type_the_checker_constructs() {
             "AB | S | 1",
             &["1", "string"],
         ),
+        (alias_chain.as_str(), "A20 | string", &["string"]),
     ];
     // Unions with no literal to absorb: the declarations beside the probe,
     // the written probe and its published text.
@@ -548,5 +554,74 @@ fn a_reducer_fault_during_composite_publication_fails_the_request() {
     assert_ne!(
         published, written,
         "the uncancelled publication absorbs the literal"
+    );
+}
+
+/// The `null` / `undefined` algebra a written union is constructed under is
+/// its file's `strictNullChecks`, as for a written intersection: measured on
+/// TypeScript 7.0.2, `"a" | string | null` is `string | null` with
+/// `strictNullChecks` on and `string` with it off.
+#[test]
+fn a_written_union_absorbs_under_its_files_strict_null_checks() {
+    for (strict_null_checks, expected) in
+        [(true, &["null", "string"][..]), (false, &["string"][..])]
+    {
+        let host = Arc::new(crate::VerterHost::new_standalone_with_tsconfig_projects(
+            crate::HostConfig {
+                analysis_level: crate::types::AnalysisLevel::Full,
+                audit_enabled: true,
+                ..crate::HostConfig::default()
+            },
+            &[(
+                "/snc",
+                &format!(
+                    r#"{{ "compilerOptions": {{ "strict": true, "strictNullChecks": {strict_null_checks} }} }}"#
+                ),
+            )],
+        ));
+        upsert_ts(
+            &host,
+            "/snc/probe.ts",
+            "type __Probe = \"a\" | string | null;\n",
+        );
+        let published = constituents(&published_probe(&host, "/snc/probe.ts"));
+        assert_eq!(
+            published, expected,
+            "strictNullChecks {strict_null_checks}: published {published:?}"
+        );
+    }
+}
+
+/// Deciding whether a written union may absorb a literal reads each arm
+/// once: a union of literals with nothing to absorb them, which publishes as
+/// written, classifies four times the arms when it holds four times the
+/// literals, never the square of them.
+#[test]
+fn a_literal_union_decides_absorption_in_linear_work() {
+    use verter_type_engine::project_semantic_dispatch::build::written_union_arm_classifications_for_tests as classifications;
+    let host = make_host_with_footprint();
+    let work = |arms: usize| {
+        let canonical = format!("/probes/linear{arms}.ts");
+        let probe = (0..arms)
+            .map(|arm| format!("\"k{arm}\""))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        upsert_ts(&host, &canonical, &format!("type __Probe = {probe};\n"));
+        let before = classifications();
+        let published = published_probe(&host, &canonical);
+        let classified = classifications() - before;
+        assert_eq!(
+            constituents(&published).len(),
+            arms,
+            "a union with nothing to absorb publishes every literal"
+        );
+        classified
+    };
+    let small = work(64);
+    let large = work(256);
+    assert!(small >= 64, "every arm is classified: {small} for 64 arms");
+    assert!(
+        large <= 5 * small,
+        "four times the arms costs about four times the work: {small} for 64 arms, {large} for 256"
     );
 }
