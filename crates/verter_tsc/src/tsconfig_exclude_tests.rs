@@ -233,3 +233,39 @@ fn exclude_entries_follow_platform_case_sensitivity() {
     let dropped = !selected.iter().any(|f| f == "src/Bad.vue");
     assert_eq!(dropped, !FILE_NAMES_ARE_CASE_SENSITIVE, "{selected:?}");
 }
+
+/// Without an `exclude` property TypeScript excludes the resolved `outDir` and
+/// `declarationDir`; an explicit `exclude: []` excludes nothing.
+#[test]
+fn absent_exclude_defaults_to_the_output_directories() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path().join("ws");
+    let tsconfig = write_project(&root, "", &[], &[]);
+    let options = serde_json::json!({ "outDir": "src/dist", "declarationDir": "other" });
+
+    std::fs::write(
+        &tsconfig,
+        serde_json::json!({ "compilerOptions": options }).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        selection(&root, &tsconfig),
+        ["app.config.ts", "src/Bad.vue", "src/Card.spec.ts"]
+    );
+
+    std::fs::write(
+        &tsconfig,
+        serde_json::json!({ "compilerOptions": options, "exclude": [] }).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        selection(&root, &tsconfig),
+        [
+            "app.config.ts",
+            "other/x.ts",
+            "src/Bad.vue",
+            "src/Card.spec.ts",
+            "src/dist/Built.vue"
+        ]
+    );
+}

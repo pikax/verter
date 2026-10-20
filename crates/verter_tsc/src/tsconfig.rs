@@ -46,8 +46,10 @@ pub struct TsConfig {
 struct RawTsConfig {
     #[serde(default)]
     include: Vec<String>,
+    /// `None` when the property is absent, which TypeScript treats
+    /// differently from an explicit `[]` (see `default_excludes`).
     #[serde(default)]
-    exclude: Vec<String>,
+    exclude: Option<Vec<String>>,
     #[serde(default)]
     files: Vec<String>,
     #[serde(rename = "extends")]
@@ -292,9 +294,10 @@ fn load_tsconfig_recursive(
     // `exclude` filters only what `include` finds; `files` entries are immune.
     // TypeScript's package-folder handling is a property of include wildcards
     // (see `is_implicitly_excluded_dir`), not a default exclude entry.
-    let excludes = match exclude_mode {
-        ExcludeMode::Apply => compile_excludes(&raw.exclude, &root_dir),
-        ExcludeMode::Ignore => Vec::new(),
+    let excludes = match (exclude_mode, &raw.exclude) {
+        (ExcludeMode::Apply, Some(exclude)) => compile_excludes(exclude, &root_dir),
+        (ExcludeMode::Apply, None) => default_excludes(tsconfig_path, &root_dir),
+        (ExcludeMode::Ignore, _) => Vec::new(),
     };
 
     // Determine include patterns — default to root if none specified.
@@ -642,6 +645,18 @@ fn compile_excludes(exclude: &[String], root_dir: &Path) -> Vec<ExcludeSpec> {
     exclude
         .iter()
         .filter_map(|spec| ExcludeSpec::compile(spec, root_dir))
+        .collect()
+}
+
+/// The `exclude` TypeScript applies when a tsconfig has no `exclude` property:
+/// the resolved `outDir` and `declarationDir`, so a later run never selects its
+/// own build output. An explicit `exclude` (even `[]`) replaces this default.
+fn default_excludes(tsconfig_path: &Path, root_dir: &Path) -> Vec<ExcludeSpec> {
+    let output_dirs = resolve_output_dirs(tsconfig_path, 0);
+    [output_dirs.out_dir, output_dirs.declaration_dir]
+        .into_iter()
+        .flatten()
+        .filter_map(|dir| ExcludeSpec::compile(&dir.to_string_lossy(), root_dir))
         .collect()
 }
 
