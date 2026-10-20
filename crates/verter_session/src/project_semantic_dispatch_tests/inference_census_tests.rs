@@ -166,12 +166,7 @@ fn call_inference() {
             read: Read::Return(r#"r1"#),
             tsc: [r#""x""#, r#""x""#, r#""x""#, r#""x""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"r2"#),
@@ -189,12 +184,7 @@ fn call_inference() {
             read: Read::Return(r#"r4"#),
             tsc: [r#""x""#, r#""x""#, r#""x""#, r#""x""#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-                Class::WrongClean,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"r5"#),
