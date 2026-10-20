@@ -884,7 +884,8 @@ fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let directory = dir.path().canonicalize().unwrap();
-        let root = directory.to_str().unwrap();
+        let canonical_root = crate::id::canonicalize_id(directory.to_str().unwrap());
+        let root = canonical_root.as_ref();
         let config = directory.join("tsconfig.json");
         std::fs::write(&config, r#"{"compilerOptions":{"strict":true,"noLib":true},"files":["lib.bench.d.ts","entry.ts"]}"#).unwrap();
         for (name, source) in [
@@ -911,7 +912,7 @@ fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
         let source = Contributor::GlobalInterface.source(1, 3);
         let edited = directory.join("a.ts");
         std::fs::write(&edited, &source).unwrap();
-        crate::u6_flow_shape_corpus_tests::upsert(&host, edited.to_str().unwrap(), &source, crate::FileLanguage::script_ts());
+        crate::u6_flow_shape_corpus_tests::upsert(&host, &format!("{root}/a.ts"), &source, crate::FileLanguage::script_ts());
         assert_eq!(read(&host), 3.0, "incremental");
         assert_eq!(read(&make()), 3.0, "cold after edit");
     }
