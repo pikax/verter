@@ -169,6 +169,10 @@ fn the_worst_relation_shape_is_refused_by_the_construction_allowance() {
     );
 }
 
+/// The fixed cost of setting one connected demand up beside what it
+/// constructs: lowering the two names and opening the relation.
+const DEMAND_SETUP_BYTES: i64 = 4 << 20;
+
 /// `type R = \`${A}-${B}\`` over `a` string literals in `A` and `b` in `B`.
 fn template_over(a: usize, b: usize) -> String {
     let union = |prefix: &str, count: usize| {
