@@ -18244,13 +18244,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
+    /// Exercise the library walk under the caller's build-local observations.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lib_awaited_for_tests(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.lib_awaited_node(operand) {
+            LibAwaited::Reduced(node) => Some(node),
+            LibAwaited::Deferred | LibAwaited::Refused => None,
+        }
+    }
+
     /// The lib conditional re-entering itself with an argument it is still
     /// evaluating on this path: the same application under the same
     /// context. Through `exact` steps that is a certified divergence, its
     /// TS2589 recovery a complete answer, kept. Without that witness — a
     /// step on the cycle read a partial, or the frame that began the
     /// application is not on this stack — it proves nothing: the
-    /// application stops as a same-path partial, never kept.
+    /// cross-query application stops as a same-path partial, never kept.
+    /// A local walk with an executable transition instead continues through
+    /// `lib_awaited_resolved` under its work and depth allowances.
     fn lib_awaited_recurs(&self, exact: Option<ExactSteps>) -> LibAwaited {
         let Some(exact) = exact else {
             self.fold_local_partial_completeness(
@@ -18376,10 +18387,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(self.lib_awaited_recurs(self.exact_steps()));
+            if let Some(exact) = self.exact_steps() {
+                return LibStep::Done(self.lib_awaited_recurs(Some(exact)));
+            }
+            // No proof: evaluate the transition again. Tail transitions
+            // remain charged by the run; synchronous carrier transitions
+            // also need a depth rail, since they can recur without
+            // returning a tail step to that run.
+            let within = walk.depth.enter(
+                1,
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+            );
+            let result = if let Err(refusal) = within {
+                LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep(refusal)))
+            } else if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                LibStep::Done(LibAwaited::Refused)
+            } else {
+                self.lib_awaited_resolved(resolved, walk)
+            };
+            walk.depth.leave(1);
+            return result;
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);
+        self.lib_awaited_resolved(resolved, walk)
+    }
+
+    /// Evaluate one resolved operand. Active membership belongs to the
+    /// first run that entered it; a repeated transition adds no duplicate
+    /// path entry that could remove an enclosing run's membership on exit.
+    fn lib_awaited_resolved(&self, resolved: SemanticNodeId, walk: &mut LibAwaitedWalk) -> LibStep {
         let Some(data) = self.graph().node_data(resolved) else {
             return LibStep::Done(LibAwaited::Refused);
         };

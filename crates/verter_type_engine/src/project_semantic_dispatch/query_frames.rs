@@ -1085,7 +1085,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 External::Complete(Ok(dispatch.answered(key, read, carrier, nesting)))
             }
             Joined::Recursive(recursion) => {
-                External::Complete(Ok(dispatch.recursion_delivery(&key, recursion)))
+                External::Complete(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Joined::Retry => {
                 self.retries.insert(demand, attempt);

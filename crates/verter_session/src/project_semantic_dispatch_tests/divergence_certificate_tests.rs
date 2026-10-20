@@ -167,6 +167,73 @@ fn a_step_through_a_budget_refusal_is_never_certified() {
     assert_eq!(ending("Spin<0>"), BUDGET_TS2589);
 }
 
+/// A local Awaited walk with an incomplete observation cannot certify a
+/// cycle. It keeps evaluating under its allowance; a finite thenable still
+/// reaches its value, and a cyclic one reaches a budget recovery.
+#[test]
+fn an_uncertified_awaited_walk_continues_under_its_budget() {
+    let source = r#"
+interface Rec { then(f: (value: Rec) => void): void }
+interface Finite { then(f: (value: 1) => void): void }
+"#;
+    let mut cycle_work = Vec::new();
+    for allowance in [5, 20] {
+        let _budget = TailBudgetForTests::install(allowance);
+        for probe in ["Rec", "Finite"] {
+            let work = with_probe_outcome_on_host(
+                &default_probe_host(),
+                ProbeProject::default(),
+                source,
+                probe,
+                |dispatch, outcome| {
+                    let StructuralFactDemandOutcome::Complete(operand) = outcome else {
+                        panic!("{probe}: expected a complete operand, got {outcome:?}");
+                    };
+                    let (_demand, trip) = dispatch.enter_connected_demand(false);
+                    assert!(trip.is_none(), "the local walk starts with allowance");
+                    let guard = super::BuildLocalTaintGuard::push(&dispatch.build_local_taint);
+                    dispatch
+                        .build_local_taint
+                        .borrow_mut()
+                        .last_mut()
+                        .expect("the observation frame")
+                        .result_is_partial = true;
+                    let node = dispatch.lib_awaited_for_tests(operand).unwrap_or_else(|| {
+                        panic!("{probe}: the walk must evaluate instead of refusing at recurrence")
+                    });
+                    let frame = guard.finish();
+                    assert!(frame.result_is_partial, "the input observation survives");
+                    if probe == "Rec" {
+                        assert!(frame.cache_suppress, "a budget refusal cannot warm-admit");
+                        assert!(
+                            matches!(
+                                dispatch.graph().node_data(node).as_deref(),
+                                Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                                    diagnostic,
+                                    basis: RecoveryBasis::Budget,
+                                    ..
+                                })) if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+                            ),
+                            "an uncertified cycle reaches budget TS2589"
+                        );
+                    } else {
+                        let expected = checker_syntax::parse("1").unwrap();
+                        assert!(checker_syntax::matches_node(dispatch, node, &expected, 0));
+                    }
+                    dispatch.connected_demand_usage().work
+                },
+            );
+            if probe == "Rec" {
+                cycle_work.push(work);
+            }
+        }
+    }
+    assert!(
+        cycle_work[1] > cycle_work[0],
+        "more allowance must evaluate more transitions, not stamp a budget recovery"
+    );
+}
+
 /// A declaration error is the checker's TS2456, complete, and no
 /// divergence.
 #[test]
