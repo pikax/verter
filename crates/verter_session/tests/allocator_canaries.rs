@@ -782,3 +782,6 @@ mod reverse_index_backing;
 
 #[path = "allocation_cases/recursive_growth.rs"]
 mod recursive_growth_allocation;
+
+#[path = "allocation_cases/intersection_distribution.rs"]
+mod intersection_distribution_allocation;

@@ -148,6 +148,7 @@ fn mapper(
 ) -> MapperKey {
     MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: outer_type_param(dispatch, binder),
         key_space,
         value_expr: value,

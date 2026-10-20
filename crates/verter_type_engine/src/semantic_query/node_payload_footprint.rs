@@ -812,6 +812,7 @@ impl PayloadHeap for MapperKey {
             name_remap,
             kind,
             over_type_variable,
+            modifiers_type,
         } = self;
         parameter_node.visit_payload_heap(visitor);
         key_space.visit_payload_heap(visitor);
@@ -821,6 +822,7 @@ impl PayloadHeap for MapperKey {
         name_remap.visit_payload_heap(visitor);
         kind.visit_payload_heap(visitor);
         over_type_variable.visit_payload_heap(visitor);
+        modifiers_type.visit_payload_heap(visitor);
     }
 }
 
