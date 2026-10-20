@@ -874,8 +874,13 @@ impl VerterHost {
                             kind: verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
                         },
                     ) {
-                        verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
-                            .into_result()
+                        // The selection answers this request and retains
+                        // nothing, so an unretained answer serves as well
+                        // as an admitted one.
+                        publication @ (verter_workspace::ResolutionPublication::Admitted(_)
+                        | verter_workspace::ResolutionPublication::Unretained(_)) => publication
+                            .into_delivered()
+                            .flatten()
                             .map(|resolution| resolution.source_id)
                             .unwrap_or_else(|| {
                                 crate::id::resolve_external(&canonical_id, specifier)

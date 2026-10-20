@@ -60,7 +60,7 @@ fn named_answer_in_mode(
     named_answer_with_library(source, probe, mode, false)
 }
 
-fn named_answer_with_library(
+pub(super) fn named_answer_with_library(
     source: &str,
     probe: &str,
     mode: Option<verter_type_engine::semantic_query::ProjectionMode>,

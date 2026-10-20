@@ -494,15 +494,44 @@ pub(super) fn mismatches_in(
             let expected = checker_syntax::parse(checker)
                 .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
             with_probe_in(project, source, probe, |dispatch, node| {
-                (!checker_syntax::matches_node(dispatch, node, &expected, 0)).then(|| {
-                    format!(
-                        "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
-                        render_node(dispatch, node, 0)
-                    )
-                })
+                row_mismatch(dispatch, node, probe, checker, &expected)
             })
         })
         .collect()
+}
+
+/// [`mismatches_in`] with every row read on `host`, a host of `project`
+/// the caller configured.
+pub(super) fn mismatches_on_host(
+    host: &Arc<crate::VerterHost>,
+    project: ProbeProject<'_>,
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
+    rows.iter()
+        .filter_map(|(probe, checker)| {
+            let expected = checker_syntax::parse(checker)
+                .unwrap_or_else(|err| panic!("the checker print `{checker}` must parse: {err}"));
+            with_probe_on_host(host, project, source, probe, |dispatch, node| {
+                row_mismatch(dispatch, node, probe, checker, &expected)
+            })
+        })
+        .collect()
+}
+
+fn row_mismatch(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+    probe: &str,
+    checker: &str,
+    expected: &checker_syntax::CheckerType,
+) -> Option<String> {
+    (!checker_syntax::matches_node(dispatch, node, expected, 0)).then(|| {
+        format!(
+            "`{probe}`: the checker answers `{checker}`, the lane measured `{}`",
+            render_node(dispatch, node, 0)
+        )
+    })
 }
 
 /// Every `(probe, checker type)` pair whose EVALUATED value does not match

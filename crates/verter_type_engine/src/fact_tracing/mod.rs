@@ -30,12 +30,14 @@ use verter_session_query::source::demand::SourceRead;
 /// computes consult to refuse shared-cache admission — and record the typed
 /// `reason` into every active [`RefusalObservationScope`], so a producer can
 /// classify its result's reuse rail instead of inferring it from a boolean
-/// that a fenced serve and a broken lease set identically. No-op when no
+/// that a fenced serve and a broken lease set identically. The tracers also
+/// keep the reason's [`NonCacheableReadReason::basis`], so an admission can
+/// tell a declined retention from an untrustworthy read. No-op when no
 /// tracer, recorder or scope is active.
 #[inline]
 pub fn note_non_cacheable_read_fan_out(reason: NonCacheableReadReason) {
     refusal_scope::record_refusal(reason);
-    note_non_cacheable_propagation(reason.propagation());
+    tracing::apply_non_cacheable_mark(reason.propagation(), reason.basis());
 }
 
 /// Apply an already-classified refusal to the active tracer stack. Cache
