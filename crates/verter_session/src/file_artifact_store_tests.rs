@@ -63,6 +63,70 @@ fn augmentation_completion_flushes_contributors_after_in_flight_membership() {
     );
 }
 
+/// A guarded augmenter install that rejects the held set still completes a
+/// membership transition: an edit that landed while its epoch was in flight
+/// skipped its own publish, so the rejecting install must flush it.
+///
+/// Mutation recipe: return from the rejected arm without publishing. The
+/// completed edit's contributor then stays unpublished.
+#[test]
+fn rejected_guarded_augmenter_install_flushes_contributors_completed_meanwhile() {
+    let store = FileArtifactStore::new();
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    // A script-global contributor: it carries no augmentation fact, so its
+    // insert never takes the augmentation-index entry the install guards.
+    let source: Arc<str> = Arc::from("interface Window { x: 1 }");
+    let state = crate::resolver_core::ShallowFileState::service_backed_for_test_at(
+        "/globals.d.ts",
+        &source,
+    );
+    let indexed = Arc::new(IndexedReady::new_for_test_with_state(
+        state.whole_hash,
+        state,
+        Arc::clone(&source),
+        source,
+    ));
+    let installed = store.install_augmenter_set_if(
+        key,
+        Arc::new(verter_session_query::resolution::AugmenterSet {
+            entries: smallvec::smallvec![],
+            fingerprint: [4u8; 16],
+        }),
+        |_| {
+            // The guarded install's epoch is in flight here.
+            store.insert(Arc::from("/globals.d.ts"), indexed);
+            assert_eq!(
+                store.global_contributor_index().snapshot().revision,
+                0,
+                "a completed edit must not publish past an in-flight transition"
+            );
+            false
+        },
+    );
+    assert!(installed.is_none(), "the rejected install writes nothing");
+    let population = store.global_contributor_index().snapshot();
+    assert_eq!(population.program_snapshot, store.membership_epoch());
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "Window",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1,
+        "the rejecting install must flush the edit completed while it was in flight"
+    );
+}
+
 fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifactKey {
     let language = verter_language::FileLanguage::vue();
     let syntax_profile =

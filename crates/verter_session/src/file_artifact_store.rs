@@ -3271,6 +3271,9 @@ impl FileArtifactStore {
         if !admitted {
             drop(entry);
             drop(reservation);
+            // A rejection still completes a reserved transition: a mutation
+            // that landed while this epoch was in flight skipped its publish.
+            self.publish_global_contributors();
             return None;
         }
         let retired = match entry {
