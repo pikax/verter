@@ -2053,8 +2053,8 @@ function withObserveBuild(run) {
   };
   run.meta.binariesAfter.observe = "o";
   const packages = structuredClone(run.meta.build.packages);
-  packages.verter_bench.features = ["attribution", "currency_probe", "hotpath", "semantic-observe"];
-  packages.verter_audit.features = ["attribution", "semantic-observe"];
+  packages.verter_bench.features = ["semantic-observe"];
+  packages.verter_audit.features = ["semantic-observe"];
   run.meta.observeBuild = { ...run.meta.build, observe: true, packages };
   return run;
 }
@@ -2445,7 +2445,7 @@ test("the observe arm's build carries semantic-observe, the production probe nev
   assert.deepEqual(buildProblems(run.meta.observeBuild), []);
   // The gate itself is required of the observe build ...
   const gateless = structuredClone(run.meta.observeBuild);
-  gateless.packages.verter_bench.features = ["attribution"];
+  gateless.packages.verter_bench.features = [];
   assert.ok(buildProblems(gateless).some((p) => /lacks semantic-observe/.test(p)));
   // ... and refused in the production build.
   const production = structuredClone(run.meta.build);

@@ -250,7 +250,7 @@ impl SemanticGraphStore {
 
     construction_ordinal_seam! {
         /// Every retained origin edge, keyed by construction ordinals.
-        #[cfg_attr(feature = "hotpath", hotpath::measure)]
+        #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
         fn export_all_origin_edges(&self) -> Vec<(SemanticNodeId, OriginEdgeKind, OriginEdge)> {
             self.derivation.lock().all_edges()
         }

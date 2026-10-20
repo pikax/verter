@@ -1,4 +1,13 @@
-//! Resolve production features with Cargo, independently of the test binary's features.
+//! Architecture guard: no shipped root can gain an optional observation hook.
+//!
+//! Every hook that only measures (work attribution, currency probes, profiler
+//! instrumentation, trace bookkeeping) compiles under one coordinated,
+//! default-off `semantic-observe` feature per owner crate (see
+//! `docs/arch/semantic-observe.md`). This guard resolves production features
+//! with Cargo, independently of the test binary's own features, and proves
+//! that neither a production dependency edge nor the production root's
+//! dev-dependency unification turns one of those features on, for every
+//! shipped root on the host and WASM targets.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -579,31 +588,48 @@ fn read_host_target(root: &Path) -> String {
         .expect("rustc host triple")
 }
 
+/// Every consolidated observation hook, read from the workspace's own feature
+/// tables: each member's coordinated `semantic-observe` gate plus every member
+/// feature that implies a coordinated gate, its own or a dependency's (an
+/// allocation-profiling mode layered on it, for instance). A new owner or mode
+/// joins the guard by declaring the dependency on the gate, with no second
+/// allowlist.
+fn observation_seeds(metadata: &Metadata) -> BTreeSet<(String, String)> {
+    let members: BTreeSet<&str> = metadata
+        .workspace_members
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut seeds = BTreeSet::new();
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| members.contains(package.id.as_str()))
+    {
+        for (feature, implied) in &package.features {
+            let gates = feature == "semantic-observe"
+                || implied.iter().any(|entry| {
+                    entry == "semantic-observe" || entry.ends_with("/semantic-observe")
+                });
+            if gates {
+                seeds.insert((package.name.clone(), feature.clone()));
+            }
+        }
+    }
+    seeds
+}
+
 #[test]
 fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
     let root = repository_root();
     let host = host_target(root);
     let metadata = metadata(root, &[]);
     for target in [host.as_str(), "wasm32-unknown-unknown"] {
-        let mut seeds: BTreeSet<(String, String)> = [
-            ("verter_audit", "semantic-observe"),
-            ("verter_scheduler", "semantic-observe"),
-            ("verter_workspace", "semantic-observe"),
-            ("verter_semantic", "semantic-observe"),
-            ("verter_compiler", "semantic-observe"),
-            ("verter_session", "attribution"),
-            ("verter_session", "currency_probe"),
-        ]
-        .iter()
-        .map(|(name, feature)| (name.to_string(), feature.to_string()))
-        .collect();
-        // Includes new forwarding owners as they are introduced, and the
-        // measurement harness's combined opt-in, without a second allowlist.
-        for package in &metadata.packages {
-            if package.features.contains_key("semantic-observe") {
-                seeds.insert((package.name.clone(), "semantic-observe".into()));
-            }
-        }
+        let seeds = observation_seeds(&metadata);
+        assert!(
+            seeds.contains(&("verter_audit".into(), "semantic-observe".into())),
+            "the audit crate declares the coordinated observation gate"
+        );
         let requests: Vec<_> = ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"]
             .into_iter()
             .flat_map(|package| [false, true].map(|dev| (package, dev)))
@@ -727,8 +753,8 @@ version = "0.0.0"
 edition = "2021"
 [features]
 default = [{audit_default}]
-semantic-observe = ["attribution"]
-attribution = []
+semantic-observe = ["capture-table"]
+capture-table = []
 test-support = []
 "#
             ),
@@ -915,14 +941,14 @@ fn observe_feature_closure_rejects_direct_and_implied_manifest_enablement() {
     assert_eq!(
         direct.violations(false),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );
-    let implied = Fixture::new("\"attribution\"", None);
+    let implied = Fixture::new("\"capture-table\"", None);
     assert_eq!(
         implied.violations(false),
-        ["verter_audit v0.0.0/attribution"]
+        ["verter_audit v0.0.0/capture-table"]
     );
     let control = Fixture::new("", Some("\"test-support\""));
     assert!(control.violations(false).is_empty());
@@ -939,7 +965,7 @@ fn observe_feature_closure_rejects_dev_dependency_unification() {
     assert_eq!(
         fixture.violations(true),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );
@@ -1095,7 +1121,7 @@ fn observe_feature_closure_rejects_owner_default_activation() {
     assert_eq!(
         defaulted.violations(false),
         [
-            "verter_audit v0.0.0/attribution",
+            "verter_audit v0.0.0/capture-table",
             "verter_audit v0.0.0/semantic-observe"
         ]
     );

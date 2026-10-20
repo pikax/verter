@@ -12,7 +12,16 @@ keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
 categories = ["compilers", "template-engine"]
 
 [features]
-semantic-observe = ["verter_audit/semantic-observe", "verter_semantic/semantic-observe", "hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# forwards to the lower layers and compiles this crate's `hotpath` measurement
+# attributes. No production edge enables it.
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_semantic/semantic-observe",
+  "verter_parser/semantic-observe",
+  "dep:hotpath",
+  "hotpath/hotpath",
+]
 # Exposes `template` (and `script`) as `pub` instead of `pub(crate)` — see
 # `src/lib.rs`. Primarily for the benchmark harness, but it also provides the
 # visibility surface required by the bench-feature compile contracts: with `template`
@@ -48,8 +57,9 @@ conformance-trace = []
 # Enables the corpus-only JSONL parse probe used to regenerate committed
 # framework parse evidence. The binary is absent from default builds.
 external-corpus = []
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+# Allocation profiling through hotpath's own allocator: a distinct measurement
+# mode on top of the coordinated opt-in.
+hotpath-alloc = ["semantic-observe", "verter_parser/hotpath-alloc", "hotpath/hotpath-alloc"]
 # Opt-in test-support seam for items the SEPARATE integration-test binary
 # (`tests/cases/**`) must see but a normal `cargo build` must NOT compile.
 # The integration binary links `verter_compiler` as a NON-test dependency, so

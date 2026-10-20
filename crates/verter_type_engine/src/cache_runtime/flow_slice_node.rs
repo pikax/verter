@@ -56,6 +56,7 @@ use verter_session_query::flow::bundle::{
     BoundFlowGraph, FlowGraphBundle, FlowGraphBundleRef, FlowSliceFunctionKey,
 };
 
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -124,6 +125,8 @@ pub struct FlowSliceLoweredKey {
 /// [`Self::remove_canonical`].
 pub struct FunctionFlowGraphStore {
     entries: DashMap<FlowSliceFunctionKey, GraphEntry>,
+    /// Graph builds performed. Test observability only.
+    #[cfg(any(test, feature = "test-support"))]
     builds: AtomicU64,
     /// The account a retained bundle is charged to.
     retention: verter_session_query::retention::StoreAccount,
@@ -182,6 +185,7 @@ pub enum GraphClaim<'a> {
 
 pub struct GraphPublish<'a> {
     slot: dashmap::mapref::entry::VacantEntry<'a, FlowSliceFunctionKey, GraphEntry>,
+    #[cfg(any(test, feature = "test-support"))]
     builds: &'a AtomicU64,
     account: &'a Arc<verter_session_query::retention::SemanticRetentionAccount>,
 }
@@ -194,6 +198,7 @@ impl GraphPublish<'_> {
         if bundle.key() != self.slot.key() {
             return None;
         }
+        #[cfg(any(test, feature = "test-support"))]
         self.builds.fetch_add(1, Ordering::Relaxed);
         let bundle = FlowGraphBundleRef::new(bundle);
         let entry = GraphEntry::admit(self.slot.key(), &bundle, self.account);
@@ -208,6 +213,7 @@ impl FunctionFlowGraphStore {
     pub fn new() -> Self {
         Self {
             entries: DashMap::new(),
+            #[cfg(any(test, feature = "test-support"))]
             builds: AtomicU64::new(0),
             retention: verter_session_query::retention::StoreAccount::default(),
         }
@@ -238,6 +244,7 @@ impl FunctionFlowGraphStore {
             }
             dashmap::mapref::entry::Entry::Vacant(slot) => GraphClaim::Produce(GraphPublish {
                 slot,
+                #[cfg(any(test, feature = "test-support"))]
                 builds: &self.builds,
                 account: self.retention.get(),
             }),
@@ -496,7 +503,8 @@ pub struct FlowSliceStores {
     lowered_node: FlowSliceLoweredBodyNode,
     /// Number of demand plans built against this store (observability;
     /// the once-per-cold-demand fixture asserts warm replay and non-flow
-    /// dispatch add zero).
+    /// dispatch add zero). Test observability only.
+    #[cfg(any(test, feature = "test-support"))]
     demand_plans: AtomicU64,
     /// The shared budget cell's store-side handle — held so a
     /// constrained test host can re-arm the budget the nodes read.
@@ -548,6 +556,7 @@ impl FlowSliceStores {
             graphs,
             hash_node,
             lowered_node,
+            #[cfg(any(test, feature = "test-support"))]
             demand_plans: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-support"))]
             budget,
@@ -556,7 +565,9 @@ impl FlowSliceStores {
     }
 
     /// Record one demand plan built against this store.
+    #[inline(always)]
     pub(crate) fn note_demand_planned(&self) {
+        #[cfg(any(test, feature = "test-support"))]
         self.demand_plans.fetch_add(1, Ordering::Relaxed);
     }
 

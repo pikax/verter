@@ -213,7 +213,7 @@ pub trait TemplateCodeGen<'alloc> {
 ///
 /// Returns the categorized runtime helper imports so the caller can emit
 /// `import { ... } from "vue"` and optionally `import { ... } from "vue/server-renderer"`.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn generate_template<'alloc>(
     ast: &TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,

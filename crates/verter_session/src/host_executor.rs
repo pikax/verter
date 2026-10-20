@@ -282,7 +282,7 @@ impl HostStageExecutor {
 }
 
 impl HostStageExecutor {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     /// The source stage's snapshot of `content`: see [`StageExecutor::execute_source`].
     fn source_snapshot(
         &self,

@@ -336,7 +336,7 @@ impl VerterHost {
     /// eager own-canonical query-identity drain and fires no
     /// reverse-dependent cascade. The only cache work is the parse-domain
     /// producer contract; see `finish_upsert_post_commit`.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub(crate) fn upsert_many_with_priority(
         &self,
         requests: Vec<UpsertRequest>,

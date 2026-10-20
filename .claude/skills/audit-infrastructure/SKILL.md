@@ -25,11 +25,14 @@ when `semantic-observe` is off and `Available` when on. `observe::capture`
 returns `None` without calling its collector when off; it returns the collected
 payload when on, never fabricated zero metrics. `ObserveMode` supplies the
 uncaptured/captured vocabulary; root selection and existing audit-endpoint
-migration remain with the execution/consolidation owner. The feature currently
-implies legacy measurement gates without removing them. Integration tests in
-`crates/verter_audit/tests/cases/observe_feature_closure.rs` check resolver-2
-production and dev-unified closures on host/WASM; run the audit tests both with
-and without `--features semantic-observe`.
+migration remain with the execution/consolidation owner. It is the only
+measurement feature: the former `attribution`, `currency_probe` and `hotpath`
+features are folded into it (the work-attribution table compiles under the
+audit crate's `semantic-observe`). The guard in
+`crates/verter_source_policy_gate/tests/cases/observe_feature_closure.rs`
+checks resolver-2 production and dev-unified closures on host/WASM for every
+member's `semantic-observe` and every feature that implies one; run the audit
+tests both with and without `--features semantic-observe`.
 
 Audit state is split between a leaf substrate crate (`verter_audit`) and the session crate (`verter_session`). `verter_audit` may depend only on `verter_span` plus ecosystem crates — never on `verter_session` or any other `verter_*` crate.
 

@@ -551,6 +551,7 @@ impl DerivationStore {
     /// Iterate over all `(node, kind, edges)` entries in the store. Used
     /// by `stats_snapshot` to compute the origin-edges-per-node
     /// percentiles without exposing the underlying map shape.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn iter_edges(
         &self,
     ) -> impl Iterator<Item = (&SemanticNodeId, &OriginEdgeKind, &[OriginEdge])> {
@@ -646,6 +647,7 @@ pub(super) fn edge_identity_key(signature: &Arc<EdgeFence>, sources: &[SemanticN
 /// Pick the percentile-`p` value out of an already-sorted ascending
 /// slice. Returns 0 for an empty slice. Index rounding matches the
 /// nearest-rank method (R-3 / SAS / Excel `PERCENTILE.INC`).
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 pub(super) fn sorted_percentile(sorted_ascending: &[u32], p: f64) -> u32 {
     if sorted_ascending.is_empty() {
         return 0;

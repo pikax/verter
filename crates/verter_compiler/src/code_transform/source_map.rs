@@ -99,7 +99,7 @@ impl<'a> CodeTransform<'a> {
     /// let source_map = ct.generate_map(options);
     /// ```
     #[must_use]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap<'static> {
         self.generate_map_product(options).0
     }
@@ -114,7 +114,7 @@ impl<'a> CodeTransform<'a> {
     /// delegates here and drops the boundary.
     #[must_use]
     #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn generate_map_with_preamble(
         &self,
         options: SourceMapOptions,
@@ -746,7 +746,7 @@ impl<'a> CodeTransform<'a> {
 
     /// Generate source map and return as JSON string
     #[must_use]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn generate_map_json(&self, options: SourceMapOptions) -> String {
         let map = self.generate_map(options);
         map.to_json_string()
@@ -760,7 +760,7 @@ impl<'a> CodeTransform<'a> {
     /// string; `oxc_sourcemap` ignores the unknown member on parse, and the strict `PositionMapper`
     /// recovers it into a typed field.
     #[must_use]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn generate_map_json_with_preamble(&self, options: SourceMapOptions) -> String {
         let (map, preamble_end, insertion_anchor) = self.generate_map_product(options);
         inject_mapping_product(map.to_json_string(), preamble_end, insertion_anchor)

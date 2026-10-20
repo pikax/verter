@@ -1168,7 +1168,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // counter and respond to the watchdog's stall signal by
         // printing a self-backtrace from inside this lowering.
         // See `loop5_instrumentation.rs` watchdog module.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::watchdog_beat();
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();

@@ -2072,15 +2072,14 @@ fn edge_dep_signatures_intern_identical_fences() {
     );
 }
 
-/// `record_path_length` and `record_projection_depth` push samples
-/// into reservoirs whose p50 / p95 surface on the next snapshot.
+/// `record_path_length` pushes samples into a reservoir whose p50 / p95
+/// surface on the next snapshot.
 #[test]
-fn record_path_length_and_projection_depth_drive_percentiles() {
+fn record_path_length_drives_percentiles() {
     let store = SemanticGraphStore::new();
     // Path lengths 1..=100 → p50 ≈ 50, p95 ≈ 95.
     for n in 1..=100u32 {
         store.record_path_length(n);
-        store.record_projection_depth(n * 2);
     }
     let stats = store.stats_snapshot();
     // Nearest-rank percentile (R-3 / PERCENTILE.INC):
@@ -2090,10 +2089,6 @@ fn record_path_length_and_projection_depth_drive_percentiles() {
     //   p95 → round(99 * 0.95) = round(94.05) = 94 → sorted[94] = 95
     assert_eq!(stats.path_length_p50, 51);
     assert_eq!(stats.path_length_p95, 95);
-    // projection_depth samples are 2..=200 step 2 (100 samples):
-    //   sorted[50] = 2 * 51 = 102; sorted[94] = 2 * 95 = 190.
-    assert_eq!(stats.projection_depth_p50, 102);
-    assert_eq!(stats.projection_depth_p95, 190);
 }
 
 /// `origin_edges_per_node_p50/p95` are computed at snapshot time

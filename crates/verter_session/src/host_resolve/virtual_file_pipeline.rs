@@ -922,7 +922,7 @@ impl VerterHost {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn ensure_compiled(
         &self,
         canonical_id: &str,
@@ -3245,7 +3245,7 @@ impl VerterHost {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn compile_entry_unrecorded(
         &self,
         snapshot: &CompileInput,

@@ -795,7 +795,7 @@ npx tsx packages/benchmark/src/trace-check.ts \
 For native hotspot attribution on a real `nuxt/ui` component, use the real-project profiler:
 
 ```bash
-cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
+cargo run -p verter_bench --example profile_real_component_meta --release --features=semantic-observe -- Accordion
 ```
 
 Useful environment variables:

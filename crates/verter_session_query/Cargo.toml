@@ -17,11 +17,10 @@ test-support = ["verter_retention/test-support"]
 # the soak/tooling runner through the `retention` re-export, without the
 # rest of `test-support`. Forwarded by `verter_session/soak-support` only.
 soak-support = ["verter_retention/soak-support"]
-# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
-# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by
-# measurement harnesses, never by a production edge.
-currency_probe = []
-# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# compiles the `currency_probe` wall-clock/call-count rail
+# (`src/currency_probe.rs`). Requested ONLY by measurement harnesses through
+# the owners that forward it, never by a production edge.
 semantic-observe = []
 
 # Dependency closure is a FIREWALL contract: this crate must never reach the

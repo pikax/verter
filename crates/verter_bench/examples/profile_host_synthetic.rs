@@ -6,7 +6,7 @@
 //! fully self-contained and reproducible.
 //!
 //! Usage:
-//!   cargo run -p verter_bench --example profile_host_synthetic --release --features=hotpath
+//!   cargo run -p verter_bench --example profile_host_synthetic --release --features=semantic-observe
 //!
 //! Environment variables:
 //!   VERTER_SYNTHETIC_COUNT — number of SFCs to generate (default: 128)
@@ -259,7 +259,7 @@ fn run_pipeline(host: &VerterHost, count: usize, dir: &Path) {
     eprintln!("  Linted: {linted}");
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 50))]
+#[cfg_attr(feature = "semantic-observe", hotpath::main(limit = 50))]
 fn main() {
     let count: usize = std::env::var("VERTER_SYNTHETIC_COUNT")
         .ok()

@@ -9,7 +9,10 @@ authors.workspace = true
 description = "Vue SFC diagnostic engine — lint rules and DiagnosticSet"
 
 [features]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# compiles this crate's `hotpath` measurement attributes. No production edge
+# enables it.
+semantic-observe = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 verter_session_query = { workspace = true }

@@ -872,7 +872,7 @@ impl VerterHost {
         )
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub(crate) fn compute_component_meta_state_inner(
         &self,
         canonical: &str,
@@ -1297,7 +1297,7 @@ impl VerterHost {
         Some(state)
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub(crate) fn append_component_meta_registry_entries(
         &self,
         owner_canonical: &str,
@@ -1313,6 +1313,7 @@ impl VerterHost {
         query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
     ) {
         let dispatch = query_engine.dispatch;
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let _loop8_timer = verter_type_engine::loop5_instrumentation::TimerGuard::new(
             &verter_type_engine::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_CALLS,
             &verter_type_engine::loop5_instrumentation::APPEND_REGISTRY_ENTRIES_NS,

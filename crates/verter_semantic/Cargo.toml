@@ -10,8 +10,16 @@ description = "Semantic authority for Verter — revision-tracked query engine, 
 publish = false
 
 [features]
-semantic-observe = ["verter_audit/semantic-observe", "verter_session_query/semantic-observe", "hotpath"]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# forwards to the lower layers and compiles this crate's `hotpath` measurement
+# attributes. No production edge enables it.
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "verter_session_query/semantic-observe",
+  "verter_parser/semantic-observe",
+  "dep:hotpath",
+  "hotpath/hotpath",
+]
 # Test-only observability accessors: the flow-slice hash invocation
 # counter behind the hash-then-lower behavioral guard
 # (`compute_flow_slice_hash_thread_invocations`). Enabled by consumers'

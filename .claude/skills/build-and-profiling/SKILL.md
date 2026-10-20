@@ -141,17 +141,21 @@ cargo build --release --package verter_napi && rm -f packages/native/dist/verter
 
 ## Profiling with Hotpath
 
-The `hotpath` feature flag enables `#[hotpath::measure]` annotations on key functions for timing/allocation profiling. Propagates across 7 crates:
+The coordinated `semantic-observe` feature (see `docs/arch/semantic-observe.md`) compiles the `#[hotpath::measure]` annotations on key functions for timing/allocation profiling, together with the work-attribution counters and currency-probe timers. There is no separate `hotpath` feature. It propagates through the owners' dependency edges:
 
 ```
-verter_bench --features hotpath
-  ├── verter_compiler/hotpath         (compile_inner, generate_ide_script, generate_ide_template)
-  ├── verter_session/hotpath         (upsert_via_scheduler, ensure_compiled, compile_entry, execute_source)
-    │   ├── verter_semantic/hotpath (build_script_analysis_with_scope)
-  │   ├── verter_scheduler/hotpath (execute_source_stage)
-  │   └── verter_workspace/hotpath      (read_file, resolve_import)
-  └── verter_diagnostics/hotpath  (lint_inner)
+verter_bench --features semantic-observe
+  ├── verter_compiler/semantic-observe     (compile_inner, generate_ide_script, generate_ide_template)
+  │   └── verter_parser/semantic-observe   (AST build)
+  ├── verter_session/semantic-observe      (upsert_via_scheduler, ensure_compiled, compile_entry, execute_source)
+  │   ├── verter_semantic/semantic-observe (build_script_analysis_with_scope)
+  │   ├── verter_scheduler/semantic-observe (execute_source_stage, instrumented DAG mutex)
+  │   ├── verter_type_engine/semantic-observe
+  │   └── verter_workspace/semantic-observe (read_file, resolve_import)
+  └── verter_diagnostics/semantic-observe  (lint_inner)
 ```
+
+`hotpath-alloc` adds hotpath's allocation profiling on top of `semantic-observe`.
 
 ### Core-only profiling
 
@@ -176,7 +180,7 @@ Exercises the full host pipeline (upsert → bundler compile → IDE compile →
 cargo run --package verter_bench --example profile_host
 
 # With hotpath instrumentation (per-function timing):
-cargo run --package verter_bench --example profile_host --features hotpath
+cargo run --package verter_bench --example profile_host --features semantic-observe
 ```
 
 Requires `VERTER_TEST_REPOS` env var or a sibling `verter-test-repos` directory. Processes all `.vue` files in each project subdirectory.
@@ -272,7 +276,7 @@ npx tsx packages/benchmark/src/trace-check.ts \
 For real-project native hotspot attribution:
 
 ```bash
-cargo run -p verter_bench --example profile_real_component_meta --release --features=hotpath -- Accordion
+cargo run -p verter_bench --example profile_real_component_meta --release --features=semantic-observe -- Accordion
 ```
 
 Useful environment variables:

@@ -449,10 +449,10 @@ pub(crate) enum DispatchOutcome {
 /// instead. Scoping the wrap to this one alias keeps every other lock in the
 /// file byte-identical to the pre-instrumentation code regardless of the
 /// feature.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 pub(super) type DagMutex = hotpath::wrap::parking_lot::Mutex<SchedulerDag>;
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 pub(super) type DagMutex = Mutex<SchedulerDag>;
 
 /// Guard type returned by locking a [`DagMutex`]. See [`DagMutex`] for why
@@ -462,23 +462,23 @@ pub(super) type DagMutex = Mutex<SchedulerDag>;
 // this alias — reproduces on EITHER branch (whichever is the active cfg), so
 // it is a rustc false positive for a private lifetime-generic alias used
 // only in return position, not an actually-unused alias.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 #[allow(dead_code)]
 pub(super) type DagMutexGuard<'a> = hotpath::wrap::parking_lot::MutexGuard<'a, SchedulerDag>;
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 #[allow(dead_code)]
 pub(super) type DagMutexGuard<'a> = parking_lot::MutexGuard<'a, SchedulerDag>;
 
 /// Construct a [`DagMutex`]. Under `hotpath` this routes through
 /// `hotpath::mutex!`; without it, this is a plain `parking_lot::Mutex::new`,
 /// identical to the pre-instrumentation code.
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
     hotpath::mutex!(parking_lot::Mutex::new(dag), label = "scheduler_dag")
 }
 
-#[cfg(not(feature = "hotpath"))]
+#[cfg(not(feature = "semantic-observe"))]
 pub(super) fn new_dag_mutex(dag: SchedulerDag) -> DagMutex {
     Mutex::new(dag)
 }
@@ -1598,7 +1598,7 @@ impl Scheduler {
 
     /// Execute the Source stage: load content, run executor, commit.
     /// Returns the terminal `StageComplete` for the caller to deliver.
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     #[must_use = "the terminal StageComplete must be delivered to the inbox"]
     pub(super) fn execute_source_stage(
         node: &FileNode,

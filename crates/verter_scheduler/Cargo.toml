@@ -10,7 +10,8 @@ description = "Async file scheduler for Verter — driver-owned DAG with typed i
 publish = false
 
 [features]
-semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md).
+# Forwarded by the workspace and session layers; no production edge enables it.
 # `hotpath/parking_lot` turns on hotpath's drop-in instrumented wrapper for
 # `parking_lot::Mutex`, used for the scheduler's central DAG lock
 # (`new_dag_mutex` in scheduler.rs — every admission, dispatch, and
@@ -21,7 +22,12 @@ semantic-observe = ["verter_audit/semantic-observe", "hotpath"]
 # would type-mismatch against every one of those call sites — adopting it
 # would need those signatures converted to a shared type alias first, which
 # is out of scope here.
-hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/parking_lot"]
+semantic-observe = [
+  "verter_audit/semantic-observe",
+  "dep:hotpath",
+  "hotpath/hotpath",
+  "hotpath/parking_lot",
+]
 # Exposes this crate's test-only instrumentation to cross-crate test code:
 # the HostCpuPool internals (per-pool identity token TLS,
 # `HostCpuPool::pool_id`, `HostCpuPool::build_count`, the

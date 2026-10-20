@@ -156,9 +156,9 @@ pub use config::{
     normalize_path_buf, parse_tsconfig_json, raw_paths_json, resolve_tsconfig_extends,
     strip_json_comments, ParsedTsConfig, TsConfigEntry,
 };
-pub use engine::{
-    known_canonicals_calls, reset_known_canonicals_calls, SVELTE_RUNE_AMBIENT_PARSER_FLAG,
-};
+pub use engine::SVELTE_RUNE_AMBIENT_PARSER_FLAG;
+#[cfg(any(test, feature = "test-support"))]
+pub use engine::{known_canonicals_calls, reset_known_canonicals_calls};
 pub use error::{DirEntry, VfsError};
 pub use exact_resolution::{DependencySnapshotView, EdgeStore};
 
@@ -190,11 +190,12 @@ pub use overlay_residency::OverlayAuthority;
 pub use package_index::PackageIndex;
 pub use project_key::project_stable_key_from_project;
 pub use published_state::{ProjectEnvHashArray, PublishedRoot, WorkspaceAuthority};
+#[cfg(any(test, feature = "test-support"))]
+pub use resolution_currency::OverlayWorkCounts;
 pub use resolution_currency::{
-    AdmittedResolution, CapturedResolutionWorld, ContentRevision, OverlayWorkCounts,
-    ResolutionEpoch, ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome,
-    ResolutionOverlaySnapshot, ResolutionPublication, ResolutionPublicationRefusal,
-    ResolutionQueryKey, ResolveContextId,
+    AdmittedResolution, CapturedResolutionWorld, ContentRevision, ResolutionEpoch,
+    ResolutionFactKey, ResolutionFactVersion, ResolutionOutcome, ResolutionOverlaySnapshot,
+    ResolutionPublication, ResolutionPublicationRefusal, ResolutionQueryKey, ResolveContextId,
 };
 pub use resolver::ide_project_config;
 pub use snapshot_builder::build_workspace_snapshot_simple;

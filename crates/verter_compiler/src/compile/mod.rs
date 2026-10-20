@@ -559,7 +559,7 @@ fn collect_template_compile_diagnostics(parsed: &ParsedSfc, diagnostics: &mut Ve
 /// examples/benches (both enable `test-support` on their own
 /// `verter_compiler` dev-dependency edge, never on their regular one).
 #[cfg(any(test, feature = "test-support"))]
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn compile(
     input: &str,
     request: &crate::compile_request::CompileRequest,
@@ -830,7 +830,7 @@ pub(crate) fn derive_legacy_vue_options(
 /// SSR`) is already enforced upstream by the canonical request, so
 /// `verter_options`/`options` here are already-validated derived values,
 /// never a second place those rules are re-decided.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 fn compile_inner(
     input: &str,
     parsed: &ParsedSfc,

@@ -7,7 +7,7 @@
 //! bottlenecks across all layers: VFS, scheduler, analysis, compilation, diagnostics.
 //!
 //! Usage:
-//!   cargo run -p verter_bench --example profile_host --release --features=hotpath
+//!   cargo run -p verter_bench --example profile_host --release --features=semantic-observe
 //!
 //! Environment variables:
 //!   VERTER_TEST_REPOS   — path to the test repos directory
@@ -141,7 +141,7 @@ fn registered_block_facts(
         .unwrap_or_default()
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 50))]
+#[cfg_attr(feature = "semantic-observe", hotpath::main(limit = 50))]
 fn main() {
     let Some(root) = find_test_repos_root() else {
         eprintln!("ERROR: No test repos found.");

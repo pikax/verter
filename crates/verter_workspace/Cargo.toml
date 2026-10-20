@@ -10,18 +10,19 @@ description = "Workspace layer for Verter — file access, resolution, project o
 publish = false
 
 [features]
+# The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
+# forwards to the lower layers (including the query boundary's currency probe
+# rail) and compiles this crate's `hotpath` measurement attributes. Requested
+# only by measurement harnesses through the session; no production edge
+# enables it.
 semantic-observe = [
   "verter_audit/semantic-observe",
   "verter_scheduler/semantic-observe",
   "verter_semantic/semantic-observe",
-  "currency_probe",
-  "hotpath",
+  "verter_session_query/semantic-observe",
+  "dep:hotpath",
+  "hotpath/hotpath",
 ]
-hotpath = ["dep:hotpath", "hotpath/hotpath"]
-# Measurement-only: enables the `currency_probe` wall-clock/call-count rail
-# (`src/currency_probe.rs`). Absent from `default`; requested ONLY by the
-# `verter_bench` measurement harness, never by a production edge.
-currency_probe = ["verter_session_query/currency_probe"]
 # Tests that require third-party repository checkouts beside this repo
 # (Testing-Hermeticity): excluded from the default canonical run; enable
 # explicitly with `--features external-corpus`.

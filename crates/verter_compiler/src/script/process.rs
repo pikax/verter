@@ -96,7 +96,7 @@ pub(super) fn component_wrap(is_ts: bool, has_options: bool) -> ComponentWrap {
 /// 4. Extracts binding metadata for template codegen
 /// 5. Overwrites open tag → component wrapper opening
 /// 6. Overwrites close tag → return statement + closing braces + export
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn process_script_setup<'alloc>(
     setup: &RootNodeScript,
     prepared: &PreparedScript<'alloc>,

@@ -1517,7 +1517,7 @@ impl<'a> CodeTransform<'a> {
 impl<'a> CodeTransform<'a> {
     /// Build the final output string with pre-allocated capacity.
     #[must_use]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub fn build_string(&self) -> String {
         #[cfg(test)]
         CODE_TRANSFORM_BUILD_STRING_CALLS.with(|count| count.set(count.get() + 1));

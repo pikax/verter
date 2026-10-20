@@ -1992,21 +1992,15 @@ impl SemanticGraphStore {
             .branch_selections_false
             .fetch_add(1, Ordering::Relaxed);
     }
-    pub fn record_budget_fallback(&self) {
-        self.stats
-            .budget_fallback_count
-            .fetch_add(1, Ordering::Relaxed);
-    }
     /// Record one path-length sample into the bounded reservoir.
-    /// Builders call this once per `ProjectPath` invocation in C-phase.
+    /// Builders call this once per `ProjectPath` invocation. A no-op
+    /// without the observation gate.
+    #[inline(always)]
     pub fn record_path_length(&self, length: u32) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.stats.path_length_samples.lock().push(length);
-    }
-    /// Record one projection-depth sample into the bounded reservoir.
-    /// Builders call this once per recursive projection descent in
-    /// C-phase.
-    pub fn record_projection_depth(&self, depth: u32) {
-        self.stats.projection_depth_samples.lock().push(depth);
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        let _ = length;
     }
     pub fn record_decl_subexpression_lowering(&self) {
         self.stats
@@ -2411,11 +2405,13 @@ impl SemanticGraphStore {
 
     /// The observations of one family-memo lookup entry, warm or cold.
     pub(crate) fn note_lookup_entry(&self) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
     /// The observations a family-memo lookup that missed `key` makes.
     pub(crate) fn note_lookup_miss(&self, key: &SemanticQueryKey) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-support"))]
         crate::project_semantic_dispatch::raise::record_dispatch_cold(key);
@@ -2431,10 +2427,13 @@ impl SemanticGraphStore {
     /// The observations a family-memo lookup answered warm for `key` makes.
     fn note_warm_hit(&self, key: &SemanticQueryKey) {
         // Instrumentation — fast-path attribution.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::FAMILY_MEMO_HITS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 

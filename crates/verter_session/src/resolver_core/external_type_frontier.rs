@@ -522,7 +522,6 @@ impl ExternalTypeFrontier {
                 } else {
                     state.local_closure_in(*owner, symbol_name, self.budgets.local_closure_steps)
                 };
-                self.counters.local_closure_steps += closure.steps;
 
                 let status = match &closure.status {
                     LocalClosureStatus::Resolved => ResolvedSymbolStatus::Resolved,

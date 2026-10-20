@@ -1685,7 +1685,7 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
 // split into `WorkspaceRead` (read-only)
 // and `WorkspaceAccess` (mutators) per the trait hierarchy.
 impl crate::traits::WorkspaceRead for FilesystemWorkspace {
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn read_file(&self, canonical_id: &str) -> Option<Arc<str>> {
         // Per-file `read_ns` capture is gated on the active request's
         // `audit_timing_capture` flag — when `false`, the zero-cost
@@ -2050,7 +2050,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         }
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     fn resolve_import(
         &self,
         importer_id: &str,

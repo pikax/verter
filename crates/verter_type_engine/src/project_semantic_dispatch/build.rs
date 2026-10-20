@@ -5288,6 +5288,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // this request" without false positives from peer dispatches in
         // workspace-parallel runs.
         if matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded) {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(ctx) = crate::request_context::current_request_context() {

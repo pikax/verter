@@ -728,7 +728,8 @@ pub struct DeclLoweringService {
     /// sent to a worker shard and awaited (a lease acquisition, a single
     /// lowering run, or one shard's share of a batch). The deterministic
     /// work count that shows demands batching per occupied shard instead
-    /// of paying one handoff per declaration.
+    /// of paying one handoff per declaration. Test observability only.
+    #[cfg(any(test, feature = "test-support"))]
     handoffs: std::sync::atomic::AtomicU64,
     // On `wasm32` the shard itself lives in the
     // `WASM_DECL_LOWERING_SHARD` thread-local, never here, so the
@@ -849,6 +850,7 @@ impl DeclLoweringService {
             profile: global_handoff_stats().cloned(),
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             handoffs: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -877,6 +879,7 @@ impl DeclLoweringService {
         Self {
             account,
             live_leases: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
             handoffs: std::sync::atomic::AtomicU64::new(0),
         }
     }
@@ -1046,8 +1049,10 @@ impl DeclLoweringService {
             let account = Arc::clone(&self.account);
             let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
             let submitted = self.profile.as_ref().map(|_| std::time::Instant::now());
+            // The worker reads the clock only for a profiled acquisition.
+            let profiled = submitted.is_some();
             let worker_job: WorkerJob = Box::new(move |shard| {
-                let started = std::time::Instant::now();
+                let started = profiled.then(std::time::Instant::now);
                 let acquired = shard.acquire(&account, &key_for_job, &source, source_type);
                 let result = if acquired.1.is_none() {
                     shard.snapshot_leased(&key_for_job).map(|parsed| {
@@ -1056,16 +1061,19 @@ impl DeclLoweringService {
                 } else {
                     None
                 };
-                let _ = result_tx.send((acquired, result, started, std::time::Instant::now()));
+                let timing = started.map(|started| (started, std::time::Instant::now()));
+                let _ = result_tx.send((acquired, result, timing));
             });
             workers[shard_index]
                 .jobs
                 .send(worker_job)
                 .expect("decl-lowering worker channel must outlive the service");
-            let (acquired, result, started, finished) = result_rx
+            let (acquired, result, timing) = result_rx
                 .recv()
                 .expect("decl-lowering worker must answer every acquire");
-            if let (Some(stats), Some(submitted)) = (self.profile.as_ref(), submitted) {
+            if let (Some(stats), Some(submitted), Some((started, finished))) =
+                (self.profile.as_ref(), submitted, timing)
+            {
                 stats.record_acquire(
                     submitted,
                     started,
@@ -1147,13 +1155,16 @@ impl DeclLoweringService {
             .sum()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn handoff_count(&self) -> u64 {
         self.handoffs.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[inline(always)]
     fn count_handoff(&self) {
+        #[cfg(any(test, feature = "test-support"))]
         self.handoffs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }

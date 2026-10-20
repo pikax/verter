@@ -1145,14 +1145,6 @@ pub struct RequestContext {
     /// Discriminating signal for the "cross-request negative-resolution
     /// caching defect" hypothesis.
     pub frontier_closure_redundant_target_none_pairs: AtomicU64,
-    /// Per-request set tracking the `(owner_canonical, type_name)`
-    /// pairs that have already emitted a `None` from the frontier
-    /// closure during this request. Used by the producer to discriminate
-    /// "first None for pair" (bumps only `target_none`) from "subsequent
-    /// None for same pair" (bumps both `target_none` AND
-    /// `redundant_target_none_pairs`).
-    pub frontier_target_none_pairs_seen:
-        Mutex<rustc_hash::FxHashSet<(std::string::String, std::string::String)>>,
     /// Warm hits on a host-owned negative entry in the
     /// resolved-external-type cache.
     pub resolved_external_type_cache_negative_hits: AtomicU64,
@@ -1621,7 +1613,6 @@ impl RequestContext {
             frontier_closure_invocations_total: AtomicU64::new(0),
             frontier_closure_invocations_target_none: AtomicU64::new(0),
             frontier_closure_redundant_target_none_pairs: AtomicU64::new(0),
-            frontier_target_none_pairs_seen: Mutex::new(rustc_hash::FxHashSet::default()),
             resolved_external_type_cache_negative_hits: AtomicU64::new(0),
             resolved_external_type_cache_negative_misses: AtomicU64::new(0),
             resolve_import_cold_positive: AtomicU64::new(0),
@@ -1819,31 +1810,6 @@ impl RequestContext {
     pub fn type_resolution_dispatched_query_tags_mask(&self) -> u32 {
         self.type_resolution_dispatched_query_tags
             .load(Ordering::Relaxed)
-    }
-
-    /// Mark that the cross-file external-type frontier closure
-    /// resolved `(owner_canonical, type_name)` to `target = None`
-    /// during this request. ALWAYS bumps
-    /// `frontier_closure_invocations_target_none`; bumps
-    /// `frontier_closure_redundant_target_none_pairs` ONLY when the
-    /// pair has already been observed earlier in the request — the
-    /// dominant signal for the "cross-request negative-resolution
-    /// caching defect" hypothesis.
-    ///
-    /// Producer side — the cross-file resolver in
-    /// `host_resolve::external_type_resolution` — calls this after
-    /// the frontier returns `Ok((_, None, _))`. Cheap on the hot
-    /// path: one `Mutex` lock + one `FxHashSet::insert` + at most one
-    /// `fetch_add`.
-    pub fn observe_frontier_target_none_for_pair(&self, owner: &str, type_name: &str) {
-        self.frontier_closure_invocations_target_none
-            .fetch_add(1, Ordering::Relaxed);
-        let key = (owner.to_string(), type_name.to_string());
-        let inserted = self.frontier_target_none_pairs_seen.lock().insert(key);
-        if !inserted {
-            self.frontier_closure_redundant_target_none_pairs
-                .fetch_add(1, Ordering::Relaxed);
-        }
     }
 
     /// Update the per-request walker depth high-water mark. Cheap on

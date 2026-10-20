@@ -23,7 +23,7 @@ enum Phase {
 /// Leaf nodes (text, interpolation, comment) only get a single visit call.
 ///
 /// The walker also calls `enter_template` / `leave_template` for the root.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn walk_template<'alloc>(
     ast: &TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,

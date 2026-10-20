@@ -28,6 +28,7 @@ use verter_type_expr::TypeExpr;
 // owner type (NOT a second definition / dual path).
 pub use super::output_materialization::{MaterializedOutputTypeExpr, OutputTypeExpr};
 use super::ProjectSemanticDispatch;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use crate::instant::Instant;
 use crate::semantic_query::{
     DepSignature, IndexKey, MapperKey, ProjectionMode, ProjectionReductionContext, QueryError,
@@ -619,12 +620,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Loop-5 instrumentation — count every iterative-reduction
         // entry. One `raise_and_reduce_with_context` produces exactly one of
         // these.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::RAISE_REDUCE_GRAPH_NODE_ITERATIVE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Loop-8 instrumentation — wall-clock attribution for the
         // iterative-reduction body. Calls counter already bumped
         // above (Loop 5); this guard adds NS-only on drop.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let _loop8_timer = crate::loop5_instrumentation::TimerGuard::new_ns_only(
             &crate::loop5_instrumentation::REDUCE_GRAPH_NODE_ITERATIVE_NS,
         );
@@ -1670,6 +1673,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         // Loop-5 instrumentation — every operator-node dispatch issues
         // one `execute_read` (which routes through `execute_cooperative`).
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::DISPATCH_OPERATOR_WITH_RECURSE_CALLS
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
@@ -1680,9 +1684,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // close-down) AND any recursive `reduce_subtree` follow-up the
         // dispatch triggers — i.e. the entire wall-clock cost
         // attributable to this single operator-node dispatch.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let kind_idx = crate::loop5_instrumentation::kind_index_for_key(&key);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_CALLS[kind_idx]
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let dispatch_started = Instant::now();
 
         let read = self.execute_read(key);
@@ -1732,9 +1739,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Error(_) => node,
         };
 
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let elapsed_ns = dispatch_started.elapsed().as_nanos() as u64;
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::DISPATCH_OPERATOR_KIND_NS[kind_idx]
             .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::DISPATCH_OPERATOR_TOTAL_NS
             .fetch_add(elapsed_ns, std::sync::atomic::Ordering::Relaxed);
         result

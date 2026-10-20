@@ -677,7 +677,12 @@ impl Subscription<'_> {
     ) -> Joined {
         let inflight = Arc::clone(&self.inflight);
         let mut state = inflight.state.lock();
-        let wait_start = Instant::now();
+        // The wait time is a measurement-only counter; without the
+        // observation gate the clock is never read.
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        let wait_start = Some(Instant::now());
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        let wait_start = None;
         if !flight_resolved(&state, flags) {
             if let Err(WaitCycle) = self.park(&state, attempt.prepared.key()) {
                 return Joined::Recursive(Recursion::WaitCycle);
@@ -695,7 +700,7 @@ impl Subscription<'_> {
                     .wait_for(&mut state, std::time::Duration::from_millis(2));
             }
         }
-        self.resolve(state, ctx, flags, attempt, capture, Some(wait_start))
+        self.resolve(state, ctx, flags, attempt, capture, wait_start)
     }
 
     /// Poll the producer's completion without blocking: `Ready` once the
@@ -1286,8 +1291,10 @@ impl<'s> ProducerLease<'s> {
             prov.execute_cooperative_held_ns
                 .fetch_add(build_held_ns, Ordering::Relaxed);
         }
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_COLD_BUILDS
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::EXECUTE_COOPERATIVE_BUILD_NS_TOTAL
             .fetch_add(build_held_ns, Ordering::Relaxed);
 

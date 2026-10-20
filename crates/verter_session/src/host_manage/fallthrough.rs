@@ -877,7 +877,7 @@ impl VerterHost {
         deps
     }
 
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
     pub(super) fn materialize_imported_runtime_values_into_env(
         &self,
         snapshot: &FileAnalysisSnapshot,

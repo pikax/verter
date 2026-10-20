@@ -229,6 +229,7 @@ impl SemanticGraphStore {
     /// no-op substitution must not increment this counter at all,
     /// because identical sub-results short-circuit the rebuild +
     /// re-intern path entirely.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     #[must_use]
     pub fn intern_preserving_scope_call_count(&self) -> u64 {
         self.stats

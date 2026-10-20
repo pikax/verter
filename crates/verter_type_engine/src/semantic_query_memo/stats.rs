@@ -1,25 +1,66 @@
-//! Telemetry — atomic counters and the diagnosis-instrumented
+//! Telemetry — optional store counters and the diagnosis-instrumented
 //! entries-mutex guard.
 //!
-//! `AtomicSemanticGraphStats` holds the lock-free counter set updated on
-//! the hot path. `SampleCollector` is the bounded reservoir backing
-//! histogram-style metrics (path length, projection depth).
-//! `InFlightStatsGuard` is a panic-safe RAII guard that decrements the
-//! in-flight presence counter. `EntriesLockGuard` wraps the entries
-//! mutex with wait/hold timing for the diagnosis benchmark.
+//! `AtomicSemanticGraphStats` holds the store's measurement-only counter
+//! set. No production decision reads it: every counter is a [`Tally`], an
+//! atomic only under the observation gate
+//! (`cfg(any(test, feature = "test-support", feature = "semantic-observe"))`) and a zero-size no-op
+//! otherwise, and the [`SemanticGraphStore::stats_snapshot`] reader exists
+//! only under the same gate, so a default build neither counts nor can
+//! report a fabricated zero. `SampleCollector` is the bounded reservoir
+//! backing the path-length histogram. `InFlightStatsGuard` is a
+//! panic-safe RAII guard that decrements the in-flight presence counter.
+//! `EntriesLockGuard` wraps the entries mutex with wait/hold timing for
+//! the diagnosis benchmark.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use parking_lot::Mutex;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use rustc_hash::FxHashMap;
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use super::derivation::sorted_percentile;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use super::SemanticGraphStore;
 // Only the (gated) `EntriesLockGuard::hold_start` timing field uses
 // `Instant`; gate the import to match so release does not see it unused.
 #[cfg(any(test, feature = "test-support"))]
 use crate::instant::Instant;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
+
+/// One measurement-only store counter.
+///
+/// Under the observation gate it is a relaxed atomic; without it it is a
+/// zero-size value whose `fetch_add` compiles to nothing and which has no
+/// reader at all, so an unobserved build carries no counter and cannot
+/// substitute zero for one it never kept.
+#[derive(Default)]
+pub(crate) struct Tally {
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    value: AtomicU64,
+}
+
+impl Tally {
+    /// Add `amount` to the counter. A no-op without the observation gate.
+    #[inline(always)]
+    pub(crate) fn fetch_add(&self, amount: u64, order: Ordering) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        self.value.fetch_add(amount, order);
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        let _ = (amount, order);
+    }
+
+    /// Read the counter. Exists only where the counter is kept.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    pub(crate) fn load(&self, order: Ordering) -> u64 {
+        self.value.load(order)
+    }
+}
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new
@@ -29,12 +70,14 @@ use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 /// Percentiles are computed at snapshot time by sorting a clone of the
 /// reservoir — O(N log N) per snapshot where N <= cap, which is fine for
 /// observational reads.
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 pub(super) struct SampleCollector {
     samples: Vec<u32>,
     cap: usize,
     inserts: u64,
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl SampleCollector {
     pub(super) fn with_cap(cap: usize) -> Self {
         Self {
@@ -65,9 +108,10 @@ impl SampleCollector {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
 
-/// Lock-free counter set updated on the hot path. Read into the immutable
+/// Measurement-only counter set updated on the hot path. Read into the immutable
 /// [`SemanticGraphStats`](crate::semantic_query::SemanticGraphStats)
 /// snapshot via [`super::SemanticGraphStore::stats_snapshot`].
 ///
@@ -79,15 +123,21 @@ pub(super) const SAMPLE_RESERVOIR_CAP: usize = 8192;
 /// `semantic_query_memo` do not name the type — only the parent
 /// module reaches it — so the broader visibility is documentation-
 /// only in practice.
+#[cfg_attr(
+    not(any(test, feature = "test-support", feature = "semantic-observe")),
+    derive(Default)
+)]
 pub(crate) struct AtomicSemanticGraphStats {
-    pub(super) hits: AtomicU64,
-    pub(super) misses: AtomicU64,
-    pub(super) same_path_sentinel_returns: AtomicU64,
+    pub(super) hits: Tally,
+    pub(super) misses: Tally,
+    pub(super) same_path_sentinel_returns: Tally,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) in_flight_current: AtomicU32,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) in_flight_peak: AtomicU32,
-    pub(super) waits_ms: AtomicU64,
-    pub(super) joined_waits: AtomicU64,
-    pub(super) inflight_aborted_retries: AtomicU64,
+    pub(super) waits_ms: Tally,
+    pub(super) joined_waits: Tally,
+    pub(super) inflight_aborted_retries: Tally,
     /// Number of cooperative joiners that woke from the condvar and
     /// forked to a cold recompute rather than reusing the winner's
     /// result. A fork happens in two cases: the winner's carrier did
@@ -98,27 +148,26 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// could only ever validate vacuously and is unsafe to reuse
     /// cross-view. A view-validated coalesce does not bump this
     /// counter; only a fork does.
-    pub(super) joiner_view_mismatch_forks: AtomicU64,
-    pub(super) cold_aborts_swept: AtomicU64,
-    pub(super) origin_edges_emitted: AtomicU64,
-    pub(super) instantiate_count: AtomicU64,
-    pub(super) conditional_decided_count: AtomicU64,
-    pub(super) conditional_deferred_count: AtomicU64,
-    pub(super) branch_selections_true: AtomicU64,
-    pub(super) branch_selections_false: AtomicU64,
-    pub(super) budget_fallback_count: AtomicU64,
+    pub(super) joiner_view_mismatch_forks: Tally,
+    pub(super) cold_aborts_swept: Tally,
+    pub(super) origin_edges_emitted: Tally,
+    pub(super) instantiate_count: Tally,
+    pub(super) conditional_decided_count: Tally,
+    pub(super) conditional_deferred_count: Tally,
+    pub(super) branch_selections_true: Tally,
+    pub(super) branch_selections_false: Tally,
     /// Cold `AwaitedNormalize` builds observed by the store. Bumped by
     /// the builder itself, so a warm family hit does NOT increment it —
     /// the discriminating signal for awaited-relation memoization.
-    pub(super) awaited_normalize_count: AtomicU64,
+    pub(super) awaited_normalize_count: Tally,
     /// Cold `AsyncReturnPayload` builds observed by the store. Separate
     /// from `awaited_normalize_count`: the two relations are distinct
     /// families and must be countable apart.
-    pub(super) async_return_payload_count: AtomicU64,
+    pub(super) async_return_payload_count: Tally,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) path_length_samples: Mutex<SampleCollector>,
-    pub(super) projection_depth_samples: Mutex<SampleCollector>,
-    pub(super) decl_subexpression_lowering_count: AtomicU64,
-    pub(super) relation_check_count: AtomicU64,
+    pub(super) decl_subexpression_lowering_count: Tally,
+    pub(super) relation_check_count: Tally,
     /// Number of `intern_preserving_scope` calls observed by the
     /// store. The substitute helper's change-tracking optimisation
     /// short-circuits no-op arms and skips the rebuild +
@@ -126,7 +175,7 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// that does not change anything must not increment this
     /// counter — it is the discriminating signal for the
     /// optimisation in tests.
-    pub(super) intern_preserving_scope_calls: AtomicU64,
+    pub(super) intern_preserving_scope_calls: Tally,
     /// Per-K mapped-type materialiser invocations observed by the
     /// store. Increments once per call to either
     /// `materialize_mapped_member_value_for_key` (the
@@ -141,67 +190,67 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// bypassing the per-K materialiser), so the counter should be
     /// `0` for hoist-eligible mapped types and `N = key_count` for
     /// K-dependent mapped types.
-    pub(super) mapped_per_k_materializations: AtomicU64,
+    pub(super) mapped_per_k_materializations: Tally,
     /// Hash-cons memo hits on
     /// `substitute_semantic_type_param`. Discriminating signal for
     /// the substitute hash-cons: a second call with the same
     /// `(value_expr, parameter_node, arg)` triple short-circuits
     /// the recursive walk and bumps this counter.
-    pub(super) substitute_memo_hits: AtomicU64,
+    pub(super) substitute_memo_hits: Tally,
     /// Hash-cons memo misses on
     /// `substitute_semantic_type_param`. Increments when the cache
     /// has no entry for the queried triple — the recursive walk
     /// runs and the result is published into the memo.
-    pub(super) substitute_memo_misses: AtomicU64,
+    pub(super) substitute_memo_misses: Tally,
     /// Hash-cons memo hits on
     /// `evaluate_deferred_semantic_node_with_context`. Bumped when
     /// a `(node, context)` pair is served from the memo, skipping
     /// the recursive fix-point walk.
-    pub(super) evaluate_deferred_memo_hits: AtomicU64,
+    pub(super) evaluate_deferred_memo_hits: Tally,
     /// Hash-cons memo misses on
     /// `evaluate_deferred_semantic_node_with_context`. Bumped when
     /// the cache has no entry for the queried pair and a fresh
     /// fix-point walk runs.
-    pub(super) evaluate_deferred_memo_misses: AtomicU64,
+    pub(super) evaluate_deferred_memo_misses: Tally,
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl Default for AtomicSemanticGraphStats {
     fn default() -> Self {
         Self {
-            hits: AtomicU64::new(0),
-            misses: AtomicU64::new(0),
-            same_path_sentinel_returns: AtomicU64::new(0),
+            hits: Tally::default(),
+            misses: Tally::default(),
+            same_path_sentinel_returns: Tally::default(),
             in_flight_current: AtomicU32::new(0),
             in_flight_peak: AtomicU32::new(0),
-            waits_ms: AtomicU64::new(0),
-            joined_waits: AtomicU64::new(0),
-            inflight_aborted_retries: AtomicU64::new(0),
-            joiner_view_mismatch_forks: AtomicU64::new(0),
-            cold_aborts_swept: AtomicU64::new(0),
-            origin_edges_emitted: AtomicU64::new(0),
-            instantiate_count: AtomicU64::new(0),
-            conditional_decided_count: AtomicU64::new(0),
-            conditional_deferred_count: AtomicU64::new(0),
-            branch_selections_true: AtomicU64::new(0),
-            branch_selections_false: AtomicU64::new(0),
-            budget_fallback_count: AtomicU64::new(0),
-            awaited_normalize_count: AtomicU64::new(0),
-            async_return_payload_count: AtomicU64::new(0),
+            waits_ms: Tally::default(),
+            joined_waits: Tally::default(),
+            inflight_aborted_retries: Tally::default(),
+            joiner_view_mismatch_forks: Tally::default(),
+            cold_aborts_swept: Tally::default(),
+            origin_edges_emitted: Tally::default(),
+            instantiate_count: Tally::default(),
+            conditional_decided_count: Tally::default(),
+            conditional_deferred_count: Tally::default(),
+            branch_selections_true: Tally::default(),
+            branch_selections_false: Tally::default(),
+            awaited_normalize_count: Tally::default(),
+            async_return_payload_count: Tally::default(),
             path_length_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
-            projection_depth_samples: Mutex::new(SampleCollector::with_cap(SAMPLE_RESERVOIR_CAP)),
-            decl_subexpression_lowering_count: AtomicU64::new(0),
-            relation_check_count: AtomicU64::new(0),
-            intern_preserving_scope_calls: AtomicU64::new(0),
-            mapped_per_k_materializations: AtomicU64::new(0),
-            substitute_memo_hits: AtomicU64::new(0),
-            substitute_memo_misses: AtomicU64::new(0),
-            evaluate_deferred_memo_hits: AtomicU64::new(0),
-            evaluate_deferred_memo_misses: AtomicU64::new(0),
+            decl_subexpression_lowering_count: Tally::default(),
+            relation_check_count: Tally::default(),
+            intern_preserving_scope_calls: Tally::default(),
+            mapped_per_k_materializations: Tally::default(),
+            substitute_memo_hits: Tally::default(),
+            substitute_memo_misses: Tally::default(),
+            evaluate_deferred_memo_hits: Tally::default(),
+            evaluate_deferred_memo_misses: Tally::default(),
         }
     }
 }
 
 impl AtomicSemanticGraphStats {
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn record_in_flight_enter(&self) {
         let now = self.in_flight_current.fetch_add(1, Ordering::Relaxed) + 1;
         // Compare-exchange peak forward; relaxed ordering is fine because
@@ -220,7 +269,13 @@ impl AtomicSemanticGraphStats {
         }
     }
 
+    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+    #[inline(always)]
+    pub(super) fn record_in_flight_enter(&self) {}
+
+    #[inline(always)]
     pub(super) fn record_in_flight_exit(&self) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -304,6 +359,7 @@ impl<'a, T> Drop for EntriesLockGuard<'a, T> {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl SemanticGraphStore {
     /// Read an immutable snapshot of every counter the store maintains.
     /// Safe to call mid-request; counters are atomic and percentile
@@ -329,10 +385,6 @@ impl SemanticGraphStore {
         let path_length_p50 = path_samples.percentile(0.5);
         let path_length_p95 = path_samples.percentile(0.95);
         drop(path_samples);
-        let proj_samples = stats.projection_depth_samples.lock();
-        let projection_depth_p50 = proj_samples.percentile(0.5);
-        let projection_depth_p95 = proj_samples.percentile(0.95);
-        drop(proj_samples);
 
         SemanticGraphStats {
             hits: stats.hits.load(Ordering::Relaxed),
@@ -353,13 +405,10 @@ impl SemanticGraphStore {
             conditional_deferred_count: stats.conditional_deferred_count.load(Ordering::Relaxed),
             branch_selections_true: stats.branch_selections_true.load(Ordering::Relaxed),
             branch_selections_false: stats.branch_selections_false.load(Ordering::Relaxed),
-            budget_fallback_count: stats.budget_fallback_count.load(Ordering::Relaxed),
             awaited_normalize_count: stats.awaited_normalize_count.load(Ordering::Relaxed),
             async_return_payload_count: stats.async_return_payload_count.load(Ordering::Relaxed),
             path_length_p50,
             path_length_p95,
-            projection_depth_p50,
-            projection_depth_p95,
             decl_subexpression_lowering_count: stats
                 .decl_subexpression_lowering_count
                 .load(Ordering::Relaxed),

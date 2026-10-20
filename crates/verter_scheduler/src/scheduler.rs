@@ -93,7 +93,7 @@ pub(crate) use crate::audit_publish;
 pub(crate) use crate::caller_kind;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use crate::execution::owner_command;
-#[cfg(feature = "hotpath")]
+#[cfg(feature = "semantic-observe")]
 pub(crate) use hotpath;
 pub(crate) use verter_audit;
 /// Contention instrumentation counters for the scheduler. Owned by

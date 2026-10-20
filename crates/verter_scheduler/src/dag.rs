@@ -650,6 +650,8 @@ fn class_for_index(index: usize) -> ResourceClass {
 /// [`SchedulerDag::cache_node_terminal_counts`]. `completed + cancelled`
 /// equals the number of [`WorkNodeIdentity::CacheNode`] identities that have
 /// terminalized (each terminalizes exactly once, complete XOR cancel).
+/// Test observability only: no production decision reads the split.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CacheNodeTerminalCounts {
     /// Cache nodes terminalized as success via [`SchedulerDag::complete`].
@@ -797,11 +799,6 @@ pub struct SchedulerDag {
     /// active-path skips, and empty lanes never debit it.
     credit: [i64; PRIORITY_LANE_COUNT],
     next_token: u64,
-    /// Aggregate in-flight permit counter — sum of cpu + io.
-    /// Surfaced via [`Self::in_flight_permits`] for diagnostics; not
-    /// used for admission decisions (the typed counters below own
-    /// that path).
-    capacity_counter: Arc<AtomicU64>,
     /// Bumped by [`Self::clear`]; reservations taken before a reset give
     /// nothing back after it (see `DagCapacityReservation::epoch`).
     reset_epoch: Arc<AtomicU64>,
@@ -819,12 +816,14 @@ pub struct SchedulerDag {
     /// [`Self::cache_node_terminal_counts`]; the router's cache-node arm relies
     /// on routing success to `complete` and failure/panic to `cancel`, so the
     /// split records whether a cache-node dispatch genuinely succeeded or was
-    /// failed/cancelled.
+    /// failed/cancelled. Test observability only.
+    #[cfg(test)]
     cache_node_completed: u64,
     /// Cumulative count of [`WorkNodeIdentity::CacheNode`] identities that
     /// reached terminal FAILURE/cancellation via [`Self::cancel`] (the
     /// router's failure/panic path, and the submit-failure release path). See
     /// [`Self::cache_node_completed`].
+    #[cfg(test)]
     cache_node_cancelled: u64,
 }
 
@@ -1138,12 +1137,13 @@ impl SchedulerDag {
             ready_lanes: Default::default(),
             credit: [0; PRIORITY_LANE_COUNT],
             next_token: 1,
-            capacity_counter: Arc::new(AtomicU64::new(0)),
             reset_epoch: Arc::new(AtomicU64::new(0)),
             cpu_counter: Arc::new(AtomicU64::new(0)),
             io_counter: Arc::new(AtomicU64::new(0)),
             budget,
+            #[cfg(test)]
             cache_node_completed: 0,
+            #[cfg(test)]
             cache_node_cancelled: 0,
         }
     }
@@ -1167,9 +1167,10 @@ impl SchedulerDag {
         }
     }
 
-    /// Current in-flight permit count across both pools (diagnostic).
+    /// Current in-flight permit count across both pools (diagnostic),
+    /// derived from the per-class counters that own admission.
     pub fn in_flight_permits(&self) -> u64 {
-        self.capacity_counter.load(Ordering::Acquire)
+        self.in_flight_cpu_permits() + self.in_flight_io_permits()
     }
 
     /// Current in-flight CPU permits (diagnostic).
@@ -1191,6 +1192,7 @@ impl SchedulerDag {
     /// `execute_cache_node` to `complete` and a failed/panicking one to
     /// `cancel`; this split therefore distinguishes a cache-node dispatch that
     /// genuinely succeeded from one that was failed.
+    #[cfg(test)]
     pub fn cache_node_terminal_counts(&self) -> CacheNodeTerminalCounts {
         CacheNodeTerminalCounts {
             completed: self.cache_node_completed,
@@ -1428,29 +1430,9 @@ impl SchedulerDag {
         )
     }
 
-    /// Reserve `permits` admission slots untyped (legacy / explicit
-    /// callers). Increments only the aggregate counter and leaves the
-    /// per-class counters untouched. Prefer
-    /// [`Self::try_reserve_for_class`] in dispatch paths so per-class
-    /// accounting stays consistent.
-    pub fn reserve_capacity(&self, permits: u32) -> DagCapacityReservation {
-        if permits > 0 {
-            self.capacity_counter
-                .fetch_add(permits as u64, Ordering::AcqRel);
-        }
-        DagCapacityReservation {
-            permits,
-            class: ResourceClass::Cpu, // untyped reservations carry no class; Cpu is the Debug-only default
-            class_counter: None,
-            counter: Some(Arc::clone(&self.capacity_counter)),
-            epoch: Some(self.reservation_epoch()),
-        }
-    }
-
     /// Try to reserve one admission slot for `class`. Returns `None`
     /// if the per-class budget is full. On success the returned
-    /// reservation decrements both the per-class counter and the
-    /// aggregate counter on release.
+    /// reservation decrements the per-class counter on release.
     ///
     /// This is the SINGLE admission-time accounting source. Permits
     /// are released EXACTLY ONCE — the by-value `release(self)`
@@ -1467,12 +1449,10 @@ impl SchedulerDag {
             counter.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
-        self.capacity_counter.fetch_add(1, Ordering::AcqRel);
         Some(DagCapacityReservation {
             permits: 1,
             class,
             class_counter: Some(Arc::clone(counter)),
-            counter: Some(Arc::clone(&self.capacity_counter)),
             epoch: Some(self.reservation_epoch()),
         })
     }
@@ -1484,8 +1464,7 @@ impl SchedulerDag {
     /// permit it took to start its current job, but it is not
     /// actively doing useful work on that permit's resource —
     /// its thread is available to execute a transitive dependency
-    /// inline. This loan bumps the per-class counter (and the
-    /// aggregate) past the configured cap for the duration of the
+    /// inline. This loan bumps the per-class counter past the configured cap for the duration of the
     /// inline execute; the parked worker's original permit will
     /// release through the normal complete / cancel path once its
     /// own job resumes. The loan releases through the same
@@ -1505,12 +1484,10 @@ impl SchedulerDag {
             ResourceClass::Io => &self.io_counter,
         };
         counter.fetch_add(1, Ordering::AcqRel);
-        self.capacity_counter.fetch_add(1, Ordering::AcqRel);
         Some(DagCapacityReservation {
             permits: 1,
             class,
             class_counter: Some(Arc::clone(counter)),
-            counter: Some(Arc::clone(&self.capacity_counter)),
             epoch: Some(self.reservation_epoch()),
         })
     }
@@ -2128,6 +2105,7 @@ impl SchedulerDag {
         // identity reaches here (the early-return above skips a no-op
         // complete), so this counts each cache node's success exactly once,
         // partitioning against the `cancel` failure tally.
+        #[cfg(test)]
         if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
             self.cache_node_completed += 1;
         }
@@ -2186,6 +2164,7 @@ impl SchedulerDag {
         // genuinely-present identity reaches here (the early-return above skips
         // a no-op cancel), so this counts each cache node's failure exactly
         // once, partitioning against the `complete` success tally.
+        #[cfg(test)]
         if matches!(identity, WorkNodeIdentity::CacheNode { .. }) {
             self.cache_node_cancelled += 1;
         }
@@ -2558,7 +2537,6 @@ impl SchedulerDag {
         // in a pool) belong to the pre-reset ledger: bump the epoch first so
         // they give nothing back against the zeroed counters.
         self.reset_epoch.fetch_add(1, Ordering::AcqRel);
-        self.capacity_counter.store(0, Ordering::Release);
         self.cpu_counter.store(0, Ordering::Release);
         self.io_counter.store(0, Ordering::Release);
     }

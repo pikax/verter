@@ -48,11 +48,12 @@ construction-byte rail is opt-in, high/configurable and bulk-only; remove it if
 enabled normal-size CPU cost is measurable. It supplies no hard
 computation-memory bound and cannot downgrade already complete output.
 
-These rules publish the existing production-only-state policy; they do not
-reclassify or remove existing bookkeeping. A later consolidation applies them
-to existing mixed mechanisms. Ambiguous classifications need a ruling from the
-policy owner; record the item, competing readings and actual consumers rather
-than silently choosing a new policy.
+The consolidation sweep applies these rules to existing mixed mechanisms; its
+rows, including the optional state still compiled into default builds, live
+in [`crates/verter_audit/observe-inventory/SKR-OBS.md`](../../crates/verter_audit/observe-inventory/SKR-OBS.md).
+Ambiguous classifications need a ruling from the policy owner; record the
+item, competing readings and actual consumers rather than silently choosing a
+new policy.
 
 ## Inventory format and ownership
 
@@ -68,7 +69,7 @@ Every table has exactly these columns:
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
-| Name the concrete item; split mixed fields | Name the decision/API consuming it, or `none` for measurement-only state | `REQUIRED`, `REQUIRED-budget`, `REQUIRED-lifetime`, or `OPTIONAL` | State who retains it and when it retires/resets | Crate-relative module owning it | `always` or `cfg(feature = "semantic-observe")` |
+| Name the concrete item; split mixed fields | Name the decision/API consuming it, or `none` for measurement-only state | `REQUIRED`, `REQUIRED-budget`, `REQUIRED-lifetime`, or `OPTIONAL` | State who retains it and when it retires/resets | Crate-relative module owning it | `always`, `cfg(feature = "semantic-observe")`, a test gate, or `absent` |
 
 Rows must name real consumers and lifetimes, not infer them from a telemetry or
 cache-shaped name. A required count is a current occupancy or policy charge,
@@ -77,29 +78,36 @@ both required occupancy and optional historical counters; classify those
 fields separately. The seeded inventory lives at
 [`crates/verter_audit/observe-inventory/SKR-OBS-D.md`](../../crates/verter_audit/observe-inventory/SKR-OBS-D.md).
 
-During consolidation, a seeded OPTIONAL row lists its legacy gate alongside
-the coordinated gate. `semantic-observe` enables that legacy gate; legacy
-opt-ins still work independently. This annotation describes current code,
-not a claim that the old `cfg` sites have already been replaced. New OPTIONAL
-items use `cfg(feature = "semantic-observe")` directly.
+OPTIONAL items use `cfg(feature = "semantic-observe")`. Optional state whose
+only readers are tests may instead be gated to tests alone: `cfg(test)` when
+only the owner's unit tests read it, `cfg(any(test, feature = "test-support"))`
+when dependents' tests read it, and the combined
+`cfg(any(test, feature = "test-support", feature = "semantic-observe"))` when a
+measurement build also reads it. Every such gate is absent from production
+builds. `absent` marks a deleted item. The former `attribution`,
+`currency_probe` and `hotpath` gates are retired; no crate declares them.
 
 ## Feature and generator constraints
 
-`semantic-observe` is a coordinated, default-off Cargo feature. The audit crate
-declares it; scheduler, workspace, semantic, compiler, the semantic source
-layer, the type engine and the session forward it through existing dependency
-edges without enabling it. The session forwarding also implies its existing
-attribution and currency probe features. The benchmark harness exposes the
-combined opt-in through the session.
+`semantic-observe` is the one coordinated, default-off measurement feature. The
+audit crate declares it for the work-attribution table; the query boundary
+declares it for the currency-probe rail; the parser, diagnostics, semantic,
+compiler, scheduler, workspace, semantic source layer, type engine and
+session declare it for their own optional state and `hotpath` profiler
+instrumentation (it activates the optional `hotpath` dependency directly), and
+forward it through existing dependency edges without enabling it. The LSP
+root and the benchmark harness expose the combined opt-in. `hotpath-alloc`
+layers hotpath's allocation profiling on top and implies `semantic-observe`.
+There are no other measurement features.
 
-Existing measurement features remain available until consolidation. The
-coordinated opt-in implies attribution, currency probes and hotpath
-instrumentation. `test-support` remains a separate capability. Only the
-benchmark harness and an owner's own test self-edge may request optional
-capture. No production dependency edge or default feature may enable it or
-its implied measurement features, even through the production root's
-dev-dependency feature unification. Tests that need optional capture can run
-with an explicit `--features semantic-observe`.
+`test-support` remains a separate capability. Only measurement harnesses and
+an owner's own test self-edge may request optional capture; the session's
+test self-edge requests the audit crate's own `semantic-observe`, so its
+CSS-domain chargeability tests can read work-attribution counters, and no
+other layer's. No production dependency edge or default feature may enable
+it, even through the production root's dev-dependency feature unification.
+Tests that need optional capture can run with an explicit
+`--features semantic-observe`.
 
 When optional state is consolidated, default builds compile away optional
 fields, hooks, argument/payload construction, TLS lookups, atomics, timers,
@@ -121,8 +129,8 @@ Generators must preserve that boundary:
 An instrumented binary currently captures unconditionally. Per-request off
 selects concrete uncaptured/captured execution once at root entry, carrying
 that choice through resumptions; background work selects at job submission.
-That selection and the existing-bookkeeping sweep belong to consolidation,
-not this substrate. Bound specialization to these two modes, not every
+That selection is not yet implemented: the audit envelope is still selected
+by runtime host configuration (see the sweep inventory's open items). Bound specialization to these two modes, not every
 host/counter combination. Do not use per-operation enabled checks,
 NoOpObserver virtual calls or observer TLS polling in hot loops.
 
@@ -144,8 +152,13 @@ zero metrics.
 
 ## Verification boundaries
 
-The audit integration tests resolve feature implications from `cargo metadata`
-and actual per-root feature activation from `cargo tree` under resolver 2.
+The feature-closure guard
+(`crates/verter_source_policy_gate/tests/cases/observe_feature_closure.rs`)
+resolves feature implications from `cargo metadata` and actual per-root
+feature activation from `cargo tree` under resolver 2. Its seeds are read from
+the workspace's own feature tables: every member's `semantic-observe` and
+every member feature that implies a coordinated gate, so a new owner or
+measurement mode is covered by declaring that dependency.
 Metadata's workspace-wide resolved feature union alone is not production
 build evidence: it includes other members' dev features. The guard checks each
 of `verter_napi`, `verter_lsp`, `verter_wasm`, and `verter_tsc` with normal/build
@@ -157,7 +170,9 @@ direct, implied and dev-dependency enablement and acceptance of independent
 test-support features.
 
 Run `cargo nextest run -p verter_audit` both without and with
-`--features semantic-observe` for availability and closure proof. Formatting,
+`--features semantic-observe` for availability proof, and
+`cargo nextest run -p verter_source_policy_gate -E 'test(observe_feature_closure)'`
+for closure proof. Formatting,
 Clippy, docs build, production builds, and the canonical/shipped-cfg and WASM
 lanes supply their respective independent checks. The docs site's build
 excludes `docs/arch/**`, so policy fidelity also requires review against the

@@ -16,7 +16,7 @@
 //!
 //! - [`attribution`] — measurement-only work attribution: the closed
 //!   [`attribution::WorkSite`] schema plus, behind the non-default
-//!   `attribution` feature, the counter table and its reader. Nothing
+//!   `semantic-observe` feature, the counter table and its reader. Nothing
 //!   in a default build can read a counter, so it cannot become a
 //!   semantic authority.
 //! - [`record`] — top-level [`record::RequestAuditRecord`] envelope plus

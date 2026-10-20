@@ -587,7 +587,7 @@ fn parse_element<'alloc>(
 /// locals (see [`BindingContext`]). IDE/TSX codegen passes `true`; runtime
 /// (VDOM / Vapor) codegen passes `false` so partial identifiers stay real
 /// references and the per-binding prefix scan is skipped.
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
+#[cfg_attr(feature = "semantic-observe", hotpath::measure)]
 pub fn parse_template_expressions<'alloc>(
     ast: &TemplateAst,
     input: &'alloc str,

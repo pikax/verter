@@ -80,6 +80,7 @@ pub struct ResolutionOverlaySnapshot {
     /// clones), holds ONE composition, and is replaced — never
     /// accumulated — when the underlying world moves.
     effective: Arc<Mutex<Option<EffectiveOverlayWorld>>>,
+    #[cfg(any(test, feature = "test-support"))]
     work: Arc<OverlayWorkCounters>,
 }
 
@@ -88,7 +89,9 @@ static NEXT_OVERLAY_SNAPSHOT_ID: std::sync::atomic::AtomicU64 =
 
 /// The overlay-side work one snapshot (and its clones) has performed,
 /// counted apart from the resolver work it enables so a relocated cost
-/// cannot pass for an eliminated one.
+/// cannot pass for an eliminated one. Test observability only: no
+/// production decision reads it.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 struct OverlayWorkCounters {
     root_builds: std::sync::atomic::AtomicU64,
@@ -98,6 +101,7 @@ struct OverlayWorkCounters {
 
 /// A snapshot's overlay-side work so far — see
 /// [`ResolutionOverlaySnapshot::work_counts`].
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayWorkCounts {
     /// Effective-root constructions (one per underlying root pair).
@@ -171,6 +175,7 @@ impl ResolutionOverlaySnapshot {
             id: NEXT_OVERLAY_SNAPSHOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             authority: authority.unwrap_or_default(),
             effective: Arc::default(),
+            #[cfg(any(test, feature = "test-support"))]
             work: Arc::default(),
         }
     }
@@ -200,6 +205,7 @@ impl ResolutionOverlaySnapshot {
     }
 
     /// The overlay-side work this snapshot (and every clone) has done.
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn work_counts(&self) -> OverlayWorkCounts {
         let load = |counter: &std::sync::atomic::AtomicU64| {
@@ -212,6 +218,7 @@ impl ResolutionOverlaySnapshot {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn count(&self, counter: fn(&OverlayWorkCounters) -> &std::sync::atomic::AtomicU64) {
         counter(&self.work).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -219,6 +226,7 @@ impl ResolutionOverlaySnapshot {
     /// Parse an overlay manifest's bytes — the one place overlay
     /// `package.json` bytes are parsed, so the work is counted once.
     fn parse_manifest(&self, source: &str) -> crate::types::PackageManifest {
+        #[cfg(any(test, feature = "test-support"))]
         self.count(|work| &work.manifest_parses);
         crate::package_index::parse_package_json(source)
     }
@@ -249,6 +257,7 @@ impl ResolutionOverlaySnapshot {
                 return Arc::clone(&memo.world);
             }
         }
+        #[cfg(any(test, feature = "test-support"))]
         self.count(|work| &work.root_builds);
         let world = match RequestOverlayRoot::build(underlying, self) {
             Some(root) => Arc::new(CapturedResolutionWorld {
@@ -2607,6 +2616,7 @@ impl crate::traits::WorkspaceRead for OverlaySnapshotReader<'_> {
     }
 
     fn probe_path(&self, canonical_id: &str) -> PathProbe {
+        #[cfg(any(test, feature = "test-support"))]
         self.overlay.count(|work| &work.probes);
         match self.overlay.get(canonical_id) {
             Some(Some(_)) => PathProbe::File,

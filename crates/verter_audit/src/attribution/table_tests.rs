@@ -1,5 +1,5 @@
 //! Substrate tests that need the counter table, so they only compile
-//! with the `attribution` feature.
+//! with the `semantic-observe` feature.
 //!
 //! These run in-process against process-global statics. Each test
 //! therefore owns a DISJOINT set of sites — no test resets the table,
