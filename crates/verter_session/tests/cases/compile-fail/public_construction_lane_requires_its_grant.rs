@@ -106,8 +106,17 @@ fn build_over_ordinals(
     nullability: NullabilityPolicy,
 ) {
     let _union = canonical_algebra::intern_ordered_union(graph, &[id], nullability);
-    let _intersection = canonical_algebra::intern_ordered_intersection(graph, &[id]);
-    let _reduced = canonical_algebra::reduced_authored_intersection(graph, id, nullability);
+    let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
+    let _intersection =
+        canonical_algebra::intern_ordered_intersection_charged(graph, &[id], unmetered);
+    let mut evidence = canonical_algebra::CanonicalEvidence::default();
+    let _reduced = canonical_algebra::reduced_authored_intersection_charged(
+        graph,
+        id,
+        nullability,
+        unmetered,
+        &mut evidence,
+    );
     let _merged = walk::reduce_merged_decl_with_graph(graph, &[id]);
 }
 
@@ -139,9 +148,11 @@ fn merge_caller_surfaces(
     alternatives: &[ObjectProjectionAlternative],
     evidence: &mut canonical_algebra::CanonicalEvidence,
 ) {
-    let _common = walk::merge_union_surfaces(graph, arms, evidence);
-    let _macro = walk::merge_union_surfaces_for_macro(graph, arms, evidence);
-    let _members = walk::spread_formula_positive_members_for_macro(graph, alternatives, evidence);
+    let unmetered = canonical_algebra::ConstructionMeter::UNMETERED;
+    let _common = walk::merge_union_surfaces(graph, arms, unmetered, evidence);
+    let _macro = walk::merge_union_surfaces_for_macro(graph, arms, unmetered, evidence);
+    let _members =
+        walk::spread_formula_positive_members_for_macro(graph, alternatives, unmetered, evidence);
 }
 
 fn read_memos_by_key<C: ResolverCapabilities>(

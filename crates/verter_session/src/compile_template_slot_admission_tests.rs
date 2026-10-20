@@ -443,6 +443,80 @@ fn a_refused_ide_output_is_still_delivered_complete_to_the_reader() {
     );
 }
 
+/// A compile whose only non-cacheable reads are import resolutions the
+/// retention account declined to keep is the complete answer, uncached: the
+/// document still holds its IDE surface, as for any other refused retention.
+/// With the account admitting, the same compile is retained.
+///
+/// Mutation recipe: replay the prefetch's unretained resolution as a fenced
+/// serve, or admit any non-cacheable compile as superseded. The compile is
+/// then forgotten and the pure IDE read misses.
+#[test]
+fn a_compile_over_unretained_resolutions_still_delivers_its_ide_surface() {
+    use crate::types::CompileTarget;
+    struct RefusingResolutionAccount;
+    impl verter_session_query::retention::resolution_charge::ResolutionRetentionAccount
+        for RefusingResolutionAccount
+    {
+        fn reserve_retained(
+            &self,
+            _bytes: usize,
+        ) -> Option<verter_session_query::retention::resolution_charge::ResolutionRetentionCharge>
+        {
+            None
+        }
+    }
+    const IMPORTING_SOURCE: &str = "<script setup lang=\"ts\">\nimport type { Msg } from './dep'\nconst msg: Msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>";
+    let profile = CompileProfile {
+        target: CompileTarget::IDE,
+        ..CompileProfile::default()
+    };
+    let mut codes = Vec::new();
+    for refused in [false, true] {
+        let workspace = Arc::new(verter_workspace::MemoryWorkspace::new(
+            verter_workspace::MemoryOptions::default(),
+        ));
+        workspace.inject_file(
+            "/proj/dep.ts".to_string(),
+            Arc::from("export type Msg = string\n"),
+        );
+        let host = Arc::new(VerterHost::new(HostConfig::default(), workspace));
+        if refused {
+            host.ws()
+                .install_resolution_retention(Arc::new(RefusingResolutionAccount));
+        }
+        upsert(&host, IMPORTING_SOURCE);
+        let publication = host.resolve_type_dependency_canonical(OWNER, "./dep");
+        assert_eq!(
+            publication.delivered().flatten().map(String::as_str),
+            Some("/proj/dep.ts"),
+            "premise: the import resolves, got {publication:?}"
+        );
+        assert_eq!(
+            matches!(
+                publication,
+                verter_workspace::ResolutionPublication::Unretained(_)
+            ),
+            refused,
+            "premise: only the refusing account declines the resolution"
+        );
+        assert!(host.ensure_ide_compiled(OWNER, &profile).unwrap());
+        assert_eq!(
+            session_slot_present(&host, &ide_profile(&profile)),
+            !refused,
+            "only a compile over retained resolutions is cached"
+        );
+        let ide = host
+            .get_ide(OWNER, &profile)
+            .expect("the IDE surface is served with or without retention");
+        codes.push(ide.code.to_string());
+    }
+    assert_eq!(
+        codes[0], codes[1],
+        "retention never changes the IDE surface"
+    );
+}
+
 /// The IDE-normalized profile `ensure_ide_compiled` / `get_ide` address.
 fn ide_profile(profile: &CompileProfile) -> CompileProfile {
     VerterHost::ide_normalized_profile(profile)
