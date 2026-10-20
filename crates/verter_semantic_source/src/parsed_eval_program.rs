@@ -21,8 +21,9 @@ use verter_session_query::function_program::{FunctionProgramEntry, FunctionProgr
 
 type CachedEvalProgramAst<'a> = oxc_ast::ast::Program<'a>;
 
-/// A walk-stack lease for walks of a retained program was refused: the
-/// walks did not run, and nothing they would have produced exists.
+/// A lease the walks of a retained program need was refused — their
+/// walk-stack region, or the retained snapshot's own lease pin: the walks
+/// did not run, and nothing they would have produced exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalkStackRefused;
 

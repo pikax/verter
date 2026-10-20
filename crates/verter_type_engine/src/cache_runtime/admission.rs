@@ -329,20 +329,21 @@ pub struct Candidate<D, V> {
     /// World generation the candidate was computed under.
     pub validated_at_generation: u64,
     /// The candidate's own charge — its slot share, block, fact slice,
-    /// self-roots, reverse-index registrations and the heap its value keeps
-    /// outside owned cells — holding the value's owned cells; released with
+    /// self-roots and the heap its value keeps outside owned cells — holding the value's owned cells; released with
     /// the candidate and its last clone ([`Candidate::admit`]).
     pub retention: Arc<verter_session_query::retention::RetentionCharge>,
 }
 
 impl<D, V> Candidate<D, V> {
     /// Charge a candidate keeping `value` in a multi-candidate slot keyed by
-    /// `K` and registered under `registrations` canonicals of its store's
-    /// reverse index. `footprint` is what the key and the value keep beyond
-    /// their inline bytes: the heap the candidate owns alone, and the value's
+    /// `K`. `footprint` is what the key and the value keep beyond their
+    /// inline bytes: the heap the candidate owns alone, and the value's
     /// owned cells. Each candidate pays for its key's slot (a declared
     /// convention: a slot is shared by at most its per-slot cap of
-    /// candidates) and one index record per registration.
+    /// candidates). Its reverse-index registration is not charged here: the
+    /// store's index charges everything it holds, the candidates' own
+    /// registrations included, so the receipt chains candidates share are
+    /// counted once.
     ///
     /// # Errors
     ///
@@ -355,7 +356,6 @@ impl<D, V> Candidate<D, V> {
         signature: ReadSetSignature,
         self_root_canonicals: Arc<[Arc<str>]>,
         validated_at_generation: u64,
-        registrations: usize,
         footprint: verter_session_query::retention::Footprint,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Result<Self, RefusedEntry<V>> {
@@ -371,7 +371,6 @@ impl<D, V> Candidate<D, V> {
             + arc_block_bytes(std::mem::size_of::<Self>())
             + fact_slice_bytes(&signature.facts, &mut aliases)
             + arc_str_list_bytes(&self_root_canonicals, &mut aliases)
-            + registrations * (ENTRY_OVERHEAD_BYTES + std::mem::size_of::<(K, u64)>())
             + footprint.bytes;
         let handles = aliases.take_handles().merge(footprint.handles);
         let refused = |value, signature, self_root_canonicals| RefusedEntry {

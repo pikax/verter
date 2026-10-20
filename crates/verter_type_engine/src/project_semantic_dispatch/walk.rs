@@ -1472,6 +1472,9 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// the entry's key names the project it read
     /// ([`Self::apparent_wrapper_read`]).
     origin_file: Option<verter_type_expr::OwnedStr>,
+    /// The shallow-surface slots filled since the synthesiser last read
+    /// them: each completes the visits that were to fill it.
+    filled_shallow_slots: Vec<BufferTarget>,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
@@ -1906,6 +1909,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             surface_failure: None,
             original_path_non_empty: false,
             origin_file: None,
+            filled_shallow_slots: Vec::new(),
         }
     }
 
@@ -7263,6 +7267,21 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let mut visited: rustc_hash::FxHashSet<(SemanticNodeId, BufferTarget)> =
             rustc_hash::FxHashSet::default();
 
+        // Idempotent merges: a node whose contribution to an intersection
+        // merge — an interface's heritage included — is complete adds
+        // nothing when a second path reaches it under the same overrides
+        // (`A & A` is `A`; a heritage diamond inherits its shared base
+        // once). Each node is walked once per merge, so a diamond costs its
+        // distinct declarations, not its paths. A visit still in progress
+        // (a heritage cycle back to an ancestor) is no completed
+        // contribution and walks on as before.
+        let mut merge_scopes: rustc_hash::FxHashMap<usize, MergeScope> =
+            rustc_hash::FxHashMap::default();
+        let mut pending: rustc_hash::FxHashMap<BufferTarget, Vec<MergedVisit>> =
+            rustc_hash::FxHashMap::default();
+        let mut merged: rustc_hash::FxHashSet<MergedVisit> = rustc_hash::FxHashSet::default();
+        self.filled_shallow_slots.clear();
+
         // Frame-depth high-water mark for the probe used by
         // `shallow_walker_stack_depth_bounded_for_100_intersection`.
         // Reset to 0 each call so concurrent-safe single-threaded use
@@ -7286,6 +7305,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         });
 
         while let Some(frame) = work.pop() {
+            // A filled slot completes every visit that was to fill it.
+            for slot in self.filled_shallow_slots.drain(..) {
+                if let Some(done) = pending.remove(&slot) {
+                    merged.extend(done);
+                }
+            }
             if work.len() + 1 > max_depth {
                 max_depth = work.len() + 1;
             }
@@ -7318,6 +7343,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         target = ?target,
                         "walker_visit"
                     );
+                    let merge_visit = MergedVisit {
+                        node: cur,
+                        scope: MergeScope::of(target, &merge_scopes),
+                        member_role_override,
+                        heritage_overlay_body,
+                        provenance_override,
+                    };
+                    if merged.contains(&merge_visit) {
+                        self.contribute_surface(
+                            target,
+                            &mut root_contribution,
+                            &mut intersection_buffers,
+                            &mut union_buffers,
+                            None,
+                        );
+                        continue;
+                    }
                     if !visited.insert((cur, target)) {
                         // Same `(node, target)` already visited — a
                         // duplicate arm or a graph cycle. Contribute
@@ -7334,6 +7376,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                         continue;
                     }
+                    pending.entry(target).or_default().push(merge_visit);
                     self.visit_shallow_node(
                         cur,
                         target,
@@ -7344,6 +7387,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         &mut intersection_buffers,
                         &mut union_buffers,
                         &mut next_buffer_id,
+                        &mut merge_scopes,
                         &mut root_contribution,
                     );
                 }
@@ -7800,6 +7844,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         next_buffer_id: &mut usize,
+        merge_scopes: &mut rustc_hash::FxHashMap<usize, MergeScope>,
         root_contribution: &mut Option<ShallowSurface>,
     ) {
         let data = match self.graph().node_data(cur) {
@@ -7879,6 +7924,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
                 intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
+                // Its arms merge into the merge it contributes to.
+                merge_scopes.insert(buffer_id, MergeScope::of(target, merge_scopes));
                 // Push the flush frame BEFORE the iterator frame so
                 // LIFO pop order executes the flush after every arm
                 // has contributed.
@@ -8837,6 +8884,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         contribution: Option<ShallowSurface>,
     ) {
+        self.filled_shallow_slots.push(target);
         match target {
             BufferTarget::Root => {
                 if let Some(surface) = contribution {
@@ -9606,6 +9654,41 @@ enum BufferTarget {
     Intersection { buffer_id: usize, arm_index: usize },
     /// One arm of a Union — `union_buffers[buffer_id][arm_index]`.
     Union { buffer_id: usize, arm_index: usize },
+}
+
+/// The merge a shallow-walk contribution lands in, up to idempotence.
+/// Arms joined only by intersections (an interface's heritage included)
+/// share their parent's merge; the root, a union arm and any other buffer
+/// slot (a filtered source) start one of their own, since dropping a
+/// repeat there would change what the slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MergeScope {
+    Root,
+    Slot(BufferTarget),
+}
+
+impl MergeScope {
+    fn of(target: BufferTarget, merge_scopes: &rustc_hash::FxHashMap<usize, MergeScope>) -> Self {
+        match target {
+            BufferTarget::Root => Self::Root,
+            BufferTarget::Intersection { buffer_id, .. } => merge_scopes
+                .get(&buffer_id)
+                .copied()
+                .unwrap_or(Self::Slot(target)),
+            BufferTarget::Union { .. } => Self::Slot(target),
+        }
+    }
+}
+
+/// One node's contribution to one merge under the overrides it was
+/// reached with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MergedVisit {
+    node: SemanticNodeId,
+    scope: MergeScope,
+    member_role_override: Option<crate::semantic_query::MemberMergeRole>,
+    heritage_overlay_body: bool,
+    provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
 }
 
 /// Worklist frame for the iterative shallow-mode terminal-surface
