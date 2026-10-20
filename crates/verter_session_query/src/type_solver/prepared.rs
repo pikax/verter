@@ -1453,6 +1453,7 @@ impl PreparedValueDecl {
                 reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
                 expression_source: None,
                 literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+                defers_read_widening: false,
             },
             signatures: Vec::new(),
             object_shape: None,

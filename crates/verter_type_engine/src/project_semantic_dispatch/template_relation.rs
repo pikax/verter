@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use super::build::TemplatePiece;
+use super::template_product::TemplatePiece;
 use super::ProjectSemanticDispatch;
 use crate::semantic_query::{LiteralValue, PrimitiveKind, SemanticNodeData, SemanticNodeId};
 use crate::semantic_query_memo::SemanticGraphStore;

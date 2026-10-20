@@ -1767,6 +1767,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     // An authored TS annotation rides the SAME field under the `Authored` source
     // — proving the field widened to accept BOTH authored locators and closed
@@ -1783,6 +1784,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     assert_ne!(
         inferred, authored,
@@ -1805,6 +1807,7 @@ fn value_type_annotation_fact_holds_a_closed_inferred_annotation() {
         reference_head: crate::facts::AuthoredReferenceHeadFact::NotReference,
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     };
     assert_ne!(typeof_target, inferred);
     assert_eq!(inferred, inferred.clone());
