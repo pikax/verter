@@ -453,9 +453,17 @@ pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
 /// this many instantiations of its recursion identity are on its stack.
 const CHECKER_DEEPLY_NESTED_DEPTH: usize = 3;
 
-/// Methods the lib `Function` interface requires: a source with no call or
-/// construct signature is a `Function` only if it declares all three.
+/// The required methods of TypeScript's lib `interface Function`
+/// (`lib.es5.d.ts`: `apply(this: Function, thisArg: any, argArray?: any)`,
+/// `call(…)`, `bind(…)`): a source with no call or construct signature is a
+/// `Function` only if it declares all three, each callable.
 const FUNCTION_REQUIRED_METHODS: [&str; 3] = ["apply", "call", "bind"];
+
+/// The required properties the same `lib.es5.d.ts` `interface Function`
+/// declares beside those methods (`prototype: any`, `readonly length:
+/// number`, `arguments: any`, `caller: Function`); `toString` is every
+/// object's. A signature-less source lacking one is no `Function`.
+const FUNCTION_REQUIRED_PROPERTIES: [&str; 4] = ["prototype", "length", "arguments", "caller"];
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -10010,8 +10018,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// * no string, number, boolean, bigint or symbol (nor a literal of
     ///   one) does: its wrapper lacks `Function`'s `apply` / `call` /
     ///   `bind`;
-    /// * neither does an object surface with no signature and no index
-    ///   signature that lacks one of those three (`{ x: 1 }`).
+    /// * neither does an array, a tuple, or an object surface with no
+    ///   signature that lacks a required `Function` member or whose method
+    ///   of that name cannot be called (`{ x: 1 }`, `{ [k: string]: 1 }`).
     ///
     /// `None` for every other pair, which then takes the ordinary arms:
     /// the deferred gate's `Unknown` is the honest answer for a carrier
@@ -10041,23 +10050,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if !surface.call_signatures.is_empty()
                         || !surface.construct_signatures.is_empty()
                     {
-                        Some(assignable(bindings))
-                    } else if surface.index_signatures.is_empty()
-                        && !surface.closed().has_index_signature()
-                        && FUNCTION_REQUIRED_METHODS.iter().any(|name| {
-                            !surface
-                                .positive_members()
-                                .iter()
-                                .any(|member| member.string_name() == Some(*name))
-                        })
-                    {
-                        // A surface's members are its complete domain: one
-                        // with no signature that lacks a required member of
-                        // `Function` is no `Function` (`{ x: 1 }`).
-                        Some(RelationResult::NotAssignable)
-                    } else {
-                        None
+                        return Some(assignable(bindings));
                     }
+                    // A surface's members are its complete domain, and an
+                    // index signature supplies no required property: one
+                    // with no signature that lacks a required member of
+                    // `Function` (`{ x: 1 }`, `{ [k: string]: any }`), or
+                    // whose method of that name cannot be called
+                    // (`{ apply: 1; call: 1; bind: 1 }`), is no `Function`.
+                    let members = surface.positive_members();
+                    let member = |name: &str| {
+                        members
+                            .iter()
+                            .find(|member| member.string_name() == Some(name))
+                    };
+                    let lacks_member = FUNCTION_REQUIRED_METHODS.iter().any(|name| {
+                        member(name).is_none_or(|member| self.is_never_callable(member.value))
+                    }) || FUNCTION_REQUIRED_PROPERTIES
+                        .iter()
+                        .any(|name| member(name).is_none());
+                    lacks_member.then_some(RelationResult::NotAssignable)
+                }
+                // An array or a tuple reads through `Array` / `ReadonlyArray`,
+                // which declare none of `apply` / `call` / `bind`.
+                SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
+                    Some(RelationResult::NotAssignable)
                 }
                 // A primitive reads through its wrapper (`Number`, `String`,
                 // …), which declares none of `Function`'s `apply` / `call` /
@@ -10077,6 +10094,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
         }
         None
+    }
+
+    /// Whether a member value is a type no call can be made through: a
+    /// primitive or literal, an array or tuple, or an object surface with no
+    /// call or construct signature. Every other value (a signature, a
+    /// carrier, a composite) is not known to be uncallable.
+    fn is_never_callable(&self, value: SemanticNodeId) -> bool {
+        match self.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                surface.call_signatures.is_empty() && surface.construct_signatures.is_empty()
+            }
+            Some(
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+                )
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. },
+            ) => true,
+            _ => false,
+        }
     }
 
     construction_ordinal_seam! {

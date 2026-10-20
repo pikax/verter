@@ -11,7 +11,9 @@
 //! expected type with `(<T>() => T extends A ? 1 : 2) extends (<T>() => T
 //! extends B ? 1 : 2)`.
 
-use super::checker_probe_lane_tests::{evaluated_mismatches, mismatches, with_probe};
+use super::checker_probe_lane_tests::{
+    default_probe_host, evaluated_mismatches, mismatches, with_probe_on_host, ProbeProject,
+};
 use verter_type_engine::semantic_query::{
     ProjectionMode, ProjectionReductionContext, SemanticNodeData,
 };
@@ -33,6 +35,7 @@ type NoFns<T> = { [K in keyof T as T[K] extends Function ? never : K]: T[K] };
 type Mp<T> = { [K in keyof T]: T[K] };
 type NoDates<T> = { [K in keyof T as T[K] extends Date ? never : K]: T[K] };
 enum S { A = 'a', B = 'b' }
+interface Callish extends Function { x: 1 }
 ";
 
 /// `RO<RO<Big>>['p5']` reads `Big['p5']` through two mappings — the outer
@@ -113,17 +116,59 @@ fn an_as_filter_on_function_valued_members_drops_them() {
             ("1 extends Function ? 'y' : 'n'", "\"n\""),
             ("NoFns<{ a: { x: 1 }; g: () => void }>", "{ a: { x: 1; }; }"),
             ("{ x: 1 } extends Function ? 'y' : 'n'", "\"n\""),
+            (
+                "NoFns<{ a: { [k: string]: 1 }; g: () => void }>",
+                "{ a: { [x: string]: 1; }; }",
+            ),
+            ("{ [k: string]: any } extends Function ? 'y' : 'n'", "\"n\""),
+            (
+                "{ apply: () => void; call: () => void; bind: () => void } extends Function ? 'y' : 'n'",
+                "\"n\"",
+            ),
+            ("readonly [1] extends Function ? 'y' : 'n'", "\"n\""),
+            ("{ (): void } extends Function ? 'y' : 'n'", "\"y\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A member value whose own surface only an index signature, a non-callable
+/// `apply` / `call` / `bind`, or an array's methods describe is no
+/// `Function` either: the filter keeps it, and a read of it or of a
+/// sibling key is that member's value, never a failure.
+#[test]
+fn an_as_filter_keeps_index_signature_array_and_method_named_members() {
+    let failures = mismatches(
+        MAPPED,
+        &[
+            (
+                "NoFns<{ a: { [k: string]: 1 }; g: () => void }>['a']",
+                "{ [x: string]: 1; }",
+            ),
+            (
+                "NoFns<{ a: { [k: string]: 1 }; b: 1; g: () => void }>['b']",
+                "1",
+            ),
+            (
+                "NoFns<{ a: { apply: 1; call: 1; bind: 1 }; g: () => void }>['a']",
+                "{ apply: 1; call: 1; bind: 1; }",
+            ),
+            ("NoFns<{ a: [1, 2]; g: () => void }>['a']", "[1, 2]"),
+            ("NoFns<{ a: string[]; g: () => void }>['a']", "string[]"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// An `as` filter whose relation the lane cannot decide (a member value
-/// against a global nominal with no body, `Date extends Function`, or any
-/// operand against `Date`) keeps the deferred mapped carrier, and an index
-/// into it stays a deferred indexed access: never a failure node.
+/// against a global nominal with no body, `Date extends Function`, any
+/// operand against `Date`, or a composite, `unknown` or heritage operand
+/// against `Function`) keeps the deferred mapped carrier, and an index into
+/// it, even at a sibling key, stays a deferred indexed access: never a
+/// failure node, on the first read or a warm one.
 #[test]
 fn an_undecided_as_filter_keeps_the_deferred_mapped_carrier() {
+    let host = default_probe_host();
     let failures: Vec<String> = [
         ("NoFns<{ a: Date; g: () => void }>", false),
         ("NoFns<{ a: Map<1, 2>; g: () => void }>", false),
@@ -134,10 +179,15 @@ fn an_undecided_as_filter_keeps_the_deferred_mapped_carrier() {
             false,
         ),
         ("NoDates<{ a: 1; d: Date }>['a']", true),
+        ("NoFns<{ a: { x: 1 } & { y: 2 }; b: 1; g: () => void }>['b']", true),
+        ("NoFns<{ a: { x: 1 } | (() => void); b: 1; g: () => void }>['b']", true),
+        ("NoFns<{ a: Callish; g: () => void }>", false),
+        ("NoFns<{ a: unknown; b: 1; g: () => void }>['b']", true),
     ]
     .into_iter()
+    .flat_map(|row| [row, row])
     .filter_map(|(probe, indexed)| {
-        with_probe(MAPPED, probe, |dispatch, node| {
+        with_probe_on_host(&host, ProbeProject::default(), MAPPED, probe, |dispatch, node| {
             let value = dispatch
                 .normalize_node_for_structural_fact_demand(
                     node,

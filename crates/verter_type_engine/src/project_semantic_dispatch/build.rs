@@ -16133,6 +16133,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
+        // A remap whose conditional the relation engine cannot decide
+        // (`T[K] extends Function` over an operand it has no judgement for)
+        // leaves this key's name unknown: the key domain is unknown, so the
+        // mapped type stays its deferred carrier, as it does over an open
+        // domain, instead of a gap. The undecided reading is declined, but
+        // its roots stay, and the carrier it led to is never warm-admitted.
+        // Any other partial (a budget, a missing dependency alone, a
+        // degraded read) joins the build as it would unobserved.
+        let read = self.observe_read(|| self.evaluate_remap_outcome(substituted_remap, context));
+        let undecided = crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL;
+        let reasons = read.result_completeness().reasons();
+        if matches!(read.value(), MappedKeyRemapOutcome::DeferCarrier)
+            && reasons.contains(undecided)
+            && undecided
+                .union(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY)
+                .contains(reasons)
+        {
+            read.preserve_reuse_evidence(self);
+            self.fold_into_top_build_local_taint(false, true);
+            return read
+                .discard()
+                .unwrap_or(MappedKeyRemapOutcome::DeferCarrier);
+        }
+        read.adopt(self)
+            .unwrap_or(MappedKeyRemapOutcome::DeferCarrier)
+    }
+
+    /// The `as`-clause outcome of one substituted remap: its evaluation,
+    /// a helper application bound and re-evaluated, then classified.
+    fn evaluate_remap_outcome(
+        &self,
+        substituted_remap: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> MappedKeyRemapOutcome {
         let evaluated_remap = self
             .evaluate_deferred_semantic_node_with_context(substituted_remap, context)
             .into_active_query_build_node(self);
