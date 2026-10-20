@@ -3119,6 +3119,15 @@ impl CheckerDispatchTransaction {
             .is_some_and(|policy| policy.argument == Some(bound))
     }
 
+    /// Whether the CURRENT call argument relates as its first-pass reading,
+    /// its context-sensitive members withheld.
+    pub(crate) fn call_argument_is_first_pass(&self) -> bool {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .is_some_and(|policy| policy.first_pass)
+    }
+
     /// Whether depositing `bound` into `param_node` would deposit the
     /// CURRENT call argument's first-pass reading whole into a top-level
     /// type parameter of its target (`T`, or the `T` arm of `T |

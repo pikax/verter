@@ -15272,8 +15272,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// per constituent of a union, the declared property, else a tuple's
     /// element at a numeric name, else an applicable index signature's
     /// value; a constrained type parameter's through its constraint (the
-    /// apparent type `getApparentTypeOfContextualType` reads). `None` when
-    /// no constituent types the property.
+    /// apparent type `getApparentTypeOfContextualType` reads), and an
+    /// intersection holding one as the intersection of its constituents'
+    /// (`reducers: R & {}` types `reducers.inc` by `R`'s constraint).
+    /// `None` when no constituent types the property.
     fn contextual_property_type(
         &self,
         contextual: SemanticNodeId,
@@ -15282,6 +15284,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
         let data = graph.node_data(contextual);
+        if let Some(SemanticNodeData::Intersection(members)) = data.as_deref() {
+            let members = members.to_vec();
+            if members.iter().any(|member| {
+                matches!(
+                    graph
+                        .node_data(self.dispatch.resolved_reduction_view(*member))
+                        .as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. })
+                )
+            }) {
+                drop(data);
+                let types: Vec<SemanticNodeId> = members
+                    .iter()
+                    .filter_map(|member| self.contextual_property_type(*member, name))
+                    .collect();
+                return match types.as_slice() {
+                    [] => None,
+                    [only] => Some(*only),
+                    _ => Some(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&types, false),
+                    ),
+                };
+            }
+        }
         match data.as_deref()? {
             SemanticNodeData::Union(members) => {
                 let members = members.to_vec();

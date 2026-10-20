@@ -1103,7 +1103,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .and_then(|&position| progress.parameters[position].constraint);
                         (
                             param,
-                            self.contextual_uninferred_parameter(param, constraint),
+                            self.contextual_uninferred_parameter(
+                                param,
+                                constraint,
+                                &inference_mapper,
+                            ),
                         )
                     }
                 })

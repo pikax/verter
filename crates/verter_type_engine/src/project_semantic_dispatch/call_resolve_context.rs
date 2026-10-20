@@ -1351,22 +1351,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.relation_combine_candidates(&members, crate::semantic_query::VariancePhase::Covariant)
     }
 
-    /// An unfixed binder retains its constraint as a contextual literal type.
+    /// An unfixed binder retains its constraint as a contextual literal type,
+    /// the constraint instantiated with the `inferences` made so far (the
+    /// checker reads a contextual type's apparent type under its non-fixing
+    /// mapper): `hc({ s: 1, r: { inc(a) {} } })` over `hc<S, R extends {
+    /// inc: (a: S) => void }>(o: { s: S; r: R })` types `a` as `number`.
     pub(super) fn contextual_uninferred_parameter(
         &self,
         param: SemanticNodeId,
         constraint: Option<SemanticNodeId>,
+        inferences: &crate::semantic_query::CanonicalTypeSubstitution,
     ) -> SemanticNodeId {
         let Some(constraint) = constraint else {
             return param;
         };
+        let constraint = self.substitute_canonical(constraint, inferences);
         let graph = self.graph();
         let Some(SemanticNodeData::TypeParam {
             decl,
             param_index,
             default,
             display_name,
-            constraint: None,
+            ..
         }) = graph
             .node_data(param)
             .as_deref()

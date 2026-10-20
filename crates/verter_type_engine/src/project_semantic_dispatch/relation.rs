@@ -5105,6 +5105,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         self.relation_session_rollback(&checkpoint);
         bindings.truncate(bindings_len);
+        // A call's inference reads the last signature whatever its
+        // assignability, as the checker's `inferFromSignature` does before
+        // applicability is checked: `callS(o)` over `callS<R>(f: (x:
+        // string) => R)` with `o` overloaded `(x: string): 1; (x: number):
+        // 0` infers `R` as `0`, and the call then fails with that
+        // inference. A conditional type's `infer` keeps the relation's own
+        // verdict, which its true branch is read under.
+        if self.call_session_active() {
+            self.infer_from_signature_parts(*last_source, *last_target, bindings);
+        }
+        let bindings_len = bindings.len();
         for (source, target) in rest {
             let checkpoint = self.relation_session_checkpoint();
             let result = self.relate_member(*source, *target, bindings, position);
@@ -5121,6 +5132,62 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             RelationResult::NotAssignable
         }
+    }
+
+    /// Whether the active inference session infers a call's type
+    /// parameters.
+    fn call_session_active(&self) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| {
+                session.context_key().pass_kind
+                    == crate::semantic_query::InferencePassKind::CallApplicability
+            })
+    }
+
+    /// Infer from a non-generic `source` signature to the signature
+    /// `target` position by position, keeping every deposit whatever each
+    /// position's relation answers (`inferFromSignature`: the parameters
+    /// contravariantly, then the return).
+    fn infer_from_signature_parts(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) {
+        let returns = |signature: SemanticNodeId| match self.graph().node_data(signature).as_deref()
+        {
+            Some(SemanticNodeData::Signature {
+                kind,
+                type_parameters,
+                return_type,
+                ..
+            }) => Some((*kind, type_parameters.is_empty(), *return_type)),
+            _ => None,
+        };
+        let (Some((_, true, source_return)), Some((kind, _, target_return))) =
+            (returns(source), returns(target))
+        else {
+            return;
+        };
+        let Ok(plan) = self.signature_comparison_plan(source, target, kind, false) else {
+            return;
+        };
+        for (source_param, target_param) in plan.positions {
+            let _ = self.relate_member(
+                target_param,
+                source_param,
+                bindings,
+                InferPosition::ContravariantParam,
+            );
+        }
+        let _ = self.relate_member(
+            source_return,
+            target_return,
+            bindings,
+            InferPosition::Return,
+        );
     }
 
     /// The source signature a relation of `source` to the signature

@@ -2688,26 +2688,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // instantiated in the context of its parameter's signature, the
         // callee's type parameters read with what the arguments inferred
         // so far (the checker's fixing mapper), and related as that
-        // instantiation.
+        // instantiation — or, for a callee returning one non-generic
+        // signature, related with its own type parameters kept, which the
+        // returned signature then declares.
+        let mut propagated_type_parameters: Vec<crate::semantic_query::TypeParamDecl> = Vec::new();
+        // The generic function arguments related with their own type
+        // parameters kept, and the clause-free signature each related as —
+        // what the applicability check below relates in their place.
+        let mut propagated_arguments: Vec<(usize, SemanticNodeId)> = Vec::new();
         for (index, signature, target) in generic_function_arguments {
             let argument = &arguments[index];
             let return_structure = match &candidate.return_carrier {
                 SignatureReturnCarrier::Declared(declared) => Some(*declared),
                 _ => None,
             };
-            let source = match self.generic_function_in_context(
-                session_id,
-                &raw_type_params,
-                (signature, target),
-                return_structure,
-                budget,
-                own_return_function.as_ref(),
-            ) {
-                Ok(Some(instantiated)) => instantiated,
-                Ok(None) => argument.node,
-                Err(failure) => {
-                    self.abandon_session(session_id);
-                    return CandidateVerdict::Degraded(failure);
+            let propagation = return_structure.and_then(|returned| {
+                self.generic_function_propagation(session_id, returned, signature, target)
+            });
+            let source = if let Some((own, type_parameters)) = propagation {
+                propagated_type_parameters.extend(type_parameters);
+                propagated_arguments.push((index, own));
+                own
+            } else {
+                match self.generic_function_in_context(
+                    session_id,
+                    &raw_type_params,
+                    (signature, target),
+                    return_structure,
+                    budget,
+                    own_return_function.as_ref(),
+                ) {
+                    Ok(Some(instantiated)) => instantiated,
+                    Ok(None) => argument.node,
+                    Err(failure) => {
+                        self.abandon_session(session_id);
+                        return CandidateVerdict::Degraded(failure);
+                    }
                 }
             };
             let deposits_before = self.accepted_inference_deposits();
@@ -3045,6 +3061,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             let (source, freshness_origin, _) = argument_source(argument, target);
+            let source = propagated_arguments
+                .iter()
+                .find(|(position, _)| *position == index)
+                .map_or(source, |(_, own)| *own);
             let target = self.substitute_canonical(target, &substitution);
             match decided_call_relation(
                 self.call_relation(source, target, freshness_origin, budget, false, true),
@@ -3121,6 +3141,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An uninferred parameter reads as itself, its constraint on it,
             // the way the checker reads a literal context through a type
             // parameter's constraint.
+            let inferences = CanonicalTypeSubstitution::new(
+                self.graph(),
+                substitution
+                    .bindings()
+                    .iter()
+                    .copied()
+                    .filter(|(param, _)| !uninferred_params.contains(param))
+                    .collect(),
+            );
             let inferred = CanonicalTypeSubstitution::new(
                 self.graph(),
                 substitution
@@ -3135,6 +3164,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.contextual_uninferred_parameter(
                                 *param,
                                 constraints.get(param).copied().flatten(),
+                                &inferences,
                             ),
                         )
                     })
@@ -3230,6 +3260,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 let instantiated =
                     self.substitute_canonical(*declared, widened.as_ref().unwrap_or(&substitution));
+                let instantiated = self.declaring_propagated_type_parameters(
+                    instantiated,
+                    &propagated_type_parameters,
+                );
                 concrete_seeds.push(self.evaluate_selected_value_with_context(
                     instantiated,
                     crate::semantic_query::ProjectionReductionContext::published(
@@ -3688,6 +3722,100 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let signature = single(argument)?;
         generic(signature).then_some(signature)
+    }
+
+    /// The checker's higher-order function type inference
+    /// (`instantiateTypeWithSingleGenericCallSignature` under an inference
+    /// context whose signature returns one non-generic signature): the
+    /// generic function argument `signature` relates to `target` with its
+    /// own type parameters left free, and the call's returned signature
+    /// declares them — `wrap(id)` over `wrap<A extends unknown[], R>(fn:
+    /// (...args: A) => R): (...args: A) => R` and `id<T extends string>(x:
+    /// { v: T }): { v: T }` is `<T extends string>(x: { v: T }) => { v: T
+    /// }`. The argument's signature without its clause and the clause;
+    /// `None` when `returned`, the callee's declared return, is not one
+    /// non-generic signature, when every type parameter has inferences
+    /// already, or when `target` reads no type parameter or one with
+    /// inferences (`hasOverlappingInferences`).
+    fn generic_function_propagation(
+        &self,
+        session_id: super::dispatch_txn::SessionId,
+        returned: SemanticNodeId,
+        signature: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(SemanticNodeId, Vec<crate::semantic_query::TypeParamDecl>)> {
+        let returned = match self.shared_signature_nodes(returned, SignatureKind::Call) {
+            super::signature_discovery::SharedSignatureNodes::Nodes(nodes) => {
+                match nodes.as_slice() {
+                    [one] => *one,
+                    _ => return None,
+                }
+            }
+            super::signature_discovery::SharedSignatureNodes::Incomplete(_) => return None,
+        };
+        if !matches!(
+            self.graph().node_data(returned).as_deref(),
+            Some(SemanticNodeData::Signature { type_parameters, .. }) if type_parameters.is_empty()
+        ) {
+            return None;
+        }
+        let inputs = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .session(session_id)
+                .and_then(|session| session.fixation_inputs())
+        }?;
+        if inputs.iter().all(|input| !input.candidates.is_empty()) {
+            return None;
+        }
+        let mut read = inputs
+            .iter()
+            .filter(|input| self.mentions_node(target, input.param))
+            .peekable();
+        read.peek()?;
+        if read.any(|input| !input.candidates.is_empty()) {
+            return None;
+        }
+        let type_parameters = match self.graph().node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) => type_parameters
+                .iter()
+                .map(crate::semantic_query::TypeParamDecl::copy)
+                .collect(),
+            _ => return None,
+        };
+        Some((
+            self.signature_without_type_parameters(signature),
+            type_parameters,
+        ))
+    }
+
+    /// `returned`, a call's instantiated non-generic return signature,
+    /// declaring the type parameters its generic function arguments kept
+    /// ([`Self::generic_function_propagation`]); `returned` itself when
+    /// none were kept or it is no such signature.
+    fn declaring_propagated_type_parameters(
+        &self,
+        returned: SemanticNodeId,
+        propagated: &[crate::semantic_query::TypeParamDecl],
+    ) -> SemanticNodeId {
+        if propagated.is_empty()
+            || !matches!(
+                self.graph().node_data(returned).as_deref(),
+                Some(SemanticNodeData::Signature { type_parameters, .. })
+                    if type_parameters.is_empty()
+            )
+        {
+            return returned;
+        }
+        self.signature_with_type_parameters(
+            returned,
+            propagated
+                .iter()
+                .map(crate::semantic_query::TypeParamDecl::copy)
+                .collect(),
+        )
     }
 
     /// `signature`, a generic function argument's, instantiated in the
