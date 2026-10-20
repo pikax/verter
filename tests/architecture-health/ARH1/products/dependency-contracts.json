@@ -1344,6 +1344,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/lib_global_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/merged_declaration_signature_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/local_declaration_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/mapped_expand_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/mapped_key_domain_carrier_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/member_accessibility_relation_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/narrowing_ledger_tests.rs",
