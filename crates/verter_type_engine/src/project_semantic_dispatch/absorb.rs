@@ -570,6 +570,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
                     stack.extend(mapper.name_remap);
+                    stack.extend(mapper.modifiers_type);
                 }
                 SemanticNodeData::TypeParam {
                     constraint,
