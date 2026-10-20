@@ -103,6 +103,7 @@ pub fn value_type_annotation_fact(
             reference_head: AuthoredReferenceHeadFact::Unavailable,
             expression_source: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         };
     }
     let Some(annotation) = annotation else {
@@ -117,6 +118,7 @@ pub fn value_type_annotation_fact(
                 reference_head: AuthoredReferenceHeadFact::NotReference,
                 expression_source,
                 literal_freshness: DeclaredLiteralFreshness::Regular,
+                defers_read_widening: false,
             };
         }
         verter_debug_assert!(
@@ -132,6 +134,7 @@ pub fn value_type_annotation_fact(
             reference_head: AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
             literal_freshness: DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         };
     };
 
@@ -173,6 +176,7 @@ pub fn value_type_annotation_fact(
         }),
         expression_source: None,
         literal_freshness: DeclaredLiteralFreshness::Regular,
+        defers_read_widening: false,
     }
 }
 
