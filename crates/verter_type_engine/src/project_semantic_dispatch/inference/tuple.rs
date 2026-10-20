@@ -44,6 +44,14 @@ impl VariadicArityFacts for VariadicElementFacts {
     }
 }
 
+/// What the session records of one inferable variadic, read under the
+/// transaction borrow.
+struct SessionVariadic {
+    param: SemanticNodeId,
+    constraint: Option<SemanticNodeId>,
+    implied_arity: Option<usize>,
+}
+
 /// The occurrence a slice infers at: a speculative slice (a target ending
 /// in an optional element) yields to a direct inference
 /// (`InferencePriority.SpeculativeTuple`).
@@ -69,7 +77,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         elements: &[TupleElement],
     ) -> Option<VariadicElementFacts> {
         let graph = self.graph();
-        let candidates: Vec<Option<(SemanticNodeId, Option<SemanticNodeId>, Option<usize>)>> = {
+        let candidates: Vec<Option<SessionVariadic>> = {
             let txn = self.dispatch_txn.borrow();
             let session = txn.active_session()?;
             elements
@@ -86,12 +94,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         _ => return None,
                     }
                     .or_else(|| session.declared_constraint(element.value));
-                    session.infers(element.value).then(|| {
-                        (
-                            element.value,
-                            constraint,
-                            session.implied_arity(element.value),
-                        )
+                    session.infers(element.value).then(|| SessionVariadic {
+                        param: element.value,
+                        constraint,
+                        implied_arity: session.implied_arity(element.value),
                     })
                 })
                 .collect()
@@ -106,18 +112,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let elements = candidates
             .into_iter()
             .map(|candidate| {
-                candidate.map(|(param, constraint, implied_arity)| InferableVariadic {
-                    param,
-                    implied_arity,
-                    fixed_constraint_arity: constraint
-                        .and_then(|constraint| self.fixed_tuple_arity(constraint)),
-                    fallback: constraint
-                        .map(|constraint| {
-                            self.settle_through_carriers(constraint)
-                                .unwrap_or(constraint)
-                        })
-                        .unwrap_or(unknown_array),
-                })
+                candidate.map(
+                    |SessionVariadic {
+                         param,
+                         constraint,
+                         implied_arity,
+                     }| InferableVariadic {
+                        param,
+                        implied_arity,
+                        fixed_constraint_arity: constraint
+                            .and_then(|constraint| self.fixed_tuple_arity(constraint)),
+                        fallback: constraint
+                            .map(|constraint| {
+                                self.settle_through_carriers(constraint)
+                                    .unwrap_or(constraint)
+                            })
+                            .unwrap_or(unknown_array),
+                    },
+                )
             })
             .collect();
         Some(VariadicElementFacts { elements })
