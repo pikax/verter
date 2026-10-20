@@ -323,6 +323,9 @@ pub(super) enum CarrierArgsContinuation {
         base: SemanticNodeId,
         source_status: FactStatus,
     },
+    ReadTypeof {
+        key: Box<SemanticQueryKey>,
+    },
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -340,6 +343,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> CarrierResolution {
+        if let CarrierArgsContinuation::ReadTypeof { key } = continuation {
+            let source = self.carrier_resolution_read(*key);
+            return CarrierResolution {
+                node: if type_args.is_empty() {
+                    source.node
+                } else {
+                    self.apply_typeof_instantiation_args(source.node, &type_args)
+                },
+                status: source.status,
+            };
+        }
         // Outside a projection run the reference keeps its declaration back-edge.
         let source_status = match &continuation {
             CarrierArgsContinuation::ApplyTypeof { source_status, .. }
@@ -539,6 +553,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             CarrierArgsContinuation::ApplyTypeof { base, .. } => {
                 CarrierFinish::Node(self.apply_typeof_instantiation_args(base, &type_args))
             }
+            continuation @ CarrierArgsContinuation::ReadTypeof { .. } => CarrierFinish::Node(
+                self.finish_carrier_resolution_fact(continuation, type_args)
+                    .node,
+            ),
         }
     }
 
@@ -1254,6 +1272,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         if typeof_query {
+            if let Some(key) = self.import_value_query(&dep_canonical, qualifier, reduction_context)
+            {
+                return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof {
+                    key: Box::new(key),
+                });
+            }
             // `typeof import("./m")` — the module's VALUE-export namespace. A
             // trailing qualifier projects a member path; trailing type args
             // apply the SAME positional binder substitution as

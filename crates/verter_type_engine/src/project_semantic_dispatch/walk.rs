@@ -2804,6 +2804,36 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         read.value
     }
 
+    /// Adopt an operand evaluated by the shared heap worklist with the
+    /// same partiality and positional guarantees as a nested query read.
+    fn evaluate_deferred_operand(
+        &mut self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> QueryResult<SemanticNodeId> {
+        let output = self
+            .dispatch
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_query_build_output(self.dispatch);
+        self.cache_suppress |= output.cache_suppress;
+        if output.completeness.is_partial() {
+            match (&output.result, output.approximation) {
+                (
+                    QueryResult::Value(node),
+                    Some(super::projection_fact::ProjectionInterpretation::Positional),
+                ) => {
+                    self.completeness = self.completeness.merge(output.completeness);
+                    self.positional_child_terminal = Some(*node);
+                }
+                _ => self.mark_partial_with(output.completeness.reasons()),
+            }
+        }
+        if matches!(output.result, QueryResult::Error(_)) {
+            self.positional_children_supported = false;
+        }
+        output.result
+    }
+
     fn resolve_carrier_subject(
         &mut self,
         node: SemanticNodeId,
@@ -4417,8 +4447,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let object = *object;
+                    let mut object = *object;
                     let ix = ix.clone();
+                    // Resolve nested operands on the shared evaluator's
+                    // worklist. Re-entering one query per authored index
+                    // otherwise makes a finite path consume native depth.
+                    if matches!(self.graph().node_data(object).as_deref(), Some(SemanticNodeData::IndexedAccess { .. })) {
+                        object = match self.evaluate_deferred_operand(
+                            object,
+                            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+                        ) {
+                            QueryResult::Value(node) => node,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                    }
                     let resolved =
                         match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
                             base: object,

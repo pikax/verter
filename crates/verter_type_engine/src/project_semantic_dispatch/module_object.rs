@@ -57,6 +57,42 @@ fn push_root(roots: &mut Vec<ObservedGraphSelfRoot>, root: ObservedGraphSelfRoot
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// A qualified import reads its selected value directly. Keeping the
+    /// query as a plan lets a projection suspend on it, and leaves unrelated
+    /// exports cold. Whole module objects retain their namespace builder.
+    pub(super) fn import_value_query(
+        &self,
+        module: &str,
+        qualifier: &[verter_type_expr::OwnedStr],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticQueryKey> {
+        let (root, path) = if let Some(root) = self.export_assignment_root(module) {
+            (root, qualifier)
+        } else {
+            let (first, rest) = qualifier.split_first()?;
+            let table = self.ctx.module_export_table(module)?;
+            self.ctx.observe_borrowed_signature(&table.facts);
+            let Some(Some(ModuleExportBinding::Value(identity))) =
+                table.bindings.get(first.as_ref())
+            else {
+                return None;
+            };
+            (
+                file_root(
+                    &identity.canonical_id,
+                    identity.owner,
+                    &identity.symbol_name,
+                ),
+                rest,
+            )
+        };
+        Some(self.typeof_key_with_path(
+            root,
+            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
+            context,
+        ))
+    }
+
     /// The module object the value root names when read whole, if it names
     /// one: a namespace import (or an import assignment of a module without
     /// `export =`), or a namespace this file declares — in its own scope or

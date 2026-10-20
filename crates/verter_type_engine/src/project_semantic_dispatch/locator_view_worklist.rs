@@ -616,7 +616,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.plan_bare_reference_projection(data, context, inputs, substitutions)
             }
             SemanticNodeData::ImportType(_) => {
-                self.plan_import_reference_projection(data, context, inputs)
+                self.plan_import_reference_projection(data, context, inputs, suspend)
             }
             _ => unreachable!("non-reference node reached reference projection planner"),
         }

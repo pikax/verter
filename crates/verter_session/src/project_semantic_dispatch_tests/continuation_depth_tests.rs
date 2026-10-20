@@ -71,6 +71,162 @@ const ALIAS_CHAIN_ROWS: &[(&str, &str)] = &[
     ("ReturnType<typeof gj>", "\"ok\" | undefined"),
 ];
 
+fn named_chain_answers(
+    host: &crate::VerterHost,
+    source: &str,
+    probe: &str,
+    check: impl Fn(&verter_type_expr::TypeExpr),
+) {
+    let canonical = super::checker_probe_lane_tests::PROBE_FILE;
+    let _update = host
+        .upsert(crate::UpsertRequest {
+            canonical_id: Some(canonical.into()),
+            input_id: canonical.into(),
+            source: std::sync::Arc::from(format!(
+                "{source}\ntype __Probe = {probe};\nexport {{}};\n"
+            )),
+            file_language: crate::FileLanguage::script_ts(),
+            aliases: vec![],
+        })
+        .expect("the named fixture indexes");
+    let _init = host
+        .resolve_named_symbol(canonical, "__BenchInit", None)
+        .expect("the initialization alias exists");
+    let wires = [(); 2].map(|()| {
+        let node = host
+            .resolve_named_symbol(canonical, "__Probe", None)
+            .expect("the probe exists");
+        let wire = host
+            .project_node_to_type_expr_json_bytes(&node)
+            .expect("the answer projects");
+        let answer = serde_json::from_slice(&wire).expect("a wire TypeExpr");
+        check(&answer);
+        wire
+    });
+    assert_eq!(wires[0], wires[1], "cold and warm named answers agree");
+}
+
+#[test]
+fn indexed_paths_past_native_query_depth_answer_cold_and_warm() {
+    fn assert_leaf(answer: &verter_type_expr::TypeExpr) {
+        assert!(
+            matches!(answer, verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(value)) if value == "leaf"),
+            "{answer:?}"
+        );
+    }
+    for depth in [22, 23, 50, 200] {
+        let mut source = String::from("type __BenchInit = 0;\n");
+        for level in 0..depth {
+            let value = if level + 1 == depth {
+                "'leaf'".to_string()
+            } else {
+                format!("L{}", level + 1)
+            };
+            source.push_str(&format!("interface L{level} {{ k0: {value} }}\n"));
+        }
+        let probe = format!("L0{}", "['k0']".repeat(depth));
+        let displays = cold_and_warm_displays(&source, &probe);
+        assert_eq!(displays, ["\"leaf\"", "\"leaf\""], "depth {depth}");
+        named_chain_answers(
+            &super::checker_probe_lane_tests::default_probe_host(),
+            &source,
+            &probe,
+            assert_leaf,
+        );
+        if depth == 23 {
+            let computed_source = source.replace("{ k0:", "{ k1: never; k0:");
+            let computed_probe = format!("L0{}", "['k0' | 'k1']".repeat(depth));
+            named_chain_answers(
+                &super::checker_probe_lane_tests::default_probe_host(),
+                &computed_source,
+                &computed_probe,
+                assert_leaf,
+            );
+        }
+    }
+}
+
+#[test]
+fn typeof_import_chains_past_native_query_depth_answer_cold_and_warm() {
+    use super::checker_probe_lane_tests::{probe_host, with_probe_on_host};
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
+    for depth in [22, 50, 200] {
+        let mut files = vec![(
+            "m0.ts".to_string(),
+            "export declare const value: { deep: 1 };".to_string(),
+        )];
+        for level in 1..=depth {
+            files.push((
+                format!("m{level}.ts"),
+                format!(
+                    "export declare const value: typeof import('./m{}').value;",
+                    level - 1
+                ),
+            ));
+        }
+        let files: Vec<_> = files
+            .iter()
+            .map(|(name, text)| (name.as_str(), text.as_str()))
+            .collect();
+        let project = ProbeProject {
+            files: &files,
+            ..Default::default()
+        };
+        let host = probe_host(project);
+        let probe = format!("typeof import('./m{depth}').value");
+        let displays = [(); 2].map(|()| {
+            with_probe_on_host(
+                &host,
+                project,
+                "type __BenchInit = 0;",
+                &probe,
+                |dispatch, node| render_node(dispatch, node, 0),
+            )
+        });
+        assert_eq!(displays, ["{ deep: 1 }", "{ deep: 1 }"], "depth {depth}");
+        named_chain_answers(
+            &probe_host(project),
+            "type __BenchInit = 0;",
+            &probe,
+            |answer| {
+                let verter_type_expr::TypeExpr::Object(object) = answer else {
+                    panic!("{answer:?}")
+                };
+                let [verter_type_expr::ObjectMember::Property(property)] =
+                    object.properties.as_slice()
+                else {
+                    panic!("{object:?}")
+                };
+                assert!(
+                    matches!(&property.key, verter_type_expr::AuthoredPropertyKey::String(name) if name.as_ref() == "deep")
+                );
+                assert!(
+                    matches!(&property.ty, verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(value)) if *value == 1.0)
+                );
+                assert!(!property.optional && !property.readonly);
+            },
+        );
+    }
+    let project = ProbeProject {
+        files: &[(
+            "generic.ts",
+            "type Local = never; export declare function make<T>(): T;",
+        )],
+        ..Default::default()
+    };
+    named_chain_answers(
+        &probe_host(project),
+        "type __BenchInit = 0; type Local = { deep: 1 };",
+        "ReturnType<typeof import('./generic').make<Local>>['deep']",
+        |answer| {
+            assert!(
+                matches!(answer, verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(value)) if *value == 1.0),
+                "{answer:?}"
+            );
+        },
+    );
+}
+
 /// Alias chains of 200 and 500 aliases evaluate cold, to the checker's
 /// answer, on the small stack. Each alias's instantiation needs the next
 /// one from the runtime instead of opening it one native query deeper, so

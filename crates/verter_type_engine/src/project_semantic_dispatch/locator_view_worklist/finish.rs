@@ -63,6 +63,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         data: &SemanticNodeData,
         context: ProjectionReductionContext,
         inputs: &LocatorViewInputs<'_>,
+        suspend: bool,
     ) -> ReferenceProjectionPlan {
         let (specifier, qualifier, typeof_query) =
             data.import_type_head().expect("ImportType head");
@@ -85,23 +86,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
         )
         .with_authored_resolution_debt(inputs.authored_resolution_debt);
-        match self.plan_import_type_head(
+        let plan = self.plan_import_type_head(
             &resolver_context,
             owner_canonical.as_ref(),
             specifier,
             &qualifier,
             typeof_query,
             type_args.len(),
-        ) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
+        );
+        let argument_context = match &plan {
             CarrierResolutionPlan::NeedsArgs(continuation) => {
-                let argument_context = self.reference_argument_context(&continuation, context);
-                ReferenceProjectionPlan::NeedsArgs {
-                    continuation,
-                    args: type_args,
+                self.reference_argument_context(continuation, context)
+            }
+            CarrierResolutionPlan::Ready(_) => context,
+        };
+        match plan {
+            CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof { key }) => {
+                let read = Box::new(TypeofRead {
+                    key: *key,
+                    type_args,
                     argument_context,
+                });
+                if suspend {
+                    ReferenceProjectionPlan::Typeof(read)
+                } else {
+                    self.read_typeof_in_place(*read)
                 }
             }
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
+            CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
+                continuation,
+                args: type_args,
+                argument_context,
+            },
         }
     }
 
