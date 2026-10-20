@@ -130,6 +130,15 @@ Generic method relations follow `compareSignaturesRelated`:
 - A source parameter the target's clause declares too (a binder no
   instantiation moved, `R2 = never`) binds to itself and asks the return for
   nothing.
+- An instantiation whose inference does not settle while a conditional's
+  `infer` is collecting and the target names one of its declarations
+  (`Promise<number> extends PromiseLike<infer U>`: `then`'s callback reads
+  `U`) leaves the signature pair undecided
+  (`InContextInstantiation::Unsettled`): the instantiation's own session takes
+  only the source's parameters, so the uninstantiated pair would decide a
+  branch it never related. Inference through a lib thenable's `then` into an
+  enclosing inference (`thenOf(p1)`) is not done yet; such calls are typed
+  `UnrepresentableCallee` gaps.
 - Two callback parameters (one non-generic call signature each, nullable
   alike, no predicate) relate target-to-source with strictly contravariant
   parameters, never the method-bivariant fallback (`callback_parameter_pair`).
