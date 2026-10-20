@@ -9286,7 +9286,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
         use super::canonical_algebra::LiteralValueIdentity;
-        use super::cost_receipt::{CostIdentity, Nesting};
+        use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
 
         if self.relation_session_active() {
             return None;
@@ -9308,17 +9308,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }) {
             Some(index) => index,
             None => {
-                let recording = self.connected_demand.record_cost(
-                    CostIdentity::of_key(LiteralUnionIndexKey(target))
-                        .with_roots(graph.root_nodes([target]).expect("relation target is live")),
-                );
+                let identity = CostIdentity::of_key(LiteralUnionIndexKey(target))
+                    .with_roots(graph.root_nodes([target]).expect("relation target is live"));
+                // A warm sibling can replay preparation after its operation
+                // released the index. Rebuild without paying it twice, but
+                // preserve its full cold price for future independent demands.
+                let already_paid = self.connected_demand.is_paid(&identity);
+                let recording =
+                    (!already_paid).then(|| self.connected_demand.record_cost(identity.clone()));
+                let mut usage = LogicalUsage::default();
+                let entry_bytes = 2 * std::mem::size_of::<LiteralValueIdentity>();
                 let mut values = Some(FxHashSet::default());
                 for member in members.iter() {
                     #[cfg(any(test, feature = "test-support"))]
                     RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
-                    if !self.charge_relation_work(1) {
+                    if !self.charge_relation_work(u64::from(!already_paid)) {
                         return Some(RelationResult::Unknown);
                     }
+                    usage.work += 1;
                     let Some(data) = graph.node_data(*member) else {
                         values = None;
                         break;
@@ -9331,12 +9338,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // Reserve logical hash-table backing before inserting.
                     if self
                         .connected_demand
-                        .reserve_bytes(2 * std::mem::size_of::<LiteralValueIdentity>())
+                        .reserve_bytes(if already_paid { 0 } else { entry_bytes })
                         .is_err()
                     {
                         self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
                         return Some(RelationResult::Unknown);
                     }
+                    usage.bytes += entry_bytes as u64;
                     values
                         .as_mut()
                         .expect("literal prefix")
@@ -9347,8 +9355,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 } else {
                     Vec::new()
                 };
-                let request = crate::request_context::current_request_budget();
-                let receipt = recording.finish(true, request.as_deref())?;
+                let receipt = match recording {
+                    Some(recording) => {
+                        let request = crate::request_context::current_request_budget();
+                        recording.finish(true, request.as_deref())?
+                    }
+                    None => DemandCostReceipt::new(identity, usage, Vec::new()),
+                };
                 self.connected_demand
                     .record_prerequisite(&receipt, Nesting::Entered);
                 let index = Arc::new(LiteralUnionIndex {

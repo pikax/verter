@@ -7,6 +7,10 @@ independent of file-scoped node ids. Index preparation charges work and logical
 construction bytes before insertion; its shared cost receipt is consumed by
 every dependent query, and each lookup deposits the inspected file self-roots.
 The outermost dispatch operation releases the index and its backing storage.
+If a warm consumer has already paid preparation in the connected demand,
+rebuilding the released index does not charge it again. The rebuilt index's
+receipt still records its full cold work and bytes, so a later independent
+demand consuming a newly cached sibling pays preparation in full.
 The checker's small-union recursion classification reuses the literal-only
 proof, so it does not flatten that target again for each source literal.
 Membership never changes the union's stored sequence or `VerterStableV1` order.

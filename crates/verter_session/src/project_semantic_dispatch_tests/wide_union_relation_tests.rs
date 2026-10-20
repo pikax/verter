@@ -19,8 +19,8 @@ fn wide_union(width: usize) -> String {
 
 const EXCLUDED_TO_WHOLE: &str = "[Exclude<W, \"m0\">] extends [W] ? 1 : 2";
 
-/// Count physical arm reads: memoized relation counts alone conceal a scan
-/// of the target for every source literal, including failed membership.
+/// Count physical arm reads or native Omit key operations: memoized relation
+/// counts alone conceal a scan of the target for every source literal.
 #[test]
 fn literal_union_membership_work_grows_with_input() {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
@@ -29,6 +29,13 @@ fn literal_union_membership_work_grows_with_input() {
         "[Most] extends [W] ? 1 : 2",
         "keyof Omit<{ [K in W]: K }, Most>",
     ] {
+        let count = if probe.starts_with("keyof Omit") {
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::omit_key_filter_steps_for_tests
+                as fn() -> usize
+        } else {
+            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests
+                as fn() -> usize
+        };
         let visits = [32, 64, 128].map(|width| {
             let most = (0..width)
                 .filter(|index| ![3, 5].contains(index))
@@ -36,18 +43,23 @@ fn literal_union_membership_work_grows_with_input() {
                 .collect::<Vec<_>>()
                 .join(" | ");
             let source = format!("{}type Most = {most};", wide_union(width));
-            let before = super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests();
+            let before = count();
             with_probe(&source, probe, |dispatch, node| {
                 let expected = checker_syntax::parse(if probe.starts_with('[') {
                     "1"
                 } else {
                     "\"m3\" | \"m5\""
-                }).expect("valid expected type");
+                })
+                .expect("valid expected type");
                 assert!(checker_syntax::matches_node(dispatch, node, &expected, 0));
             });
-            super::ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_union_arm_visits_for_tests() - before
+            count() - before
         });
-        println!("literal membership {probe}: arm visits {visits:?}");
+        println!("literal membership {probe}: membership steps {visits:?}");
+        assert!(
+            visits.iter().all(|visits| *visits > 0),
+            "membership work must be observed: {probe}: {visits:?}"
+        );
         for step in 0..2 {
             assert!(
                 visits[step + 1] * 10 <= visits[step] * 22,
@@ -55,6 +67,70 @@ fn literal_union_membership_work_grows_with_input() {
             );
         }
     }
+}
+
+#[test]
+fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
+    use super::ProjectSemanticDispatch;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{
+        LiteralValue, QueryResult, RelationOutcome, SemanticNodeData, SemanticQueryKey,
+        SemanticQueryValue,
+    };
+
+    let observe =
+        |warm_first: bool, allowance: usize| {
+            let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+            let dispatch = ProjectSemanticDispatch::new(&host);
+            let _builder = dispatch.enter_construction_scope();
+            let members: Vec<Arc<str>> = (0..32).map(|i| Arc::from(format!("s{i}"))).collect();
+            let target = dispatch.intern_string_literal_union(&members);
+            let keys =
+                ["s0", "s1"].map(|value| {
+                    let source = dispatch.graph().intern_node(SemanticNodeData::Literal(
+                        LiteralValue::String(value.to_owned()),
+                    ));
+                    dispatch.relate_key_for(source, target).to_query_key()
+                });
+            let read = |key: &SemanticQueryKey| {
+                let answer = dispatch.execute_via_cold_build_helper(key.clone());
+                assert!(!answer.result_is_partial(), "{:?}", answer.value());
+                assert!(
+                    matches!(answer.value(),
+                QueryResult::Value(SemanticQueryValue::Relation(payload))
+                    if payload.outcome == RelationOutcome::Assignable),
+                    "{:?}",
+                    answer.value()
+                );
+            };
+            if warm_first {
+                read(&keys[0]);
+            }
+            dispatch.set_connected_limits_for_tests(allowance, 24);
+            let usage = || {
+                (
+                    dispatch.connected_demand().work_used_for_tests(),
+                    dispatch.connected_demand().bytes_used_for_tests(),
+                )
+            };
+            let together = {
+                let (_guard, _) = dispatch.enter_connected_demand(false);
+                for key in &keys {
+                    read(key);
+                }
+                usage()
+            };
+            // The cold sibling's receipt must still price preparation in full
+            // when a later independent demand consumes it without the first.
+            read(&keys[1]);
+            (together, usage())
+        };
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let cold = observe(false, full);
+    let partly_warm = observe(true, full);
+    assert_eq!(partly_warm, cold, "warmth changes neither work nor bytes");
+    assert_eq!(observe(false, cold.0 .0), cold);
+    assert_eq!(observe(true, cold.0 .0), cold);
 }
 
 #[test]
