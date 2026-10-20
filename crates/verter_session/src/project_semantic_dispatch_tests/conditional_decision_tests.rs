@@ -51,6 +51,137 @@ export function reflexive<X>() { return null! as Eq<X, X>; }
 }
 
 #[test]
+fn generic_signature_identity_ignores_operand_construction_details() {
+    let source = r#"
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Left = { a: 1; b: 2 };
+type Right = { b: 2; a: 1 };
+declare const key: unique symbol;
+declare const otherKey: unique symbol;
+export function reordered() { return null! as Eq<Left, Right>; }
+export function nested() { return null! as Eq<{ v: Left }, { v: Right }>; }
+export function union() { return null! as Eq<1 | 2, 2 | 1>; }
+export function tuple() { return null! as Eq<[x: 1], [y: 1]>; }
+export function signature() { return null! as Eq<(x: 1) => 2, (y: 1) => 2>; }
+export function readonly() { return null! as Eq<{ readonly a: 1 }, { a: 1 }>; }
+export function optional() { return null! as Eq<{ a?: 1 }, { a: 1 }>; }
+export function tupleReadonly() { return null! as Eq<readonly [1], [1]>; }
+export function signatureOptional() { return null! as Eq<(x?: 1) => 2, (y: 1) => 2>; }
+export function generic() { return null! as Eq<<T>(x: T) => T, <U>(y: U) => U>; }
+export function keySpelling() { return null! as Eq<{ 1: 2 }, { "1": 2 }>; }
+export function nominal() { return null! as Eq<typeof key, typeof key>; }
+export function nominalBroad() { return null! as Eq<typeof key, symbol>; }
+export function nominalDifferent() { return null! as Eq<typeof key, typeof otherKey>; }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("reordered", "true"),
+        ("nested", "true"),
+        ("union", "true"),
+        ("tuple", "true"),
+        ("signature", "true"),
+        ("readonly", "false"),
+        ("optional", "false"),
+        ("tupleReadonly", "false"),
+        ("signatureOptional", "false"),
+        ("generic", "true"),
+        ("keySpelling", "true"),
+        ("nominal", "true"),
+        ("nominalBroad", "false"),
+        ("nominalDifferent", "false"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn named_generic_signature_identity_is_stable_when_warm() {
+    use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+    use std::sync::Arc;
+    use verter_type_expr::{LiteralValue, TypeExpr};
+
+    for (strict_null_checks, no_implicit_any) in
+        [(true, true), (true, false), (false, true), (false, false)]
+    {
+        let config = format!(
+            r#"{{ "compilerOptions": {{ "strictNullChecks": {strict_null_checks}, "noImplicitAny": {no_implicit_any} }} }}"#
+        );
+        let host = VerterHost::new_standalone_with_tsconfig_projects(
+            HostConfig::default(),
+            &[("/identity", &config)],
+        );
+        for (file, source) in [
+            ("left.ts", "export type Left = { a: 1; b: 2 };"),
+            ("right.ts", "export type Right = { b: 2; a: 1 };"),
+            (
+                "probe.ts",
+                r#"
+import type { Left } from './left';
+import type { Right } from './right';
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+export type ObjectOrder = Eq<{ a: 1; b: 2 }, { b: 2; a: 1 }>;
+export type UnionOrder = Eq<1 | 2, 2 | 1>;
+export type TupleLabels = Eq<[x: 1], [y: 1]>;
+export type ParameterNames = Eq<(x: 1) => 2, (y: 1) => 2>;
+export type ImportedAliases = Eq<{ v: Left }, { v: Right }>;
+export type Unequal = Eq<{ a: 1 }, { a: 2 }>;
+"#,
+            ),
+        ] {
+            let canonical = format!("/identity/{file}");
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical,
+                    source: Arc::from(source),
+                    file_language: FileLanguage::script_ts(),
+                    aliases: vec![],
+                })
+                .expect("fixture admitted");
+        }
+        let read = |symbol: &str| -> TypeExpr {
+            let node = host
+                .resolve_named_symbol_with_audit("/identity/probe.ts", symbol, None)
+                .into_parts()
+                .0
+                .expect("the named demand completes")
+                .expect("the symbol exists");
+            let bytes = host
+                .project_node_to_type_expr_json_bytes(&node)
+                .expect("the answer projects");
+            serde_json::from_slice(&bytes).expect("a wire answer")
+        };
+        for (symbol, expected) in [
+            ("ObjectOrder", true),
+            ("UnionOrder", true),
+            ("TupleLabels", true),
+            ("ParameterNames", true),
+            ("ImportedAliases", true),
+            ("Unequal", false),
+        ] {
+            for _ in 0..2 {
+                let answer = read(symbol);
+                assert!(
+                    matches!(answer, TypeExpr::Literal(LiteralValue::Boolean(value)) if value == expected),
+                    "{symbol}: {answer:?}"
+                );
+            }
+        }
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/identity/right.ts".into()),
+                input_id: "/identity/right.ts".into(),
+                source: Arc::from("export type Right = { b: 2; a: 2 };"),
+                file_language: FileLanguage::script_ts(),
+                aliases: vec![],
+            })
+            .expect("changed dependency admitted");
+        assert!(matches!(
+            read("ImportedAliases"),
+            TypeExpr::Literal(LiteralValue::Boolean(false))
+        ));
+    }
+}
+
+#[test]
 fn any_infer_tuple_uses_unknown_and_preserves_open_checks() {
     let source = r#"
 export function open<T>() { return null! as (T extends [infer A] ? A : 0); }

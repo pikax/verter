@@ -760,7 +760,7 @@ impl CanonicalEvidence {
         self.seen_nodes.extend(other.seen_nodes);
     }
 
-    fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
+    pub(super) fn record_file_root(&mut self, graph: &SemanticGraphStore, node: SemanticNodeId) {
         if !self.seen_nodes.insert(node) {
             return;
         }

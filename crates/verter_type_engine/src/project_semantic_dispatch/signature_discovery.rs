@@ -139,6 +139,7 @@ fn is_js_canonical(canonical_id: &str) -> bool {
 pub(crate) struct GraphTypes<'a, 'd, C: crate::resolver_core::ResolverCapabilities> {
     dispatch: &'a ProjectSemanticDispatch<'d, C>,
     store: &'a SignatureStore,
+    semantic_identity: bool,
 }
 
 impl<'a, 'd, C: crate::resolver_core::ResolverCapabilities> GraphTypes<'a, 'd, C> {
@@ -189,6 +190,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
                 &CanonicalTypeSubstitution::new(self.dispatch.graph(), moving),
             )
         };
+        if self.semantic_identity {
+            return self.dispatch.relate_type_identity(na, nb);
+        }
         if na == nb {
             return Some(true);
         }
@@ -963,6 +967,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let types = GraphTypes {
             dispatch: self,
             store,
+            semantic_identity: false,
         };
         let mut walk = Walk {
             types: &types,
@@ -1031,6 +1036,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let types = GraphTypes {
             dispatch: self,
             store,
+            semantic_identity: false,
         };
         match self.read_result_inner(
             &types,
@@ -1936,6 +1942,47 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// Exact signature identity uses the kernel's positional, binder and
+    /// result rules, with component types compared by the relation authority.
+    pub(super) fn signature_types_identical(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: GraphSignatureKind,
+    ) -> Option<bool> {
+        let store = self.graph().signature_store();
+        for attempt in 0..2 {
+            let source = self.signature_set_value(source, kind).ok()?;
+            let target = self.signature_set_value(target, kind).ok()?;
+            let result = (|| {
+                let view = SemanticReadView::pin(store);
+                let only = |value: &crate::signature_kernel::SignatureSetValue| match view
+                    .read_set(value.set)?
+                {
+                    crate::signature_kernel::BorrowedSet::One { candidate, .. } => Ok(candidate),
+                    _ => Err(DiscoveryError::Incomplete(IncompleteReason::UnsettledInput)),
+                };
+                crate::signature_kernel::signatures_identical(
+                    store,
+                    &GraphTypes {
+                        dispatch: self,
+                        store,
+                        semantic_identity: true,
+                    },
+                    only(&source)?,
+                    only(&target)?,
+                    crate::signature_kernel::MatchOptions::EXACT,
+                )
+            })();
+            match result {
+                Ok(result) => return Some(result),
+                Err(error) if attempt == 0 && is_retired_handle(&error) => continue,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// The parameter positions one signature comparison relates, read
     /// through the ONE positional model for both signatures — the checker's
     /// `compareSignaturesRelated` over `getParameterCount`,
@@ -2103,6 +2150,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let facts = GraphTypes {
             dispatch: self,
             store,
+            semantic_identity: false,
         };
         let only =
             |value: &crate::signature_kernel::SignatureSetValue| match view.read_set(value.set) {
