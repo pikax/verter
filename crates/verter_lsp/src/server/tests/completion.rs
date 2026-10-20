@@ -5313,6 +5313,67 @@ async fn a_carrier_publication_never_announces_provider_sync_completion() {
             > 0,
         "the carrier publications still tell the editor the store changed"
     );
+    assert_eq!(
+        store_pings_from_a_debounced_sync(&fixture).await,
+        1,
+        "the debounced sync of an edited carrier tells a subscribed editor once"
+    );
+}
+
+/// Edit `Consumer.vue` and run its debounced coordinator sync to completion;
+/// return how many carrier-store pings that put on the wire. A marker sent
+/// after the sync bounds the observation: the wire is ordered, so once the
+/// marker is recorded every ping the sync produced has been counted.
+async fn store_pings_from_a_debounced_sync(fixture: &WatchedDependencyFixture) -> usize {
+    let server = fixture.service.inner();
+    let uri = workspace_uri(&fixture.root, "src/Consumer.vue");
+    let id = crate::documents::uri_to_canonical_id(&uri);
+    let before = fixture
+        .store_changed
+        .load(std::sync::atomic::Ordering::SeqCst);
+    server.documents.did_change(
+        &uri,
+        2,
+        "<script setup lang=\"ts\">\nimport { value } from './helper';\nconst again = value;\n</script>\n<template>{{ again }}</template>",
+    );
+    let deps = lane_interleaving_deps(server);
+    assert_eq!(
+        crate::sync_coordinator::synchronize_document_outcome_for_test(&deps, &id, uri.as_str())
+            .await,
+        crate::sync_coordinator::SyncFileOutcome::Settled,
+        "the debounced sync must run to completion for its pings to be counted"
+    );
+    let marker = "window/logMessage";
+    let markers = || {
+        fixture
+            .methods
+            .lock()
+            .iter()
+            .filter(|method| method.as_str() == marker)
+            .count()
+    };
+    let markers_before = markers();
+    server
+        .client
+        .log_message(MessageType::INFO, "sync observed")
+        .await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let changed = fixture.methods_changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if markers() > markers_before {
+                break;
+            }
+            changed.await;
+        }
+    })
+    .await
+    .expect("the marker sent after the sync reaches the wire");
+    fixture
+        .store_changed
+        .load(std::sync::atomic::Ordering::SeqCst)
+        - before
 }
 
 /// The carrier-store ping is a subscription. A client that did not ask for it
@@ -5341,19 +5402,26 @@ async fn an_unsubscribed_client_receives_no_carrier_store_pings() {
         unrequested.is_empty(),
         "an unsubscribed client receives only its open documents' diagnostics, got {unrequested:?}"
     );
-    let published = fixture.published.lock();
-    for name in ["Consumer.vue", "Unrelated.vue"] {
-        let uri = workspace_uri(&fixture.root, &format!("src/{name}"));
+    {
+        let published = fixture.published.lock();
+        for name in ["Consumer.vue", "Unrelated.vue"] {
+            let uri = workspace_uri(&fixture.root, &format!("src/{name}"));
+            assert!(
+                published.iter().any(|params| params.uri == uri),
+                "{name} still receives its diagnostics without the subscription"
+            );
+        }
+        let open = ["Consumer.vue", "Unrelated.vue"]
+            .map(|name| workspace_uri(&fixture.root, &format!("src/{name}")));
         assert!(
-            published.iter().any(|params| params.uri == uri),
-            "{name} still receives its diagnostics without the subscription"
+            published.iter().all(|params| open.contains(&params.uri)),
+            "only open documents are published"
         );
     }
-    let open = ["Consumer.vue", "Unrelated.vue"]
-        .map(|name| workspace_uri(&fixture.root, &format!("src/{name}")));
-    assert!(
-        published.iter().all(|params| open.contains(&params.uri)),
-        "only open documents are published"
+    assert_eq!(
+        store_pings_from_a_debounced_sync(&fixture).await,
+        0,
+        "nor may the debounced sync of an edited carrier ping it"
     );
 }
 

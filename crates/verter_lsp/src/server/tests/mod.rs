@@ -3037,6 +3037,8 @@ struct WatchedDependencyFixture {
     store_changed: Arc<std::sync::atomic::AtomicUsize>,
     /// Every server-to-client method, in wire order.
     methods: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Signalled after each message is recorded in `methods`.
+    methods_changed: Arc<tokio::sync::Notify>,
     drain: tokio::task::JoinHandle<()>,
 }
 
@@ -3115,9 +3117,12 @@ async fn watched_dependency_fixture_declaring(
     let captured_store_changed = store_changed.clone();
     let methods = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let captured_methods = methods.clone();
+    let methods_changed = Arc::new(tokio::sync::Notify::new());
+    let captured_methods_changed = methods_changed.clone();
     let drain = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
             captured_methods.lock().push(message.method().to_string());
+            captured_methods_changed.notify_waiters();
             if message.method() == "$/verter/carrierStoreChanged" {
                 captured_store_changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
@@ -3190,6 +3195,7 @@ async fn watched_dependency_fixture_declaring(
         sync_complete,
         store_changed,
         methods,
+        methods_changed,
         drain,
     }
 }
@@ -4074,7 +4080,7 @@ fn lane_interleaving_deps(
     crate::sync_coordinator::SyncCoordinatorDeps {
         documents: Arc::clone(&server.documents),
         dependency_receipts: Default::default(),
-        subscriptions: Default::default(),
+        subscriptions: Arc::clone(&server.subscriptions),
         project_sync: server.project_sync.clone(),
         needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
         pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),
