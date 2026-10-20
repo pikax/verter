@@ -741,7 +741,10 @@ reverse-index metadata, or persistent artifact.
 `ResolutionOutcome::into_publication()` is the only durable conversion.
 `ResolutionPublication::Admitted` carries a sealed `AdmittedResolution`; no
 caller can manufacture it from a direct probe, overlay lookup, or normalized
-string. Its projection helpers require an existing Engine-minted carrier.
+string. A complete answer whose retention the account refused leaves as
+`ResolutionPublication::Unretained`: the consumer gets the value and its
+witness, no persistent or shared sink may admit it, and a compute that reads
+it is non-cacheable. Its projection helpers require an existing Engine-minted carrier.
 The former `from_admitted_state` constructor is deleted. Full
 resolution-derived batches are admitted before any route, overlay, prepared,
 provider, or session state mutates; one refusal rejects the whole batch.
@@ -874,8 +877,9 @@ Every resolution producer resolves through ONE bounded candidate slot per
   node and edges too, and it is shared with the node: every root that still
   holds the node — a held snapshot included — keeps the bytes charged, and
   they are released once, with the last owner. A refused reservation serves
-  the complete answer uncached as `RetentionPressure`, with no slot and no
-  decision, and delivers it to the flight's subscribers, which restate its
+  the complete answer uncached as `RetentionPressure` — published as
+  `ResolutionPublication::Unretained`, never as a refusal — with no slot and
+  no decision, and delivers it to the flight's subscribers, which restate its
   witness. An importer that leaves the workspace (deleted, renamed away, or
   under a removed subtree) retires its slots and their decisions in the same
   world mutation that retires its edges; the session-population half waits

@@ -652,16 +652,18 @@ pub(crate) trait RequestBoundLifecycle: Sync {
             .observe_materialize_scope_with_context(ctx, canonical)
     }
 
-    fn resolve_type_dependency_canonical(
+    /// The shared type-route policy's publication for this request's
+    /// resolution view: admitted, unretained, or refused.
+    fn type_dependency_publication(
         &self,
         owner_canonical: &str,
         import_source: &str,
-    ) -> Option<String> {
-        type_route_answer(crate::VerterHost::resolve_type_dependency_canonical(
+    ) -> verter_workspace::ResolutionPublication<String> {
+        crate::VerterHost::resolve_type_dependency_canonical(
             self.host(),
             owner_canonical,
             import_source,
-        ))
+        )
     }
 }
 
@@ -1110,8 +1112,10 @@ where
         verter_type_engine::count_resolver_context_call!(
             "RouteLookup::resolve_type_dependency_canonical"
         );
-        self.0
-            .resolve_type_dependency_canonical(owner_canonical, import_source)
+        type_route_answer(
+            self.0
+                .type_dependency_publication(owner_canonical, import_source),
+        )
     }
 
     #[inline]
@@ -1229,14 +1233,21 @@ where
 }
 
 /// A type-route publication as a resolver context answers it: the admitted
-/// target, or — for a refusal — `None` marked non-cacheable, so a refused
-/// route never becomes a cacheable "not found". Every context answers
-/// through this, whichever resolution snapshot produced the publication.
+/// target; an unretained target, the same complete answer, marking the
+/// compute that reads it non-cacheable so nothing derived from it is
+/// retained; or — for a refusal — `None` marked non-cacheable, so a
+/// refused route never becomes a cacheable "not found". Every context
+/// answers through this, whichever resolution snapshot produced the
+/// publication.
 pub(crate) fn type_route_answer(
     publication: verter_workspace::ResolutionPublication<String>,
 ) -> Option<String> {
     match publication {
         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+            note_non_cacheable_read_fan_out(NonCacheableReadReason::UnretainedResolution);
+            unretained.into_result()
+        }
         verter_workspace::ResolutionPublication::Refused(_) => {
             note_non_cacheable_read_fan_out(NonCacheableReadReason::UnrootableRoute);
             None

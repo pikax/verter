@@ -63,6 +63,70 @@ fn augmentation_completion_flushes_contributors_after_in_flight_membership() {
     );
 }
 
+/// A guarded augmenter install that rejects the held set still completes a
+/// membership transition: an edit that landed while its epoch was in flight
+/// skipped its own publish, so the rejecting install must flush it.
+///
+/// Mutation recipe: return from the rejected arm without publishing. The
+/// completed edit's contributor then stays unpublished.
+#[test]
+fn rejected_guarded_augmenter_install_flushes_contributors_completed_meanwhile() {
+    let store = FileArtifactStore::new();
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    // A script-global contributor: it carries no augmentation fact, so its
+    // insert never takes the augmentation-index entry the install guards.
+    let source: Arc<str> = Arc::from("interface Window { x: 1 }");
+    let state = crate::resolver_core::ShallowFileState::service_backed_for_test_at(
+        "/globals.d.ts",
+        &source,
+    );
+    let indexed = Arc::new(IndexedReady::new_for_test_with_state(
+        state.whole_hash,
+        state,
+        Arc::clone(&source),
+        source,
+    ));
+    let installed = store.install_augmenter_set_if(
+        key,
+        Arc::new(verter_session_query::resolution::AugmenterSet {
+            entries: smallvec::smallvec![],
+            fingerprint: [4u8; 16],
+        }),
+        |_| {
+            // The guarded install's epoch is in flight here.
+            store.insert(Arc::from("/globals.d.ts"), indexed);
+            assert_eq!(
+                store.global_contributor_index().snapshot().revision,
+                0,
+                "a completed edit must not publish past an in-flight transition"
+            );
+            false
+        },
+    );
+    assert!(installed.is_none(), "the rejected install writes nothing");
+    let population = store.global_contributor_index().snapshot();
+    assert_eq!(population.program_snapshot, store.membership_epoch());
+    assert_eq!(
+        population
+            .lookup(
+                &AugmentationTargetKind::GlobalAugmentation,
+                "Window",
+                None,
+                true
+            )
+            .entries
+            .len(),
+        1,
+        "the rejecting install must flush the edit completed while it was in flight"
+    );
+}
+
 fn vue_key(source: &str, options: &verter_language::ParseOptions) -> FileArtifactKey {
     let language = verter_language::FileLanguage::vue();
     let syntax_profile =
@@ -1082,6 +1146,90 @@ fn populate_augmenter_set_is_bump_iff_fingerprint_changed() {
         store.artifact_generation(),
         "a changed-fingerprint augmenter populate MUST advance artifact_generation (no under-bump)"
     );
+}
+
+/// A key refresh re-keys the set the index holds and never installs one: a
+/// set served to its request only — its scan consumed a resolution the
+/// process did not keep — stays out of the shared index once its keys heal,
+/// and a set the index has since superseded is not written back over the
+/// newer one.
+///
+/// Mutation recipe: publish the healed set without checking what the index
+/// holds. The unheld refresh then installs its entry.
+#[test]
+fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
+    use smallvec::smallvec;
+
+    use verter_session_query::resolution::AugmenterEntry;
+    use verter_session_query::resolution::AugmenterSet;
+
+    let store = FileArtifactStore::new();
+    let key = AugmentationTargetKey {
+        project_identity: ProjectIdentity([7u8; 16]),
+        resolve_env_hash: [1u8; 16],
+        lib_env_hash: [2u8; 16],
+        population: crate::file_artifact_store::AugmentationPopulation::Base,
+        target: AugmentationTargetKind::GlobalAugmentation,
+    };
+    let set = |content_hash: Hash16, fingerprint: Hash16| AugmenterSet {
+        entries: smallvec![AugmenterEntry {
+            artifact_key: FileArtifactKey::base_for_test(Arc::from("/aug.ts"), content_hash),
+            parse_stable_hash: [3u8; 16],
+        }],
+        fingerprint,
+    };
+    let healed = || {
+        vec![(
+            0,
+            FileArtifactKey::base_for_test(Arc::from("/aug.ts"), [8u8; 16]),
+        )]
+    };
+    let held_hash = |store: &FileArtifactStore| {
+        store
+            .get_augmenter_set(&key)
+            .map(|held| held.entries[0].artifact_key.content_hash)
+    };
+
+    let served = set([9u8; 16], [4u8; 16]);
+    assert!(
+        !store.refresh_augmenter_set_keys(&key, &served, healed()),
+        "a set the index does not hold is not written"
+    );
+    assert_eq!(
+        held_hash(&store),
+        None,
+        "the unheld set stays out of the index"
+    );
+
+    store.populate_augmenter_set(key.clone(), Arc::new(set([9u8; 16], [5u8; 16])));
+    assert!(
+        !store.refresh_augmenter_set_keys(&key, &served, healed()),
+        "a set the index has superseded is not written back"
+    );
+    assert_eq!(held_hash(&store), Some([9u8; 16]), "the newer set stays");
+
+    let observed = set([9u8; 16], [5u8; 16]);
+    assert!(
+        store.refresh_augmenter_set_keys(&key, &observed, healed()),
+        "control: the held set is re-keyed"
+    );
+    assert_eq!(
+        held_hash(&store),
+        Some([8u8; 16]),
+        "control: the healed key is held"
+    );
+
+    // The refresh's held-set check is decided under the install's own entry
+    // guard, so a set superseded after a caller's look still is not written.
+    assert!(
+        store
+            .install_augmenter_set_if(key.clone(), Arc::new(served.clone()), |held| {
+                held.is_some_and(|held| held.fingerprint == served.fingerprint)
+            })
+            .is_none(),
+        "a guarded install that rejects the held set writes nothing"
+    );
+    assert_eq!(held_hash(&store), Some([8u8; 16]), "the held set stays");
 }
 
 // ── Gap-free no-op: a base-equivalent no-op legacy replace must expose NO

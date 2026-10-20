@@ -6879,6 +6879,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use verter_session_query::resolution::AugmentationTargetKind;
 
         prepare();
+        // Every read the fold consumes from here on — the index read, the
+        // augmenter target resolutions, the contributor artifacts — decides
+        // whether its healed keys may be written back to the shared index.
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
         // The source boundary captures the same session population and host
         // environment, ingests program roots, and returns an owned index read.
         let (key, augmenter_set, index_resolutions) =
@@ -7688,8 +7692,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the identical fingerprint keeps every recorded
         // `ModuleAugmentationIndexShape` signature valid while making the next
         // stitch hit the fast exact-key path (mirrors the names stitch).
-        self.ctx
-            .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
+        // A fold that consumed a read the process did not keep — an
+        // unretained or refused resolution among them — answers this request
+        // only: nothing it derived, healed keys included, enters the index.
+        if refusals.observed().is_none() {
+            self.ctx
+                .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
+        }
+        drop(refusals);
 
         if contributor_nodes.is_empty() && planned_bodies.is_empty() && enum_blocks.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):

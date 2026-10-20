@@ -280,17 +280,15 @@ impl RequestBoundLifecycle for SessionRequestLifecycle<'_> {
             .observe_materialize_scope_with_context(ctx, canonical)
     }
 
-    fn resolve_type_dependency_canonical(
+    fn type_dependency_publication(
         &self,
         owner_canonical: &str,
         import_source: &str,
-    ) -> Option<String> {
-        crate::resolver_core::request_bound::type_route_answer(
-            self.inner.resolve_type_dependency_canonical_in(
-                self.resolution_overlay(),
-                owner_canonical,
-                import_source,
-            ),
+    ) -> verter_workspace::ResolutionPublication<String> {
+        self.inner.resolve_type_dependency_canonical_in(
+            self.resolution_overlay(),
+            owner_canonical,
+            import_source,
         )
     }
 }
