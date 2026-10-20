@@ -23,6 +23,7 @@ pub(crate) struct AugmentationTarget {
 
 impl AugmentationTarget {
     /// An admitted answer.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn admitted(target: Option<Arc<str>>) -> Self {
         Self {
             target,
