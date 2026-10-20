@@ -416,7 +416,7 @@ fn recovery_code(
         super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
             recovery_diagnostic: Some(diagnostic),
             ..
-        }) => Some(diagnostic.code),
+        }) => Some(diagnostic.code()),
         _ => None,
     }
 }
@@ -4084,8 +4084,11 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
             &step,
             super::call_resolve::ResolveCallStep::Complete(ResolvedCallResult::Selected {
                 return_type,
-                recovery_diagnostic: Some(verter_type_engine::semantic_query::CheckerDiagnostic {
-                    code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                recovery_diagnostic: Some(verter_type_engine::semantic_query::CheckerDiagnosticRecipe {
+                    diagnostic: verter_type_engine::semantic_query::CheckerDiagnostic {
+                        code: verter_type_engine::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
+                        ..
+                    },
                     ..
                 }),
                 ..
@@ -4095,6 +4098,33 @@ fn union_partial_applicability_answers_the_synthesized_signatures_recovery() {
             )
         ),
         "the synthesized union signature accepts no argument of either arm alone, got {step:?}"
+    );
+}
+
+/// A relation refused at its comparison allowance reaches a consumer as the
+/// checker's own diagnostic, TS2859, naming both types as the checker
+/// prints them. Message: TypeScript 7.0.2 `diagnosticMessages.json`,
+/// "Excessive complexity comparing types '{0}' and '{1}'." A walker
+/// diagnostic the checker has no code for carries no checker message.
+#[test]
+fn a_relation_refusal_reports_the_checkers_formatted_ts2859() {
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(host.as_ref());
+    let _builder = dispatch.enter_construction_scope();
+    let graph = dispatch.graph();
+    let source = graph.intern_node(SemanticNodeData::Literal(
+        verter_type_engine::semantic_query::LiteralValue::String("a".to_owned()),
+    ));
+    let target = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    assert_eq!(
+        dispatch
+            .checker_message(&super::walk::ShallowDiagnostic::RelationTooComplex { source, target })
+            .as_deref(),
+        Some("TS2859: Excessive complexity comparing types '\"a\"' and 'number'.")
+    );
+    assert_eq!(
+        dispatch.checker_message(&super::walk::ShallowDiagnostic::OpenConditional { node: source }),
+        None
     );
 }
 

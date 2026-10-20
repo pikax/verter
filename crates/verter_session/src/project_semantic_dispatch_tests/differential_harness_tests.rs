@@ -1080,7 +1080,7 @@ fn observe(host: &VerterHost, canonical: &str, symbol: &str, scoped: bool) -> (O
     let diagnostics: Vec<u32> = result
         .checker_diagnostics()
         .iter()
-        .map(|diagnostic| diagnostic.code.code())
+        .map(|diagnostic| diagnostic.code().code())
         .collect();
     // The probe's type is read as a consumer reads it: under a request for
     // the probe file, so every judgement takes that project's options.
