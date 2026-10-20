@@ -210,6 +210,7 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
             source: domain,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: binder,
                 key_space: domain,
                 value_expr: binder,

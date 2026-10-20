@@ -1675,7 +1675,13 @@ fn collect_unique_symbol_members_of_ts_type(ty: &TSType<'_>, out: &mut Vec<Strin
 /// this same lowering just built) — consumers read the stored facts, never
 /// re-walk a body.
 fn member_header_facts_from_body(body: &TypeExpr) -> Arc<[MemberHeaderFact]> {
-    fn collect(body: &TypeExpr, out: &mut Vec<MemberHeaderFact>) {
+    /// The first header of each key, in member order; `seen` holds the keys
+    /// already taken, so a body of `n` members costs `n` lookups.
+    fn collect(
+        body: &TypeExpr,
+        out: &mut Vec<MemberHeaderFact>,
+        seen: &mut rustc_hash::FxHashSet<verter_type_expr::facts::FactPropertyKey>,
+    ) {
         match body {
             TypeExpr::Object(object) => {
                 for member in &object.properties {
@@ -1710,23 +1716,23 @@ fn member_header_facts_from_body(body: &TypeExpr) -> Arc<[MemberHeaderFact]> {
                         // they are not member HEADERS.
                         _ => continue,
                     };
-                    if !out.iter().any(|existing| existing.key == fact.key) {
+                    if seen.insert(fact.key.clone()) {
                         out.push(fact);
                     }
                 }
             }
             TypeExpr::Intersection(parts) => {
                 for part in parts.iter() {
-                    collect(part, out);
+                    collect(part, out, seen);
                 }
             }
-            TypeExpr::Parenthesized(inner) => collect(inner, out),
+            TypeExpr::Parenthesized(inner) => collect(inner, out, seen),
             _ => {}
         }
     }
 
     let mut out = Vec::new();
-    collect(body, &mut out);
+    collect(body, &mut out, &mut rustc_hash::FxHashSet::default());
     out.into()
 }
 
