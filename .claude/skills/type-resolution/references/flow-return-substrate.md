@@ -1,5 +1,17 @@
 ## Flow-Return Substrate (U6)
 
+Capture obligations follow the callable site's retained selection. A value-selected
+callable requires reaching-value evidence for its read captures. An effect-only
+callable retains its exact captured cells and effect dependencies without demanding
+their unused values; this includes sibling actions excluded by a return-member
+projection. Capture enumeration, correlation gaps and completion checks still apply.
+
+Return-member projection first checks for an already completed, validated whole
+return. Its ordinary signature-utility unwrap and PathWalker can reuse that value
+without installing a new member flow plan. This probe never starts a cold whole
+return and never substitutes an unfinished whole value for an independent member
+proof. Mapped remaps therefore reuse one body inference across their member reads.
+
 Whole-return spread programs retain their immutable construction carriers and
 shared inferred callee operands when the flow completion is sealed. Each body
 is inferred once; no intermediate return prefix is projected into a complete
@@ -208,11 +220,14 @@ publication. Relation checks and subtype-reduction views use that same empty
 surface, so a fresh `{}` still absorbs a primitive sibling where the checker
 does, without losing its literal provenance before object normalization.
 Thus separately declared object values do not normalize against later siblings.
-Member-granular `typeof` publication applies the same rule to direct array/union
-properties while preserving the nested-object cutoff. Class fields and inferred
-default-parameter types normalize as independent initializers; authored parameter
-types keep their own shapes. Signature normalization runs after located-body
-lowering, preserving the callable header's occurrence, carrier and scope.
+Member-granular and whole-value publication apply the same rule through nested
+object properties, without a depth cutoff. Class fields normalize as independent
+initializers on selected-member, instance and constructor-object publication
+paths, without forcing deferred sibling fields. Inferred default-parameter types
+normalize for standalone functions, arrow functions and object methods;
+authored parameter types keep their own shapes. Signature normalization preserves
+the callable header's occurrence, return carrier and scope, including a deferred
+callable whose return has not been demanded.
 
 The call value carries a matching reduction on the intersection side: a callee's
 INSTANTIATED return that pairs the empty object type `{}` with a definitely

@@ -14,10 +14,8 @@
 //!
 //! Where the widening applies is measured on TypeScript 7.0.2: a return
 //! or yield join is widened as a whole; an array is widened through its
-//! element as a whole; a lone object literal widens a union-valued
-//! property as a whole, but not a union two object-literal properties
-//! down (`{ o: { p: c ? { a: 1 } : { a: 1, b: 2 } } }` keeps `p`
-//! un-normalised).
+//! element as a whole; object properties start their own context when
+//! there is no enclosing sibling context, at every nesting depth.
 
 use std::sync::Arc;
 
@@ -51,6 +49,9 @@ enum Widening {
         element: SemanticNodeId,
         readonly: bool,
     },
+    /// A callable rebuilt from its normalized parameter initializers. Its
+    /// return remains owned by the original header, including any deferral.
+    Parameters { node: SemanticNodeId, count: usize },
     /// A lone literal rebuilt from the widened values of the members
     /// `widened` marks, in member order.
     LoneLiteral {
@@ -107,10 +108,47 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     values.push(if widened == element {
                         node
                     } else {
-                        self.graph().intern_node(SemanticNodeData::Array {
-                            element: widened,
-                            readonly,
-                        })
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::Array {
+                                element: widened,
+                                readonly,
+                            },
+                        )
+                    });
+                }
+                Widening::Parameters { node, count } => {
+                    let mut parameters = values
+                        .split_off(values.len() - count)
+                        .into_iter()
+                        .map(|ty| self.regularized_source_node_with_policy(ty, nullability));
+                    let graph = self.graph();
+                    let original = graph.node_data(node).expect("the callable being widened");
+                    let mut rebuilt = original.as_ref().clone();
+                    match &mut rebuilt {
+                        SemanticNodeData::Signature { params, .. } => {
+                            *params = params
+                                .iter()
+                                .map(|param| {
+                                    let mut normalized = param.copy();
+                                    normalized.ty =
+                                        parameters.next().expect("the widened parameter");
+                                    normalized
+                                })
+                                .collect::<Vec<_>>()
+                                .into();
+                        }
+                        SemanticNodeData::DeferredCallable(callable) => {
+                            *callable = callable.map_parameter_types(|_| {
+                                parameters.next().expect("the widened parameter")
+                            });
+                        }
+                        _ => unreachable!("only callable headers schedule parameter widening"),
+                    }
+                    values.push(if rebuilt == *original {
+                        node
+                    } else {
+                        graph.intern_preserving_scope(node, rebuilt)
                     });
                 }
                 Widening::LoneLiteral {
@@ -183,9 +221,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///
     /// A union widens each member in the context of its siblings (the
     /// union's own members for a whole value), an array its element as a
-    /// whole value. A lone object literal widens each union- or
-    /// array-valued property as a whole value and keeps a nested literal
-    /// as it is; in a context, a literal widens each property in the
+    /// whole value. An object without literal siblings widens its properties
+    /// independently; in a context, a literal widens each property in the
     /// context of the same property of its siblings and receives the
     /// properties they name and it lacks.
     fn widening_visit(
@@ -237,7 +274,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 matches!(
                                     self.graph().node_data(member.value).as_deref(),
                                     Some(
-                                        SemanticNodeData::Union(_) | SemanticNodeData::Array { .. }
+                                        SemanticNodeData::Union(_)
+                                            | SemanticNodeData::Array { .. }
+                                            | SemanticNodeData::Object(_)
+                                            | SemanticNodeData::Signature { .. }
+                                            | SemanticNodeData::DeferredCallable(_)
                                     )
                                 )
                             })
@@ -302,6 +343,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         tasks.extend(visits);
                     }
                 }
+            }
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                let parameters: Vec<_> = params.iter().map(|param| param.ty).collect();
+                drop(data);
+                tasks.push(Widening::Parameters {
+                    node,
+                    count: parameters.len(),
+                });
+                tasks.extend(parameters.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
+            }
+            Some(SemanticNodeData::DeferredCallable(callable)) => {
+                let mut parameters = Vec::new();
+                callable.for_each_parameter_type(|ty| parameters.push(ty));
+                drop(data);
+                tasks.push(Widening::Parameters {
+                    node,
+                    count: parameters.len(),
+                });
+                tasks.extend(parameters.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
             }
             // A spread-built literal names no property to its siblings, but
             // receives the ones it lacks (`c ? { a: 1, q: 1 } : { ...s, a: 2
@@ -410,16 +476,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if members.as_slice() == view.positive_members() {
             return node;
         }
-        self.graph().intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        self.graph().intern_preserving_scope(
+            node,
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::clone(&view.call_signatures),
                 construct_signatures: Arc::clone(&view.construct_signatures),
                 index_signatures: Arc::clone(&view.index_signatures),
                 keyspace: view.keyspace,
                 has_index_signature: view.has_known_index_signature(),
-            },
-        ))
+            }),
+        )
     }
 }
 

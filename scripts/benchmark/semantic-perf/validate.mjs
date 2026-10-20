@@ -19,9 +19,9 @@
 // unless every Verter answer matched tsc (or is a verified beyond-tsc
 // answer), for a run meant as a baseline.
 //
-//   node scripts/benchmark/semantic-perf/validate.mjs <results.json> [--require-all-matched]
+//   node scripts/benchmark/semantic-perf/validate.mjs <results.json> [--require-all-matched] [--expected <file>]
 
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readSessionRecord } from "./session-record.mjs";
@@ -659,17 +659,20 @@ export function rawFileProblems(run) {
 }
 
 async function cli(argv) {
-  const path = argv.find((a) => !a.startsWith("--"));
+  const expectedFlag = argv.indexOf("--expected");
+  const path = argv.find(
+    (a, i) => !a.startsWith("--") && !(expectedFlag >= 0 && i === expectedFlag + 1),
+  );
   if (!path) {
-    console.error("usage: validate.mjs <results.json> [--require-all-matched]");
+    console.error("usage: validate.mjs <results.json> [--require-all-matched] [--expected <file>]");
     return 2;
   }
   const run = JSON.parse(readFileSync(path, "utf8"));
-  const recordedReference = run.meta?.expected?.file;
-  const expectedPath =
-    recordedReference && existsSync(recordedReference)
-      ? recordedReference
-      : join(HERE, "expected.json");
+  if (expectedFlag >= 0 && (!argv[expectedFlag + 1] || argv[expectedFlag + 1].startsWith("--"))) {
+    console.error("--expected requires a reference file");
+    return 2;
+  }
+  const expectedPath = expectedFlag >= 0 ? argv[expectedFlag + 1] : join(HERE, "expected.json");
   const expected = JSON.parse(readFileSync(expectedPath, "utf8"));
   const failures = [];
   if (sha256File(expectedPath) !== run.meta?.expected?.sha256) {

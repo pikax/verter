@@ -26,6 +26,17 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static MAPPED_NAME_REMAP_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual per-key remap classifications on this thread, for growth tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
+    MAPPED_NAME_REMAP_EVALUATIONS.get()
+}
+
 #[path = "tuple_product.rs"]
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
@@ -1099,9 +1110,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut substitutions,
                             context,
                         );
-                        let node = self.normalize_inferred_signature_parameters(
+                        let node = self.normalize_widened_object_literals(
                             node,
-                            job.prepared.root_identity.canonical_id.as_ref(),
+                            self.nullability_for(job.prepared.root_identity.canonical_id.as_ref()),
                         );
                         signatures.record(node);
                     }
@@ -1262,9 +1273,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )));
                 }
                 TypeofThen::Signatures(signatures) => {
-                    let node = self.normalize_inferred_signature_parameters(
+                    let node = self.normalize_widened_object_literals(
                         node,
-                        build.prepared.root_identity.canonical_id.as_ref(),
+                        self.nullability_for(build.prepared.root_identity.canonical_id.as_ref()),
                     );
                     signatures.record(node);
                     match self.next_value_signature(signatures) {
@@ -2217,65 +2228,78 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return node;
         }
         let nullability = self.nullability_for(prepared.root_identity.canonical_id.as_ref());
+        self.normalize_inferred_initializer_type(node, nullability)
+    }
+
+    fn normalize_inferred_initializer_type(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
         let normalized = self.normalize_widened_object_literals(node, nullability);
         self.regularized_source_node_with_policy(normalized, nullability)
     }
 
-    /// Defaulted parameters carry inferred initializer types in the located
-    /// signature. Normalize those fresh literals before publishing the header;
-    /// authored parameter types have no literal origins and keep their shape.
-    fn normalize_inferred_signature_parameters(
+    /// Class surfaces publish each field as an independent initializer. Work
+    /// only on the shape already lowered; reference carriers stay deferred.
+    fn normalize_class_initializers(
         &self,
         node: SemanticNodeId,
-        canonical: &str,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> SemanticNodeId {
         let graph = self.graph();
         let Some(data) = graph.node_data(node) else {
             return node;
         };
-        let SemanticNodeData::Signature {
-            kind,
-            params,
-            return_type,
-            type_parameters,
-            occurrence,
-            return_carrier,
-            signature_span,
-            return_type_span,
-            predicate,
-            is_abstract,
-        } = data.as_ref()
-        else {
-            return node;
-        };
-        let nullability = self.nullability_for(canonical);
-        let normalized: Vec<_> = params
-            .iter()
-            .map(|param| {
-                let mut normalized = param.copy();
-                let widened = self.normalize_widened_object_literals(param.ty, nullability);
-                normalized.ty = self.regularized_source_node_with_policy(widened, nullability);
-                normalized
-            })
-            .collect();
-        if params.iter().eq(normalized.iter()) {
-            return node;
-        }
-        graph.intern_preserving_scope(
-            node,
-            SemanticNodeData::Signature {
-                kind: *kind,
-                params: normalized.into(),
-                return_type: *return_type,
-                type_parameters: type_parameters.share(),
-                occurrence: occurrence.clone(),
-                return_carrier: return_carrier.clone(),
-                signature_span: *signature_span,
-                return_type_span: *return_type_span,
-                predicate: *predicate,
-                is_abstract: *is_abstract,
+        let normalized = match data.as_ref() {
+            SemanticNodeData::Object(view) => {
+                let entries = view
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SurfaceEntry::Member(member) => SurfaceEntry::Member(SurfaceMember {
+                            value: self
+                                .normalize_inferred_initializer_type(member.value, nullability),
+                            ..member.clone()
+                        }),
+                        _ => entry.clone(),
+                    })
+                    .collect();
+                SemanticNodeData::Object(SurfaceView::from_entries(
+                    entries,
+                    view.keyspace,
+                    view.has_known_index_signature(),
+                ))
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let normalized: Arc<[_]> = arms
+                    .iter()
+                    .map(|arm| self.normalize_class_initializers(*arm, nullability))
+                    .collect();
+                if arms.iter().eq(normalized.iter()) {
+                    return node;
+                }
+                SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        arms.origin_category(),
+                        normalized,
+                    ),
+                )
+            }
+            SemanticNodeData::MergedDecl { contributors } => SemanticNodeData::MergedDecl {
+                contributors: contributors
+                    .iter()
+                    .map(|contributor| self.normalize_class_initializers(*contributor, nullability))
+                    .collect::<Vec<_>>()
+                    .into(),
             },
-        )
+            _ => return node,
+        };
+        if normalized == *data {
+            node
+        } else {
+            graph.intern_preserving_scope(node, normalized)
+        }
     }
 
     /// The type of a value whose declared type is its initializer's
@@ -3978,6 +4002,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &scope,
             &mut substitutions,
         );
+        let shape = self.normalize_class_initializers(shape, self.nullability_for(canonical));
         if context.mode != ProjectionMode::Expanded {
             return Some(shape);
         }
@@ -9299,6 +9324,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             scope,
             substitutions,
         );
+        let substituted = if decl_kind == verter_session_query::declarations::TypeDeclKind::Class {
+            let nullability = scope
+                .canonical_file()
+                .as_deref()
+                .map(|canonical| self.nullability_for(canonical))
+                .unwrap_or(verter_session_query::flow::policy::NullabilityPolicy::Strict);
+            self.normalize_class_initializers(substituted, nullability)
+        } else {
+            substituted
+        };
 
         // 3. Plan the projection of the demanded view: per-arm
         //    ProjectionStamp application + deferred-carrier evaluation under
@@ -9726,6 +9761,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &mut substitutions,
                     context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
                 );
+                let value = self
+                    .normalize_inferred_initializer_type(value, self.nullability_for(canonical));
                 own.push(SurfaceEntry::Member(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
                     value,
@@ -10126,7 +10163,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 positions,
                 class_type_params,
                 context,
-                is_class,
                 own,
             },
         ))
@@ -10143,17 +10179,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let SurfaceEntry::Member(member) = entry else {
                 continue;
             };
-            // An object's direct array/union properties widen as whole values;
-            // a nested object keeps its context. Class fields are independent
-            // initializers, so their complete inferred value widens instead.
-            if members.is_class
-                || matches!(
-                    self.graph().node_data(member.value).as_deref(),
-                    Some(SemanticNodeData::Array { .. } | SemanticNodeData::Union(_))
-                )
-            {
-                member.value = self.normalize_widened_object_literals(member.value, nullability);
-            }
+            member.value = self.normalize_widened_object_literals(member.value, nullability);
         }
         let node = self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(members.own, None, false)),
@@ -16106,6 +16132,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(remap_node) = mapper.name_remap else {
             return MappedKeyRemapOutcome::Keep(key.key.clone());
         };
+        #[cfg(any(test, feature = "test-support"))]
+        MAPPED_NAME_REMAP_EVALUATIONS.set(MAPPED_NAME_REMAP_EVALUATIONS.get() + 1);
         // Kind-preserving substitution: the `as` clause sees the key's
         // ORIGINAL literal (probe12: `{ [K in 1 as K extends number ?
         // "n" : "s"]: K }` = `{ n: 1 }` — a stringified K would select
@@ -20263,7 +20291,6 @@ pub(super) struct ValueMembers {
     positions: std::collections::VecDeque<(u32, ValueMemberFacts)>,
     class_type_params: Vec<verter_type_expr::facts::NarrowTypeParam>,
     context: crate::semantic_query::ProjectionReductionContext,
-    is_class: bool,
     own: Vec<SurfaceEntry>,
 }
 

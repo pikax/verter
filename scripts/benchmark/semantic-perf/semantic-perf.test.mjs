@@ -10,6 +10,7 @@
 //   node --test scripts/benchmark/semantic-perf/semantic-perf.test.mjs
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -958,6 +959,33 @@ const resummarize = (run) => {
 };
 const firstOf = (run, arm, measured = true) =>
   run.invocations.find((i) => i.arm === arm && i.warmup !== measured);
+
+test("validation uses the committed reference unless an alternate is explicitly selected", () => {
+  const dir = mkdtempSync(join(tmpdir(), "semantic-reference-"));
+  try {
+    const expectedPath = join(dir, "expected.json");
+    const runPath = join(dir, "results.json");
+    const expectedText = JSON.stringify(EXPECTED);
+    writeFileSync(expectedPath, expectedText);
+    const run = syntheticRun();
+    run.meta.expected = { file: expectedPath, sha256: sha256Text(expectedText) };
+    writeFileSync(runPath, JSON.stringify(run));
+    const invoke = (...args) => {
+      const result = spawnSync(process.execPath, [join(HERE, "validate.mjs"), ...args, runPath], {
+        encoding: "utf8",
+      });
+      assert.equal(result.error, undefined);
+      // Synthetic paths intentionally have no raw files on disk. The reference
+      // digest diagnostic distinguishes selection from those other failures.
+      assert.equal(result.status, 1, result.stderr);
+      return result.stdout;
+    };
+    assert.match(invoke(), /reference digest differs/);
+    assert.doesNotMatch(invoke("--expected", expectedPath), /reference digest differs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("a well-formed synthetic run passes and compares the matched row", () => {
   const run = syntheticRun();

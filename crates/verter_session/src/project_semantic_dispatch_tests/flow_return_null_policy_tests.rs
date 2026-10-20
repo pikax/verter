@@ -5794,13 +5794,13 @@ const OBJECT_LITERAL_NORMALIZATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
         "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
         "{ o: { a: number; b: number; z?: undefined } | { a: number; z?: undefined; b?: undefined } } | { o: { z: number; a?: undefined; b?: undefined } }",
     ),
-    // { o: { p: { a: number; } | { a: number; b: number; }; }; }
+    // { o: { p: { a: number; b?: undefined; } | { a: number; b: number; }; }; }
     (
         "depthTwo",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
-        "{ o: { p: { a: number } | { a: number; b: number } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
+        "{ o: { p: { a: number; b: number } | { a: number; b?: undefined } } }",
     ),
     // { o: ({ b?: undefined; a: number; } | { a: number; b: number; })[]; }
     (

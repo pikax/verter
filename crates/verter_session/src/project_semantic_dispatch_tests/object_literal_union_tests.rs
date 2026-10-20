@@ -39,9 +39,13 @@ function emptyReturn(flag: boolean) { return flag ? {} : { a: 1 }; }
 const holder = {
     arr: [{ a: 1 }, { b: "x" }],
     conditional: c ? { a: 1 } : { b: "x" },
-    deep: { conditional: c ? { a: 1 } : { b: "x" } },
+    deep: {
+        conditional: c ? { a: 1 } : { b: "x" },
+        arr: [{ a: 1 }, { b: "x" }],
+    },
 };
 class Fields {
+    arr = [{ a: 1 }, { b: "x" }];
     static arr = [{ a: 1 }, { b: "x" }];
     static conditional = c ? { a: 1 } : { b: "x" };
 }
@@ -49,6 +53,9 @@ function defaultArray(value = [{ a: 1 }, { b: "x" }]) { return value; }
 function defaultConditional(value = c ? { a: 1 } : { b: "x" }) { return value; }
 function annotatedArray(value: ({ a: number } | { b: string })[]) { return value; }
 function defaultSeparate(value = separate) { return value; }
+const arrow = (value = [{ a: 1 }, { b: "x" }]) => value;
+const methods = { method(value = [{ a: 1 }, { b: "x" }]) { return value; } };
+const expression = function(value = [{ a: 1 }, { b: "x" }]) { return value; };
 type __Probe = typeof arr;
 type Conditional = typeof cond;
 type Nested = typeof nested;
@@ -68,12 +75,19 @@ type EmptyReturn = ReturnType<typeof emptyReturn>;
 type MemberArray = typeof holder.arr;
 type MemberConditional = typeof holder.conditional;
 type DeepMemberConditional = typeof holder.deep.conditional;
+type DeepMemberArray = typeof holder.deep.arr;
+type Holder = typeof holder;
+type InstanceArray = Fields["arr"];
+type StaticIndexedArray = (typeof Fields)["arr"];
 type StaticArray = typeof Fields.arr;
 type StaticConditional = typeof Fields.conditional;
 type DefaultArray = NonNullable<Parameters<typeof defaultArray>[0]>;
 type DefaultConditional = NonNullable<Parameters<typeof defaultConditional>[0]>;
 type AnnotatedArray = Parameters<typeof annotatedArray>[0];
 type DefaultSeparate = NonNullable<Parameters<typeof defaultSeparate>[0]>;
+type ArrowParameter = NonNullable<Parameters<typeof arrow>[0]>;
+type MethodParameter = NonNullable<Parameters<typeof methods.method>[0]>;
+type ExpressionParameter = NonNullable<Parameters<typeof expression>[0]>;
 export {};
 "#;
 
@@ -126,13 +140,20 @@ fn inferred_object_literal_unions_normalize_only_fresh_members() {
                 ("EmptyReturn", "{ a?: undefined; } | { a: number; }"),
                 ("MemberArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("MemberConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
-                ("DeepMemberConditional", "{ a: number; } | { b: string; }"),
+                ("DeepMemberConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("DeepMemberArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("Holder", "{ arr: ({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]; conditional: { a: number; b?: undefined; } | { a?: undefined; b: string; }; deep: { conditional: { a: number; b?: undefined; } | { a?: undefined; b: string; }; arr: ({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]; }; }"),
+                ("InstanceArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("StaticIndexedArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("StaticArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("StaticConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
                 ("DefaultArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("DefaultConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
                 ("AnnotatedArray", "({ a: number; } | { b: string; })[]"),
                 ("DefaultSeparate", "({ a: number; } | { b: string; })[]"),
+                ("ArrowParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("MethodParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("ExpressionParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
             ] {
                 let (outcome, _) = host
                     .resolve_named_symbol_with_audit(
