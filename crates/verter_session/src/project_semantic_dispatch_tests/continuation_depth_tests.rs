@@ -213,11 +213,13 @@ fn declared_namespace_import_chains_answer_cold_and_warm_23() {
 #[test]
 fn indexed_namespace_import_chains_answer_cold_and_warm_control_1() {
     import_chain_named_answers(1, ImportChainKind::IndexedNamespaceReexport);
+    import_chain_named_answers(1, ImportChainKind::AliasedIndexedNamespaceReexport);
 }
 
 #[test]
 fn indexed_namespace_import_chains_answer_cold_and_warm_23() {
     import_chain_named_answers(23, ImportChainKind::IndexedNamespaceReexport);
+    import_chain_named_answers(23, ImportChainKind::AliasedIndexedNamespaceReexport);
 }
 
 #[test]
@@ -244,6 +246,7 @@ enum ImportChainKind {
     NamedDeclaredNamespace,
     IndexedDeclaredNamespace,
     ComputedIndexedNamespaceReexport,
+    AliasedIndexedNamespaceReexport,
 }
 
 fn import_chain_files(depth: usize, kind: ImportChainKind) -> Vec<(String, String)> {
@@ -256,12 +259,15 @@ fn import_chain_files(depth: usize, kind: ImportChainKind) -> Vec<(String, Strin
             ImportChainKind::Direct => format!("typeof import('./m{}').value", level - 1),
             ImportChainKind::NamespaceReexport
             | ImportChainKind::IndexedNamespaceReexport
-            | ImportChainKind::ComputedIndexedNamespaceReexport => {
+            | ImportChainKind::ComputedIndexedNamespaceReexport
+            | ImportChainKind::AliasedIndexedNamespaceReexport => {
                 files.push((
                     format!("ns{level}.ts"),
                     format!("export * as ns from './m{}';", level - 1),
                 ));
-                if matches!(kind, ImportChainKind::ComputedIndexedNamespaceReexport) {
+                if matches!(kind, ImportChainKind::AliasedIndexedNamespaceReexport) {
+                    "ImportedNamespace['value']".to_string()
+                } else if matches!(kind, ImportChainKind::ComputedIndexedNamespaceReexport) {
                     format!("(typeof import('./ns{level}').ns)[SelectedKey]")
                 } else if matches!(kind, ImportChainKind::IndexedNamespaceReexport) {
                     format!("(typeof import('./ns{level}').ns)['value']")
@@ -289,6 +295,9 @@ fn import_chain_files(depth: usize, kind: ImportChainKind) -> Vec<(String, Strin
             }
         };
         let prelude = match kind {
+            ImportChainKind::AliasedIndexedNamespaceReexport => {
+                format!("type ImportedNamespace = typeof import('./ns{level}').ns;")
+            }
             ImportChainKind::NamedDeclaredNamespace => {
                 format!("import {{ ns }} from './ns{level}';")
             }

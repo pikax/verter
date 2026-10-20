@@ -530,6 +530,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then(|| self.recursive_ref_sentinel(identity, Arc::from([])))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_reference_projection(
         &self,
         node: SemanticNodeId,
@@ -538,6 +539,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         suspend: bool,
+        ancestors: &[ProjectionFrame],
     ) -> ReferenceProjectionPlan {
         match data {
             // The terminal nominal carrier IS the type it denotes: resolving
@@ -602,6 +604,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return ReferenceProjectionPlan::Ready(
                         self.recursive_ref_sentinel(identity, Arc::from([])),
                     );
+                }
+                // A demanded alias is transparent to navigation. Resolve it
+                // on this worklist before an index selects its value; aliases
+                // in member-value positions still keep their references.
+                if context.mode == ProjectionMode::Navigate
+                    && !self.in_deferred_interior(ancestors)
+                    && matches!(
+                        self.prepared_decl_kind(identity),
+                        Some(verter_session_query::declarations::TypeDeclKind::Alias)
+                    )
+                {
+                    return ReferenceProjectionPlan::Query(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(
+                                identity.canonical_id.clone(),
+                                identity.owner,
+                                identity.decl_name.clone(),
+                            ),
+                            Arc::from([]),
+                            self.instantiate_context_for(&identity.canonical_id, context),
+                        ),
+                    ));
                 }
                 if matches!(
                     context.mode,
@@ -1860,6 +1884,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inputs,
                     substitutions,
                     seam.suspend,
+                    frames,
                 );
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {
