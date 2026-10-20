@@ -31,7 +31,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. Exact identity compares binders positionally with constraint/default identity. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -39,7 +39,7 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | Path | Owns |
 |---|---|
 | `semantic_query/stable_key.rs` | `VerterStableV1` encoding and `StableKey::cmp`. |
-| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union` / `intern_ordered_intersection` — the two crate-private canonical builders, plus `compare_structural` and `CanonicalEvidence`. |
+| `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
 | `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. |
 
@@ -54,8 +54,21 @@ and **exactly two** crate-private builders:
 SemanticQueryKey::ReduceUnion { members, nullability }      → build_reduce_union
 SemanticQueryKey::ReduceIntersection { input, purpose, ctx } → build_reduce_intersection
         ↓                                                           ↓
-canonical_algebra::intern_ordered_union          canonical_algebra::intern_ordered_intersection
+canonical_algebra::intern_ordered_union_charged  canonical_algebra::intern_ordered_intersection_charged
+        └──────────── admit_cross_product(meter) ──────────────────┘
 ```
+
+The builders called inside a connected demand take the demand's
+`ConstructionMeter` (`ConstructionMeter::charged(ledger)`): every
+distribution a construction runs is weighed by `admit_cross_product` against
+the checker's cross-product limit from the counts alone, then paid to the
+ledger before its first constituent is built, so a refusal stops it before it
+allocates. The unmetered forms are not production seams for a demand:
+`intern_ordered_union` (`ConstructionMeter::UNMETERED`) serves a construction
+outside any connected demand — its distributions are still weighed, but
+charged to no ledger — and `intern_ordered_intersection` /
+`intern_ordered_intersection_paying_for_tests` exist only under `test` /
+`test-support`.
 
 Both builders perform recursive same-kind flattening, the lattice absorption
 laws, literal subsumption on unions, structural `T | T = T` / `T & T = T`
@@ -71,13 +84,28 @@ nullable-only list becomes `null` if it names `null`, else `undefined`. The
 policy is family identity on `ReduceUnion` and is recorded on the canonical
 stamp (`CompositeOriginCategory::Canonical(NullabilityPolicy)`), so the two
 settings never share a memo entry, a node, or the pre-seal skip.
-Intersections run the strict algebra.
+Intersections run the strict algebra under the default
+`IntersectionPurpose::CheckerReduction` (a derived intersection: every
+redundant supertype drops). `IntersectionPurpose::WrittenTypeNode(nullability)`
+is the checker's construction of a WRITTEN intersection type node
+(`getTypeFromIntersectionTypeNode`, `intern_written_intersection_charged`):
+the same reduction, except the written `string & {}` pair (`number`,
+`bigint`, a pattern template literal, either order —
+`is_kept_primitive_over_empty_object`) stays as written, and with
+`strictNullChecks` off a union arm is first erased of `null` / `undefined`.
+The typeinfo materializer (`materialize_through_aliases`) reduces an
+intersection written at an alias root through it, so a named demand answers
+`never` for conflicting discriminants, distributes over a union, and absorbs
+`(A & B) & (A | B)` to `A & B`. The raise fold keeps the `{}` arm of that
+written pair instead of dropping it as `{} & X ≡ X`.
 
 `ProjectSemanticDispatch::intern_normalized_union_or_intersection` is the
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
 through; its unions run the strict algebra. The flow-return evaluator, which
 answers under its function's own project policy, constructs through
-`intern_normalized_union` with the frame's policy instead. Two composite
+`intern_normalized_union` with the frame's policy instead. Conditional branch
+unions use that same builder with the request project's nullability policy.
+Two composite
 constructions are deliberately outside the funnel, both
 `CompositeList::ordered_carrier` mints, and both for the same reason — an
 ordered carrier is an authored sequence, not a commutative intersection, and
@@ -102,17 +130,23 @@ A written union or intersection stays as written through lowering — its
 `AuthoredShell`, or a declaration body's order-preserving `PreservingRebuild`
 view. Where a named type is PUBLISHED (the typeinfo materializer
 `materialize_through_aliases`, both the named-resolve and evaluate entries),
-`ProjectSemanticDispatch::reduced_written_composite` asks the same two queries
-for the type the checker constructs from it when that construction absorbs a
-literal: `"a" | string` is `string`, a pattern template absorbs the literals
-it matches, `string & "a"` is `"a"`. Only a union holding a literal beside a
-primitive or pattern template, or an intersection of literals and primitives
-alone, is offered; every other written composite (and one whose reduction
-absorbs nothing) stays as written in its written order. The reducer's outcome
+a written intersection at the alias root is reduced by `ReduceIntersection`
+for a written type node (under the root file's `strictNullChecks`), and a
+union by `ProjectSemanticDispatch::reduced_written_union`, which asks
+`ReduceUnion` for the type the checker constructs from it when that
+construction absorbs a literal: `"a" | string` is `string`, a pattern
+template absorbs the literals it matches. An alias is transparent to that
+construction, so a named arm (a declaration reference or placeholder) is
+resolved first: it stands for its literal, primitive or pattern-template
+resolution, or contributes its resolved union's arms (`type A = "a"`: `A |
+string` is `string`); any other named arm stays by its name. Only a union
+holding a literal beside a primitive or pattern template is offered; every
+other union (and one whose reduction absorbs nothing, `A | "b"`) stays as it
+was published. The reducer's outcome, or a named arm's failed resolution,
 returns typed, so a fault fails the publication through the materializer's
-fault/miss split while a miss keeps the written composite. Only the published
-alias body is reduced; a composite nested in a member or element stays shallow
-until the consumer walks to it.
+fault/miss split while a miss keeps the union. Only the published alias body
+is reduced; a composite nested in a member or element stays shallow until the
+consumer walks to it.
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,

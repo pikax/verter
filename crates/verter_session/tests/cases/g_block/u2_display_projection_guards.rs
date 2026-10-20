@@ -617,6 +617,7 @@ fn mapped_type_renders_modifiers_and_name_remap() {
             source: t,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: k,
                 key_space,
                 value_expr: v,

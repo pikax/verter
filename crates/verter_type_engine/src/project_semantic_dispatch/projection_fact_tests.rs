@@ -44,6 +44,35 @@ fn a_complete_read_is_exact_for_every_projection() {
 }
 
 #[test]
+fn a_permissive_wildcard_is_an_exact_internal_operand() {
+    use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let (_, _, key) = keys();
+    let wildcard = graph.intern_node(SemanticNodeData::Opaque(QueryError::PermissiveWildcard));
+    let value = || QueryResult::Value(SemanticQueryValue::TypeNode(wildcard));
+    let (result, status) =
+        super::adopt_projection_result(&graph, &key, value(), ResultCompleteness::Complete, None);
+    assert_eq!(status, FactStatus::Complete);
+    assert!(
+        matches!(result, QueryResult::Value(SemanticQueryValue::TypeNode(node)) if node == wildcard)
+    );
+
+    let (_, status) = super::adopt_projection_result(&graph, &key, value(), partial(), None);
+    assert!(matches!(status, FactStatus::Unavailable(_)));
+
+    let fault = graph.intern_node(SemanticNodeData::Opaque(QueryError::Other("fault".into())));
+    let (_, status) = super::adopt_projection_result(
+        &graph,
+        &key,
+        QueryResult::Value(SemanticQueryValue::TypeNode(fault)),
+        ResultCompleteness::Complete,
+        None,
+    );
+    assert!(matches!(status, FactStatus::Unavailable(_)));
+}
+
+#[test]
 fn a_partial_member_or_key_projection_is_a_presence_only_approximation() {
     let (shallow, key_of, _) = keys();
     for _key in [&shallow, &key_of] {

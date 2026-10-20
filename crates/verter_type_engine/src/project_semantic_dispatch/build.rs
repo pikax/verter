@@ -41,6 +41,11 @@ pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static OMIT_KEY_FILTER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
 /// that exceeds it has NOT established its root set and the result it
@@ -555,6 +560,12 @@ pub(super) struct InferScan {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Native Omit key insertions and membership probes on this thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn omit_key_filter_steps_for_tests() -> usize {
+        OMIT_KEY_FILTER_STEPS.with(std::cell::Cell::get)
+    }
+
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
@@ -10625,6 +10636,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 kind: crate::semantic_query::MapperKind::Identity,
                 // `{ [K in keyof T]…: T[K] }` over the utility's own `T`.
                 over_type_variable: true,
+                modifiers_type: None,
             }
         };
 
@@ -10780,6 +10792,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // evaluate path.
                     kind: crate::semantic_query::MapperKind::Computed,
                     over_type_variable: false,
+                    // `K extends keyof any`: no modifiers.
+                    modifiers_type: None,
                 };
                 // Source is K; `build_mapped_type` reads names from K's
                 // keyspace branch when the source isn't an Object.
@@ -11021,7 +11035,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return (QueryResult::Value(result), fence, false, None);
                     }
                 };
-                let omit_set: FxHashSet<&PropertyKey> = omit_names.iter().collect();
+                let omit_set: FxHashSet<&PropertyKey> = omit_names
+                    .iter()
+                    .inspect(|_| {
+                        #[cfg(any(test, feature = "test-support"))]
+                        OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
+                    })
+                    .collect();
                 let omitted_event_names: FxHashSet<&str> = omit_names
                     .iter()
                     .filter_map(PropertyKey::as_string)
@@ -11055,10 +11075,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .filter_map(|entry| match entry {
                         SurfaceEntry::Member(member)
                             if member.visibility.is_public()
-                                && member
-                                    .key
-                                    .cloned_known()
-                                    .is_none_or(|key| !omit_set.contains(&key)) =>
+                                && member.key.cloned_known().is_none_or(|key| {
+                                    #[cfg(any(test, feature = "test-support"))]
+                                    OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
+                                    !omit_set.contains(&key)
+                                }) =>
                         {
                             Some(entry.clone())
                         }
@@ -13402,6 +13423,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node
         };
         let node = match data.as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+                self.primitive_node(PrimitiveKind::Never)
+            }
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
@@ -13601,10 +13625,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|arm| self.resolve_signature_source_carrier(*arm, published))
             .collect();
-        super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
             self.graph(),
             &surfaces,
-        )
+            self.construction_meter(),
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        conflicts
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -13635,6 +13664,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|member| self.key_set_of(*member))
             .collect::<Option<_>>()?;
+        // A union has only keys shared by every arm. An empty arm's key
+        // set is complete negative evidence, including nullish operands.
+        if is_union
+            && keys.iter().any(|key| {
+                matches!(
+                    self.graph().node_data(*key).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                )
+            })
+        {
+            return Some(self.primitive_node(PrimitiveKind::Never));
+        }
         let names_alone = keys.iter().all(|keys| {
             let graph = self.graph();
             let literal = |node: SemanticNodeId| {
@@ -14565,31 +14606,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         source: SemanticNodeId,
         source_optional: impl Fn() -> Option<bool>,
     ) -> SemanticNodeId {
-        let (strict_null_checks, exact_optional) = self
-            .graph()
-            .node_scope(source)
-            .and_then(|scope| scope.canonical_file())
-            .map_or((true, false), |canonical| {
-                let options = self.ctx.semantic_compiler_options_for(&canonical);
-                (
-                    options.strict_null_checks,
-                    options.exact_optional_property_types,
-                )
-            });
+        let (strict_null_checks, exact_optional) = self.optional_member_compiler_options(source);
         if !strict_null_checks {
             return value;
         }
-        let graph = self.graph();
-        let arms: Vec<SemanticNodeId> = match graph.node_data(value).as_deref() {
-            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
-            _ => vec![value],
-        };
-        let is_undefined = |arm: &SemanticNodeId| {
-            matches!(
-                graph.node_data(*arm).as_deref(),
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
-            )
-        };
+        let arms = self.union_arms(value);
+        let is_undefined = |arm: &SemanticNodeId| self.is_undefined_node(*arm);
         match mapper.optionality {
             crate::semantic_query::OptionalityMod::Add
                 if !exact_optional && !arms.iter().any(is_undefined) =>
@@ -14613,15 +14635,78 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     && arms.iter().any(is_undefined)
                     && source_optional() == Some(true) =>
             {
-                let kept: Vec<SemanticNodeId> =
-                    arms.into_iter().filter(|arm| !is_undefined(arm)).collect();
-                match kept.as_slice() {
-                    [] => self.primitive_node(PrimitiveKind::Never),
-                    [only] => *only,
-                    _ => self.intern_normalized_union_or_intersection(&kept, true),
-                }
+                self.without_undefined_arms(arms)
             }
             _ => value,
+        }
+    }
+
+    /// The read `value` of an optional member whose kept `?` carries the
+    /// `undefined` the read added (`removeMissingType`): `value` without
+    /// its `undefined` arm, unless the member's `declared` type holds one
+    /// itself. Without `strictNullChecks`, or under
+    /// `exactOptionalPropertyTypes`, a read adds none and `value` is kept.
+    /// `scope` is the node whose file's options decide.
+    pub(super) fn read_without_optional_member_undefined(
+        &self,
+        value: SemanticNodeId,
+        declared: SemanticNodeId,
+        scope: SemanticNodeId,
+    ) -> SemanticNodeId {
+        let (strict_null_checks, exact_optional) = self.optional_member_compiler_options(scope);
+        if !strict_null_checks || exact_optional {
+            return value;
+        }
+        let arms = self.union_arms(value);
+        if !arms.iter().any(|arm| self.is_undefined_node(*arm))
+            || self
+                .union_arms(declared)
+                .iter()
+                .any(|arm| self.is_undefined_node(*arm))
+        {
+            return value;
+        }
+        self.without_undefined_arms(arms)
+    }
+
+    /// `(strictNullChecks, exactOptionalPropertyTypes)` of the file `node`
+    /// is scoped to; a node with no file scope reads the strict defaults.
+    fn optional_member_compiler_options(&self, node: SemanticNodeId) -> (bool, bool) {
+        self.graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .map_or((true, false), |canonical| {
+                let options = self.ctx.semantic_compiler_options_for(&canonical);
+                (
+                    options.strict_null_checks,
+                    options.exact_optional_property_types,
+                )
+            })
+    }
+
+    fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
+            _ => vec![node],
+        }
+    }
+
+    fn is_undefined_node(&self, node: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+        )
+    }
+
+    fn without_undefined_arms(&self, arms: Vec<SemanticNodeId>) -> SemanticNodeId {
+        let kept: Vec<SemanticNodeId> = arms
+            .into_iter()
+            .filter(|arm| !self.is_undefined_node(*arm))
+            .collect();
+        match kept.as_slice() {
+            [] => self.primitive_node(PrimitiveKind::Never),
+            [only] => *only,
+            _ => self.intern_normalized_union_or_intersection(&kept, true),
         }
     }
 
@@ -14845,10 +14930,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // evaluation consumes it), so it participates in BOTH the memo
         // entry's observed self-roots (a remap-only edit must reject the
         // warm entry on the read-side validator — the R6/R21 invalidation
-        // rail) AND the structural `Normalize` origin edges below.
+        // rail) AND the structural `Normalize` origin edges below. A
+        // modifiers type other than `source` decides each produced member's
+        // modifiers, so it joins the set the same way.
         let contribution_nodes: Vec<SemanticNodeId> = [source, mapper.key_space, mapper.value_expr]
             .into_iter()
             .chain(mapper.name_remap)
+            .chain(mapper.modifiers_type)
             .collect();
         // Self-version rooting: all contribution nodes are
         // already-interned. Root the memo entry on the file content
@@ -15230,6 +15318,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source_member_index.entry(key).or_insert(member);
             }
         }
+        // A kept modifier is read off the modifiers type
+        // (`getModifiersTypeFromMappedType`): `source` itself, or the `X` of
+        // a key parameter constrained to `keyof X`. One that does not
+        // project leaves the source's (absent) modifiers.
+        let inherits_modifiers = mapper.optionality == crate::semantic_query::OptionalityMod::Keep
+            || mapper.readonly == crate::semantic_query::ReadonlyMod::Keep;
+        let modifiers_members = mapper
+            .modifiers_type
+            .filter(|_| inherits_modifiers && !keys.is_empty())
+            .and_then(|modifiers| self.source_members_for_published_projection(modifiers, context))
+            .map(|(members, reasons)| {
+                mapped_partial_reasons = mapped_partial_reasons.union(reasons);
+                members
+            });
+        let modifiers_member_index = modifiers_members.as_deref().map(|members| {
+            let mut index = FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
+        // `X[P]` over the modifiers type `X` is the property read `X[P]` — an
+        // overloaded method's whole signature group, an accessor's read
+        // type — under the member's kept `?`, which carries the `undefined`
+        // the read adds for an optional member.
+        let value_reads_modifiers_member = modifiers_member_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    graph,
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
         for key in &keys {
             // Cancellation before this key's remap substitution AND before
             // its value force — the two per-key forcing points.
@@ -15264,18 +15388,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             };
             let source_member = source_member_index.get(&key.key).copied();
+            let modifiers_member = match &modifiers_member_index {
+                Some(index) => index.get(&key.key).copied(),
+                None => source_member,
+            };
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
                 crate::semantic_query::OptionalityMod::Remove => false,
                 crate::semantic_query::OptionalityMod::Keep => {
-                    source_member.map(|m| m.optional).unwrap_or(false)
+                    modifiers_member.map(|m| m.optional).unwrap_or(false)
                 }
             };
             let readonly = match mapper.readonly {
                 crate::semantic_query::ReadonlyMod::Add => true,
                 crate::semantic_query::ReadonlyMod::Remove => false,
                 crate::semantic_query::ReadonlyMod::Keep => {
-                    source_member.map(|m| m.readonly).unwrap_or(false)
+                    modifiers_member.map(|m| m.readonly).unwrap_or(false)
                 }
             };
             // Value selection branches:
@@ -15368,7 +15496,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.mapped_member_optionality(mapper, value, source, key_node)
                 })
             } else {
-                value
+                match (modifiers_member, mapper.modifiers_type) {
+                    (Some(member), Some(modifiers))
+                        if value_reads_modifiers_member && optional && member.optional =>
+                    {
+                        self.read_without_optional_member_undefined(value, member.value, modifiers)
+                    }
+                    _ => value,
+                }
             };
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
@@ -15398,7 +15533,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 // Rationale on [`mapped_produced_key_inherits_declaration_site`]
                 // — the one shared predicate both rails judge inheritance with.
-                let identity_source = source_member.filter(|_| {
+                // A member taking its modifiers from the modifiers type links
+                // to that member's declaration (`shouldLinkPropDeclarations`).
+                let identity_source = source_member.or(modifiers_member).filter(|_| {
                     mapped_produced_key_inherits_declaration_site(&produced_name, &key.key)
                 });
                 // SAFETY: mapped-type member synthesis (e.g.,
@@ -16591,7 +16728,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_audit::attribute!(ReduceUnion);
             self.build_normalize_composite(
                 members,
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability),
+                super::canonical_algebra::intern_ordered_union_charged(
+                    self.graph(),
+                    members,
+                    nullability,
+                    self.construction_meter(),
+                ),
             )
         }
     }
@@ -16602,13 +16744,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// [`Self::build_reduce_union`]; the algebra additionally applies
         /// the intersection lattice laws and the PROVEN-disjoint scalar
         /// collapse (`string & number = never`). Operand order is preserved.
+        /// The purpose selects a derived intersection's reduction or a
+        /// written type node's, which keeps the written `string & {}` pair.
         fn build_reduce_intersection(
             &self,
             input: crate::semantic_query::IntersectionInputRef,
-            _purpose: crate::semantic_query::IntersectionPurpose,
+            purpose: crate::semantic_query::IntersectionPurpose,
             context: crate::semantic_query::SemanticContextId,
         ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             verter_audit::attribute!(ReduceIntersection);
+            let reduce = |members: &[SemanticNodeId]| match purpose {
+                crate::semantic_query::IntersectionPurpose::CheckerReduction => {
+                    super::canonical_algebra::intern_ordered_intersection_charged(
+                        self.graph(),
+                        members,
+                        self.construction_meter(),
+                    )
+                }
+                crate::semantic_query::IntersectionPurpose::WrittenTypeNode(nullability) => {
+                    super::canonical_algebra::intern_written_intersection_charged(
+                        self.graph(),
+                        members,
+                        nullability,
+                        self.construction_meter(),
+                    )
+                }
+            };
             if let Some(steps) = input.as_steps() {
                 let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
                 for step in steps.iter() {
@@ -16635,16 +16796,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
-                self.build_normalize_composite(
-                    &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
-                )
+                self.build_normalize_composite(&members, reduce(&members))
             } else {
                 let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
-                self.build_normalize_composite(
-                    &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
-                )
+                self.build_normalize_composite(&members, reduce(&members))
             }
         }
     }
@@ -16692,6 +16847,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A distribution the connected demand could not pay for is the
+        // written composite, a partial of the rails it exhausted.
+        if !composite.evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(composite.evidence.exhausted);
         }
         output
     }
@@ -17077,7 +17237,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().node_data(reduced).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
                 if *diagnostic == relation.recursion_diagnostic()
-        ) && !matches!(self.peek_special(operand), Some((SpecialKind::Error, _)))
+        ) && !matches!(
+            self.peek_special(operand),
+            Some((SpecialKind::Error | SpecialKind::Wildcard, _))
+        )
     }
 
     /// Whether the runtime awaited relation FAILED on `operand` with TS1062,
@@ -17320,7 +17483,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
-                | SpecialKind::Error => special,
+                | SpecialKind::Error
+                | SpecialKind::Wildcard => special,
             };
             return (resolved, Some(decided));
         }
@@ -17928,7 +18092,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
-                | SpecialKind::Error => LibAwaited::Reduced(special),
+                | SpecialKind::Error
+                | SpecialKind::Wildcard => LibAwaited::Reduced(special),
             });
         }
         if self.settled_non_thenable(resolved) {
@@ -19266,6 +19431,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             arms,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
             super::canonical_algebra::DistributionOrigin::Distributed,
+            self.construction_meter(),
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
@@ -19296,10 +19462,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::QueryResult::Value(node) => node,
                     crate::semantic_query::QueryResult::Recursive(node) => node,
                     crate::semantic_query::QueryResult::Error(_) => {
-                        let composite = super::canonical_algebra::intern_ordered_intersection(
-                            self.graph(),
-                            members,
-                        );
+                        let composite =
+                            super::canonical_algebra::intern_ordered_intersection_charged(
+                                self.graph(),
+                                members,
+                                self.construction_meter(),
+                            );
                         self.deposit_canonical_evidence(composite.evidence);
                         composite.node
                     }
@@ -19320,116 +19488,194 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             members: &[SemanticNodeId],
             nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ) -> SemanticNodeId {
-            let composite =
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+            let composite = super::canonical_algebra::intern_ordered_union_charged(
+                self.graph(),
+                members,
+                nullability,
+                self.construction_meter(),
+            );
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
         }
     }
 
     construction_ordinal_seam! {
-        /// The type the checker constructs from a WRITTEN union or
-        /// intersection (`getUnionType` / `getIntersectionType` over its
-        /// arms) when that construction absorbs a literal: `"a" | string` is
-        /// `string`, `1 | number | "x"` is `number | "x"`, `"a1" | `a${number}`
-        /// | "ab"` is `"ab" | `a${number}``, and `string & "a"` is `"a"`.
+        /// The type the checker constructs from a WRITTEN union
+        /// (`getUnionType` over its arms) when that construction absorbs a
+        /// literal: `"a" | string` is `string`, `1 | number | "x"` is
+        /// `number | "x"`, `"a1" | `a${number}` | "ab"` is
+        /// `"ab" | `a${number}``.
         ///
-        /// `None` for any other node, for a written union with no literal
-        /// beside a primitive or pattern template that could absorb it, and
-        /// for a written intersection not made of literals and primitives
-        /// alone: such a composite is not re-decided here and stays the
-        /// authored display form in its written order (`"a" | "b" | never`,
-        /// `(1 | 2) & (2 | 3)`, `{ a: 1 } & { b: 2 }`).
+        /// An alias is transparent to that construction, so a named arm
+        /// (`type A = "a"`) is resolved before absorption is decided: an arm
+        /// resolving to a literal, primitive or pattern template stands for
+        /// its resolution, and one resolving to a union contributes that
+        /// union's arms, resolved the same way. Any other named arm stays
+        /// written by its name. A canonical union is offered too: the
+        /// canonical algebra keeps a named arm unresolved, so only its named
+        /// arms can still absorb or be absorbed.
         ///
-        /// Otherwise the shared `ReduceUnion` / `ReduceIntersection` query
-        /// decides the arms as they stand (a named arm is not resolved), unions
+        /// `None` for any other node and for a written union with no literal
+        /// beside a primitive or pattern template that could absorb it: such
+        /// a union is not re-decided here and stays the authored display form
+        /// in its written order (`"a" | "b" | never`, `A | "b"`).
+        ///
+        /// Otherwise the shared `ReduceUnion` query decides the resolved arms
         /// under the strict `null` / `undefined` algebra, and the outcome is
         /// returned typed: the reduced type when it absorbed a literal, the
-        /// written node itself when it absorbed none, and the reducer's error,
-        /// recursive back-edge or opaque result verbatim, for the caller to
-        /// classify as a fault or a miss.
-        fn reduced_written_composite(
+        /// written node itself when it absorbed none, and the reducer's (or a
+        /// named arm's resolution) error or opaque result verbatim, for the
+        /// caller to classify as a fault or a miss.
+        fn reduced_written_union(
             &self,
             node: SemanticNodeId,
         ) -> Option<QueryResult<SemanticNodeId>> {
             use crate::semantic_query::composite::CompositeOriginCategory as Category;
             let graph = self.graph();
-            let written = |category: Category| {
-                matches!(category, Category::AuthoredShell | Category::PreservingRebuild)
-            };
-            let (arms, is_union) = match graph.node_data(node)?.as_ref() {
-                SemanticNodeData::Union(arms) if written(arms.origin_category()) => {
-                    (arms.members_arc(), true)
-                }
-                SemanticNodeData::Intersection(arms) if written(arms.origin_category()) => {
-                    (arms.members_arc(), false)
+            let arms = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms)
+                    if matches!(
+                        arms.origin_category(),
+                        Category::AuthoredShell
+                            | Category::PreservingRebuild
+                            | Category::Canonical(_)
+                            | Category::CanonicalUnproven
+                    ) =>
+                {
+                    arms.members_arc()
                 }
                 _ => return None,
             };
-            // The written arms, nested composites of the same kind flattened
-            // as the reducer reads them.
-            let mut flat = Vec::with_capacity(arms.len());
-            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
-            while let Some(arm) = pending.pop() {
-                match graph.node_data(arm).as_deref() {
-                    Some(SemanticNodeData::Union(inner)) if is_union => {
-                        pending.extend(inner.iter().rev().copied());
-                    }
-                    Some(SemanticNodeData::Intersection(inner)) if !is_union => {
-                        pending.extend(inner.iter().rev().copied());
-                    }
-                    _ => flat.push(arm),
-                }
-            }
             let is_literal = |arm: &SemanticNodeId| {
                 matches!(
                     graph.node_data(*arm).as_deref(),
                     Some(SemanticNodeData::Literal(_) | SemanticNodeData::TemplateLiteral { .. })
                 )
             };
-            let is_primitive = |arm: &SemanticNodeId| {
+            // A named arm: a declaration reference, an alias shell or a
+            // declaration placeholder.
+            let is_named = |arm: SemanticNodeId| {
                 matches!(
-                    graph.node_data(*arm).as_deref(),
-                    Some(SemanticNodeData::Primitive(_))
+                    graph.node_data(arm).as_deref(),
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::Alias(_)
+                            | SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder { .. })
+                    )
                 )
             };
-            let reducible = if is_union {
-                // A supertype a literal arm may be absorbed into: its
-                // primitive, a pattern template, `any` or `unknown`.
-                let may_absorb = |arm: &SemanticNodeId| {
-                    matches!(
-                        graph.node_data(*arm).as_deref(),
+            // The arm a named arm stands for when deciding absorption: its
+            // resolution through any alias chain, unless that is neither a
+            // union nor a literal, primitive or pattern template. A
+            // resolution that fails is returned for the caller to classify.
+            let resolve_named = |arm: SemanticNodeId| -> Result<SemanticNodeId, QueryResult<SemanticNodeId>> {
+                let mut resolved = arm;
+                for _ in 0..16 {
+                    let key = match graph.node_data(resolved).as_deref() {
+                        Some(SemanticNodeData::Alias(inner)) => {
+                            resolved = *inner;
+                            continue;
+                        }
+                        Some(SemanticNodeData::DeclRef { identity }) => {
+                            SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+                                &identity.canonical_id,
+                                identity.owner,
+                                &identity.decl_name,
+                            ))
+                        }
+                        Some(SemanticNodeData::Opaque(
+                            crate::semantic_query::QueryError::DeclPlaceholder {
+                                canonical_id,
+                                owner,
+                                name,
+                                ..
+                            },
+                        )) => SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(canonical_id.clone(), *owner, name.clone()),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                            self.instantiate_context_for(
+                                canonical_id,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    ProjectionMode::Navigate,
+                                ),
+                            ),
+                        )),
                         Some(
-                            SemanticNodeData::Primitive(
-                                PrimitiveKind::String
-                                    | PrimitiveKind::Number
-                                    | PrimitiveKind::BigInt
-                                    | PrimitiveKind::Boolean
-                                    | PrimitiveKind::Any
-                                    | PrimitiveKind::Unknown
-                            ) | SemanticNodeData::TemplateLiteral { .. }
-                        )
-                    )
-                };
-                flat.iter().any(|literal| {
-                    is_literal(literal)
-                        && flat.iter().any(|arm| arm != literal && may_absorb(arm))
-                })
-            } else {
-                flat.iter().all(|arm| is_literal(arm) || is_primitive(arm))
-                    && flat.iter().any(is_literal)
-                    && flat.iter().any(is_primitive)
+                            SemanticNodeData::Union(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Primitive(_),
+                        ) => return Ok(resolved),
+                        Some(SemanticNodeData::Opaque(_)) if resolved != arm => {
+                            return Err(QueryResult::Value(resolved));
+                        }
+                        _ => return Ok(arm),
+                    };
+                    match self.execute_read(key).value {
+                        // No progress: the arm stays written by its name.
+                        QueryResult::Value(next) if next == resolved => return Ok(arm),
+                        QueryResult::Value(next) => resolved = next,
+                        // A recursive alias stays written by its name.
+                        QueryResult::Recursive(_) => return Ok(arm),
+                        error @ QueryResult::Error(_) => return Err(error),
+                    }
+                }
+                Ok(arm)
             };
+            // The written arms, nested and named unions flattened as the
+            // reducer reads them, and named arms standing for their
+            // resolution.
+            let mut flat = Vec::with_capacity(arms.len());
+            let mut seen_names: Vec<SemanticNodeId> = Vec::new();
+            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
+            while let Some(arm) = pending.pop() {
+                let arm = if is_named(arm) {
+                    if seen_names.contains(&arm) {
+                        flat.push(arm);
+                        continue;
+                    }
+                    seen_names.push(arm);
+                    match resolve_named(arm) {
+                        Ok(resolved) => resolved,
+                        Err(outcome) => return Some(outcome),
+                    }
+                } else {
+                    arm
+                };
+                match graph.node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Union(inner)) => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    _ => flat.push(arm),
+                }
+            }
+            // A supertype a literal arm may be absorbed into: its primitive, a
+            // pattern template, `any` or `unknown`.
+            let may_absorb = |arm: &SemanticNodeId| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(
+                        SemanticNodeData::Primitive(
+                            PrimitiveKind::String
+                                | PrimitiveKind::Number
+                                | PrimitiveKind::BigInt
+                                | PrimitiveKind::Boolean
+                                | PrimitiveKind::Any
+                                | PrimitiveKind::Unknown
+                        ) | SemanticNodeData::TemplateLiteral { .. }
+                    )
+                )
+            };
+            let reducible = flat.iter().any(|literal| {
+                is_literal(literal) && flat.iter().any(|arm| arm != literal && may_absorb(arm))
+            });
             if !reducible {
                 return None;
             }
-            let key = if is_union {
-                SemanticQueryKey::ReduceUnion {
-                    members: Arc::clone(&arms),
-                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                }
-            } else {
-                SemanticQueryKey::reduce_intersection_operands(graph, Arc::clone(&arms))
+            let members: Arc<[SemanticNodeId]> = Arc::from(flat.as_slice());
+            let key = SemanticQueryKey::ReduceUnion {
+                members,
+                nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
             };
             let reduced = match self.execute_read(key).value {
                 QueryResult::Value(reduced) => reduced,
@@ -19438,11 +19684,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let absorbed = match graph.node_data(reduced).as_deref() {
                 // An opaque reduction is the caller's to classify.
                 Some(SemanticNodeData::Opaque(_)) => true,
-                Some(SemanticNodeData::Union(kept)) if is_union => flat
+                Some(SemanticNodeData::Union(kept)) => flat
                     .iter()
                     .any(|arm| is_literal(arm) && !kept.contains(arm)),
-                Some(_) if is_union => flat.iter().any(|arm| is_literal(arm) && *arm != reduced),
-                Some(_) => is_literal(&reduced) && flat.contains(&reduced),
+                Some(_) => flat.iter().any(|arm| is_literal(arm) && *arm != reduced),
                 None => false,
             };
             Some(QueryResult::Value(if absorbed { reduced } else { node }))

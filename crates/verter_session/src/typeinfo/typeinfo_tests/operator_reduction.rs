@@ -376,21 +376,24 @@ fn render(answer: &TypeExpr) -> String {
 }
 
 /// A written union absorbs the literals its primitives and pattern
-/// templates already hold, and a written intersection of a literal and its
-/// primitive is the literal; every other written composite publishes exactly
-/// as written, in its written order. A written composite nested in a
-/// published member or element stays shallow there, and walking to it
-/// publishes the absorbed type.
+/// templates already hold, also when a literal or its supertype is written
+/// through an alias, and a written intersection of a literal and its
+/// primitive is the literal; every other written union publishes exactly as
+/// written, in its written order and by its written names. A written
+/// composite nested in a published member or element stays shallow there,
+/// and walking to it publishes the absorbed type.
 ///
 /// Measured on TypeScript 7.0.2 with `declare const p: <probe>; const s:
 /// never = p;` read off the TS2322 message (all four `strictNullChecks` ×
 /// `noImplicitAny` settings agree): `"a1" | `a${number}` | "ab"` is `"ab" |
 /// `a${number}``, `"a" | string` is `string`, `1 | number | "x"` is `number
-/// | "x"`, `string & "a"` is `"a"`.
+/// | "x"`, `string & "a"` is `"a"`, and with `type A = "a"`, `type AB = "a" |
+/// "b"`, `type S = string`: `A | string` is `string`, `AB | S | 1` is
+/// `string | 1`, while `A | "b"` keeps `A` by its name.
 #[test]
 fn a_written_composite_publishes_the_type_the_checker_constructs() {
     let host = make_host_with_footprint();
-    let absorbed: [(&str, &str, &[&str]); 4] = [
+    let absorbed: [(&str, &str, &[&str]); 6] = [
         (
             BENCH_LIB_PRELUDE,
             "\"a1\" | `a${number}` | \"ab\"",
@@ -399,28 +402,47 @@ fn a_written_composite_publishes_the_type_the_checker_constructs() {
         ("", "\"a\" | string", &["string"]),
         ("", "1 | number | \"x\"", &["'x'", "number"]),
         ("", "string & \"a\"", &["'a'"]),
+        ("type A = \"a\";\n", "A | string", &["string"]),
+        (
+            "type AB = \"a\" | \"b\";\ntype S = string;\n",
+            "AB | S | 1",
+            &["1", "string"],
+        ),
     ];
-    // Composites with no literal to absorb, or not made of literals and
-    // primitives alone: the written probe and its published text.
+    // Unions with no literal to absorb: the declarations beside the probe,
+    // the written probe and its published text.
     let kept = [
-        ("\"a\" | \"b\"", "'a' | 'b'"),
-        ("\"a\" | (\"b\" | \"c\")", "'a' | 'b' | 'c'"),
-        ("\"a\" | \"b\" | never", "'a' | 'b' | never"),
-        ("\"a\" | null | undefined", "'a' | null | undefined"),
-        ("{ a: 1 } & { b: 2 }", "{ a: 1 } & { b: 2 }"),
-        ("(1 | 2) & (2 | 3)", "(1 | 2) & (2 | 3)"),
-        ("number & string", "number & string"),
+        ("", "\"a\" | \"b\"", "'a' | 'b'"),
+        ("", "\"a\" | (\"b\" | \"c\")", "'a' | 'b' | 'c'"),
+        ("", "\"a\" | \"b\" | never", "'a' | 'b' | never"),
+        ("", "\"a\" | null | undefined", "'a' | null | undefined"),
     ];
     let mut failures = Vec::new();
-    for (index, (probe, expected)) in kept.iter().enumerate() {
+    for (index, (prelude, probe, expected)) in kept.iter().enumerate() {
         let canonical = format!("/probes/kept{index}.ts");
-        upsert_ts(&host, &canonical, &format!("type __Probe = {probe};\n"));
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!("{prelude}type __Probe = {probe};\n"),
+        );
         let published = render(&published_probe(&host, &canonical));
         if published != *expected {
             failures.push(format!(
                 "`{probe}`: kept as {expected}, published {published}"
             ));
         }
+    }
+    // A named arm with nothing to absorb it stays by its name.
+    upsert_ts(
+        &host,
+        "/probes/kept_named.ts",
+        "type A = \"a\";\ntype __Probe = A | \"b\";\n",
+    );
+    let published = constituents(&published_probe(&host, "/probes/kept_named.ts"));
+    if published != ["'b'", "A"] {
+        failures.push(format!(
+            "`A | \"b\"`: kept as [\"'b'\", \"A\"], published {published:?}"
+        ));
     }
     for (index, (container, walk)) in [
         ("{ x: \"a\" | string }", "__Probe[\"x\"]"),

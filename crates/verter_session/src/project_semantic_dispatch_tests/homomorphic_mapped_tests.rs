@@ -13,7 +13,10 @@
 //! s: null = v;` read off the TS2322 message.
 
 use super::checker_probe_lane_tests::{
-    evaluated_mismatches, mismatches, mismatches_in, ProbeProject,
+    evaluated_mismatches, mismatches, mismatches_in, with_probe, ProbeProject,
+};
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, SemanticNodeData,
 };
 
 const MAPPED: &str = "\
@@ -587,4 +590,68 @@ fn branded_key_space_never_enumerates_its_brand_members() {
             "{probe} must not read the brand's member names as keys"
         );
     }
+}
+
+/// A mapping over a key parameter constrained to `keyof T` — the shape of
+/// TypeScript's own `Pick` — reads its modifiers from `T`
+/// (`getModifiersTypeFromMappedType`): each selected property keeps its
+/// `readonly` and `?`. TypeScript 7.0.2: `PickOf<R, "a" | "b">` is `{
+/// readonly a: 1; b?: 2; }`. The key parameter's constraint decides it, so
+/// the same mapping over a literal key union, or over a parameter with an
+/// unrelated constraint, keeps no source modifiers. Each value is still the
+/// property read: an overloaded method keeps its whole signature group and an
+/// accessor its read type.
+#[test]
+fn a_mapping_over_a_keyof_constrained_key_parameter_keeps_source_modifiers() {
+    let source = "interface R { readonly a: 1; b?: 2; c: 3 }\n\
+        interface C { m(): void; o(x: string): 1; o(x: number): 2; get g(): string; set g(v: string); }\n\
+        interface O { f?(x: string): 1; }\n\
+        type PickOf<T, K extends keyof T> = { [P in K]: T[P] };\n\
+        type PickStr<T, K extends string> = { [P in K]: K extends keyof T ? T[K] : never };\n\
+        type ByKeys<T> = { [P in keyof T]: T[P] };";
+    let failures = evaluated_mismatches(
+        source,
+        &[
+            ("PickOf<R, 'a' | 'b'>", "{ readonly a: 1; b?: 2; }"),
+            ("PickOf<R, 'b'>", "{ b?: 2; }"),
+            ("PickOf<R, 'c'>", "{ c: 3; }"),
+            ("ByKeys<R>", "{ readonly a: 1; b?: 2; c: 3; }"),
+            ("{ [P in 'a' | 'b']: R[P] }", "{ a: 1; b: 2 | undefined; }"),
+            ("PickStr<R, 'a'>", "{ a: 1; }"),
+            ("PickOf<C, 'm'>", "{ m: () => void; }"),
+            ("PickOf<C, 'g'>", "{ g: string; }"),
+            ("PickOf<O, 'f'>", "{ f?: (x: string) => 1; }"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // The checker syntax has no overload-group print: count the signatures
+    // the picked `o` holds (TypeScript: both overloads).
+    let overloads = with_probe(source, "PickOf<C, 'o'>", |dispatch, node| {
+        let value = dispatch
+            .normalize_node_for_structural_fact_demand(
+                node,
+                ProjectionReductionContext::published(ProjectionMode::Expanded),
+            )
+            .into_usable_node()
+            .expect("the pick evaluates completely");
+        let graph = dispatch.graph();
+        let data = graph.node_data(value);
+        let Some(SemanticNodeData::Object(surface)) = data.as_deref() else {
+            panic!("the pick evaluates to an object");
+        };
+        let member = surface
+            .positive_members()
+            .iter()
+            .find(|member| member.key.as_string() == Some("o"))
+            .map(|member| member.value)
+            .expect("the pick keeps `o`");
+        match graph.node_data(member).as_deref() {
+            Some(SemanticNodeData::Object(group)) => group.call_signatures().len(),
+            _ => 1,
+        }
+    });
+    assert_eq!(
+        overloads, 2,
+        "a picked overloaded method keeps every overload"
+    );
 }

@@ -75,6 +75,7 @@ use crate::VerterHost;
 use verter_type_engine::instant::Instant;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::semantic_query::composite::CompositeOriginCategory;
 use verter_type_engine::semantic_query::{
     NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -1059,17 +1060,64 @@ pub(crate) fn materialize_through_aliases(
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
-            // Composite-bodied alias reduction. Lowering keeps a written
-            // union or intersection as written (its authored shell, or the
-            // declaration body's order-preserving view of it); under the
-            // publication modes an alias whose written composite absorbs a
-            // literal publishes the type the checker constructs from it
-            // (`type X = "a" | string` is `string`, `type Y = string & "a"`
-            // is `"a"`), reduced by the shared canonical algebra. Any other
-            // written composite stays as written, and so does one the reducer
-            // misses; a reducer fault propagates through the same fault/miss
-            // split as the operator bridge. `Skeleton` / `Identity` keep it.
-            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+            // An intersection written at the alias root is the type the
+            // checker constructs from it (`getTypeFromIntersectionTypeNode`):
+            // the shared `ReduceIntersection` reducer, for a written type
+            // node under the root file's `strictNullChecks`, decides
+            // discriminant conflicts, distribution over a union, nullable
+            // removal by `{}` and absorption. An intersection the checker
+            // keeps as written (`string & {}`, `QA & QB`) stays as written.
+            // A written intersection is the authored shell or the
+            // order-preserving projection of it an alias body publishes; a
+            // canonical intersection is already reduced, and an overload
+            // carrier or a heritage body is not re-decided. `Skeleton` and
+            // `Identity` keep the written shell, as for the operator bodies
+            // above.
+            Some(SemanticNodeData::Intersection(members))
+                if matches!(
+                    members.origin_category(),
+                    CompositeOriginCategory::AuthoredShell
+                        | CompositeOriginCategory::PreservingRebuild
+                ) && matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                let nullability = match store.node_scope_in_scope(current) {
+                    Some(NodeScopeId::File { canonical_id, .. }) => {
+                        dispatch.nullability_for(&canonical_id)
+                    }
+                    _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                };
+                let key = SemanticQueryKey::reduce_written_intersection_operands(
+                    store,
+                    members,
+                    nullability,
+                );
+                let step_result = match dispatch.execute_type_node(key) {
+                    QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
+                        QueryResult::Value(node)
+                    }
+                    QueryResult::Recursive(node) => QueryResult::Recursive(node),
+                    QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // A union written at the alias root publishes the type the
+            // checker constructs from it when that construction absorbs a
+            // literal (`type X = "a" | string` is `string`, also when the
+            // literal or its supertype is written through an alias), reduced
+            // by the shared `ReduceUnion` algebra. Any other written union
+            // stays as written, and so does one the reducer misses; a reducer
+            // fault propagates through the same fault/miss split as the
+            // operator bridge. `Skeleton` / `Identity` keep it.
+            Some(SemanticNodeData::Union(_))
                 if matches!(
                     mode,
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
@@ -1077,7 +1125,7 @@ pub(crate) fn materialize_through_aliases(
             {
                 let Some(step_result) = dispatch
                     .owning()
-                    .reduced_written_composite(current)
+                    .reduced_written_union(current)
                     .into_value_in(&scope)
                 else {
                     return Ok(current);
