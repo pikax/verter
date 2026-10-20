@@ -140,22 +140,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
-    /// Whether the node being finished is a rest element of the tuple whose
-    /// projection encloses it: the enclosing frame's cursor has just passed
-    /// that element.
-    fn in_variadic_slot(ancestors: &[ProjectionFrame]) -> bool {
-        matches!(
-            ancestors.last(),
-            Some(ProjectionFrame::CompositeResume { data, next_child, .. })
-                if matches!(
-                    data.as_ref(),
-                    SemanticNodeData::Tuple { elements, .. }
-                        if next_child
-                            .checked_sub(1)
-                            .and_then(|slot| elements.get(slot))
-                            .is_some_and(|element| element.rest)
-                )
-        )
+    /// The slot `child`, `parent`'s child at `index`, projects in. An
+    /// application a tuple spreads, under a carrier mode that splices it, is
+    /// [`ProjectionSlot::Spread`]: the tuple's own positions and length are
+    /// the application's, so it is instantiated there as the checker
+    /// instantiates it, while the same application stays a carrier anywhere
+    /// else. Its two readings are memoized apart, so neither depends on
+    /// which occurrence the projection meets first.
+    pub(super) fn child_projection_slot(
+        &self,
+        parent: &SemanticNodeData,
+        index: usize,
+        child: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionSlot {
+        let spread = matches!(
+            context.mode,
+            ProjectionMode::Navigate | ProjectionMode::Shallow
+        ) && matches!(
+            parent,
+            SemanticNodeData::Tuple { elements, .. }
+                if elements
+                    .get(index)
+                    .is_some_and(|element| element.rest && element.value == child)
+        ) && matches!(
+            self.graph().node_data(child).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        );
+        if spread {
+            ProjectionSlot::Spread
+        } else {
+            ProjectionSlot::Plain
+        }
+    }
+
+    /// The slot the node being finished projects in, read off the frame of
+    /// the composite enclosing it, whose cursor has just passed it.
+    pub(super) fn finishing_projection_slot(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        ancestors: &[ProjectionFrame],
+    ) -> ProjectionSlot {
+        match ancestors.last() {
+            Some(ProjectionFrame::CompositeResume {
+                data, next_child, ..
+            }) => next_child
+                .checked_sub(1)
+                .map_or(ProjectionSlot::Plain, |index| {
+                    self.child_projection_slot(data.as_ref(), index, node, context)
+                }),
+            _ => ProjectionSlot::Plain,
+        }
     }
 
     /// An application over its projected arguments: the application itself
@@ -254,14 +290,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         }
         // The carrier modes keep an application a carrier, except one a
-        // tuple spreads over closed arguments: the tuple's own positions and
-        // length are the application's, so it is instantiated where the
-        // checker instantiates it, to splice (`[...Deep<[0, 0]>, 1]`).
+        // tuple spreads over closed arguments, which is instantiated to
+        // splice (`[...Deep<[0, 0]>, 1]`).
         let keeps_carrier = matches!(
             context.mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) && !(context.mode != ProjectionMode::Skeleton
-            && Self::in_variadic_slot(ancestors)
+        ) && !(self.finishing_projection_slot(node, context, ancestors)
+            == ProjectionSlot::Spread
             && !projected_args.iter().any(|argument| {
                 super::super::raise::builtin_lowering_argument_is_open(self, *argument)
             }));
@@ -472,9 +507,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Tuple { elements, readonly } => {
                 let projected_elements: Vec<_> = elements
                     .iter()
-                    .map(|element| TupleElement {
+                    .enumerate()
+                    .map(|(index, element)| TupleElement {
                         label: element.label.clone(),
-                        value: projected(memo, element.value, context),
+                        value: projected_in(
+                            memo,
+                            element.value,
+                            context,
+                            self.child_projection_slot(data, index, element.value, context),
+                        ),
                         optional: element.optional,
                         rest: element.rest,
                     })

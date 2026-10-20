@@ -323,6 +323,71 @@ fn the_named_demand_answers_a_spread_recursion_as_the_checker_does() {
     );
 }
 
+/// One application both spread into a tuple and written plainly, in either
+/// order and in every projection mode: the spread splices its instantiation
+/// and the plain occurrence keeps its own reading, so neither answer depends
+/// on which occurrence the projection meets first.
+///
+/// TypeScript 7.0.2, `--strict --noLib` over the benchmark's library:
+/// `[Deep<[0, 0]>, ...Deep<[0, 0]>]["length"]` and its reverse are `3`, and
+/// `Mix<[0]>["length"]` and `Xim<[0]>["length"]` are `2`.
+#[test]
+fn a_spread_application_beside_its_plain_occurrence_answers_in_either_order() {
+    use super::mapped_expand_tests::{display, named_answer_with_library};
+    use verter_type_engine::semantic_query::ProjectionMode;
+    let source = format!(
+        "{SPREADS}type Mix<T extends unknown[]> = [Deep<T>, ...Deep<T>];\n\
+         type Xim<T extends unknown[]> = [...Deep<T>, Deep<T>];\n"
+    );
+    let members =
+        |probe: &str, mode| match &named_answer_with_library(&source, probe, mode, true).answer {
+            verter_type_expr::TypeExpr::Object(object) => object
+                .properties
+                .iter()
+                .map(|member| match member {
+                    verter_type_expr::ObjectMember::Property(property) => {
+                        (format!("{:?}", property.key), display(&property.ty))
+                    }
+                    other => panic!("`{probe}` has a member `{other:?}`"),
+                })
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            other => panic!("`{probe}` is an object type, got `{}`", display(other)),
+        };
+    let mut failures = Vec::new();
+    for mode in [
+        None,
+        Some(ProjectionMode::Navigate),
+        Some(ProjectionMode::Shallow),
+    ] {
+        for (probe, expected) in [
+            (r#"[Deep<[0, 0]>, ...Deep<[0, 0]>]["length"]"#, "3"),
+            (r#"[...Deep<[0, 0]>, Deep<[0, 0]>]["length"]"#, "3"),
+            (r#"Mix<[0]>["length"]"#, "2"),
+            (r#"Xim<[0]>["length"]"#, "2"),
+        ] {
+            let answer = display(&named_answer_with_library(&source, probe, mode, true).answer);
+            if answer != expected {
+                failures.push(format!(
+                    "{mode:?} `{probe}`: expected `{expected}`, got `{answer}`"
+                ));
+            }
+        }
+        let forward = members("{ a: Deep<[0, 0]>; b: [...Deep<[0, 0]>] }", mode);
+        let backward = members("{ b: [...Deep<[0, 0]>]; a: Deep<[0, 0]> }", mode);
+        if forward != backward {
+            failures.push(format!(
+                "{mode:?}: the members read {forward:?} in one order, {backward:?} in the other"
+            ));
+        }
+        if forward.values().nth(1).map(String::as_str) != Some("[1, 1]") {
+            failures.push(format!(
+                "{mode:?}: the spread member is unspliced in {forward:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The benchmark module's prelude and its non-tail reverse.
 const BENCH_REVERSE: &str = r#"type Exclude<T, U> = T extends U ? never : T;
 type Extract<T, U> = T extends U ? T : never;
