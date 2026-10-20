@@ -298,3 +298,107 @@ fn alias_geometry_retention_uses_checked_inclusive_live_charges() {
     );
     retention.force_alias_retained_for_test(0);
 }
+
+#[test]
+fn shared_operation_merge_transfers_all_categories_and_releases_duplicates() {
+    let budgets =
+        verter_session_query::resolution::InputResolutionBudgets::try_tightened_with_retention(
+            8, 8, 128, 4, 2, 2, 3,
+        )
+        .expect("test policy");
+    let retention = crate::InputResolutionRetention::new(budgets);
+    retention.scope(|| {
+        let mut parent = AttemptOutput::new();
+        parent.record_fact(fact(1)).unwrap();
+        let mut child = parent.clone();
+        child
+            .record_ambient_dependency(Arc::from("/ws/a.ts"), Arc::from("virtual:/a"))
+            .unwrap();
+        child
+            .record_consumed_resolution_observation(ConsumedResolutionObservationKey::PathProbe {
+                path: Arc::from("/ws/a.ts"),
+            })
+            .unwrap();
+        let expected = child.clone();
+        let mut forwarded = AttemptOutput::new();
+        forwarded
+            .merge(child)
+            .expect("empty parent adopts the child's leases");
+        parent
+            .merge(forwarded)
+            .expect("already reserved witnesses fit at the inclusive limit");
+        parent
+            .merge(expected.clone())
+            .expect("duplicates add no distinct charge");
+        assert_eq!(parent, expected);
+        drop(expected);
+        assert_eq!(retention.retained_for_test().2, 3);
+        drop(parent);
+        assert_eq!(
+            retention.retained_for_test().2,
+            0,
+            "merged leases are released exactly once"
+        );
+        let mut fresh = AttemptOutput::new();
+        fresh
+            .record_fact(fact(2))
+            .expect("all former charges were released");
+    });
+    assert_eq!(retention.retained_for_test().2, 0);
+}
+
+#[test]
+fn cross_operation_merge_still_checks_the_destination_budget() {
+    let budgets =
+        verter_session_query::resolution::InputResolutionBudgets::try_tightened_with_retention(
+            8, 8, 128, 4, 2, 2, 1,
+        )
+        .expect("test policy");
+    let destination = crate::InputResolutionRetention::new(budgets);
+    let source = crate::InputResolutionRetention::default();
+    let mut parent = destination.scope(|| {
+        let mut output = AttemptOutput::new();
+        output.record_fact(fact(1)).unwrap();
+        output
+    });
+    let child = source.scope(|| {
+        let mut output = AttemptOutput::new();
+        output.record_fact(fact(2)).unwrap();
+        output
+    });
+    assert!(matches!(parent.merge(child), Err(
+        verter_session_query::resolution::AttemptFailure::InputResolutionCompletedWitnessRetentionLimit {
+            retained: 1, prospective: 2, maximum: 1,
+        }
+    )));
+    assert_eq!(parent.observed_facts(), &[fact(1)]);
+    assert_eq!(source.retained_for_test().2, 0);
+    assert_eq!(destination.retained_for_test().2, 1);
+    drop(parent);
+    assert_eq!(destination.retained_for_test().2, 0);
+}
+
+#[test]
+fn cloned_output_mutation_is_isolated_and_holds_the_original_lease() {
+    let budgets =
+        verter_session_query::resolution::InputResolutionBudgets::try_tightened_with_retention(
+            8, 8, 128, 4, 2, 2, 2,
+        )
+        .expect("test policy");
+    let retention = crate::InputResolutionRetention::new(budgets);
+    retention.scope(|| {
+        let mut original = AttemptOutput::new();
+        original.record_fact(fact(1)).unwrap();
+        let mut changed = original.clone();
+        changed.record_fact(fact(2)).unwrap();
+        assert_eq!(original.observed_facts(), &[fact(1)]);
+        assert_eq!(changed.observed_facts(), &[fact(1), fact(2)]);
+        drop(changed);
+        assert_eq!(retention.retained_for_test().2, 1);
+        let shared = original.clone();
+        original.merge(shared).unwrap();
+        assert_eq!(original.observed_facts(), &[fact(1)]);
+        assert_eq!(retention.retained_for_test().2, 1);
+    });
+    assert_eq!(retention.retained_for_test().2, 0);
+}
