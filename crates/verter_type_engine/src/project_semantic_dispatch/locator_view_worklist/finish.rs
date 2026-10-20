@@ -137,6 +137,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             memo,
             self.in_deferred_interior(ancestors),
+            self.answer_position(ancestors),
         ))
     }
 
@@ -268,6 +269,50 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The type a closed `keyof` or indexed access nested in a published
+    /// `Expanded` answer denotes. The checker reduces an operator over
+    /// closed operands when it builds the type, so the answer holds what the
+    /// operator reads in an object, tuple, signature, type argument or union
+    /// as its root does: an access reads its member (a member naming a
+    /// declaration is that declaration, as the checker prints it), and a
+    /// `keyof` is the literal key set the union it stands in reduces over.
+    ///
+    /// `None` keeps the operator: another altitude (the carrier is the
+    /// demand-driven shape there), an operand naming a type parameter or an
+    /// `infer` binder (the operator is generic), or a read that stopped
+    /// (its partiality folds into the build) or reads nothing.
+    fn reduce_closed_answer_operator(
+        &self,
+        operator: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
+            return None;
+        }
+        let graph = self.graph();
+        if graph.binder_dependencies_for(operator).may_mention_binder() {
+            return None;
+        }
+        let reduced = match graph.node_data(operator).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => self.key_set_of(*base),
+            Some(SemanticNodeData::IndexedAccess { .. }) => {
+                match self.named_indexed_access(operator, context) {
+                    Some(named) => named.into_complete_active_query_build_node(self),
+                    None => self
+                        .evaluate_deferred_semantic_node_with_context(operator, context)
+                        .into_complete_active_query_build_node(self),
+                }
+            }
+            _ => None,
+        }?;
+        (reduced != operator
+            && !matches!(
+                graph.node_data(reduced).as_deref(),
+                Some(SemanticNodeData::Opaque(_) | SemanticNodeData::KeyOf { .. })
+            ))
+        .then_some(reduced)
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn finish_projection_structure(
         &self,
@@ -278,6 +323,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
         deferred_position: bool,
+        position: AnswerPosition,
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
@@ -686,12 +732,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context.into_structural_transit_with_mode(ProjectionMode::Navigate),
                 );
                 if may_reduce_operator(context) {
-                    match self.execute_type_node(SemanticQueryKey::KeyOf {
+                    let keys = match self.execute_type_node(SemanticQueryKey::KeyOf {
                         base: base_id,
                         context,
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
+                        _ => return self.opaque(QueryError::Miss),
+                    };
+                    // An arm's keys are constituents of the union or
+                    // intersection the answer holds: it reduces over P's
+                    // keys, as the checker's union flattens them. Elsewhere
+                    // the carrier is the `keyof P` the checker prints.
+                    if position == AnswerPosition::Constituent {
+                        self.reduce_closed_answer_operator(keys, context)
+                            .unwrap_or(keys)
+                    } else {
+                        keys
                     }
                 } else {
                     match graph.node_data(base_id).as_deref() {
@@ -732,13 +788,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         || deferred_position
                         || !matches!(graph.node_data(object_id).as_deref(), Some(SemanticNodeData::Object(_))));
                 if should_defer {
-                    graph.intern_preserving_scope(
+                    let access = graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::IndexedAccess {
                             object: object_id,
                             index,
                         },
-                    )
+                    );
+                    // The checker never keeps an access over closed operands:
+                    // it reads the member when it builds the type, wherever
+                    // the answer holds the access. The projection's own value
+                    // is its demand's to read; an operand, its operator's.
+                    match position {
+                        AnswerPosition::Constituent | AnswerPosition::Interior => self
+                            .reduce_closed_answer_operator(access, context)
+                            .unwrap_or(access),
+                        AnswerPosition::Root | AnswerPosition::Operand => access,
+                    }
                 } else {
                     match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                         base: object_id,

@@ -1098,7 +1098,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the read kept only when it is a declaration or class reference.
     /// `None` for any other access (a computed index, a partial read, a
     /// terminal that is not a named reference).
-    fn named_indexed_access(
+    pub(super) fn named_indexed_access(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
