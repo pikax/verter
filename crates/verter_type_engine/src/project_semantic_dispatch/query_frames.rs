@@ -76,6 +76,12 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
+/// Where each relation operand's carrier walk stopped in a decision's last
+/// run, by operand and checking site: the node whose step reached a read
+/// without an answer. Every node before it settled from answers the frame
+/// keeps, so the next run's operand demand resumes there.
+type OperandResumes = FxHashMap<(SemanticNodeId, TupleSplicePosition), SemanticNodeId>;
+
 /// What a query answered to the frame that needed it: the read (with the
 /// answering result's cost receipt, for the consumer's recording), and the
 /// carrier of the result that answered it, for the consumer to replay.
@@ -208,6 +214,7 @@ pub(super) struct CallBuild {
     frame: Option<usize>,
     suspension: Option<Box<super::call_resolve::CallSuspension>>,
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    resumes: OperandResumes,
     awaiting: Option<SemanticQueryKey>,
     /// The claim the awaited demand entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
@@ -220,6 +227,7 @@ pub(super) struct CallSeam {
     key: crate::semantic_query::ResolveCallKey,
     resume: Option<Box<super::call_resolve::CallSuspension>>,
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    resumes: OperandResumes,
     needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
@@ -255,6 +263,7 @@ impl From<InstantiatePoll> for FramePoll {
 #[derive(Default)]
 pub(super) struct ConditionalBuild {
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    resumes: OperandResumes,
     awaiting: Option<SemanticQueryKey>,
     /// The claim the awaited read entered with, until the runtime takes it.
     claim: Option<ClaimAttempt>,
@@ -267,6 +276,8 @@ pub(super) struct ConditionalBuild {
 /// frame's answers, and the reads they do not answer.
 pub(super) struct DecisionSeam {
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
+    /// Where the operand demands of the decision's last run stopped.
+    resumes: OperandResumes,
     /// The reads the run reached that no answer holds, in the order it
     /// reached them, each with the claim it entered with for the runtime
     /// to produce it.
@@ -1511,6 +1522,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let installed = self.decision_seam.replace(Some(DecisionSeam {
             answers: std::mem::take(&mut build.answers),
+            resumes: std::mem::take(&mut build.resumes),
             needs: Vec::new(),
             depth,
             nested: 0,
@@ -1531,6 +1543,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .take()
             .expect("the decision's seam stays installed for its run");
         build.answers = seam.answers;
+        build.resumes = seam.resumes;
         let mut needs = seam.needs.into_iter();
         let output = match needs.next() {
             Some((need, claim)) => match run.discard() {
@@ -2064,6 +2077,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             key: (**call).clone(),
             resume: build.suspension.take(),
             answers: std::mem::take(&mut build.answers),
+            resumes: std::mem::take(&mut build.resumes),
             needs: Vec::new(),
             depth,
         }));
@@ -2074,6 +2088,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .take()
             .expect("the walk's seam stays installed for its run");
         build.answers = seam.answers;
+        build.resumes = seam.resumes;
         match step {
             super::call_resolve::CallWalkStep::Suspended(suspension) => {
                 #[cfg(any(test, feature = "test-support"))]
@@ -2127,26 +2142,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// demand observed is the relation's to observe, so it is dropped.
     /// Whether the walk must stop for any.
     pub(super) fn call_operands_wait(&self, operands: [SemanticNodeId; 2]) -> bool {
-        let (answers, depth) = {
+        let (answers, resumes, depth) = {
             let mut seam = self.call_seam.borrow_mut();
             let seam = seam
                 .as_mut()
                 .expect("an operand demand runs inside its frame's walk");
-            (std::mem::take(&mut seam.answers), seam.depth)
+            (
+                std::mem::take(&mut seam.answers),
+                std::mem::take(&mut seam.resumes),
+                seam.depth,
+            )
         };
         let outer = self.decision_seam.replace(Some(DecisionSeam {
             answers,
+            resumes,
             needs: Vec::new(),
             depth,
             nested: 0,
         }));
-        let demanded = self.observe_read(|| {
-            for operand in operands {
-                let _ = self.unwrap_identity_carrier_for_relation(operand);
-            }
-        });
+        let demanded = self.observe_read(|| self.demand_relation_operands(operands));
         let _ = demanded.discard();
-        let DecisionSeam { answers, needs, .. } = self
+        let DecisionSeam {
+            answers,
+            resumes,
+            needs,
+            ..
+        } = self
             .decision_seam
             .replace(outer)
             .expect("the operand demand's seam stays installed for its run");
@@ -2156,8 +2177,47 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .as_mut()
             .expect("an operand demand runs inside its frame's walk");
         seam.answers = answers;
+        seam.resumes = resumes;
         seam.needs = needs;
         waits
+    }
+
+    /// Demand what a relation over `operands` unwraps at the running
+    /// decision's seam, each operand's carrier walk resuming where the
+    /// decision's last run stopped it. A walk over a chain of aliases reads
+    /// one answer per hop and stops at the first hop without one, so a
+    /// demand that restarted from the operand would read every answered hop
+    /// again on each run: a chain of `n` aliases would cost `n * n / 2`
+    /// reads. The hops before the resume point settled from answers the
+    /// frame keeps, and what the demand observes is dropped, so skipping
+    /// them changes nothing the decision decides: its relation still walks
+    /// each operand whole, once, when every hop is answered.
+    pub(super) fn demand_relation_operands(&self, operands: [SemanticNodeId; 2]) {
+        let site = self.checking_site.get();
+        let needs_now = || {
+            self.decision_seam
+                .borrow()
+                .as_ref()
+                .map_or(0, |seam| seam.needs.len())
+        };
+        for operand in operands {
+            let start = self
+                .decision_seam
+                .borrow()
+                .as_ref()
+                .and_then(|seam| seam.resumes.get(&(operand, site)).copied())
+                .unwrap_or(operand);
+            let needs_before = needs_now();
+            let mut resume = start;
+            let _ = self.unwrap_identity_carrier_walk(start, &mut |reached| {
+                if needs_now() == needs_before {
+                    resume = reached;
+                }
+            });
+            self.with_decision_seam(|seam| {
+                seam.resumes.insert((operand, site), resume);
+            });
+        }
     }
 
     /// Carry a flow return's frame on: record a delivery as the answer to
