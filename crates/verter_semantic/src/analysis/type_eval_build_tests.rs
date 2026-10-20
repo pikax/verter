@@ -2544,27 +2544,6 @@ fn satisfies_object_initializer_is_served_as_its_evaluated_value() {
     );
 }
 
-/// A `let` / `var` copying a value is served as the evaluated read, which
-/// alone knows whether the copied declaration widens; a `const` copy keeps
-/// the read it names.
-#[test]
-fn mutable_copy_initializer_is_served_as_its_evaluated_read() {
-    let source = "const c = \"a\"; let x = c; var v = c; const k = c;";
-    let parts = lowered(source);
-    for (name, init) in [("x", "c; var"), ("v", "c; const")] {
-        let decl = parts.value_decl(name).expect("lowered copy");
-        assert_eq!(decl.type_annotation, None, "{name}");
-        assert_eq!(
-            decl.expression_source_offset,
-            source.find(init).map(|offset| offset as u32),
-            "{name}"
-        );
-    }
-    let decl = parts.value_decl("k").expect("lowered const copy");
-    assert_eq!(decl.expression_source_offset, None);
-    assert!(decl.type_annotation.is_some());
-}
-
 #[test]
 fn satisfies_does_not_use_annotation_type() {
     // When using satisfies, the expression type should win, not the annotation

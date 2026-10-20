@@ -849,6 +849,14 @@ const satLit = { a: 1, b: \"x\" } satisfies { a: 1; b: string };
 const satConst = { a: 1 } as const satisfies { a: number };
 const o = { f: () => true, g: (n: number) => n > 0, h: () => \"s\", i: (): 1 => 1, j: () => 1 as const, k: () => flag ? 1 : 2 };
 const oc = { f: () => true } as const;
+const ocn = { a: { f: () => \"s\" } } as const;
+const ocm = { a: { f: () => \"s\" } as const };
+declare function obj<T>(o: T): T;
+const oca = obj({ f: () => \"s\" } as const);
+const ocat = obj([{ f: () => \"s\" }] as const);
+const ocan = obj({ a: { f: () => \"s\" } } as const);
+const ocam = obj({ a: { f: () => \"s\" } as const });
+const ocs = { f: () => \"s\" } as const satisfies { f: () => \"s\" };
 const om = { m() { return true; } };
 declare function keep<T extends string>(f: () => T): T;
 const kept = keep(() => \"s\");
@@ -866,15 +874,21 @@ const kept = keep(() => \"s\");
 /// `satU` `{ a: number; b: string; c: boolean[]; }`, `satLit` `{ a: 1;
 /// b: string; }`, `satConst` `{ readonly a: 1; }`; `o` is `{ f: () =>
 /// boolean; g: (n: number) => boolean; h: () => string; i: () => 1; j: () =>
-/// 1; k: () => 1 | 2; }`, `oc` `{ readonly f: () => boolean; }`, `om` `{
-/// m(): boolean; }`; `kept` (an argument's arrow under a `string`
+/// 1; k: () => 1 | 2; }`, `oc` `{ readonly f: () => boolean; }`, `ocn` `{
+/// readonly a: { readonly f: () => string; }; }`, `ocm` `{ a: { readonly f:
+/// () => string; }; }`; an `as const` with a
+/// contextual type keeps the arrow's literal: `oca` and `ocs` `{ readonly
+/// f: () => "s"; }`, `ocat` `readonly [{ readonly f: () => "s"; }]`, `ocan`
+/// `{ readonly a: { readonly f: () => "s"; }; }`, `ocam` `{ a: { readonly f:
+/// () => "s"; }; }`; `om` `{ m(): boolean; }`; `kept` (an argument's arrow under a `string`
 /// constraint) `"s"`.
 ///
 /// Mutation: lowering a mutable copy as the read it names answers `x` `"a"`;
 /// typing a `satisfies` object without its contextual type answers `satU`
 /// `{ a: 1; b: "x"; c: true[]; }`; keeping a member arrow's fresh return
 /// answers `o.f` `() => true`; widening every arrow's return answers `o.k`
-/// `() => number` and `kept` `string`.
+/// `() => number` and `kept` `string`; widening it under every `as const`
+/// answers `oca` `{ readonly f: () => string; }`.
 #[test]
 fn a_declaration_widens_the_literals_the_checker_widens() {
     for compiler_options in [
@@ -908,6 +922,19 @@ fn a_declaration_widens_the_literals_the_checker_widens() {
                      i: () => 1; j: () => 1; k: () => 1 | 2; }",
                 ),
                 ("typeof oc", "{ readonly f: () => boolean; }"),
+                (
+                    "typeof ocn",
+                    "{ readonly a: { readonly f: () => string; }; }",
+                ),
+                ("typeof ocm", "{ a: { readonly f: () => string; }; }"),
+                ("typeof oca", "{ readonly f: () => \"s\"; }"),
+                ("typeof ocat", "readonly [{ readonly f: () => \"s\"; }]"),
+                (
+                    "typeof ocan",
+                    "{ readonly a: { readonly f: () => \"s\"; }; }",
+                ),
+                ("typeof ocam", "{ a: { readonly f: () => \"s\"; }; }"),
+                ("typeof ocs", "{ readonly f: () => \"s\"; }"),
                 ("typeof om", "{ m(): boolean; }"),
                 ("typeof kept", "\"s\""),
             ],

@@ -4741,20 +4741,8 @@ fn lower_identifier_variable_parts(
             enrich_function_signature_with_jsdoc(sig, source, name_offset, has_ts_return);
         }
 
-        // A mutable declaration copying a value widens the copy exactly
-        // when the read would widen as a bare literal (`const c = "a"; let
-        // x = c` is `string`, over `const c: "a"` it stays `"a"`): only
-        // the copied declaration knows, so its value is the evaluated read.
-        let mutable_copy = matches!(var_kind, ValueDeclKind::Let | ValueDeclKind::Var)
-            && !expr_is_widening_nullish(init)
-            && matches!(
-                initializer_literal_freshness(init),
-                DeclaredLiteralFreshness::Follows(_)
-            );
         if type_annotation.is_none()
-            && (value_type_derives_from_a_call(init, source)
-                || contextual_object_initializer(init)
-                || mutable_copy)
+            && (value_type_derives_from_a_call(init, source) || contextual_object_initializer(init))
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -5127,14 +5115,16 @@ fn extract_initializer_object_shape_with_budget(
             }
             Expression::TSAsExpression(ts_as) => {
                 if is_const_assertion_type_expr(&lower_ts_type(&ts_as.type_annotation, source)) {
-                    policy = MemberLiteralPolicy::ConstAssert;
+                    policy = policy.const_asserted();
                 }
                 expr = &ts_as.expression;
             }
             Expression::TSSatisfiesExpression(sat) => {
-                if policy != MemberLiteralPolicy::ConstAssert {
-                    policy = MemberLiteralPolicy::Preserve;
-                }
+                policy = if policy.is_const() {
+                    MemberLiteralPolicy::ConstAssert { contextual: true }
+                } else {
+                    MemberLiteralPolicy::Preserve
+                };
                 expr = &sat.expression;
             }
             Expression::ParenthesizedExpression(paren) => expr = &paren.expression,
@@ -5246,7 +5236,12 @@ use crate::analysis::function_program::static_property_key_name;
 ///   contextual type decides which member literals widen.
 /// - [`ConstAssert`](MemberLiteralPolicy::ConstAssert): an `as const` object —
 ///   members keep their literals AND are `readonly`; an array literal is a
-///   `readonly` tuple of its element types.
+///   `readonly` tuple of its element types. `contextual` records whether the
+///   asserted expression has a contextual type (a call argument, a
+///   `satisfies` operand or a member of either), which alone keeps the lone
+///   literal a member arrow returns (`{ f: () => "s" } as const` is
+///   `{ readonly f: () => string }`, `obj({ f: () => "s" } as const)` keeps
+///   `() => "s"`).
 /// - [`Argument`](MemberLiteralPolicy::Argument): a call-argument position —
 ///   the fresh AUTHORED form. Members keep their literals and are NOT
 ///   `readonly`; an array literal is a mutable tuple of its element types.
@@ -5259,7 +5254,7 @@ use crate::analysis::function_program::static_property_key_name;
 enum MemberLiteralPolicy {
     Widen,
     Preserve,
-    ConstAssert,
+    ConstAssert { contextual: bool },
     Argument,
 }
 
@@ -5268,9 +5263,32 @@ impl MemberLiteralPolicy {
     /// element-wise TUPLE structure (and, for `as const`, its `readonly`).
     fn array_literal_is_tuple(self) -> Option<bool> {
         match self {
-            MemberLiteralPolicy::ConstAssert => Some(true),
+            MemberLiteralPolicy::ConstAssert { .. } => Some(true),
             MemberLiteralPolicy::Argument => Some(false),
             MemberLiteralPolicy::Widen | MemberLiteralPolicy::Preserve => None,
+        }
+    }
+
+    /// Whether this is a const context (`as const`).
+    fn is_const(self) -> bool {
+        matches!(self, MemberLiteralPolicy::ConstAssert { .. })
+    }
+
+    /// Whether an expression lowered under this policy has a contextual
+    /// type: a call argument, a `satisfies` operand, or a member of either.
+    fn is_contextual(self) -> bool {
+        match self {
+            MemberLiteralPolicy::Widen => false,
+            MemberLiteralPolicy::Preserve | MemberLiteralPolicy::Argument => true,
+            MemberLiteralPolicy::ConstAssert { contextual } => contextual,
+        }
+    }
+
+    /// The policy an `as const` written under this policy gives its
+    /// operand: a const context, contextually typed as the assertion is.
+    fn const_asserted(self) -> Self {
+        MemberLiteralPolicy::ConstAssert {
+            contextual: self.is_contextual(),
         }
     }
 }

@@ -2535,32 +2535,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .is_some()
     }
 
-    /// The file and value path an inferred declaration's expression source
-    /// reads WHOLE (`let x = c` reads `c`), or `None` for any other value:
-    /// the read a mutable declaration widens when the declaration it names
-    /// declares a widening literal (`value_read_widens`).
-    pub(crate) fn semantic_expression_source_read(
-        &self,
-        source: &verter_type_expr::facts::SemanticExpressionSource,
-    ) -> Option<(Arc<str>, Vec<String>)> {
-        let ExpressionSourceRoute::Indexed {
-            canonical,
-            expression,
-            ..
-        } = self.route_semantic_expression_source(source)
-        else {
-            return None;
-        };
-        match expression.as_ref() {
-            verter_type_expr::IndexedValueExpression::Value(TypeExpr::TypeOf(read))
-                if read.type_args.is_empty() =>
-            {
-                Some((canonical, read.path.clone()))
-            }
-            _ => None,
-        }
-    }
-
     fn semantic_expression_source_value(
         &self,
         source: &verter_type_expr::facts::SemanticExpressionSource,

@@ -515,8 +515,9 @@ fn value<'a>(
             return Ok(());
         }
         ValueInferenceCarrier::Satisfies(inner) => {
-            let inner_policy = if policy == MemberLiteralPolicy::ConstAssert {
-                policy
+            // The `satisfies` type is the operand's contextual type.
+            let inner_policy = if policy.is_const() {
+                MemberLiteralPolicy::ConstAssert { contextual: true }
             } else {
                 MemberLiteralPolicy::Preserve
             };
@@ -528,7 +529,7 @@ fn value<'a>(
             annotation,
         } => {
             if verter_type_expr_oxc::is_const_assertion_type(annotation) {
-                tasks.push(same_chain(operand, MemberLiteralPolicy::ConstAssert));
+                tasks.push(same_chain(operand, policy.const_asserted()));
                 return Ok(());
             }
             let mut query = None;
@@ -635,7 +636,7 @@ fn value<'a>(
         // holes' literal types (`` `x${1}` as const `` is `"x1"`), when every
         // hole is a literal or primitive type this inference reads; a hole
         // naming a value keeps the template a `string`.
-        Expression::TemplateLiteral(tpl) if policy == MemberLiteralPolicy::ConstAssert => {
+        Expression::TemplateLiteral(tpl) if policy.is_const() => {
             tasks.push(Task::ConstTemplate(TemplateFrame::new(tpl, policy)));
             return Ok(());
         }
@@ -644,13 +645,10 @@ fn value<'a>(
             // An arrow's own return is no member of the literal around it:
             // with no contextual return type, its lone fresh literal widens
             // (`{ f: () => true }` is `{ f: () => boolean }`, and so under
-            // `as const`, whose context ends at the arrow). A call argument
-            // keeps it for the inference deposit, and a `satisfies` member
-            // for its contextual type.
-            let widen_fresh_return = matches!(
-                policy,
-                MemberLiteralPolicy::Widen | MemberLiteralPolicy::ConstAssert
-            );
+            // an `as const` nothing types, whose context ends at the arrow).
+            // A call argument keeps it for the inference deposit, and a
+            // `satisfies` member (`as const` or not) for its contextual type.
+            let widen_fresh_return = !policy.is_contextual();
             tasks.push(Task::Arrow(
                 ArrowFrame::new(arrow, true).widening_fresh_return(widen_fresh_return),
             ));
@@ -713,19 +711,14 @@ fn value<'a>(
     // are written as they are; a read is as fresh as its binding, which the
     // positions it is closed in leave to the binding's resolution.
     values.push(match &ty {
-        TypeExpr::Literal(literal)
-            if policy != MemberLiteralPolicy::ConstAssert
-                && scalar_literal_type(expr).is_some() =>
-        {
+        TypeExpr::Literal(literal) if !policy.is_const() && scalar_literal_type(expr).is_some() => {
             let literal = literal.clone();
             let mut typed = Typed::plain(ty);
             typed.fresh.push(literal);
             Value::Typed(typed)
         }
         TypeExpr::TypeOf(read)
-            if budget.defer_read_widening
-                && policy != MemberLiteralPolicy::ConstAssert
-                && read.type_args.is_empty() =>
+            if budget.defer_read_widening && !policy.is_const() && read.type_args.is_empty() =>
         {
             let read = read.clone();
             let mut typed = Typed::plain(ty);
@@ -1381,7 +1374,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     // (the enclosing policy). A per-property `as const`
                     // (`{ tag: "x" as const }`) narrows the VALUE to a
                     // literal but does NOT add the `readonly` modifier.
-                    let readonly = self.policy == MemberLiteralPolicy::ConstAssert;
+                    let readonly = self.policy.is_const();
                     let value = &property.value;
                     // A bare nullish member value under `strictNullChecks`
                     // off widens to `any` whatever the member policy — an
@@ -1406,7 +1399,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
                     // context; `Preserve` (satisfies) and `ConstAssert` keep
                     // it.
                     let value_policy = if expr_is_const_asserted(value, source) {
-                        MemberLiteralPolicy::ConstAssert
+                        self.policy.const_asserted()
                     } else {
                         self.policy
                     };
