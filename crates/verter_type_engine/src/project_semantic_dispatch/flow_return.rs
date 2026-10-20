@@ -7972,6 +7972,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// when it names none, or when its carrier does not resolve).
     pub(super) fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         match self.graph().node_data(view).as_deref() {
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                return self.regularized_empty_object_program(view);
+            }
             Some(
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::DeclRef { .. }
@@ -7980,7 +7983,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return view,
         }
         match self.unwrap_identity_carrier_for_relation(view) {
-            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => resolved,
+            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => {
+                self.regularized_empty_object_program(resolved)
+            }
             super::relation::IdentityCarrierUnwrap::Unresolvable => view,
         }
     }

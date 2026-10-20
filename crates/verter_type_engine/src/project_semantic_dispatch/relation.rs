@@ -7099,6 +7099,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
         };
+        // An effect-free program is already complete. Relate its ordinary
+        // empty surface so primitive and nullable rules use the same authority
+        // as an authored `{}` type, rather than requiring two object branches.
+        let regular_source = self.regularized_empty_object_program(source);
+        let regular_target = self.regularized_empty_object_program(target);
+        if regular_source != source || regular_target != target {
+            return Some(self.relate_member(
+                regular_source,
+                regular_target,
+                bindings,
+                InferPosition::Covariant,
+            ));
+        }
         // Top/bottom rules apply before projection: `any` / `unknown` accept
         // from either side, `never` is bottom, an error type swallows, and the
         // `object` nonprimitive accepts every program (a construction program

@@ -204,6 +204,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// An effect-free construction has the ordinary empty object surface
+    /// once its expression-site freshness is no longer needed.
+    pub(super) fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        if matches!(
+            graph.node_data(node).as_deref(),
+            Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.effects.is_empty()
+        ) {
+            graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Object(crate::semantic_query::SurfaceView::from_entries(
+                    Vec::new(),
+                    None,
+                    false,
+                )),
+            )
+        } else {
+            node
+        }
+    }
+
     /// Consume expression-site freshness without expanding declaration or
     /// spread operands. The postorder work list visits a shared child once
     /// and does not spend a native stack level on nested literal types.
@@ -325,6 +346,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             readonly: *readonly,
                         })
                     }
+                }
+                SemanticNodeData::ObjectSpreadProgram(program) if program.effects.is_empty() => {
+                    self.regularized_empty_object_program(current)
                 }
                 SemanticNodeData::ObjectSpreadProgram(program) => {
                     let mut regular = program.map_child_nodes(mapped);

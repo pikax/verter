@@ -306,15 +306,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // A spread-built literal names no property to its siblings, but
             // receives the ones it lacks (`c ? { a: 1, q: 1 } : { ...s, a: 2
             // }` gives the spread arm `q?: undefined`): each is one more
-            // direct write after its construction program. As a whole value
-            // it is kept as it is.
+            // direct write after its construction program. An effect-free
+            // result is the ordinary empty surface after this normalization.
             Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
                 let program = program.share();
                 drop(data);
-                values.push(match siblings {
+                let normalized = match siblings {
                     Some(siblings) => self.spread_literal_in_context(node, &program, &siblings),
                     None => node,
-                });
+                };
+                values.push(self.regularized_empty_object_program(normalized));
             }
             _ => {
                 drop(data);

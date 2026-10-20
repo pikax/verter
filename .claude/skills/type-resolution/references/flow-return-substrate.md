@@ -203,6 +203,10 @@ finishes. The existing source regularizer then consumes freshness across object,
 array, tuple and union nodes with a memoized postorder walk. Spread construction
 programs record whether they still denote a literal expression; regularization
 clears that bit and their direct-member origins without expanding spread operands.
+An effect-free construction program becomes an ordinary empty object surface at
+publication. Relation checks and subtype-reduction views use that same empty
+surface, so a fresh `{}` still absorbs a primitive sibling where the checker
+does, without losing its literal provenance before object normalization.
 Thus separately declared object values do not normalize against later siblings.
 Member-granular `typeof` publication applies the same rule to direct array/union
 properties while preserving the nested-object cutoff. Class fields and inferred
