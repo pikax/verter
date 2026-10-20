@@ -35,6 +35,9 @@
 //! controls that need a trace no fresh host can produce build it from
 //! measured values — a re-labelled or single-field-substituted real
 //! trace, stated inline at each site.
+// The cold/warm boundary half of this harness reads optional audit capture;
+// without `semantic-observe` only the answer half runs.
+#![cfg_attr(not(feature = "semantic-observe"), allow(dead_code))]
 
 use std::sync::Arc;
 
@@ -42,6 +45,7 @@ use super::{degr_of, upsert, Degr};
 use crate::host_flow_return_audit::FlowReturnError;
 use crate::types::HostConfig;
 use crate::{FileLanguage, VerterHost};
+#[cfg(feature = "semantic-observe")]
 use verter_session_query::flow::policy::FlowGap;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
@@ -1127,6 +1131,7 @@ fn first_call_cold_clauses(measured: &MeasuredBoundary) -> Vec<String> {
     failures
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Check a measured trace against a [`Boundary::Audit`] pin. Pure over
 /// the measurement so controls can prove every clause fails.
 pub(crate) fn check_boundary(
@@ -2937,6 +2942,7 @@ pub(crate) mod matrix {
     }
 
     impl FixedCell {
+        #[cfg(feature = "semantic-observe")]
         /// The cell's full matrix coordinate, for failure reports.
         pub(crate) fn coords(&self) -> String {
             format!(
@@ -3336,6 +3342,8 @@ mod matrix_suite {
         },
     ];
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// Dump every cell's measured outcome (`U6_CORPUS_DUMP=1`) so pins
     /// are measured, never guessed.
     #[test]
@@ -3558,6 +3566,8 @@ mod matrix_suite {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn uniform_iife_effect_refusal_covers_every_position() {
         assert_eq!(IIFE_POSITION_CELL.positions, COVERED_POSITIONS);
@@ -3619,6 +3629,8 @@ mod matrix_outcome_controls {
         failures
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — the three VALUE-arm clauses each reject a wrong pin, and
     /// reject it ALONE: rendering, typed degradation, warm-replay state.
     /// The truthful pin holds first, so each subsequent failure is
@@ -3716,6 +3728,8 @@ mod matrix_outcome_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// Cached refusal must fail non-admission through the cell
     /// comparator's refusal delegation, not only the underlying clauses.
     #[test]
@@ -3801,6 +3815,8 @@ mod matrix_outcome_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// A substituted warm first call must fail first-call-cold through
     /// the cell comparator, at corpus parity.
     #[test]
@@ -5268,6 +5284,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — cache replay, both directions, each failure named to
     /// its exact clause. A clean result REPLAYS WARM: pinning
     /// `warm_replay: false` against it must fail BOTH cold-arm clauses
@@ -5358,6 +5376,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — the cold arm demands ACTUAL cold work: the REAL
     /// degraded trace with ONLY the second call's compute count zeroed
     /// (a trace that "was not admitted warm" but did nothing either)
@@ -5401,6 +5421,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — replay result-CLASS drift and typed-DEGRADATION drift,
     /// each failing exactly its clause. Both traces are real
     /// measurements with a single field substituted by another MEASURED
@@ -5489,6 +5511,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — every [`check_boundary_refusal`] clause, each failing
     /// individually against a single-field-substituted REAL refusal
     /// trace: the truthful pin holds; a CACHED refusal fails the
@@ -5904,6 +5928,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — the two FIRST-CALL-COLD clauses of `check_boundary`.
     /// `check_boundary` is pure over the measurement, so this control
     /// feeds it a WARM-FIRST trace built exclusively from measured
@@ -5962,6 +5988,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — the WARM-PAIR clauses fail INDIVIDUALLY, not only
     /// jointly: `from_cache == false` with zero cold computes trips the
     /// replay-warm clause alone, and `from_cache == true` with nonzero
@@ -6054,6 +6082,8 @@ mod expectation_controls {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// CONTROL — the REPLAY-DRIFT clause and the NO-VALUE clause. The
     /// drifted trace is a real measurement whose second projection is
     /// substituted with a DIFFERENT program's real measured projection;
@@ -6140,6 +6170,8 @@ mod expectation_controls {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A control test written INSIDE a nested function value, over a binding
 /// an ENCLOSING frame declares, establishes a narrowing the checker
 /// applies to every read that follows it in that nested body — and the
@@ -6195,6 +6227,8 @@ fn narrowing_over_a_captured_binding_is_carried_and_warms() {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A top type under a runtime guard narrows as the checker narrows it,
 /// exact and warm: `instanceof` takes `unknown` or `any` to the instance
 /// type on the positive edge (`getNarrowedType` answers the candidate for
@@ -6340,6 +6374,7 @@ fn top_types_under_a_runtime_guard_narrow_like_the_checker() {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Warm-candidate count for one program's `FlowReturn` slot after two
 /// public boundary calls on a fresh host.
 fn flow_return_candidate_count(id: &str, script: &str) -> usize {
@@ -6380,6 +6415,8 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
     )
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `"key" in x` over a union arm whose key set the graph cannot decide
 /// (a type parameter, an unresolvable carrier) must keep that arm
 /// possible on BOTH edges. Retention is either EXACT or a typed-gap
@@ -6526,6 +6563,8 @@ fn unclassifiable_in_guard_arms_remain_possible_degrade_and_never_warm() {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `instanceof` narrows by the checker's measured arm rule and
 /// degrades whenever a needed relation is unprovable. Positive edge:
 /// nullish arms strip first; an arm IDENTICAL to the instance type
@@ -6677,6 +6716,8 @@ fn instanceof_narrows_by_the_checker_rule_and_gaps_only_unproven_arms() {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A narrow's iteration domain enumerates THROUGH identity carriers: a
 /// subject typed by a union type ALIAS (`type Tag = ... | ...`), an
 /// alias of an alias, or a generic alias instantiation contributes the
@@ -6869,6 +6910,8 @@ fn alias_union_subjects_enumerate_and_narrow_like_the_checker() {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A guard over a property PATH lands its fact at the reference the
 /// checker narrows — never deeper-rooted. Measured against the pinned
 /// checker: `===` / `!==` (and the switch dispatch, remainder, and
@@ -7083,6 +7126,8 @@ fn deep_path_guards_narrow_the_parent_reference_not_the_root() {
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A bare truthiness guard consumes the shared demand-scoped
 /// truthiness-domain fact (`ClassifyTruthinessDomain`) per enumerated
 /// arm: an arm with NO inhabitant on the tested edge leaves the edge, an
@@ -7291,6 +7336,7 @@ fn truthiness_domain_facts_narrow_like_the_checker() {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// One member-object wrapper for the exact boundary JSON pins below:
 /// `{ v: <ty> }` exactly as the projector serialises a fresh literal
 /// return object with the single member `v`.
@@ -7301,6 +7347,8 @@ fn single_v_object_json(ty: &str) -> String {
     )
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `as const` literal identity through EVOLVING-variable assignments and
 /// joins (checker-measured, tsgo 7.0.2 `--strict`): an assignment into a
 /// binding with no declared authority widens EXACTLY the fresh
@@ -7430,6 +7478,8 @@ fn as_const_literal_identity_survives_evolving_assignments_and_joins() {
     assert!(report.is_empty(), "\n{}", report.join("\n"));
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `"k" in x` models KEY PRESENCE separately from value
 /// non-`undefined`-ness, and a member VALUE READ carries the optional
 /// member's own absent-key `undefined` (checker-measured, tsgo 7.0.2

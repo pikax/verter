@@ -12,6 +12,8 @@ mod block_1_i_discriminators;
 #[path = "g_block/block_2_canary_compile_tier.rs"]
 mod block_2_canary_compile_tier;
 #[path = "g_block/block_2_canary_component_meta.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_2_canary_component_meta;
 #[path = "g_block/block_2_canary_lifecycle.rs"]
 mod block_2_canary_lifecycle;
@@ -20,6 +22,8 @@ mod block_2_canary_owner_self_edit;
 #[path = "g_block/block_6h_architecture_guards.rs"]
 mod block_6h_architecture_guards;
 #[path = "g_block/block_6i_f1_dep_signature_cross_file.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod block_6i_f1_dep_signature_cross_file;
 #[path = "g_block/block_6i_identity_mapper_unchanged.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.

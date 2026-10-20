@@ -97,6 +97,7 @@ export type Remapped = {
 };
 "#;
 
+#[cfg(feature = "semantic-observe")]
 /// The same six-key shape with the remap written INLINE rather than
 /// through a userland helper. Deciding an inline conditional remap needs
 /// no nested query, so a cancelled request does not fail the first key
@@ -1081,6 +1082,7 @@ fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() 
     );
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Audit observer that cancels the ACTIVE request the first time a
 /// top-level type-parameter substitution is issued, and counts every
 /// substitution the run performs.
@@ -1091,11 +1093,13 @@ fn single_key_demand_through_an_identity_remap_is_independent_of_source_width() 
 /// that key is decided.
 const CANCEL_AT_SUBSTITUTION: u64 = 3;
 
+#[cfg(feature = "semantic-observe")]
 struct CancelOnFirstSubstitution {
     seen: std::sync::atomic::AtomicU64,
     ctx: Arc<verter_type_engine::request_context::RequestContext>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
     fn record_event(&self, event: verter_audit::AuditEvent) {
         if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
@@ -1107,6 +1111,7 @@ impl verter_audit::AuditObserver for CancelOnFirstSubstitution {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Counts substitutions without cancelling — the control that says how
 /// much work an UNINTERRUPTED build performs, so the cancelled run's
 /// count is compared against a measured quantity rather than a guess.
@@ -1114,6 +1119,7 @@ struct CountSubstitutions {
     seen: std::sync::atomic::AtomicU64,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for CountSubstitutions {
     fn record_event(&self, event: verter_audit::AuditEvent) {
         if matches!(event, verter_audit::AuditEvent::SubstituteTopLevelCall) {
@@ -1137,6 +1143,8 @@ fn project_result(
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// REGRESSION BOUNDARY (cancelled mapped projection): once the request
 /// is cancelled, a mapped projection must stop substituting keys and
 /// must not hand back a published surface.
@@ -1592,6 +1600,8 @@ fn a_proven_absent_key_on_a_plain_mapper_misses_without_forcing_any_value() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// REGRESSION BOUNDARY (cancelled mapped key loop, BOTH publication
 /// rails): once the request is cancelled, a mapped evaluation must stop
 /// forcing key values rather than run its key domain out.

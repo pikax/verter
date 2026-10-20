@@ -2055,7 +2055,7 @@ impl HostStoreView {
     /// requires both. The memo is bypassed deliberately — a memoized
     /// answer is not a root read, and a control that could be satisfied by
     /// a cache hit would prove nothing about the instrumentation.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn owner_read_through_roots_for_tests(
         &self,
         canonical_id: &str,
@@ -5185,6 +5185,8 @@ mod store_view_o1_build_tests;
 /// declared here for the same reason.
 #[cfg(test)]
 #[path = "store_view_marginal_admit_tests.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod store_view_marginal_admit_tests;
 
 /// Terminal-aggregate validation contract — declared here for the same

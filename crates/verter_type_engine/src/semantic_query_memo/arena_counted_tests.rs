@@ -1,6 +1,8 @@
 use super::*;
 use crate::semantic_query::LiteralValue;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn arena_wait_counter_includes_hit_and_both_miss_acquisitions() {
     use std::sync::{

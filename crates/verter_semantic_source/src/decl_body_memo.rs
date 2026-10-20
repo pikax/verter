@@ -294,7 +294,9 @@ struct LoweredStatementBatch {
     aug_types: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredTypeDecl)>,
     aug_values: Vec<(AugmentationScopeKind, DeclBindingKey, LoweredValueDecl)>,
     /// Declaration-body contributors lowered by this job — the
-    /// `decl_bodies_lowered` increment.
+    /// `decl_bodies_lowered` increment. Counted only where the counter is
+    /// kept.
+    #[cfg(feature = "semantic-observe")]
     lowered_count: usize,
 }
 
@@ -1258,6 +1260,7 @@ impl DeclBodyMemo {
         self.counters
             .eval_env_builds
             .fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "semantic-observe")]
         self.counters
             .decl_bodies_lowered
             .fetch_add(env.total_decl_count() as u64, Ordering::Relaxed);
@@ -1911,13 +1914,13 @@ impl DeclBodyMemo {
                 }
             }
 
-            let lowered_count = scratch.total_decl_count();
             let mut batch = LoweredStatementBatch {
                 types: Vec::new(),
                 values: Vec::new(),
                 aug_types: Vec::new(),
                 aug_values: Vec::new(),
-                lowered_count,
+                #[cfg(feature = "semantic-observe")]
+                lowered_count: scratch.total_decl_count(),
             };
             let empty_retained = RetainedTypeTransients::default();
             for (decl_key, group) in &scratch.type_symbols {
@@ -2034,6 +2037,7 @@ impl DeclBodyMemo {
         let Some((batch, transient)) = inner else {
             return (DemandLower::Ready(None), None);
         };
+        #[cfg(feature = "semantic-observe")]
         self.counters
             .decl_bodies_lowered
             .fetch_add(batch.lowered_count as u64, Ordering::Relaxed);

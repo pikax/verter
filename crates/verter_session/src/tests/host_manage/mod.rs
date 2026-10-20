@@ -4,7 +4,9 @@ use verter_type_engine::resolver_core::request_ports::IndexedInputs;
 use std::sync::Arc;
 #[cfg(feature = "semantic-observe")]
 use verter_type_expr::TypeExpr;
-use verter_workspace::{WorkspaceAccess, WorkspaceRead};
+use verter_workspace::WorkspaceAccess;
+#[cfg(feature = "semantic-observe")]
+use verter_workspace::WorkspaceRead;
 
 const LAZY_ANALYSIS_SFC: &str = r#"<template><div>{{ msg }}</div></template>
 <script setup>

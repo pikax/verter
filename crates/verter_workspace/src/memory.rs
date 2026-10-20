@@ -641,6 +641,7 @@ impl crate::traits::WorkspaceRead for MemoryWorkspace {
         self.engine.record_content_transition(canonical_id);
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.engine.vfs_provenance.snapshot()
     }

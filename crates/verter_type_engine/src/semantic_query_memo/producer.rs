@@ -283,6 +283,9 @@ pub struct ProducerLease<'s> {
     panic_guard: InflightPanicGuard<'s>,
     open: OpenProducer,
     stats: InFlightStatsGuard<'s>,
+    /// Build clock for the held-time measurements; read only where they
+    /// are kept.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     started: Instant,
 }
 
@@ -649,6 +652,7 @@ impl SemanticGraphStore {
             panic_guard,
             open,
             stats,
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started: Instant::now(),
         }
     }
@@ -1268,12 +1272,15 @@ impl<'s> ProducerLease<'s> {
             mut panic_guard,
             open,
             stats,
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started,
         } = self;
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let build_held_ns = started.elapsed().as_nanos() as u64;
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(open);
+        #[cfg(feature = "semantic-observe")]
         if let Some(prov) = store.provenance.as_ref() {
             prov.execute_cooperative_held_ns
                 .fetch_add(build_held_ns, Ordering::Relaxed);

@@ -22,7 +22,6 @@ semantic-observe = [
   "verter_semantic/semantic-observe",
   "verter_session_query/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
 ]
 # Tests that require third-party repository checkouts beside this repo
 # (Testing-Hermeticity): excluded from the default canonical run; enable
@@ -67,6 +66,9 @@ verter_type_expr = { workspace = true }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
 oxc_allocator = { workspace = true }
 oxc_parser = { workspace = true }
 verter_parser = { path = "../verter_parser" }

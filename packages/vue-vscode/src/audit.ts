@@ -18,6 +18,7 @@ import { commands, window, workspace } from "vscode";
 import type { LogOutputChannel, QuickPickItem } from "vscode";
 import {
   formatRecordAsJson,
+  isAuditCaptureUnavailable,
   recordsToQuickPickItems,
   type AuditQuickPickItem,
   type AuditRecordSummary,
@@ -25,6 +26,7 @@ import {
 
 export {
   formatRecordTagFromKind,
+  isAuditCaptureUnavailable,
   recordsToQuickPickItems,
   formatRecordAsJson,
   type AuditQuickPickItem,
@@ -95,6 +97,13 @@ export function addShowRecentAuditRecordsCommand(
         });
         await window.showTextDocument(document, { preview: true });
       } catch (err) {
+        if (isAuditCaptureUnavailable(err)) {
+          log.info("Verter audit capture is unavailable in this language server build");
+          window.showInformationMessage(
+            "Verter audit records are unavailable: this language server was built without audit capture (the semantic-observe feature).",
+          );
+          return;
+        }
         log.error("Failed to fetch audit records", err as Error);
         const message = err instanceof Error ? err.message : String(err);
         window.showErrorMessage(`Failed to fetch Verter audit records: ${message}`);

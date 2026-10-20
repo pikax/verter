@@ -72,6 +72,9 @@ use verter_type_engine::semantic_query::{
 pub(crate) mod u6_flow_expect_tests;
 
 #[path = "flow_gap_retraction_tests.rs"]
+// Measures cold/warm work through optional audit capture: runs in the
+// instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod flow_gap_retraction_tests;
 use self::u6_flow_expect_tests::{
     Boundary, Expect, ExpectedNode, ExpectedSpreadArm, ExpectedSpreadMember, Lit,
@@ -1044,6 +1047,7 @@ fn drive_svelte(row: &Row) -> Result<Vec<String>, String> {
 
 include!("u6_flow_shape_corpus_rows_tests.rs");
 
+#[cfg(feature = "semantic-observe")]
 /// Locked baseline rows that were checker-correct, complete, and singly admitted.
 ///
 /// The cohort is derived mechanically from the table: it is EXACTLY the rows
@@ -2464,6 +2468,8 @@ mod corpus_suite {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn flow_gap_retraction_preserves_clean_checker_matches() {
         use sha2::{Digest, Sha256};
@@ -3117,6 +3123,8 @@ mod corpus_suite {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     /// The RECURSIVE-expectation + PUBLIC-BOUNDARY lane.
     ///
     /// For every row carrying an [`Expect::Node`], [`Boundary::Audit`],

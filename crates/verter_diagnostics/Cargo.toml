@@ -12,7 +12,7 @@ description = "Vue SFC diagnostic engine — lint rules and DiagnosticSet"
 # The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
 # compiles this crate's `hotpath` measurement attributes. No production edge
 # enables it.
-semantic-observe = ["dep:hotpath", "hotpath/hotpath"]
+semantic-observe = ["dep:hotpath"]
 
 [dependencies]
 verter_session_query = { workspace = true }
@@ -27,3 +27,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 verter_type_expr = { path = "../verter_type_expr" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }

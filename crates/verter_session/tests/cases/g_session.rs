@@ -5,6 +5,8 @@ mod active_occupancy_window;
 #[path = "g_session/committed_input_basis.rs"]
 mod committed_input_basis;
 #[path = "g_session/cooperative_drive_seam.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod cooperative_drive_seam;
 #[path = "g_session/flight_rendezvous.rs"]
 mod flight_rendezvous;
@@ -24,8 +26,12 @@ mod session_overlay_parent_index_import;
 #[path = "g_session/session_view_dep_overlay_invalidates_warm.rs"]
 mod session_view_dep_overlay_invalidates_warm;
 #[path = "g_session/session_view_isolation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod session_view_isolation;
 #[path = "g_session/session_view_smoke.rs"]
 mod session_view_smoke;
 #[path = "g_session/session_view_warm_reuse.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod session_view_warm_reuse;

@@ -318,6 +318,8 @@ fn component_meta_trace_structured_macro_does_not_write_to_file_or_stderr_trace(
     }
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `IndexedReadyBuilt` fires exactly once per fresh `(canonical, whole_hash)`
 /// insert into `FileArtifactStore`.
 #[test]
@@ -355,6 +357,8 @@ fn indexed_ready_built_event_fires_once_per_fresh_whole_hash() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// `IndexedReadyBuilt` fires per BUILT CONTENT VERSION, never on a
 /// same-content reinsert.
 ///

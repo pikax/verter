@@ -630,9 +630,14 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
             seeds.contains(&("verter_audit".into(), "semantic-observe".into())),
             "the audit crate declares the coordinated observation gate"
         );
+        // The shipped roots, each with and without its dev edges, plus the
+        // session's own test build: the canonical gate runs the session
+        // suites in the default configuration, so no dev edge of the crate
+        // that owns audit capture may switch observation on for it.
         let requests: Vec<_> = ["verter_napi", "verter_lsp", "verter_wasm", "verter_tsc"]
             .into_iter()
             .flat_map(|package| [false, true].map(|dev| (package, dev)))
+            .chain([("verter_session", true)])
             .collect();
         let production = map_in_parallel::map_in_parallel(&requests, |&(package, include_dev)| {
             let before = TREE_RUNS.get();

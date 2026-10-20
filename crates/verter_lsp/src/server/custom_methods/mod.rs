@@ -913,7 +913,7 @@ impl VerterLanguageServer {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (params,);
-            return Err(audit_capture_unavailable_error());
+            Err(audit_capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -956,7 +956,7 @@ impl VerterLanguageServer {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (params,);
-            return Err(audit_capture_unavailable_error());
+            Err(audit_capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {

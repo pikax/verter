@@ -486,6 +486,8 @@ fn prefix_backfill_emits_record_origin_edge_when_target_cold() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Test 3 (audit-mining contract). With an installed
 /// `RequestFootprintAccumulator`, run a query that triggers the
 /// warm-prefix dedup path. Assert the audit accumulator still

@@ -246,7 +246,8 @@ fn meta_project_shutdown_then_new_project_in_same_process_is_clean() {
 /// see (each test starts a fresh process, so "does the resolved value stay
 /// resolved for the rest of THIS process" never gets exercised by any
 /// individual test) and exactly what deliberate shared-process coverage
-/// is for.
+/// is for. The profile exists only under `semantic-observe`.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn decl_handoff_profile_sink_resolves_once_per_process_not_per_call() {
     // First consultation in this process, gate unset: must resolve OFF.

@@ -33,6 +33,7 @@
 //! * tracer finalisation exposes only the BOOLEAN — it never records the
 //!   reason.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -54,6 +55,8 @@ fn upsert(host: &VerterHost, path: &str, source: &str) {
         .unwrap_or_else(|e| panic!("upsert {path} failed: {e:?}"));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn cold_flight_runs(host: &VerterHost) -> u64 {
     host.provenance()
         .bundle_cold_flight_runs
@@ -65,6 +68,7 @@ fn cold_flight_runs(host: &VerterHost) -> u64 {
 /// refusals; this fixture isolates the downstream `UnrootableRoute`
 /// carrier, which remains stable and joinable even though it cannot be
 /// shared-admitted.
+#[cfg(feature = "semantic-observe")]
 fn host_with_refused_resolution(root: &str) -> (Arc<VerterHost>, String) {
     let host = VerterHost::new_standalone(HostConfig::default());
     let owner = format!("{root}/owner.ts");
@@ -96,6 +100,8 @@ fn host_with_refused_resolution(root: &str) -> (Arc<VerterHost>, String) {
 /// so without an explicit replay its own enclosing compute sees a clean
 /// scope and may warm a shared cache with a value whose basis is not
 /// fact-rootable. That is the taint-laundering hole this test closes.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_only_singleflight_follower_replays_identical_taint() {
     let (host, owner) = host_with_refused_resolution("/rc_reqonly_follower");
@@ -243,6 +249,8 @@ fn shared_singleflight_follower_stays_cacheable() {
 /// Touch 1 is the flight LEADER (a genuine cold materialisation); every
 /// later touch adopts the retained rendezvous as a FOLLOWER, so the
 /// refusals compared below are a computed one against REUSED ones.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_only_first_and_nth_return_same_refusal_reason_and_propagation() {
     let (host, owner) = host_with_refused_resolution("/rc_reqonly_reason");
@@ -315,6 +323,8 @@ fn request_only_first_and_nth_return_same_refusal_reason_and_propagation() {
 /// regression the fail-closed witness gate exists to prevent. The
 /// no-publication half alone is satisfied by the pre-change tree. And
 /// reuse WITHOUT the replay is taint laundering.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn request_only_bundle_never_publishes_shared() {
     let (host, owner) = host_with_refused_resolution("/rc_reqonly_publish");

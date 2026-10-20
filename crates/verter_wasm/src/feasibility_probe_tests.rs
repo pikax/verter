@@ -231,9 +231,12 @@ fn bwh1_native_feasibility_probe() {
             .is_some_and(|rows| !rows.is_empty()),
         "query results must not be empty"
     );
+    // An audit-enabled host stores the query's record exactly when the
+    // build captures; a build without `semantic-observe` reports
+    // unavailable capture instead.
     assert_eq!(
         operations["query"][0]["hasRecord"],
-        json!(true),
+        json!(cfg!(feature = "semantic-observe")),
         "audit-enabled probe must derive hasRecord from ActiveStored"
     );
     assert!(

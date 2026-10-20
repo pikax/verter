@@ -284,6 +284,8 @@ fn evaluate_types_reuses_cached_results_until_the_file_changes() {
 ///
 /// The boundary triple: published `props`, `synthesis_should_suppress`, and
 /// the `component_meta_result_cache_hits` delta across a replay.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_missed_terminal_hop_on_a_deep_macro_projection_never_publishes_complete_or_warm() {
@@ -365,6 +367,8 @@ defineProps<{ msg: string }>()
     assert_eq!(names1, names2, "cached result should be identical");
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn shared_child_runtime_reuse_survives_host_child_cache_clear() {
@@ -843,6 +847,8 @@ defineProps<{ p: boolean }>()
 /// AND performs O(1) (not O(N)) store-view reads on the warm pass — the
 /// single `capture_batch_fixed_view` read is threaded into every per-job
 /// call (invariant 15: no extra per-item store-view reads).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn output_batch_equals_scalar_and_is_o1_store_view_reads_when_warm() {
     use std::sync::atomic::Ordering::Relaxed;

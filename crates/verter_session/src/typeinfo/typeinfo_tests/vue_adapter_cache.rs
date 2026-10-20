@@ -93,6 +93,8 @@ defineSlots<{ default(props: { item: string }): any }>();
 </script>
 "#;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn vue_public_type_carries_synthesized_instance_members_without_component_meta() {
     const FILE: &str = "/w/FullComp.vue";

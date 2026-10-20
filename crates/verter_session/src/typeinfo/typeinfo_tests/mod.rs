@@ -29,6 +29,8 @@ mod flow_return_edge_catalog;
 mod flow_return_parity_contracts;
 mod flow_return_path_contracts;
 mod flow_return_substrate;
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod footprint;
 mod function_advanced;
 mod generic_defaults;

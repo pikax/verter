@@ -2103,10 +2103,12 @@ fn unshadowed_awaited_resolves_to_the_builtin_identity_in_one_gate_decision() {
     );
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Counts the dispatch adapter's scope-payload reads.
 #[derive(Default)]
 struct ScopePayloadReadCounter(std::sync::atomic::AtomicUsize);
 
+#[cfg(feature = "semantic-observe")]
 impl verter_audit::AuditObserver for ScopePayloadReadCounter {
     fn record_event(&self, event: verter_audit::AuditEvent) {
         if matches!(
@@ -2118,6 +2120,8 @@ impl verter_audit::AuditObserver for ScopePayloadReadCounter {
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// The builtin utility gate costs ONE scope-payload read per builtin build.
 ///
 /// Discrimination: the gate used to be two callbacks — one to enter the

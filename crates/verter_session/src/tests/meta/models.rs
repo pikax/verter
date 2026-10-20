@@ -4,6 +4,8 @@ use super::*;
 /// checker's error type is recovery for a program that does not type-check,
 /// which the flow-return lane does not model — an unmodelled position by
 /// design.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn one_unmodeled_member_marks_its_prop_and_the_props_surface_survives() {

@@ -6,6 +6,8 @@ use super::*;
 /// scope open around the consumer, and an edit in the request probes again.
 /// Probing for every consumer re-ran the same missing dependencies' probes
 /// about sixty times per request on a real-world component.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_request_normalizes_an_analysis_canonical_once() {
     use crate::host_manage::import_route_witness::{
@@ -561,10 +563,13 @@ fn lazy_promotion_stability() {
 
 #[cfg(test)]
 mod trace_laziness_tests {
+    #[cfg(feature = "semantic-observe")]
     use super::super::*;
     use std::cell::Cell;
     use verter_type_engine::component_meta_trace_custom;
+    #[cfg(feature = "semantic-observe")]
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+    #[cfg(feature = "semantic-observe")]
     use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 
     // Counter is per-test (declared inside the test function), not
@@ -593,6 +598,8 @@ mod trace_laziness_tests {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn macro_detail_evaluated_when_accumulator_installed() {
         let counter: Cell<u32> = Cell::new(0);

@@ -203,6 +203,29 @@ export declare function memoryAuditSites(topK: number): string | null;
 export declare function parseSelectorThreadInvocations(): number;
 
 // =============================================================================
+// Request audit capture availability
+//
+// Request audit records, footprints and provenance walkers are compiled in
+// only when the binding is built with the `semantic-observe` Cargo feature
+// (`pnpm --filter @verter/native build:observe`). A default build runs every
+// `*WithAudit` operation but carries no record: the record-returning methods
+// return `null` (or a `Workspace` record whose `capture_state` is
+// `"Unavailable"`), and `getLastAuditRecord` / `getAuditRecords` /
+// `getBundlerBatchSummary` / `getComponentMetaWithAudit` /
+// `why*FromAuditJson` throw "audit capture is unavailable: ...".
+// =============================================================================
+
+/** Whether the loaded binding can capture request audit records. */
+export type CaptureAvailability = "Available" | "Unavailable";
+
+/**
+ * `"Available"` when this binding was built with `semantic-observe`,
+ * `"Unavailable"` otherwise. Consumers that read audit records branch on
+ * this instead of interpreting an absent record as an empty one.
+ */
+export declare function captureAvailability(): CaptureAvailability;
+
+// =============================================================================
 // Host-backed batch compile — VerterHost.compileMany
 //
 // Replaces the previous free-fn `compileBatch` (Rayon-direct,
@@ -978,8 +1001,10 @@ export declare class VerterHost {
   // Each entry-point wraps a `VerterHost::*_with_audit` Rust producer
   // and returns the produced `RequestAuditRecord` as a JSON Buffer.
   // Audit must be enabled on the host config (`auditEnabled: true`)
-  // for these calls to publish a record; otherwise they short-circuit
-  // to `null` (the underlying operation still runs).
+  // AND the binding must capture (`captureAvailability() ===
+  // "Available"`) for these calls to publish a record; otherwise they
+  // short-circuit to `null` (the underlying operation still runs).
+  // Without capture the store-reading methods below throw.
   // ===========================================================================
 
   /**
@@ -1277,7 +1302,8 @@ export declare class ComponentMetaSession {
    * not resolve.
    *
    * The host must have `audit_enabled` + `footprint_capture` set on
-   * construction; otherwise this throws. Promise ergonomics (if
+   * construction and the binding must capture
+   * (`captureAvailability() === "Available"`); otherwise this throws. Promise ergonomics (if
    * desired) live in `packages/native/audit.ts` — the Rust binding
    * itself is synchronous.
    */
@@ -1315,7 +1341,11 @@ export declare class ComponentMetaSession {
   /** Returns canonical IDs of all files visible to this session. */
   trackedFileIds(): string[];
 
-  /** Return provenance counters for observability. */
+  /**
+   * Return provenance counters for observability. Throws the
+   * unavailable-capture error when the binding was built without
+   * `semantic-observe` (see `captureAvailability()`).
+   */
   getProvenance(): string;
 
   /** Close the session, releasing the overlay and lease. Idempotent. */

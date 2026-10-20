@@ -2482,6 +2482,7 @@ fn block_dominant_mechanism(block: TypeInfoParityBlockId) -> Option<MechanismId>
         .map(|b| b.mechanism_id)
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Recover the `SemanticQueryName` mirror variant for a live tag name
 /// (`SemanticQueryKeyTag::name`), via the macro-generated witness array — so the
 /// trace's tag names join the manifest's owner map without a second hand-list.
@@ -2492,6 +2493,7 @@ fn semantic_query_name_from_str(s: &str) -> Option<SemanticQueryName> {
         .find(|n| semantic_query_name_str(*n) == s)
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map a registry projection-mode spec onto the resolver's `ProjectionMode`.
 fn registry_mode_to_resolver(
     mode: oracle_registry::ProjectionModeSpec,
@@ -2506,6 +2508,7 @@ fn registry_mode_to_resolver(
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Run ONE lifted-row registry query through the public host entry-point its
 /// `oracle::run_row` body rides and return the recorded
 /// `semantic_query_dispatch_mask`. The host construction mirrors
@@ -2515,6 +2518,7 @@ fn run_lifted_query_mask(spec: &oracle_registry::QuerySpec) -> u32 {
     run_lifted_query_payload(spec).semantic_query_dispatch_mask
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Run ONE lifted-row registry query through the public host entry-point and
 /// return its full `TypeResolutionPayload` audit record (the execution-truth the
 /// dispatch-mask trace AND the recorded `query_mode` are both read off). Shared
@@ -2729,6 +2733,8 @@ fn lifted_row_trace_failures(
     out
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn lifted_row_mechanism_trace_matches_manifest() {
     let lifted: Vec<&IgnoredTestRow> = EXPECTED_IGNORE_MANIFEST
@@ -4159,6 +4165,8 @@ fn snapshot_workspace_files_match_retained_provenance() {
     assert!(checked > 0, "expected at least one v3 snapshot to check");
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Oracle query IDENTITY: every lifted row's live audit `query_mode` equals the
 /// mode its registry spec declares (`u0-oracle-harness-design.md` §Q4).
 ///
@@ -4248,6 +4256,7 @@ fn lifted_row_audit_query_mode_matches_spec() {
     );
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Map a registry `ProjectionModeSpec` onto the audit `ProjectionModeTag` the
 /// resolver records — so a row's declared spec mode can be compared against its
 /// REAL audit `query_mode`.

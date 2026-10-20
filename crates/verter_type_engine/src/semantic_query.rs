@@ -6077,6 +6077,7 @@ impl EdgeFence {
         }
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// A fence the edge store retains through `hold`.
     pub(crate) fn retained(
         signature: DepSignature,

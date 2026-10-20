@@ -3522,6 +3522,7 @@ dependencies = [
  "prost",
  "serde_json",
  "verter_actions",
+ "verter_audit",
  "verter_compiler",
  "verter_diagnostics",
  "verter_identity",

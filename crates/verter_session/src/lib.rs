@@ -259,6 +259,8 @@ mod overlay_artifact_key_isolation_tests;
 // Current-content-pinned `shallow_file_state` observed-read
 // discriminators.
 #[cfg(test)]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod shallow_file_state_pinned_tests;
 // Shared substrate for query-identity self-version rooting —
 // current-content fact path, self-root signature helpers, and strict

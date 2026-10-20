@@ -58,6 +58,7 @@ fn nextest_flags_a_test_at_10s_and_fails_it_at_20s_on_ci() {
     }
 }
 
+#[cfg(feature = "semantic-observe")]
 fn policy_output(command: &mut Command) -> String {
     let result = command.output().expect("start nextest policy probe");
     assert!(
@@ -68,6 +69,8 @@ fn policy_output(command: &mut Command) -> String {
     String::from_utf8(result.stdout).expect("UTF-8 policy output")
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn every_compiled_corpus_chunk_has_the_twenty_second_nextest_deadline() {
     const PREFIX: &str = "cases::corpus_audit_tests::chunk_";

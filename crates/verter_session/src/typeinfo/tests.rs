@@ -75,9 +75,15 @@ fn assert_one_typeresolution_record(
         matches!(record.kind_payload, RequestKindPayload::TypeResolution(_)),
         "kind_payload must be TypeResolution"
     );
+    // A build without `semantic-observe` answers the same request but
+    // reports unavailable capture instead of a stored record.
+    let expected = if cfg!(feature = "semantic-observe") {
+        verter_audit::AuditCaptureState::ActiveStored
+    } else {
+        verter_audit::AuditCaptureState::Unavailable
+    };
     assert_eq!(
-        record.capture_state,
-        verter_audit::AuditCaptureState::ActiveStored,
+        record.capture_state, expected,
         "active TypeResolution request must produce a stored record"
     );
     record
@@ -213,11 +219,13 @@ fn list_file_symbols_returns_empty_for_unloaded_file() {
 /// Number of top-level `export type T{i}` declarations emitted by the
 /// 5 KLOC fixture below. Every other line is a `// filler` comment, so
 /// this is the EXACT count of listed symbols.
+#[cfg(feature = "semantic-observe")]
 const BIG_TS_SYMBOL_COUNT: usize = 250;
 
 /// Build the ~5 KLOC fixture: `BIG_TS_SYMBOL_COUNT` top-level type
 /// aliases, each padded with 19 comment lines (≈ 5_000 lines total).
 /// Only the `export type` lines declare symbols; the filler is comments.
+#[cfg(feature = "semantic-observe")]
 fn big_ts_fixture() -> String {
     let mut source = String::with_capacity(5_000);
     for i in 0..BIG_TS_SYMBOL_COUNT {
@@ -241,6 +249,8 @@ fn big_ts_fixture() -> String {
 /// provenance counters rather than a wall-clock ceiling, which flakes
 /// under nextest process-per-test CPU oversubscription. The wall-clock
 /// budget for the 5 KLOC path lives in a `verter_bench` criterion bench.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn list_file_symbols_5kloc_is_complete_and_warm() {
     let host = make_host_with_audit();
@@ -437,6 +447,8 @@ export type Outer = Inner;
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_non_generic_default_expands() {
     let host = make_host_with_audit();
@@ -477,6 +489,8 @@ export type Outer = Inner;
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_generic_default_navigates() {
     let host = make_host_with_audit();
@@ -535,6 +549,8 @@ fn resolve_named_symbol_with_audit_emits_one_record() {
     );
 }
 
+// Correlation trace ids are optional capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn resolve_named_symbol_with_audit_carries_trace_id() {
     let host = make_host_with_audit();
@@ -822,6 +838,8 @@ fn evaluate_with_audit_emits_one_record() {
     );
 }
 
+// Correlation trace ids are optional capture.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_with_audit_carries_trace_id() {
     let host = make_host_with_audit();
@@ -886,6 +904,8 @@ export type Wrap<T> = { wrapped: T };
     let _ = type_arg_ref;
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn wire_lowering_miss_reports_computed_default_effective_mode() {
     // FIX D regression: an early miss with `mode = None` must record the

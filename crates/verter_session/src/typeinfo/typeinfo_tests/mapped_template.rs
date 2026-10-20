@@ -515,6 +515,8 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     assert!(graph.contains_key(&memo_key));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// What one cold evaluation of the mapped index `Paths<Api>` selects over
 /// `count` entities admits into the family memo, with the paths it publishes.
 fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
@@ -586,6 +588,8 @@ fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A recursive evaluation admits what a later demand can reach — each
 /// instantiation and the projections that answer it — while the conditional
 /// decisions, template-literal reductions and index projections nested in

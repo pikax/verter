@@ -959,9 +959,9 @@ pub struct FileArtifactStore {
     /// [`Self::evict_lru_promoted`] under explicit memory pressure.
     access_tick: AtomicU64,
     /// Live entry counter.
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Stale-sweep counter.
-    stale_sweeps: Arc<AtomicU64>,
+    stale_sweeps: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Monotonic artifact-publication generation.
     ///
     /// Bumped on every mutation that changes the per-canonical
@@ -1060,7 +1060,10 @@ impl FileArtifactStore {
         Self::with_counters(Default::default(), Default::default())
     }
 
-    pub(crate) fn with_counters(live: Arc<AtomicU64>, stale: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counters(
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counters_and_schema_version(
             live,
             stale,
@@ -1080,8 +1083,8 @@ impl FileArtifactStore {
     }
 
     fn with_counters_and_schema_version(
-        live: Arc<AtomicU64>,
-        stale: Arc<AtomicU64>,
+        live: verter_type_engine::cache_runtime::OccupancyCounter,
+        stale: verter_type_engine::cache_runtime::OccupancyCounter,
         schema_version: u32,
     ) -> Self {
         Self {

@@ -323,7 +323,9 @@ export class ProjectSession {
   }
 
   /**
-   * Provenance counters for observability. Returns parsed JSON or null.
+   * Provenance counters for observability, as parsed JSON. Throws the
+   * native unavailable-capture error when the binding was built without
+   * `semantic-observe`.
    */
   getProvenance(): Record<string, number> {
     this.ensureOpen();

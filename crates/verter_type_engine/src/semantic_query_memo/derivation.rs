@@ -73,8 +73,12 @@ use std::sync::{Arc, Weak};
 
 use rustc_hash::FxHashMap;
 
-use crate::bounded_query_retention::{next_retention_seq, GlobalRetentionBudget};
-use crate::semantic_query::{DepSignature, EdgeFence, OriginEdge, OriginEdgeKind, SemanticNodeId};
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+use crate::bounded_query_retention::next_retention_seq;
+use crate::bounded_query_retention::GlobalRetentionBudget;
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+use crate::semantic_query::DepSignature;
+use crate::semantic_query::{EdgeFence, OriginEdge, OriginEdgeKind, SemanticNodeId};
 
 /// Total cap on the number of distinct `(result, kind)` edge buckets the
 /// derivation store retains. A long-lived session that edits many owners
@@ -275,6 +279,7 @@ impl DerivationStore {
         self.storage.charged()
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// The pooled fence for `sig`, sharing a live edge's when one holds an
     /// equal fence. A fresh fence takes the store's hold on the rail's own
     /// charge; `None` when the account refuses it, and the edge is then not
@@ -338,6 +343,7 @@ impl DerivationStore {
         Some(arc)
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn record(
         &mut self,
         result: SemanticNodeId,
@@ -490,6 +496,7 @@ impl DerivationStore {
         self.edges.len()
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// Lookup the bucket for `(result, kind)` for an identity-tuple
     /// dedup probe (`record_origin_edge` callers compare `Arc::ptr_eq`
     /// on `edge_dep_signature` plus content equality on `sources` and
@@ -583,11 +590,13 @@ pub(super) struct EdgeBucket {
 }
 
 impl EdgeBucket {
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn push(&mut self, identity: u64, edge: OriginEdge) {
         self.edges.push(edge);
         self.identities.push(identity);
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn evict_oldest(&mut self) {
         self.edges.remove(0);
         self.identities.remove(0);
@@ -613,6 +622,7 @@ impl EdgeBucket {
         }
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     /// Whether the bucket already holds `edge`, whose identity key is
     /// `identity`: the same interned signature, sources and metadata.
     pub(super) fn holds(&self, identity: u64, edge: &OriginEdge) -> bool {
@@ -631,6 +641,7 @@ impl EdgeBucket {
     }
 }
 
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 /// The identity key of an edge with interned signature `signature` over
 /// `sources`: equal edges have equal keys. It narrows the duplicate-edge
 /// probe; a key match is confirmed on the whole edge.

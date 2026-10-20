@@ -585,7 +585,10 @@ pub trait WorkspaceRead: Send + Sync {
         None
     }
 
-    /// Point-in-time VFS provenance counters for observability and benchmarks.
+    /// Point-in-time VFS provenance counters for tests and measurement
+    /// builds. Exists only under the observation gate, where the counters
+    /// are kept.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         crate::types::VfsProvenanceSnapshot::default()
     }

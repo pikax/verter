@@ -501,6 +501,8 @@ fn mapper_kind_classification_materialises_no_value_body() {
 /// identity — pinned by
 /// `distinct_argument_environments_instantiate_once_each_and_repeats_join_the_memo`),
 /// otherwise a count of one would only mean the demands collapsed.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn one_generic_body_lowers_once_across_distinct_argument_environments() {
     let host = new_host();

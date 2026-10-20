@@ -5,6 +5,10 @@
 //! record is appended to the named path as a single JSON line. The
 //! test populates a temp directory, sets the env var, drives one
 //! audited LSP run, and asserts the file holds the produced record.
+//!
+//! The trace-out drainer appends captured records, which exist only with
+//! `semantic-observe`; the test runs in the instrumentation lane.
+#![cfg(feature = "semantic-observe")]
 
 use std::sync::Arc;
 

@@ -54,18 +54,24 @@
 //! file whose own CI runs are exactly the noisy, single-sample environment
 //! that makes a wall-clock ceiling here flip under load.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+#[cfg(feature = "semantic-observe")]
+use std::sync::{Condvar, Mutex};
 
 use crate::host_manage::component_meta_request_impl::ViewBoundRequestHost;
 use crate::meta::MetaProject;
 use crate::resolver_core::{
     run_component_meta_request, CanonicalCompletionOverlay, ComponentMetaCacheLookup,
-    ComponentMetaRequestHost, RequestRunResult, RequestSource, ResolutionNodeKey, SingleflightRole,
+    ComponentMetaRequestHost, ResolutionNodeKey,
 };
+#[cfg(feature = "semantic-observe")]
+use crate::resolver_core::{RequestRunResult, RequestSource, SingleflightRole};
 use crate::session_view::HostViewRef;
 use crate::types::HostConfig;
 use crate::VerterHost;
+#[cfg(feature = "semantic-observe")]
 use verter_session_query::facts::store_view::StoreView;
 
 const NODE_COUNT_GROWTH_LIMIT: f64 = 1.20;
@@ -163,6 +169,8 @@ defineProps<{ msg: string; count: number }>()
         .unwrap();
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     let project = make_project();
@@ -282,6 +290,8 @@ fn component_meta_owner_scope_refuses_only_the_final_publication_then_heals() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn dispatch_lowering_cost_bounded_on_editortoolbar() {
     let project = make_project();
@@ -344,6 +354,8 @@ fn dispatch_lowering_cost_bounded_on_editortoolbar() {
 /// about serialization or cold coalescing; the cold-key concurrency
 /// invariants are owned by
 /// `concurrent_demand_for_same_meta_key_collapses_to_one_compute` below.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_warm_readers_all_hit_the_final_result_cache() {
     let project = make_project();
@@ -410,6 +422,7 @@ fn concurrent_warm_readers_all_hit_the_final_result_cache() {
 /// lane before any cold work completes. Mirrors the `LeaderGate` idiom
 /// in `resolver_core::mod` tests (`entered` proves the Leader is inside
 /// `compute`; `open` releases it).
+#[cfg(feature = "semantic-observe")]
 struct LeaderGate {
     entered: Mutex<bool>,
     entered_cv: Condvar,
@@ -417,6 +430,7 @@ struct LeaderGate {
     open_cv: Condvar,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl LeaderGate {
     fn new() -> Self {
         Self {
@@ -462,11 +476,13 @@ impl LeaderGate {
 /// expressed entirely at the request layer, and the only signal the
 /// test reads from the singleflight primitive is the existing
 /// `test_flight_strong_count` lane probe.
+#[cfg(feature = "semantic-observe")]
 struct GatingRequestHost<'a> {
     inner: ViewBoundRequestHost<'a>,
     gate: Arc<LeaderGate>,
 }
 
+#[cfg(feature = "semantic-observe")]
 impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
     type View = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::View;
     type Mode = <ViewBoundRequestHost<'a> as ComponentMetaRequestHost>::Mode;
@@ -545,6 +561,7 @@ impl<'a> ComponentMetaRequestHost for GatingRequestHost<'a> {
 /// host borrows `view`, which the caller must keep alive for the
 /// request's lifetime (exactly how production constructs the adapter at
 /// `component_meta_methods.rs`).
+#[cfg(feature = "semantic-observe")]
 fn gating_request_host<'a>(
     host: &'a VerterHost,
     view: &'a HostViewRef<'a>,
@@ -564,6 +581,7 @@ fn gating_request_host<'a>(
 /// discriminating shape every coalesced caller must agree on. Avoids a
 /// full `PartialEq` (the resolved state does not derive it) while still
 /// proving the 32 callers observed the SAME computed result.
+#[cfg(feature = "semantic-observe")]
 fn resolved_state_fingerprint(
     state: &crate::meta_resolve::ResolvedComponentMetaState,
 ) -> (String, String, usize, usize, (usize, usize, usize, usize)) {
@@ -603,6 +621,8 @@ fn resolved_state_fingerprint(
 /// in-flight (`baseline` strong count == 3), the 31 Followers are
 /// spawned and deterministically polled onto the SAME lane (no sleep, no
 /// barrier) before the gate is released.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn concurrent_demand_for_same_meta_key_collapses_to_one_compute() {
     const FOLLOWERS: usize = 31;

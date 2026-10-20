@@ -1,5 +1,7 @@
 use super::*;
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn prepared_decl_bundle_without_store_view_reuses_stable_cache() {
     let host = make_host();
@@ -66,6 +68,8 @@ fn prepared_decl_bundle_without_store_view_reuses_stable_cache() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn prepared_decl_bundle_with_store_view_reuses_cache_for_structural_exact_resolutions() {
     let ws = Arc::new(verter_workspace::MemoryWorkspace::new(
@@ -882,6 +886,8 @@ export type TargetEmits = { change: [value: string] }
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn get_component_meta_reuses_scheduler_snapshot_when_materializing_owner_indexed_ready() {
@@ -923,6 +929,8 @@ const props = defineProps<AccordionRootProps>()
 ///
 /// Full verification requires a CountingWorkspace to track file read counts,
 /// which is not available in the standalone host test harness.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn solver_host_cache_ownership_cold_warm() {
     let host = VerterHost::new_standalone(HostConfig {
@@ -979,6 +987,8 @@ defineProps<Props>()
 
 /// Two different Vue files importing the same type from the same canonical
 /// file should share the host-owned imported file state.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn same_canonical_file_reuses_state_across_two_owners() {
     let host = VerterHost::new_standalone(HostConfig {

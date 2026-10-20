@@ -113,7 +113,7 @@ enum BundleMaterialization {
 /// its compute observed, which is strictly more than tracer finalisation
 /// exposes: the tracer records only that the enclosing compute is
 /// non-cacheable, never why.
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) struct BundleReuseOutcome {
     pub(crate) bundle: Option<
         crate::resolver_core::CachedValue<crate::resolver_core::prepared_decl::PreparedDeclBundle>,
@@ -357,7 +357,7 @@ impl VerterHost {
     /// projection above; the class governs admission INSIDE the
     /// implementation (the request memo's structural gate and the
     /// shared-cache gate), so no production caller needs to inspect it.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn prepared_decl_bundle_with_reuse_class(
         &self,
         view: &dyn verter_session_query::facts::store_view::StoreView,

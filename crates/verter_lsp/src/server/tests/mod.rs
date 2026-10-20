@@ -3852,6 +3852,7 @@ pub(super) fn rename_edit_ranges(
 
 /// Frame `count` full-document `textDocument/didChange` notifications for
 /// `uri`, versions `first_version..`, each carrying a distinguishable source.
+#[cfg(feature = "semantic-observe")]
 fn did_change_burst_frames(uri: &Uri, first_version: i32, count: usize) -> (Vec<u8>, String) {
     let revision = |marker: i32| {
         format!(
@@ -3945,6 +3946,8 @@ async fn serve_over_duplex_initialized(
 /// execute a cold compile per keystroke while a tick-based counter reported
 /// zero. A malformed intermediate revision is the ordinary state of a file
 /// being typed, so the instrument has to see it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn cold_compile_runs(host: &Arc<VerterHost>) -> u64 {
     host.provenance_snapshot().compile_cold_runs
 }
@@ -3989,6 +3992,8 @@ fn ingress_measurement_server(
 /// pads every run. This polls for the first movement, then requires the rail to
 /// hold still across a full debounce window — so a per-notification storm cannot
 /// be sampled mid-flight and read as a small number.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64 {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let quiet_for = std::time::Duration::from_millis(crate::sync_coordinator::DEBOUNCE_MS * 3);
@@ -4012,6 +4017,7 @@ async fn await_settled_cold_compiles(host: &Arc<VerterHost>, before: u64) -> u64
 
 /// Frame `count` full-document `didChange` notifications carrying revisions that
 /// do NOT compile — the ordinary mid-edit state of a file being typed.
+#[cfg(feature = "semantic-observe")]
 fn invalid_did_change_burst_frames(
     uri: &Uri,
     first_version: i32,
@@ -4039,6 +4045,7 @@ fn invalid_did_change_burst_frames(
 }
 
 /// Whether the host still has no IDE TSX for `canonical_id` (a pure cached read).
+#[cfg(feature = "semantic-observe")]
 fn service_projection_still_absent(host: &Arc<VerterHost>, canonical_id: &str) -> bool {
     host.get_ide(canonical_id, &verter_session::CompileProfile::default())
         .is_none()

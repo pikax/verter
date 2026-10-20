@@ -113,7 +113,7 @@ where
     retention_budget: Option<GlobalRetentionBudget<(K, u64)>>,
     /// Shared live-candidate counter (the `component_meta_cache_live`
     /// sum). Net-bumped on admission, decremented on every removal.
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// Lifecycle gate.
     ///
     /// `publish_core` and `evict_deferred` (the publish side) run under
@@ -165,7 +165,7 @@ where
     /// Construct a store with no retention budget (per-slot cap + the
     /// per-canonical drain are the only reclamation). The
     /// imported-registry consumer uses this form.
-    pub fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub fn with_counter(live_counter: crate::cache_runtime::OccupancyCounter) -> Self {
         Self::build(live_counter, None, QUERY_SLOT_CANDIDATE_CAP)
     }
 
@@ -173,7 +173,10 @@ where
     /// candidate count across all slots. The materialise-structure and
     /// ref-cycle consumers use this form — the budget is their routine
     /// reclamation path.
-    pub(crate) fn with_counter_and_budget(live_counter: Arc<AtomicU64>, budget_cap: usize) -> Self {
+    pub(crate) fn with_counter_and_budget(
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        budget_cap: usize,
+    ) -> Self {
         Self::build(
             live_counter,
             Some(GlobalRetentionBudget::new(budget_cap)),
@@ -182,7 +185,7 @@ where
     }
 
     fn build(
-        live_counter: Arc<AtomicU64>,
+        live_counter: crate::cache_runtime::OccupancyCounter,
         retention_budget: Option<GlobalRetentionBudget<(K, u64)>>,
         per_slot_cap: usize,
     ) -> Self {
@@ -512,10 +515,7 @@ where
             }
             std::cmp::Ordering::Less => {
                 let dec = (-delta) as u64;
-                self.live_counter.fetch_sub(
-                    dec.min(self.live_counter.load(Ordering::Relaxed)),
-                    Ordering::Relaxed,
-                );
+                self.live_counter.saturating_sub(dec);
             }
             std::cmp::Ordering::Equal => {}
         }

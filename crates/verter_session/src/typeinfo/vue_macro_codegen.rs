@@ -191,18 +191,82 @@ pub(crate) fn vue_macro_codegen_schedule_identity_from_compat(
 }
 
 /// Deterministic work counters for one producer invocation.
+///
+/// Only this crate's contract suites read the counts, so the fields exist
+/// only under `cfg(test)`. Elsewhere the struct is zero-size and every
+/// `record_*` method is a no-op, so threading it through the producer costs
+/// nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct VueMacroCodegenCounters {
     /// Always one for an output returned by this producer.
+    #[cfg(test)]
     pub producer_invocations: u32,
     /// Empty-path Shallow root-surface demands.
+    #[cfg(test)]
     pub root_shallow_demands: u32,
     /// In-process `ClassifyBroadRuntime` demands.
+    #[cfg(test)]
     pub runtime_classifier_calls: u32,
     /// Terminal TypeInfo display materializations for TSC.
+    #[cfg(test)]
     pub tsc_materializations: u32,
     /// Exactly one scheduler admission attempt for this SFC demand.
+    #[cfg(test)]
     pub scheduler_submissions: u32,
+}
+
+impl VueMacroCodegenCounters {
+    /// The counters of one producer invocation, before any demand ran.
+    #[inline]
+    pub(crate) fn for_invocation() -> Self {
+        #[cfg(test)]
+        {
+            Self {
+                producer_invocations: 1,
+                ..Self::default()
+            }
+        }
+        #[cfg(not(test))]
+        {
+            Self::default()
+        }
+    }
+
+    /// Record the one scheduler admission attempt of this SFC demand.
+    #[inline]
+    pub(crate) fn record_scheduler_submission(&mut self) {
+        #[cfg(test)]
+        {
+            self.scheduler_submissions = 1;
+        }
+    }
+
+    /// Record one empty-path Shallow root-surface demand.
+    #[inline]
+    pub(crate) fn record_root_shallow_demand(&mut self) {
+        #[cfg(test)]
+        {
+            self.root_shallow_demands += 1;
+        }
+    }
+
+    /// Record one in-process `ClassifyBroadRuntime` demand.
+    #[inline]
+    pub(crate) fn record_runtime_classifier_call(&mut self) {
+        #[cfg(test)]
+        {
+            self.runtime_classifier_calls += 1;
+        }
+    }
+
+    /// Record one terminal TypeInfo display materialization for TSC.
+    #[inline]
+    pub(crate) fn record_tsc_materialization(&mut self) {
+        #[cfg(test)]
+        {
+            self.tsc_materializations += 1;
+        }
+    }
 }
 
 /// Typed missing-dependency provenance produced by the same graph projection
@@ -681,10 +745,10 @@ fn terminal_partial_vue_macro_codegen_output(
         // refuses the consumer's admission rather than pretending an empty
         // signature validated.
         fact_footprint: MacroFactFootprint::Unobserved,
-        counters: VueMacroCodegenCounters {
-            producer_invocations: 1,
-            scheduler_submissions: 1,
-            ..VueMacroCodegenCounters::default()
+        counters: {
+            let mut counters = VueMacroCodegenCounters::for_invocation();
+            counters.record_scheduler_submission();
+            counters
         },
     }
 }
@@ -848,7 +912,7 @@ impl VerterHost {
                 state
             },
         );
-        state.counters.scheduler_submissions = 1;
+        state.counters.record_scheduler_submission();
 
         let (transitive_canonicals, fact_footprint) = MacroFactFootprint::from_finalise(finalise);
         VueMacroCodegenOutput {
@@ -882,10 +946,7 @@ impl VerterHost {
             runtime_entries: Vec::new(),
             tsc_entries: Vec::new(),
             dependency_failures: Vec::new(),
-            counters: VueMacroCodegenCounters {
-                producer_invocations: 1,
-                ..VueMacroCodegenCounters::default()
-            },
+            counters: VueMacroCodegenCounters::for_invocation(),
             published: Vec::new(),
             completeness: ResultCompleteness::Complete,
         };
@@ -1226,7 +1287,7 @@ impl VerterHost {
                 if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
-                counters.root_shallow_demands += 1;
+                counters.record_root_shallow_demand();
                 let surface = self.project_shallow_surface_graph_only(
                     ctx,
                     dispatch,
@@ -1323,7 +1384,7 @@ impl VerterHost {
                 if probe_definitely_non_object_root(dispatch, payload) {
                     return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).tsc();
                 }
-                counters.root_shallow_demands += 1;
+                counters.record_root_shallow_demand();
                 let surface = self.project_shallow_surface_graph_only(
                     ctx,
                     dispatch,
@@ -1591,7 +1652,7 @@ impl VerterHost {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
-        counters.root_shallow_demands += 1;
+        counters.record_root_shallow_demand();
         let surface = self.project_shallow_surface_graph_only(
             ctx,
             dispatch,
@@ -1746,7 +1807,7 @@ impl VerterHost {
         if probe_definitely_non_object_root(dispatch, payload) {
             return ProjectionFailure::Invalid(MacroInvalidReason::NonObjectRoot).runtime();
         }
-        counters.root_shallow_demands += 1;
+        counters.record_root_shallow_demand();
         let runtime_context = ProjectionReductionContext::vue_runtime_object_surface(
             ProjectionMode::Shallow,
             SurfaceProvenanceContext::Structural,

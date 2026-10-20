@@ -27,8 +27,6 @@ semantic-observe = [
   "verter_audit/semantic-observe",
   "verter_execution/semantic-observe",
   "dep:hotpath",
-  "hotpath/hotpath",
-  "dep:uuid",
 ]
 
 # Dependency closure is a layering contract: the engine depends only on the
@@ -61,16 +59,19 @@ serde_json = { workspace = true }
 smallvec = "1.15"
 static_assertions = "1.1.0"
 tracing = "0.1.44"
-# Correlation-only request trace ids: optional capture.
-uuid = { version = "1.23", features = ["v4"], optional = true }
+# Correlation-only request trace ids (minted only with `semantic-observe`).
+uuid = { version = "1.23", features = ["v4"] }
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1.1"
-uuid = { version = "1.23", features = ["js"], optional = true }
+uuid = { version = "1.23", features = ["js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-uuid = { version = "1.23", features = ["rng-getrandom"], optional = true }
+# The profiler itself is native-only: on wasm32 `hotpath` stays in its
+# no-op mode, so `semantic-observe` builds for every target.
+hotpath = { version = "0.23", optional = true, features = ["hotpath"] }
+uuid = { version = "1.23", features = ["rng-getrandom"] }
 
 # Generator for the SemanticQueryKeySpec table artifact (sole writer of
 # `src/semantic_query/query_key_spec_table.txt`). Run via the pnpm script

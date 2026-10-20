@@ -10,10 +10,7 @@ use crate::fact_signature_helpers::ReadSetSignatureExt as _;
 use crate::resolver_core::fact_validation_port::{FactValidation, LiveFactValidation};
 use crate::resolver_core::resolver_context::{RequestFlags, RequestSnapshot};
 use dashmap::DashMap;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
-};
+use std::sync::{atomic::Ordering, Arc};
 use verter_session_query::declarations::metadata::ResolvedTypeDeclaration;
 use verter_session_query::facts::fact_cache::FactVersionRef;
 use verter_session_query::facts::fact_cache::ReadSetSignature;
@@ -68,7 +65,7 @@ pub enum ComponentMetaTrace {
 pub(crate) struct SingleEntryAttachment<'a, K: Eq + std::hash::Hash + Clone, V> {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
-    live_counter: &'a AtomicU64,
+    live_counter: &'a crate::cache_runtime::OccupancyCounter,
     schema_version: u32,
     /// The account an entry of this cache is charged to.
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
@@ -77,7 +74,7 @@ impl<'a, K: Eq + std::hash::Hash + Clone, V> SingleEntryAttachment<'a, K, V> {
     pub(crate) fn new(
         entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
         inflight: &'a InflightTable<QueryFlightKey<K>>,
-        live_counter: &'a AtomicU64,
+        live_counter: &'a crate::cache_runtime::OccupancyCounter,
         schema_version: u32,
         account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
@@ -213,7 +210,7 @@ where
 {
     entries: &'a DashMap<K, Arc<CacheEntry<V>>>,
     inflight: &'a InflightTable<QueryFlightKey<K>>,
-    live_counter: &'a AtomicU64,
+    live_counter: &'a crate::cache_runtime::OccupancyCounter,
     /// The account the cache's entries are charged to.
     account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     /// The canonicals the warm-read validator checks STRICTLY. Owned by

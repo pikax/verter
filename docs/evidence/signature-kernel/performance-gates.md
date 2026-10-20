@@ -199,7 +199,9 @@ steps inside one request, `A2` the carrier-validated memo read alone, `A3`
 the request setup and teardown with no semantic work; `A0` and `A2` also
 run with every caller on the same witness (`keys: same`). Per point:
 `samples_ns`, `qps`, and `store_view_reads_per_query` (from the host's
-provenance counter, which must not grow with callers). It asserts, and
+provenance counter, which must not grow with callers; the counter exists only
+in a build with `--features semantic-observe`, and the probe reports `null`
+without it). It asserts, and
 reports as `answers_agree_across_callers`, that every witness answers the
 same when read by 1/2/4/8/16 concurrent callers as when read by one. What
 it found, what was fixed and what is proposed is recorded in

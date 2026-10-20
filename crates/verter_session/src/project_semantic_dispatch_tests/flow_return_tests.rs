@@ -782,6 +782,8 @@ fn flow_refused_preparation_is_publicly_approximate_without_admission() {
         panic!("refused preparation must be approximate");
     };
     assert!(causes.get().contains(PartialReasonSet::UNSTABLE_STATE));
+    // The audited partiality tag is optional capture.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         public
             .audit()
@@ -6818,6 +6820,8 @@ fn declined_member_projection_probe_leaks_no_partial_into_the_enclosing_build() 
 // planning.
 // ────────────────────────────────────────────────────────────────────────
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// The per-request cold-compute counter, read from the installed
 /// `RequestContext`.
 fn flow_cold_computes() -> u32 {
@@ -6900,6 +6904,8 @@ fn flow_root_publish_requires_complete_flow_proof() {
     });
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A production plan whose discharge leaves ONE planned obligation
 /// pending finalizes Partial: the usable value still returns (twice), the
 /// cold-compute counter increments on BOTH demands (nothing warmed), and
@@ -6947,6 +6953,8 @@ fn production_missing_obligation_returns_only_and_recomputes() {
     });
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A NATURAL degraded success never warms — root and SCC legs. The root
 /// leg (a call on a non-callable binding) returns its usable payload
 /// twice with two cold computations and zero candidates; the SCC leg (a

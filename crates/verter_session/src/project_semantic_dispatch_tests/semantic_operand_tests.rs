@@ -1337,6 +1337,8 @@ fn cancellation_before_entry_performs_zero_semantic_work() {
     assert_eq!(ctx.projection_budget.projection_ops_executed_count(), 0);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn force_boundary_and_nested_dispatches_are_budget_charged() {
     let host = make_host();
@@ -2559,6 +2561,7 @@ pub(super) fn interned_nodes(host: &VerterHost) -> usize {
     host.project_type_store().semantic_graph().node_count()
 }
 
+#[cfg(feature = "semantic-observe")]
 /// A request context with a generous projection budget, installed so the
 /// measured window's substitution calls are countable through
 /// `substitute_top_level_calls`.
@@ -2703,6 +2706,8 @@ fn a_selective_authored_force_records_its_materialised_point_at_the_residual_pat
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn residual_path_force_answers_the_requested_key_without_requesting_the_whole_base_surface() {
     let host = projection_host();
@@ -2831,6 +2836,8 @@ fn residual_path_force_answers_the_requested_key_without_requesting_the_whole_ba
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn key_domain_force_answers_keyof_without_materialising_member_values() {
     let host = projection_host();
@@ -2932,6 +2939,7 @@ fn key_domain_force_answers_keyof_without_materialising_member_values() {
     );
 }
 
+#[cfg(feature = "semantic-observe")]
 /// Sorted literal key names of a `keyof` result — a single literal or a
 /// union of them. Any other shape is a failure, so the assertion cannot
 /// pass on a degraded/opaque answer.
@@ -3870,14 +3878,19 @@ export type Deep = { wanted: { leaf: string }; cold: { c: \"c1\" } };\n";
 // not only dispatch counters — proves the sibling stayed cold.
 // =====================================================================
 
+#[cfg(feature = "semantic-observe")]
 const IMPORT_OWNER: &str = "/w/operand/import_owner.ts";
+#[cfg(feature = "semantic-observe")]
 const IMPORT_DEP: &str = "/w/operand/import_sibling.ts";
+#[cfg(feature = "semantic-observe")]
 const IMPORT_OWNER_SOURCE: &str = "\
 import { Cold } from \"./import_sibling\";\n\
 export type Deep = { wanted: { leaf: string }; cold: Cold };\n";
+#[cfg(feature = "semantic-observe")]
 const IMPORT_DEP_SOURCE: &str = "\
 export type Cold = { d0: \"d0\"; d1: \"d1\"; d2: \"d2\"; d3: \"d3\" };\n";
 
+#[cfg(feature = "semantic-observe")]
 fn import_host() -> VerterHost {
     let host = make_host();
     upsert_at(&host, IMPORT_OWNER, IMPORT_OWNER_SOURCE);
@@ -3885,6 +3898,7 @@ fn import_host() -> VerterHost {
     host
 }
 
+#[cfg(feature = "semantic-observe")]
 fn import_deep_locator() -> AuthoredBodyLocator {
     locator_at(
         IMPORT_OWNER,
@@ -3894,6 +3908,8 @@ fn import_deep_locator() -> AuthoredBodyLocator {
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_cold_import_sibling_contributes_no_dispatches_or_facts_to_a_residual_path_force() {
     let host = import_host();

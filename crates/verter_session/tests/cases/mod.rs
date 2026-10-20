@@ -26,6 +26,8 @@ mod corpus_audit_layout;
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod corpus_audit_tests;
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod css_attribution_chargeable;
 mod defect_b_corpus_prevention_gate;
 mod exposed_binding_regression;

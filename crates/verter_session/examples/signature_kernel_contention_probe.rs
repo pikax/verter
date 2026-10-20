@@ -43,8 +43,9 @@
 //! One JSON document goes to stdout: per variant, key mode and caller
 //! count, the wall samples, queries per second, and the host's
 //! store-view reads per query (`store_view_reads_per_query`, from the
-//! host's own provenance counter), which must not grow with the caller
-//! count; and `answers_agree_across_callers`, the check (asserted) that
+//! host's own provenance counter, `null` in a build without
+//! `semantic-observe`, which keeps no provenance), which must not grow with
+//! the caller count; and `answers_agree_across_callers`, the check (asserted) that
 //! every witness answers the same when read by 1/2/4/8/16 concurrent
 //! callers as when read by one. The corpus is the comparative harness's module shape, written
 //! here again because the harness must stay a single file the runner can
@@ -234,7 +235,21 @@ fn caller_sample(
 
 struct Point {
     samples_ns: Vec<u64>,
-    store_view_reads: u64,
+    /// Store-view reads across the run; `None` without `semantic-observe`.
+    store_view_reads: Option<u64>,
+}
+
+/// The host's store-view read count, kept only under `semantic-observe`.
+fn store_view_reads(host: &VerterHost) -> Option<u64> {
+    #[cfg(feature = "semantic-observe")]
+    {
+        Some(host.provenance_snapshot().store_view_from_host_reads)
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        let _ = host;
+        None
+    }
 }
 
 /// `samples` timed samples (after one untimed warm-up) of `callers`
@@ -257,7 +272,7 @@ fn run(
     let failure: Mutex<Option<Box<dyn Any + Send>>> = Mutex::new(None);
     let failed = || failure.lock().expect("failure slot").is_some();
     let mut samples_ns = Vec::with_capacity(samples);
-    let reads_before = host.provenance_snapshot().store_view_from_host_reads;
+    let reads_before = store_view_reads(host);
     std::thread::scope(|scope| {
         for caller in 0..callers {
             let (start, end, spans, failure, failed) = (&start, &end, &spans, &failure, &failed);
@@ -314,7 +329,9 @@ fn run(
     }
     Point {
         samples_ns,
-        store_view_reads: host.provenance_snapshot().store_view_from_host_reads - reads_before,
+        store_view_reads: store_view_reads(host)
+            .zip(reads_before)
+            .map(|(after, before)| after - before),
     }
 }
 
@@ -448,7 +465,9 @@ fn probe() {
                     "samples_ns": point.samples_ns,
                     "qps": qps,
                     "median_qps": median(&qps),
-                    "store_view_reads_per_query": point.store_view_reads as f64 / performed,
+                    "store_view_reads_per_query": point
+                        .store_view_reads
+                        .map(|reads| reads as f64 / performed),
                 }),
             );
         }

@@ -402,7 +402,7 @@ impl NapiMetaSession {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (audit_json, canonical_id);
-            return Err(crate::audit::capture_unavailable_error());
+            Err(crate::audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -448,7 +448,7 @@ impl NapiMetaSession {
                 decl_symbol_name,
                 args_fingerprint_hex,
             );
-            return Err(crate::audit::capture_unavailable_error());
+            Err(crate::audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -498,18 +498,12 @@ impl NapiMetaSession {
         }))?
     }
 
+    /// Provenance counters for this session's host, as JSON. A binding built
+    /// without `semantic-observe` keeps no provenance and returns the
+    /// unavailable-capture error rather than a zero-filled payload.
     #[napi(js_name = "getProvenance")]
     pub fn get_provenance(&self) -> Result<String> {
-        let session = self.session()?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
-            let snapshot = session.get_provenance().map_err(meta_err)?;
-            serde_json::to_string(&snapshot).map_err(|e| {
-                Error::new(
-                    Status::GenericFailure,
-                    format!("provenance serialization error: {e}"),
-                )
-            })
-        }))?
+        provenance_json(self.session()?)
     }
 
     #[napi(js_name = "trackedFileIds")]
@@ -587,6 +581,26 @@ impl NapiMetaSession {
     }
 }
 
+/// Serialize the session host's provenance counters.
+#[cfg(feature = "semantic-observe")]
+fn provenance_json(session: &HostComponentMetaSession) -> Result<String> {
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let snapshot = session.get_provenance().map_err(meta_err)?;
+        serde_json::to_string(&snapshot).map_err(|e| {
+            Error::new(
+                Status::GenericFailure,
+                format!("provenance serialization error: {e}"),
+            )
+        })
+    }))?
+}
+
+/// A build without `semantic-observe` keeps no provenance to serialize.
+#[cfg(not(feature = "semantic-observe"))]
+fn provenance_json(_session: &HostComponentMetaSession) -> Result<String> {
+    Err(crate::audit::capture_unavailable_error())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,6 +612,49 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("MetaProject.openSession"));
+    }
+
+    fn standalone_session() -> NapiMetaSession {
+        let project = NapiMetaProject {
+            inner: Arc::new(ComponentMetaHost::new_standalone_with_scheduler_config(
+                verter_session::HostConfig::default(),
+                verter_scheduler::scheduler::SchedulerConfig {
+                    cpu_threads: 1,
+                    ..verter_scheduler::scheduler::SchedulerConfig::default()
+                },
+            )),
+        };
+        project.open_session().expect("open a session")
+    }
+
+    /// A binding built without `semantic-observe` keeps no provenance, so
+    /// `getProvenance` reports unavailable capture rather than a payload of
+    /// zeros.
+    #[cfg(not(feature = "semantic-observe"))]
+    #[test]
+    fn get_provenance_reports_unavailable_capture_without_semantic_observe() {
+        let err = standalone_session()
+            .get_provenance()
+            .expect_err("provenance is compiled out of this build");
+        assert!(
+            err.to_string()
+                .contains("built without the semantic-observe feature"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    #[test]
+    fn get_provenance_returns_the_host_counters_with_semantic_observe() {
+        let json = standalone_session()
+            .get_provenance()
+            .expect("an instrumented build reports provenance");
+        let payload: serde_json::Value = serde_json::from_str(&json).expect("provenance is JSON");
+        assert!(
+            payload["getComponentMetaCalls"].is_u64(),
+            "the payload carries the host counters: {payload}"
+        );
     }
 
     // The walker bindings exist only with optional capture.

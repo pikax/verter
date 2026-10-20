@@ -386,7 +386,7 @@ pub(super) fn classify_runtime(
     subject: BroadRuntimeSubjectLocator,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<RuntimeClassification, ProjectionFailure> {
-    counters.runtime_classifier_calls += 1;
+    counters.record_runtime_classifier_call();
     let fact = dispatch
         .owning()
         .execute_fact(dispatch.broad_runtime_key_for(subject));

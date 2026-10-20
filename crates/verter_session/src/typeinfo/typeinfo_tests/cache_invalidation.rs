@@ -48,9 +48,13 @@ const BARREL_BASIC: &str = "/fixtures/cache_invalidation_basic_barrel.ts";
 const SELECTED_BASIC: &str = "/fixtures/cache_invalidation_basic_selected.ts";
 const UNUSED_BASIC: &str = "/fixtures/cache_invalidation_basic_unused.ts";
 
+#[cfg(feature = "semantic-observe")]
 const OWNER_ROUTE: &str = "/fixtures/cache_invalidation_route_owner.ts";
+#[cfg(feature = "semantic-observe")]
 const BARREL_ROUTE: &str = "/fixtures/cache_invalidation_route_barrel.ts";
+#[cfg(feature = "semantic-observe")]
 const LEAF_A_ROUTE: &str = "/fixtures/cache_invalidation_route_leaf_a.ts";
+#[cfg(feature = "semantic-observe")]
 const LEAF_B_ROUTE: &str = "/fixtures/cache_invalidation_route_leaf_b.ts";
 
 const OWNER_AUG: &str = "/fixtures/cache_invalidation_aug_owner.ts";
@@ -61,15 +65,21 @@ const OWNER_BASIC_SRC: &str = include_str!("fixtures/cache_invalidation_owner_ba
 const BARREL_BASIC_SRC: &str = include_str!("fixtures/cache_invalidation_basic_barrel.ts");
 const SELECTED_BASIC_V1_SRC: &str =
     include_str!("fixtures/cache_invalidation_basic_selected_v1.ts");
+#[cfg(feature = "semantic-observe")]
 const SELECTED_BASIC_V2_SRC: &str =
     include_str!("fixtures/cache_invalidation_basic_selected_v2.ts");
 const UNUSED_BASIC_V1_SRC: &str = include_str!("fixtures/cache_invalidation_basic_unused_v1.ts");
 const UNUSED_BASIC_V2_SRC: &str = include_str!("fixtures/cache_invalidation_basic_unused_v2.ts");
 
+#[cfg(feature = "semantic-observe")]
 const OWNER_ROUTE_SRC: &str = include_str!("fixtures/cache_invalidation_route_owner.ts");
+#[cfg(feature = "semantic-observe")]
 const BARREL_ROUTE_V1_SRC: &str = include_str!("fixtures/cache_invalidation_route_barrel_v1.ts");
+#[cfg(feature = "semantic-observe")]
 const BARREL_ROUTE_V2_SRC: &str = include_str!("fixtures/cache_invalidation_route_barrel_v2.ts");
+#[cfg(feature = "semantic-observe")]
 const LEAF_A_ROUTE_SRC: &str = include_str!("fixtures/cache_invalidation_route_leaf_a.ts");
+#[cfg(feature = "semantic-observe")]
 const LEAF_B_ROUTE_SRC: &str = include_str!("fixtures/cache_invalidation_route_leaf_b.ts");
 
 const OWNER_AUG_SRC: &str = include_str!("fixtures/cache_invalidation_aug_owner.ts");
@@ -94,6 +104,7 @@ fn resolve_surface(host: &VerterHost, owner: &str) -> (TypeExpr, verter_audit::R
     resolve_expr(host, owner, "Surface", &[], ProjectionMode::Expanded)
 }
 
+#[cfg(feature = "semantic-observe")]
 fn assert_basic_surface_has_v_property(expr: &TypeExpr, expected_v: f64, expected_tag: &str) {
     let props = object_props(expr);
     assert_eq!(prop_names(&props), vec!["tag", "v"]);
@@ -101,6 +112,8 @@ fn assert_basic_surface_has_v_property(expr: &TypeExpr, expected_v: f64, expecte
     assert_string_literal(&props["tag"].ty, expected_tag);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Cache layer: `FileArtifactStore` + `OwnerImportSurfaceDb`.
 /// Editing the selected leaf advances its `content_hash` so the
 /// owner's published `Surface` must observe the V2 shape; the leaf's
@@ -139,6 +152,8 @@ fn cache_invalidation_basic_selected_leaf_edit_flips_published_surface() {
 // Scenario 2 — unselected-leaf edit does NOT invalidate cached result.
 // ---------------------------------------------------------------------------
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Cache layer: `FileArtifactStore` + `OwnerImportSurfaceDb` +
 /// `SemanticGraphStore` final-result projections. Editing an
 /// unreferenced barrel sibling must NOT invalidate any cache participant
@@ -201,6 +216,7 @@ fn cache_invalidation_unselected_leaf_edit_preserves_result_equality() {
 // Scenario 3 — barrel-export edit invalidates route facts.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "semantic-observe")]
 fn install_route_fixture(host: &VerterHost, barrel_src: &str) {
     upsert_ts(host, LEAF_A_ROUTE, LEAF_A_ROUTE_SRC);
     upsert_ts(host, LEAF_B_ROUTE, LEAF_B_ROUTE_SRC);
@@ -208,18 +224,22 @@ fn install_route_fixture(host: &VerterHost, barrel_src: &str) {
     upsert_ts(host, OWNER_ROUTE, OWNER_ROUTE_SRC);
 }
 
+#[cfg(feature = "semantic-observe")]
 fn assert_route_surface_is_leaf_a(expr: &TypeExpr) {
     let props = object_props(expr);
     assert_eq!(prop_names(&props), vec!["a"]);
     assert_primitive(&props["a"].ty, PrimitiveName::Number);
 }
 
+#[cfg(feature = "semantic-observe")]
 fn assert_route_surface_is_leaf_b(expr: &TypeExpr) {
     let props = object_props(expr);
     assert_eq!(prop_names(&props), vec!["b"]);
     assert_primitive(&props["b"].ty, PrimitiveName::String);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Cache layer: `RouteDb` + `ResolvedImportFacts`. Editing the barrel's
 /// re-export target must invalidate the route fact for `(owner, "Item")`
 /// — the V2 result must reflect the new leaf and the V2 footprint must
@@ -242,6 +262,8 @@ fn cache_invalidation_barrel_edit_redirects_route_to_new_leaf() {
     assert_query_mode(&v2_record, ProjectionModeTag::Expanded);
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Cache layer: `RouteDb`. The strict promise is that leaf_a drops
 /// out of the V2 footprint entirely — the redirected barrel no longer
 /// routes to it. This is the path-precise invalidation guarantee.

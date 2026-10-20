@@ -848,6 +848,8 @@ fn return_wrapper_roles_cover_the_exact_vue_vocabulary_structurally() {
 /// authored return head (zero declaration bodies lower), and carrying the head
 /// to the prepared declaration is a COPY — no locator deref, no import
 /// resolution, no semantic dispatch at the producer boundary.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn signature_return_head_is_minted_without_extra_lowering_or_resolution() {
     let ws = Arc::new(CountingWorkspace::new());

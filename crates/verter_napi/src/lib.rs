@@ -3875,7 +3875,7 @@ impl NapiVerterHost {
     pub fn get_last_audit_record(&self) -> Result<Option<Buffer>> {
         #[cfg(not(feature = "semantic-observe"))]
         {
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -3916,7 +3916,7 @@ impl NapiVerterHost {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (filter,);
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -3965,7 +3965,7 @@ impl NapiVerterHost {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (args,);
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {

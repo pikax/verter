@@ -319,6 +319,8 @@ mod tests {
         );
     }
 
+    // Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     #[test]
     fn unregistered_uris_produce_distinct_envelope_and_position_identities() {
         let host = Arc::new(VerterHost::new_standalone(HostConfig {
