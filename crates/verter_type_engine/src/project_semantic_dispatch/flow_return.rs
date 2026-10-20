@@ -28685,7 +28685,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // return whether or not the call applies, but the checker still
         // checks the call against it: the executor decides applicability,
         // so the diagnostic of a call it does not accept rides the answer.
-        if self.lone_declared_signature(&call_sigs, &construct_sigs) {
+        // A parameterless signature called with no arguments cannot be
+        // refused, so its declared return is read as it stands.
+        if self
+            .lone_declared_signature(&call_sigs, &construct_sigs)
+            .is_some_and(|only| {
+                site.supplies_parameter_ordinal(0) || self.signature_takes_parameters(only)
+            })
+        {
             return true;
         }
         let supplies_evidence =
@@ -28716,10 +28723,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             .shared_signature_buckets(callee)
             .is_ok_and(|(call_sigs, construct_sigs)| {
                 self.lone_declared_signature(&call_sigs, &construct_sigs)
+                    .is_some()
             })
     }
 
-    /// Whether one bucket holds exactly one signature, non-generic, whose
+    /// The one signature of a bucket holding exactly one, non-generic, whose
     /// return is DECLARED: its answer does not depend on the arguments, so
     /// resolving the call through the executor changes no value and only
     /// adds the applicability check the checker runs.
@@ -28727,15 +28735,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &self,
         call_sigs: &[SemanticNodeId],
         construct_sigs: &[SemanticNodeId],
-    ) -> bool {
+    ) -> Option<SemanticNodeId> {
         let [only] = (if call_sigs.is_empty() {
             construct_sigs
         } else if construct_sigs.is_empty() {
             call_sigs
         } else {
-            return false;
+            return None;
         }) else {
-            return false;
+            return None;
         };
         matches!(
             self.dispatch.arena().node_data(*only).as_deref(),
@@ -28744,6 +28752,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
                 ..
             }) if type_parameters.is_empty()
+        )
+        .then_some(*only)
+    }
+
+    /// Whether the signature declares any parameter.
+    fn signature_takes_parameters(&self, signature: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.arena().node_data(signature).as_deref(),
+            Some(SemanticNodeData::Signature { params, .. }) if !params.is_empty()
         )
     }
 
@@ -28802,9 +28819,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             })
     }
 
-    /// Whether the callee type has exactly one call signature and it
-    /// declares no type parameters.
-    fn callee_has_lone_non_generic_signature(&self, callee_node: SemanticNodeId) -> bool {
+    /// Whether a call of the callee type has an applicability to decide: the
+    /// callee has exactly one call signature, it declares no type
+    /// parameters, and the call supplies arguments or the signature takes
+    /// parameters. A parameterless signature called with no arguments cannot
+    /// be refused, so its declared return stays the retained answer.
+    fn callee_call_needs_applicability_check(
+        &self,
+        callee_node: SemanticNodeId,
+        argument_count: usize,
+    ) -> bool {
         let resolved = self.dispatch.resolve_signature_source_carrier(
             callee_node,
             crate::semantic_query::ProjectionReductionContext::structural_transit(),
@@ -28820,7 +28844,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         };
         matches!(
             self.dispatch.graph().node_data(*only).as_deref(),
-            Some(SemanticNodeData::Signature { type_parameters, .. }) if type_parameters.is_empty()
+            Some(SemanticNodeData::Signature { params, type_parameters, .. })
+                if type_parameters.is_empty() && (argument_count > 0 || !params.is_empty())
         )
     }
 
@@ -29263,7 +29288,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // decides applicability first, and an undecided executor
                     // leaves the declared-return read. A generic callee keeps
                     // the interim answer (no call-site instantiation here).
-                    if self.callee_has_lone_non_generic_signature(callee_node) {
+                    if self.callee_call_needs_applicability_check(callee_node, arguments.len()) {
                         if let Some(value) =
                             self.eval_call_via_resolve_call(callee_node, site, arguments)
                         {
