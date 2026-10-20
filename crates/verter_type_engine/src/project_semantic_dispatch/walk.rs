@@ -1607,6 +1607,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
 /// its `extends`/`implements` HERITAGE reference arms.
 ///
 /// `Object` (and `Alias`-to-`Object`) bodies are pure own-body surfaces.
+/// Nested `MergedDecl` groups contribute every body in declaration order.
 /// `Intersection` bodies (interface/class with heritage) contribute their
 /// object-surface arms as own-body and their remaining reference arms as
 /// heritage (de-duplicated). Any other shape yields nothing.
@@ -1616,30 +1617,32 @@ pub(super) fn collect_merged_contributor_arms(
     own_surfaces: &mut Vec<ShallowSurface>,
     heritage_arms: &mut Vec<SemanticNodeId>,
 ) {
-    let Some(data) = graph.node_data(node) else {
-        return;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
-        SemanticNodeData::Intersection(arms) => {
-            let arms = arms.members_arc();
-            drop(data);
-            for arm in arms.iter() {
-                if arm_is_object_surface(graph, *arm) {
-                    if let Some(view) = object_surface_view(graph, *arm) {
-                        own_surfaces.push(ShallowSurface::from_object(&view));
+    let mut pending: smallvec::SmallVec<[SemanticNodeId; 4]> = smallvec::smallvec![node];
+    while let Some(node) = pending.pop() {
+        let Some(data) = graph.node_data(node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                for arm in arms.iter() {
+                    if arm_is_object_surface(graph, *arm) {
+                        if let Some(view) = object_surface_view(graph, *arm) {
+                            own_surfaces.push(ShallowSurface::from_object(&view));
+                        }
+                    } else if !heritage_arms.contains(arm) {
+                        heritage_arms.push(*arm);
                     }
-                } else if !heritage_arms.contains(arm) {
-                    heritage_arms.push(*arm);
                 }
             }
+            SemanticNodeData::Alias(target) => pending.push(*target),
+            SemanticNodeData::MergedDecl { contributors } => {
+                pending.extend(contributors.iter().rev().copied());
+            }
+            _ => {}
         }
-        SemanticNodeData::Alias(target) => {
-            let target = *target;
-            drop(data);
-            collect_merged_contributor_arms(graph, target, own_surfaces, heritage_arms);
-        }
-        _ => {}
     }
 }
 
@@ -2807,6 +2810,60 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             self.positional_children_supported = false;
         }
         read.value
+    }
+
+    /// Adopt an operand evaluated by the shared heap worklist with the
+    /// same partiality and positional guarantees as a nested query read.
+    fn evaluate_deferred_operand(
+        &mut self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> QueryResult<SemanticNodeId> {
+        let output = self
+            .dispatch
+            .evaluate_deferred_semantic_node_with_context(node, context)
+            .into_query_build_output(self.dispatch);
+        self.cache_suppress |= output.cache_suppress;
+        if output.completeness.is_partial() {
+            match (&output.result, output.approximation) {
+                (
+                    QueryResult::Value(node),
+                    Some(super::projection_fact::ProjectionInterpretation::Positional),
+                ) => {
+                    self.completeness = self.completeness.merge(output.completeness);
+                    self.positional_child_terminal = Some(*node);
+                }
+                _ => self.mark_partial_with(output.completeness.reasons()),
+            }
+        }
+        if matches!(output.result, QueryResult::Error(_)) {
+            self.positional_children_supported = false;
+        }
+        output.result
+    }
+
+    /// Read a value's typeof once. Any deferred result belongs to the
+    /// caller's evaluation worklist rather than a nested evaluator drive.
+    fn read_typeof_carrier(
+        &mut self,
+        value_root: crate::semantic_query::ValueRootKey,
+        path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
+        type_args: &[SemanticNodeId],
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> QueryResult<SemanticNodeId> {
+        let key = self
+            .dispatch
+            .typeof_key_with_path(value_root, path, context);
+        let value = match self.execute_read_folding_partial(key) {
+            QueryResult::Value(value) => value,
+            other => return other,
+        };
+        QueryResult::Value(if type_args.is_empty() {
+            value
+        } else {
+            self.dispatch
+                .apply_typeof_instantiation_args(value, type_args)
+        })
     }
 
     fn resolve_carrier_subject(
@@ -4486,8 +4543,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     // TERMINAL segment runs in the caller's mode — that is
                     // handled after the loop by
                     // `resolve_expanded_terminal_carrier`.
-                    let object = *object;
+                    let mut object = *object;
                     let ix = ix.clone();
+                    // Resolve nested operands on the shared evaluator's
+                    // worklist. Re-entering one query per authored index
+                    // otherwise makes a finite path consume native depth.
+                    if matches!(self.graph().node_data(object).as_deref(), Some(SemanticNodeData::IndexedAccess { .. })) {
+                        object = match self.evaluate_deferred_operand(
+                            object,
+                            crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Navigate),
+                        ) {
+                            QueryResult::Value(node) => node,
+                            _ => {
+                                results.push(self.opaque_miss());
+                                return;
+                            }
+                        };
+                    }
                     let resolved =
                         match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {
                             base: object,
@@ -5245,25 +5317,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     let type_args: Vec<SemanticNodeId> = data.carrier_type_args().to_vec();
                     drop(data);
                     let typeof_context = self.context;
-                    let typeof_key = self.dispatch.typeof_key_with_path(
+                    let resolved = match self.read_typeof_carrier(
                         value_root.clone(),
                         typeof_path.clone(),
+                        &type_args,
                         typeof_context,
-                    );
-                    let mut resolved = match self.execute_read_folding_partial(typeof_key) {
+                    ) {
                         QueryResult::Value(id) => id,
                         _ => {
                             results.push(self.opaque_miss());
                             return;
                         }
                     };
-                    // Instantiation expression (`typeof C.make<string>`): apply
-                    // the lowered type arguments to the projected generic
-                    // signature AFTER the path projection reached it. An
-                    // arity/shape mismatch composes an honest `Opaque(Miss)`.
-                    if !type_args.is_empty() {
-                        resolved = self.dispatch.apply_typeof_instantiation_args(resolved, &type_args);
-                    }
                     #[cfg(any(test, feature = "test-support"))]
                     LAST_WALK_TYPEOF_RESOLVED.with(|c| c.set(Some(resolved)));
                     if resolved == current {
@@ -5995,6 +6060,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         // Identity / Navigate / Skeleton retain their bare carriers —
         // those modes' contracts promise no terminal-surface synthesis.
         if matches!(self.mode(), ProjectionMode::Expanded) {
+            // A TypeOf read already projects its terminal in the caller's
+            // mode. Expanding that answer again would open a nominal class
+            // reference returned by a value (`new C()` is C, not its body).
+            let typeof_owns_terminal_projection = self.original_path_non_empty
+                && matches!(
+                    self.graph().node_data(current).as_deref(),
+                    Some(SemanticNodeData::TypeOf(_))
+                );
             // Path-precision: when this is a NON-EMPTY projected path,
             // the terminal value is a projected segment result. A
             // terminal `DeclRef` / `InstantiationRef` carrier
@@ -6008,7 +6081,9 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.original_path_non_empty {
                 current = self.resolve_expanded_terminal_carrier(current);
             }
-            current = self.expand_empty_path_terminal(current);
+            if !typeof_owns_terminal_projection {
+                current = self.expand_empty_path_terminal(current);
+            }
             if self.original_path_non_empty {
                 // Terminal-surface carrier PRESENTATION: the demanded
                 // terminal projection materialises its own surface one
@@ -6079,6 +6154,17 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             None => return node,
         };
         match &*data {
+            SemanticNodeData::TypeOf(_) => {
+                let (root, path) = data.typeof_head().expect("TypeOf carrier head");
+                let root = root.clone();
+                let path = path.clone();
+                let type_args = data.carrier_type_args().to_vec();
+                drop(data);
+                match self.read_typeof_carrier(root, path, &type_args, self.context) {
+                    QueryResult::Value(value) => value,
+                    QueryResult::Recursive(_) | QueryResult::Error(_) => node,
+                }
+            }
             SemanticNodeData::DeclRef { identity } => {
                 let scope = ScopeId {
                     canonical_id: identity.canonical_id.clone(),
@@ -11453,6 +11539,50 @@ mod m1_merge_visibility_tests {
 
     fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
         ShallowSurface::from_entries(vec![super::ShallowSurfaceEntry::Member(m)], None)
+    }
+
+    #[test]
+    fn nested_merged_contributors_keep_every_own_member() {
+        let graph = SemanticGraphStore::new();
+        let _roots = graph.enter_node_root_scope();
+        let object = |name| {
+            let surface = one_member_surface(member(
+                &graph,
+                name,
+                MemberVisibility::Public,
+                MemberMergeRole::Authored,
+                PrimitiveKind::Number,
+            ));
+            graph.intern_node(SemanticNodeData::Object(super::surface_view_from_shallow(
+                &surface,
+            )))
+        };
+        let nested = graph.intern_node(SemanticNodeData::MergedDecl {
+            contributors: crate::semantic_query::PayloadArray::from(vec![
+                object("base"),
+                object("same_file"),
+            ]),
+        });
+        let alias = graph.intern_node(SemanticNodeData::Alias(nested));
+        let peer = object("other_file");
+        for contributors in [[alias, peer], [peer, alias]] {
+            let node = super::reduce_merged_decl_with_graph(&graph, &contributors);
+            let data = graph.node_data(node).expect("merged declaration has data");
+            let SemanticNodeData::Object(view) = data.as_ref() else {
+                panic!("merged own members form an object: {data:?}");
+            };
+            let mut names: Vec<_> = view
+                .positive_members()
+                .iter()
+                .map(|member| member.string_name().expect("named member"))
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["base", "other_file", "same_file"],
+                "a same-file merge contributing to a cross-file merge keeps every member"
+            );
+        }
     }
 
     fn merged_member_visibility(surface: &ShallowSurface, name: &str) -> MemberVisibility {
