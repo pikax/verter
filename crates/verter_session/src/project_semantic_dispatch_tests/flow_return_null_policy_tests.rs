@@ -5853,8 +5853,8 @@ const OBJECT_LITERAL_NORMALIZATION_TABLE: &[(&str, &str, &str, &str, &str)] = &[
 /// property in the context of the same property of its siblings, so the
 /// normalisation reaches nested literals (`nestedDeep`, `deep3`,
 /// `mixedDeep`, `arrDeep`, `joinSibling`); a lone literal normalises a
-/// union-valued property (`nested`, `joinNested`) but, on TypeScript
-/// 7.0.2, not a union two literal properties down (`depthTwo`), and an
+/// union-valued property (`nested`, `joinNested`), including a union two
+/// literal properties down (`depthTwo`) on TypeScript 7.0.2, and an
 /// array widens its element as a whole (`arrayResets`). A declared object
 /// type neither names nor receives a property (`vsDecl`), and the added
 /// member is `undefined` without `strictNullChecks` too (`nullArm`). The

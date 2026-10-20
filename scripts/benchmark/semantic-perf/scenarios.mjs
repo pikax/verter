@@ -62,6 +62,22 @@ export function allScenarios() {
         'const arr = [{ a: 1 }, { b: "x" }];\n',
       "typeof arr",
     ),
+    scenario(
+      "edge-equal-identity-idiom",
+      "conditional",
+      "generic signatures with identical deferred conditional returns",
+      "type Exclude<T, U> = T extends U ? never : T;\n" +
+        "type Extract<T, U> = T extends U ? T : never;\n" +
+        "type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;\n",
+      "Eq<{ a: 1 }, { a: 1 }>",
+    ),
+    scenario(
+      "edge-any-infer-pattern",
+      "conditional",
+      "any checked against a tuple infer pattern",
+      "",
+      "any extends [infer A] ? A : 0",
+    ),
   );
 
   out.push(
@@ -784,6 +800,8 @@ export const SCENARIO_TIERS = {
   "mapped-index-tags-1000": "quick",
   "mapped-index-tags-3000": "standard",
   "mapped-index-tags-10000": "stress",
+  "edge-equal-identity-idiom": "quick",
+  "edge-any-infer-pattern": "quick",
   "mapped-expand-mixins-10": "quick",
   "mapped-expand-mixins-25": "standard",
   "mapped-expand-mixins-40": "standard",

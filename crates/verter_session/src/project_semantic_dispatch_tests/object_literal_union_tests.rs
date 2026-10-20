@@ -56,6 +56,40 @@ function defaultSeparate(value = separate) { return value; }
 const arrow = (value = [{ a: 1 }, { b: "x" }]) => value;
 const methods = { method(value = [{ a: 1 }, { b: "x" }]) { return value; } };
 const expression = function(value = [{ a: 1 }, { b: "x" }]) { return value; };
+const tuple = [c ? { a: 1 } : { b: "x" }] as const;
+const constTuple = [{ a: 1 }, { b: "x" }] as const;
+const spreadHolder = { ...{}, arr: [{ a: 1 }, { b: "x" }], conditional: c ? { a: 1 } : { b: "x" } };
+const spreadNested = { ...{}, deep: { arr: [{ a: 1 }, { b: "x" }], conditional: c ? { a: 1 } : { b: "x" } } };
+const spreadArray = [{ ...{}, arr: [{ a: 1 }, { b: "x" }] }];
+const spreadOperand = { ...{ arr: [{ a: 1 }, { b: "x" }] } };
+const nestedConditional = { deep: { conditional: c ? { a: 1 } : { b: "x" } } };
+const nestedWithNull = { deep: { conditional: c ? { a: 1 } : { b: "x" }, n: null as null } };
+const nestedWithNumbers = { deep: { conditional: c ? { a: 1 } : { b: "x" }, arr: [1] } };
+const nestedWithObject = { deep: { conditional: c ? { a: 1 } : { b: "x" }, z: { y: 1 } } };
+class ConstructorDefault { constructor(value = [{ a: 1 }, { b: "x" }]) {} }
+class ConstructorConditional { constructor(value = c ? { a: 1 } : { b: "x" }) {} }
+class ConstructorAnnotated { constructor(value: ({ a: number } | { b: string })[] = []) {} }
+type Args<T> = T extends new (...args: infer P) => any ? P : never;
+type TupleConditional = typeof tuple;
+type TupleKeys = keyof (typeof tuple)[0];
+type TupleMissingA = Extract<(typeof tuple)[0], { b: unknown }>["a"];
+type TupleMissingB = Extract<(typeof tuple)[0], { a: unknown }>["b"];
+type ConstTuple = typeof constTuple;
+type SpreadArray = typeof spreadHolder.arr;
+type SpreadConditional = typeof spreadHolder.conditional;
+type SpreadNestedConditional = typeof spreadNested.deep.conditional;
+type ArraySpreadInitializer = (typeof spreadArray)[number]["arr"];
+type SpreadOperand = typeof spreadOperand.arr;
+type NestedConditional = typeof nestedConditional.deep.conditional;
+type NestedWithNull = typeof nestedWithNull.deep.conditional;
+type NestedWithNumbers = typeof nestedWithNumbers.deep.conditional;
+type NestedWithObject = typeof nestedWithObject.deep.conditional;
+type ConstructorParameter = NonNullable<Args<typeof ConstructorDefault>[0]>;
+type ConditionalConstructorParameter = NonNullable<Args<typeof ConstructorConditional>[0]>;
+type AnnotatedConstructorParameter = NonNullable<Args<typeof ConstructorAnnotated>[0]>;
+type NestedKeys = keyof typeof nestedConditional.deep.conditional;
+function nestedReturn(flag: boolean) { return { o: { p: flag ? { a: 1 } : { a: 1, b: 2 } } }; }
+type NestedReturnKeys = keyof ReturnType<typeof nestedReturn>["o"]["p"];
 type __Probe = typeof arr;
 type Conditional = typeof cond;
 type Nested = typeof nested;
@@ -154,6 +188,26 @@ fn inferred_object_literal_unions_normalize_only_fresh_members() {
                 ("ArrowParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("MethodParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("ExpressionParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                // The missing properties are independent of primitive literal
+                // widening inside the conditional's const assertion context.
+                ("TupleKeys", "\"a\" | \"b\""),
+                ("TupleMissingA", "undefined"),
+                ("TupleMissingB", "undefined"),
+                ("ConstTuple", "readonly [{ readonly a: 1; }, { readonly b: \"x\"; }]"),
+                ("SpreadArray", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("SpreadConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("SpreadNestedConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("ArraySpreadInitializer", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("SpreadOperand", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("NestedConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("NestedWithNull", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("NestedWithNumbers", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("NestedWithObject", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("ConstructorParameter", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("ConditionalConstructorParameter", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
+                ("AnnotatedConstructorParameter", "({ a: number; } | { b: string; })[]"),
+                ("NestedKeys", "\"a\" | \"b\""),
+                ("NestedReturnKeys", "\"a\" | \"b\""),
             ] {
                 let (outcome, _) = host
                     .resolve_named_symbol_with_audit(

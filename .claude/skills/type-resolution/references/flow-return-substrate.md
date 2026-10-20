@@ -229,6 +229,17 @@ authored parameter types keep their own shapes. Signature normalization preserve
 the callable header's occurrence, return carrier and scope, including a deferred
 callable whose return has not been demanded.
 
+Tuple elements enter independent widening contexts before publication consumes
+their initializer freshness; tuple labels, optional/rest markers and readonly
+modifiers survive rebuilding. Literal spread programs likewise normalize their
+initializer children before receiving missing sibling properties, without
+flattening the construction or changing write order. Constructor headers use
+the same parameter normalization as function headers; authored parameter types
+remain unchanged. For nested literals, TypeScript 7.0.2 diagnostic messages can
+omit inferred optional properties that its native API and `keyof` expose. Use
+the actual checker type and key assertions to distinguish that abbreviated
+diagnostic print from a semantic normalization cutoff.
+
 The call value carries a matching reduction on the intersection side: a callee's
 INSTANTIATED return that pairs the empty object type `{}` with a definitely
 non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at

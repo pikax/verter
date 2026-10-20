@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    SurfaceView,
+    AuthoredPropertyKey, ObjectSpreadProgram, PrimitiveKind, SemanticNodeData, SemanticNodeId,
+    SurfaceMember, SurfaceView,
 };
 use verter_session_query::flow::policy::NullabilityPolicy;
 
@@ -48,6 +48,17 @@ enum Widening {
         node: SemanticNodeId,
         element: SemanticNodeId,
         readonly: bool,
+    },
+    /// A tuple rebuilt from independently widened elements, retaining its
+    /// labels, optional/rest markers and readonly modifier.
+    Tuple { node: SemanticNodeId },
+    /// A literal construction rebuilt after widening its initializer children.
+    /// Only the completed literal participates in the enclosing sibling context.
+    SpreadLiteral {
+        node: SemanticNodeId,
+        program: ObjectSpreadProgram,
+        siblings: Option<Arc<[SemanticNodeId]>>,
+        count: usize,
     },
     /// A callable rebuilt from its normalized parameter initializers. Its
     /// return remains owned by the original header, including any deferral.
@@ -116,6 +127,66 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             },
                         )
                     });
+                }
+                Widening::Tuple { node } => {
+                    let graph = self.graph();
+                    let original = graph.node_data(node).expect("the tuple being widened");
+                    let SemanticNodeData::Tuple { elements, readonly } = original.as_ref() else {
+                        unreachable!("only tuples schedule tuple widening");
+                    };
+                    let widened = values.split_off(values.len() - elements.len());
+                    values.push(
+                        if elements
+                            .iter()
+                            .map(|element| element.value)
+                            .eq(widened.iter().copied())
+                        {
+                            node
+                        } else {
+                            let elements = elements
+                                .iter()
+                                .zip(widened)
+                                .map(|(element, value)| {
+                                    let mut widened = element.copy();
+                                    widened.value = value;
+                                    widened
+                                })
+                                .collect::<Vec<_>>();
+                            graph.intern_preserving_scope(
+                                node,
+                                SemanticNodeData::Tuple {
+                                    elements: elements.into(),
+                                    readonly: *readonly,
+                                },
+                            )
+                        },
+                    );
+                }
+                Widening::SpreadLiteral {
+                    node,
+                    program,
+                    siblings,
+                    count,
+                } => {
+                    let mut widened = values.split_off(values.len() - count).into_iter();
+                    let rebuilt = program.map_child_nodes(|_| {
+                        widened.next().expect("the widened construction child")
+                    });
+                    let normalized = if rebuilt == program {
+                        node
+                    } else {
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::ObjectSpreadProgram(rebuilt.share()),
+                        )
+                    };
+                    let normalized = match siblings {
+                        Some(siblings) => {
+                            self.spread_literal_in_context(normalized, &rebuilt, &siblings)
+                        }
+                        None => normalized,
+                    };
+                    values.push(self.regularized_empty_object_program(normalized));
                 }
                 Widening::Parameters { node, count } => {
                     let mut parameters = values
@@ -262,6 +333,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     siblings: None,
                 });
             }
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                let children: Vec<_> = elements.iter().map(|element| element.value).collect();
+                drop(data);
+                tasks.push(Widening::Tuple { node });
+                tasks.extend(children.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
+            }
             Some(SemanticNodeData::Object(view)) if object_literal_surface(view) => {
                 let view = view.clone();
                 drop(data);
@@ -276,7 +356,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                     Some(
                                         SemanticNodeData::Union(_)
                                             | SemanticNodeData::Array { .. }
+                                            | SemanticNodeData::Tuple { .. }
                                             | SemanticNodeData::Object(_)
+                                            | SemanticNodeData::ObjectSpreadProgram(_)
                                             | SemanticNodeData::Signature { .. }
                                             | SemanticNodeData::DeferredCallable(_)
                                     )
@@ -377,11 +459,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
                 let program = program.share();
                 drop(data);
-                let normalized = match siblings {
-                    Some(siblings) => self.spread_literal_in_context(node, &program, &siblings),
-                    None => node,
-                };
-                values.push(self.regularized_empty_object_program(normalized));
+                let mut children = Vec::new();
+                program.for_each_child_node(|child| children.push(child));
+                tasks.push(Widening::SpreadLiteral {
+                    node,
+                    program,
+                    siblings,
+                    count: children.len(),
+                });
+                tasks.extend(children.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
             }
             _ => {
                 drop(data);

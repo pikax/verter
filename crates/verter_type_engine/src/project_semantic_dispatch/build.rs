@@ -2262,6 +2262,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .normalize_inferred_initializer_type(member.value, nullability),
                             ..member.clone()
                         }),
+                        SurfaceEntry::ConstructSignature(signature) => {
+                            SurfaceEntry::ConstructSignature(
+                                self.normalize_widened_object_literals(*signature, nullability),
+                            )
+                        }
                         _ => entry.clone(),
                     })
                     .collect();
@@ -13528,6 +13533,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node
         };
         let node = match data.as_deref() {
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
+                self.primitive_node(PrimitiveKind::Never)
+            }
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
@@ -13761,6 +13769,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|member| self.key_set_of(*member))
             .collect::<Option<_>>()?;
+        // A union has only keys shared by every arm. An empty arm's key
+        // set is complete negative evidence, including nullish operands.
+        if is_union
+            && keys.iter().any(|key| {
+                matches!(
+                    self.graph().node_data(*key).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+                )
+            })
+        {
+            return Some(self.primitive_node(PrimitiveKind::Never));
+        }
         let names_alone = keys.iter().all(|keys| {
             let graph = self.graph();
             let literal = |node: SemanticNodeId| {
@@ -17203,7 +17223,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.graph().node_data(reduced).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
                 if *diagnostic == relation.recursion_diagnostic()
-        ) && !matches!(self.peek_special(operand), Some((SpecialKind::Error, _)))
+        ) && !matches!(
+            self.peek_special(operand),
+            Some((SpecialKind::Error | SpecialKind::Wildcard, _))
+        )
     }
 
     /// Whether the runtime awaited relation FAILED on `operand` with TS1062,
@@ -17446,7 +17469,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
-                | SpecialKind::Error => special,
+                | SpecialKind::Error
+                | SpecialKind::Wildcard => special,
             };
             return (resolved, Some(decided));
         }
@@ -18054,7 +18078,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SpecialKind::Any
                 | SpecialKind::Never
                 | SpecialKind::Unknown
-                | SpecialKind::Error => LibAwaited::Reduced(special),
+                | SpecialKind::Error
+                | SpecialKind::Wildcard => LibAwaited::Reduced(special),
             });
         }
         if self.settled_non_thenable(resolved) {
