@@ -82,6 +82,8 @@ fn an_inherited_member_reads_where_the_nearest_class_declares_it() {
 
 /// The semantic nodes one probe interned on a fresh host: a demand-scoped
 /// work count that grows with every base member a read lowers.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn nodes_interned_by(source: &str, probe: &str) -> u64 {
     let host = default_probe_host();
     host.provenance().reset();
@@ -92,6 +94,8 @@ fn nodes_interned_by(source: &str, probe: &str) -> u64 {
 /// A member read through a derived class's instance follows only the
 /// demanded name up the `extends` chain: forty more members on the base, or
 /// on a class between the reader and the declaring base, add no work.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn an_inherited_member_read_lowers_no_unrelated_base_member() {
     let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();
@@ -240,6 +244,8 @@ fn deep_chain(depth: usize, base_extra: &str) -> String {
 /// still answers, and forty unrelated members on a class the walk passes through add no work —
 /// the chain is never escaped through a whole-class read. At an ordinary
 /// depth the same holds.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_chain_past_three_hundred_classes_lowers_no_unrelated_base_member() {
     let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();
@@ -263,6 +269,8 @@ fn a_chain_past_three_hundred_classes_lowers_no_unrelated_base_member() {
 
 /// A read through a circular `extends` chain lowers no unrelated member of
 /// the cycle's classes: forty more members on each add no work.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn a_circular_extends_chain_lowers_no_unrelated_member() {
     let unrelated: String = (0..40).map(|i| format!("  u{i} = {i};\n")).collect();

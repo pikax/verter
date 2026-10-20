@@ -80,6 +80,8 @@ mod component_meta_delivery;
 mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
+#[cfg(test)]
+mod request_view_verdict_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};
@@ -259,6 +261,8 @@ mod overlay_artifact_key_isolation_tests;
 // Current-content-pinned `shallow_file_state` observed-read
 // discriminators.
 #[cfg(test)]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod shallow_file_state_pinned_tests;
 // Shared substrate for query-identity self-version rooting —
 // current-content fact path, self-root signature helpers, and strict

@@ -85,10 +85,10 @@ pub(crate) use crate::host_manage::jsdoc_resolve::resolve_type_declaration_with_
 // Test-only re-exports — `meta_resolve_tests.rs` references
 // `super::HostComponentMetaResolver` and bare `resolve_jsdoc_tag_type`
 // via `super::*` glob.
+#[cfg(all(test, feature = "semantic-observe"))]
+pub(crate) use crate::host_manage::jsdoc_resolve::resolve_jsdoc_tag_type;
 #[cfg(test)]
-pub(crate) use crate::host_manage::jsdoc_resolve::{
-    resolve_jsdoc_tag_type, HostComponentMetaResolver,
-};
+pub(crate) use crate::host_manage::jsdoc_resolve::HostComponentMetaResolver;
 pub(crate) use macro_member_walk::{
     collect_define_props_root_names, slot_binding_targets_define_props_root,
 };

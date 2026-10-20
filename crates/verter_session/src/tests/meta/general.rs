@@ -737,6 +737,8 @@ fn concurrent_sessions_on_different_files() {
 /// `build_flow_return` leaves the whole rest of the suite green and
 /// fails exactly this test — first on `synthesis_should_suppress`, and
 /// on the warm replay if that assertion is removed.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn a_degraded_success_with_a_usable_value_still_gates_the_enclosing_result() {
@@ -1041,6 +1043,8 @@ defineExpose({ shown })
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn evaluate_types_cold_path_does_not_call_public_get_analysis_workflow() {
     let project = make_project();

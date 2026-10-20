@@ -415,7 +415,7 @@ note: the function `merge_union_surfaces_for_macro` is defined here
 error[E0603]: function `spread_formula_positive_members_for_macro` is private
    --> tests/cases/compile-fail/public_construction_lane_requires_its_grant.rs:144:26
     |
-144 |     let _members = walk::spread_formula_positive_members_for_macro(graph, formula, evidence);
+144 |     let _members = walk::spread_formula_positive_members_for_macro(graph, alternatives, evidence);
     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
     |
 note: the function `spread_formula_positive_members_for_macro` is defined here

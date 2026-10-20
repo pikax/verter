@@ -20,10 +20,14 @@ mod type_resolution_audit_diamond_repeated_prop;
 #[path = "g_type/type_resolution_audit_intermediate_navigate_terminal_caller_mode.rs"]
 mod type_resolution_audit_intermediate_navigate_terminal_caller_mode;
 #[path = "g_type/type_resolution_audit_long_chain_stack_safe.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod type_resolution_audit_long_chain_stack_safe;
 #[path = "g_type/type_resolution_audit_no_unrelated_imports.rs"]
 mod type_resolution_audit_no_unrelated_imports;
 #[path = "g_type/type_resolution_audit_pathological_recursion.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod type_resolution_audit_pathological_recursion;
 #[path = "g_type/type_resolution_audit_read_once.rs"]
 mod type_resolution_audit_read_once;

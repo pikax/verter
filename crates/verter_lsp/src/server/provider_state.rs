@@ -888,6 +888,18 @@ impl VerterLanguageServer {
         self.needs_deferred_sync.insert(canonical_id.to_string());
     }
 
+    /// The same owed legs as [`Self::cancel_legs_after_moved_revision`] for a
+    /// delivery the serving engine refused to certify while the revision
+    /// stayed current.
+    pub(super) fn defer_legs_until_certified(&self, canonical_id: &str) {
+        tracing::debug!(
+            "provider_sync: {canonical_id}'s IDE delivery is not certified by the serving \
+             engine; its remaining legs stay owed"
+        );
+        self.needs_ide_sync.insert(canonical_id.to_string());
+        self.needs_deferred_sync.insert(canonical_id.to_string());
+    }
+
     /// Whether the open-document revision this transaction pinned before it
     /// compiled is still the live one; see
     /// [`crate::documents::DocumentRegistry::compile_pin_is_current`]. `None`

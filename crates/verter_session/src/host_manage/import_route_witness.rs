@@ -133,7 +133,7 @@ thread_local! {
 
 /// How many normalizations ran their probes on this thread so far
 /// (test-only).
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn normalization_builds_for_tests() -> usize {
     NORMALIZATION_BUILDS.with(Cell::get)
 }
@@ -203,7 +203,7 @@ thread_local! {
 
 /// How many witness builds were served by replay on this thread so far
 /// (test-only).
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn witness_replays_for_tests() -> usize {
     WITNESS_REPLAYS.with(Cell::get)
 }

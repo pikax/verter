@@ -99,18 +99,21 @@ pub(crate) use crate::execution::owner_command;
 pub(crate) use hotpath;
 pub(crate) use verter_audit;
 /// Contention instrumentation counters for the scheduler. Owned by
-/// [`Scheduler`]; surfaced via
-/// [`Scheduler::counters`](Scheduler::counters) so host-level provenance
-/// snapshots (verter_session's `MetaProvenanceSnapshot`) can aggregate
-/// them without introducing a cross-crate dependency on `MetaProvenance`.
+/// [`Scheduler`]; surfaced via `Scheduler::counters` so host-level
+/// provenance snapshots (verter_session's `MetaProvenanceSnapshot`) can
+/// aggregate them without introducing a cross-crate dependency on
+/// `MetaProvenance`.
 ///
-/// All fields are plain `AtomicU64`; reads are `Relaxed`.
+/// Optional measurement state: no scheduling decision reads either counter.
+/// Without `semantic-observe` both fields are zero-size, their writes
+/// compile to nothing and the accessor does not exist; with it, reads are
+/// `Relaxed`.
 #[derive(Default, Debug)]
 pub struct SchedulerCounters {
     /// Submissions entering the inbox via `submit_request`.
-    pub submit_count: AtomicU64,
+    pub submit_count: verter_audit::observe::ObservedU64,
     /// Peak inbox depth observed (monotonic increase via `fetch_max`).
-    pub inbox_depth_max: AtomicU64,
+    pub inbox_depth_max: verter_audit::observe::ObservedU64,
 }
 
 /// Configuration for the scheduler.
@@ -838,10 +841,7 @@ impl Scheduler {
                 false,
             );
         } else {
-            self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
-            self.counters
-                .inbox_depth_max
-                .fetch_max(self.inbox.sender.len() as u64, Ordering::Relaxed);
+            self.record_inbox_submission();
         }
 
         let result = self.wait_for_scoped_cache_node(
@@ -900,15 +900,7 @@ impl Scheduler {
             Ok(()) => {
                 // Record the submission + update the peak inbox depth
                 // observed (contention instrumentation).
-                self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
-                let depth = self.inbox.sender.len() as u64;
-                let prev_max = self.counters.inbox_depth_max.load(Ordering::Relaxed);
-                if depth > prev_max {
-                    let _ = self
-                        .counters
-                        .inbox_depth_max
-                        .fetch_max(depth, Ordering::Relaxed);
-                }
+                self.record_inbox_submission();
                 handle
             }
             Err(_) => {
@@ -980,15 +972,7 @@ impl Scheduler {
             Ok(()) => {
                 // ONE batch == ONE submission for contention accounting,
                 // regardless of how many items it carries.
-                self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
-                let depth = self.inbox.sender.len() as u64;
-                let prev_max = self.counters.inbox_depth_max.load(Ordering::Relaxed);
-                if depth > prev_max {
-                    let _ = self
-                        .counters
-                        .inbox_depth_max
-                        .fetch_max(depth, Ordering::Relaxed);
-                }
+                self.record_inbox_submission();
             }
             Err(submission) => {
                 // Inbox closed (scheduler shutting down): signal every
@@ -1055,9 +1039,22 @@ impl Scheduler {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Access the scheduler's contention instrumentation counters.
+    /// Access the scheduler's contention instrumentation counters. Exists
+    /// only under `semantic-observe`, where the counters are kept.
+    #[cfg(feature = "semantic-observe")]
     pub fn counters(&self) -> &SchedulerCounters {
         &self.counters
+    }
+
+    /// Count one inbox submission and raise the peak inbox depth. Without
+    /// `semantic-observe` this reads nothing and records nothing.
+    #[inline(always)]
+    fn record_inbox_submission(&self) {
+        self.counters.submit_count.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "semantic-observe")]
+        self.counters
+            .inbox_depth_max
+            .fetch_max(self.inbox.sender.len() as u64, Ordering::Relaxed);
     }
 
     /// Current occupancy of the DAG's dependency-edge and blocker
@@ -2478,6 +2475,8 @@ mod tests {
         let joiner_request = scoped_test_request(joiner_context);
         let identity = leader_request.identity();
         let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
         let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
         let (leader_entered_tx, leader_entered_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -2545,6 +2544,8 @@ mod tests {
             "owners share one publication"
         );
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
         assert_eq!(
             scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
             2,
@@ -2572,6 +2573,8 @@ mod tests {
         let (context, _token) = scoped_test_context(12);
         let outer_request = scoped_test_request(context);
         let nested_request = outer_request.clone();
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
         let submissions_before = scheduler.counters.submit_count.load(Ordering::Relaxed);
         let scheduler_for_thread = Arc::clone(&scheduler);
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -2591,6 +2594,8 @@ mod tests {
             .expect("same-active-identity recursion must not block")
             .expect("outer scoped producer must publish");
         assert_eq!(*result, ScopedCacheNodeError::Reentrant);
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
         assert_eq!(
             scheduler.counters.submit_count.load(Ordering::Relaxed) - submissions_before,
             1,
@@ -15290,6 +15295,14 @@ mod tests {
         );
     }
 
+    /// Without `semantic-observe` the scheduler keeps no contention
+    /// counters: both are zero-size, so a submission touches no atomic.
+    #[cfg(not(feature = "semantic-observe"))]
+    #[test]
+    fn contention_counters_compile_away_without_semantic_observe() {
+        assert_eq!(std::mem::size_of::<SchedulerCounters>(), 0);
+    }
+
     /// (2) One batch == one wake == one `submit_count` increment.
     ///
     /// After `submit_batch_atomic(N)`, a single `pump_ready` reports
@@ -15299,7 +15312,8 @@ mod tests {
     /// Discrimination: a sequential per-request submission increments
     /// `submit_count` N times (once per `submit_request`) and pushes N
     /// inbox items, so `drained == N`. Both `== 1` assertions fail on
-    /// the sequential impl.
+    /// the sequential impl; the `submit_count` half reads the optional
+    /// counter and runs in the instrumentation lane.
     #[test]
     fn exactly_one_wake_per_batch() {
         use crate::caller_kind::CallerKind;
@@ -15308,6 +15322,8 @@ mod tests {
         let loader = batch_loader(&ids.iter().map(|s| s.as_str()).collect::<Vec<_>>());
         let sched = test_scheduler_with_loader(loader);
 
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
         let before = sched
             .counters
             .submit_count
@@ -15315,17 +15331,21 @@ mod tests {
 
         let _batch = sched.submit_batch_atomic(reqs);
 
-        let after = sched
-            .counters
-            .submit_count
-            .load(std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(
-            after - before,
-            1,
-            "one atomic batch must bump submit_count by exactly 1; got +{} \
-             (a sequential N-item batch bumps it N times)",
-            after - before,
-        );
+        // Reads optional audit capture: runs in the instrumentation lane.
+        #[cfg(feature = "semantic-observe")]
+        {
+            let after = sched
+                .counters
+                .submit_count
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                after - before,
+                1,
+                "one atomic batch must bump submit_count by exactly 1; got +{} \
+                 (a sequential N-item batch bumps it N times)",
+                after - before,
+            );
+        }
 
         let stats = sched.pump_ready(PumpReason::DriverWake, CallerKind::Driver);
         assert_eq!(

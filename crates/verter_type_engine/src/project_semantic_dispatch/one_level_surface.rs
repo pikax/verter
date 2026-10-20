@@ -219,12 +219,11 @@ impl OneLevelSurface {
     /// empty success.
     pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
-        formula: &crate::semantic_query::ObjectProjectionFormula,
+        alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
         evidence: &mut super::canonical_algebra::CanonicalEvidence,
     ) -> SurfaceResolution<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
-            PropertyKey,
         };
 
         fn union_value(
@@ -245,7 +244,6 @@ impl OneLevelSurface {
             composite.node
         }
 
-        let alternatives = formula.alternatives();
         if let [only] = alternatives {
             if let Some(closed) = only.closed() {
                 let Some(view) = closed.to_closed_surface_view() else {
@@ -258,7 +256,6 @@ impl OneLevelSurface {
         }
 
         struct MemberJoin {
-            key: PropertyKey,
             present_in: usize,
             optional_somewhere: bool,
             values: Vec<SemanticNodeId>,
@@ -268,9 +265,10 @@ impl OneLevelSurface {
         }
 
         let alternative_count = alternatives.len();
-        let mut joins: Vec<MemberJoin> = Vec::new();
+        let mut joins = crate::projection::aggregation::OrderedMemberAggregation::new();
         let mut call_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut construct_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut seen_signatures = rustc_hash::FxHashSet::default();
         let mut index_joins: Vec<(usize, SemanticNodeId, Vec<SemanticNodeId>, bool)> = Vec::new();
         for alternative in alternatives {
             alternative.positive().visit(|fact| {
@@ -278,24 +276,17 @@ impl OneLevelSurface {
                 // join into ONE row (matching the walker and macro
                 // merges), so a colliding second alternative unions the
                 // value instead of publishing a mis-optionaled duplicate.
-                let join = match joins
-                    .iter_mut()
-                    .find(|join| join.key.element_access_collides(fact.key()))
-                {
-                    Some(join) => join,
-                    None => {
-                        joins.push(MemberJoin {
-                            key: fact.key().clone(),
+                let join =
+                    joins.entry(&AuthoredPropertyKey::from_known(fact.key().clone()), || {
+                        MemberJoin {
                             present_in: 0,
                             optional_somewhere: false,
                             values: Vec::new(),
                             readonly_all: true,
                             method_kind: None,
                             has_implementation_body: false,
-                        });
-                        joins.last_mut().expect("just pushed")
-                    }
-                };
+                        }
+                    });
                 join.present_in += 1;
                 join.optional_somewhere |= fact.presence() == PositiveKeyPresence::Optional;
                 if let ProjectionEvidence::Proven(value) = fact.value() {
@@ -319,7 +310,10 @@ impl OneLevelSurface {
                     ObjectSignatureKind::Call => &mut call_nodes,
                     ObjectSignatureKind::Construct => &mut construct_nodes,
                 };
-                if !bucket.contains(&signature.node()) {
+                if seen_signatures.insert((
+                    signature.kind() == ObjectSignatureKind::Call,
+                    signature.node(),
+                )) {
                     bucket.push(signature.node());
                 }
             }
@@ -351,7 +345,7 @@ impl OneLevelSurface {
         let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(
             joins.len() + call_nodes.len() + construct_nodes.len() + index_count,
         );
-        for join in joins {
+        for (key, join) in joins.into_entries() {
             // A definitely-present key whose value is Indeterminate in
             // EVERY alternative (an open residual may overwrite it)
             // still publishes its row — with the honest open value,
@@ -365,7 +359,7 @@ impl OneLevelSurface {
                 union_value(graph, join.values, evidence)
             };
             entries.push(SurfaceEntry::Member(SurfaceMember {
-                key: AuthoredPropertyKey::from_known(join.key),
+                key,
                 value,
                 optional: join.optional_somewhere || join.present_in < alternative_count,
                 readonly: join.readonly_all,
@@ -597,9 +591,18 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
                     ));
                 }
             };
+            let alternatives = match dispatch.object_spread_alternatives(&formula) {
+                Ok(alternatives) => alternatives,
+                Err(trip) => {
+                    return SurfaceResolution::incomplete(NonEmptyReasons::from_demand_trip(trip));
+                }
+            };
             let mut canonical_evidence = super::canonical_algebra::CanonicalEvidence::default();
-            let surface =
-                OneLevelSurface::from_spread_projection(graph, &formula, &mut canonical_evidence);
+            let surface = OneLevelSurface::from_spread_projection(
+                graph,
+                &alternatives,
+                &mut canonical_evidence,
+            );
             dispatch.deposit_canonical_evidence(canonical_evidence);
             surface
         }
@@ -753,8 +756,10 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                     };
                 }
             };
-            let members = dispatch.spread_formula_positive_members_for_macro(&formula);
-            SurfaceResolution::resolved(members)
+            match dispatch.spread_formula_positive_members_for_macro(&formula) {
+                Ok(members) => SurfaceResolution::resolved(members),
+                Err(trip) => SurfaceResolution::incomplete(NonEmptyReasons::from_demand_trip(trip)),
+            }
         }
         Some(SemanticNodeData::Union(arms)) => {
             let arms = arms.members_arc();

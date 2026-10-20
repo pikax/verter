@@ -49,6 +49,7 @@ use super::{
     cancelled_cache_read, empty_signature, record_inflight_aborted_retry,
     semantic_operand_evidence, PublishedMemoCandidate, SemanticGraphStore, WarmPublishOutcome,
 };
+use crate::semantic_query::checker_policy::TupleSplicePosition;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 type BuildOutput = crate::project_semantic_dispatch::walk::QueryBuildOutput<SemanticQueryValue>;
@@ -68,15 +69,31 @@ pub enum Recursion {
 /// itself ([`CacheRead::receipt`]).
 #[derive(Default)]
 pub struct ReadCapture<'a> {
+    site: TupleSplicePosition,
     publication: Option<&'a mut Option<PublishedMemoCandidate>>,
     evidence: Option<&'a mut Option<crate::semantic_query::operand::SemanticOperandEvidence>>,
     carrier: Option<&'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>>,
 }
 
 impl<'a> ReadCapture<'a> {
+    /// Fixture claim for an expression demand, including a producer held
+    /// while a semantic task migrates to another polling thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expression_for_tests() -> Self {
+        Self {
+            site: TupleSplicePosition::Expression,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_checking_site(&mut self, site: TupleSplicePosition) {
+        self.site = site;
+    }
+
     /// Capture the candidate this read's cold build admits, if any.
     pub(crate) fn publication(slot: &'a mut Option<PublishedMemoCandidate>) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: Some(slot),
             evidence: None,
             carrier: None,
@@ -90,6 +107,7 @@ impl<'a> ReadCapture<'a> {
         _authority: &crate::project_semantic_dispatch::SemanticOperandAuthority,
     ) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: None,
             evidence: Some(slot),
             carrier: None,
@@ -110,6 +128,7 @@ impl<'a> ReadCapture<'a> {
         slot: &'a mut Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     ) -> Self {
         Self {
+            site: TupleSplicePosition::Type,
             publication: None,
             evidence: None,
             carrier: Some(slot),
@@ -155,6 +174,7 @@ pub(super) struct CaptureParts<'c> {
 /// One logical claim of one key: the prepared key and what earlier attempts
 /// of the same claim already counted.
 pub struct ClaimAttempt {
+    site: TupleSplicePosition,
     prepared: PreparedKeyHandle,
     /// Binding relations carry transaction-local inference candidates, so
     /// their producers never serve another claimant.
@@ -172,6 +192,13 @@ pub struct ClaimAttempt {
 }
 
 impl ClaimAttempt {
+    pub(crate) fn checking_site(&self) -> TupleSplicePosition {
+        self.site
+    }
+    pub(crate) fn set_checking_site(&mut self, site: TupleSplicePosition) {
+        self.site = site;
+    }
+
     /// The identity of the computation this claim names, for its cost
     /// recording: the identity its producer records under
     /// ([`ProducerLease::cost_identity`]).
@@ -283,6 +310,9 @@ pub struct ProducerLease<'s> {
     panic_guard: InflightPanicGuard<'s>,
     open: OpenProducer,
     stats: InFlightStatsGuard<'s>,
+    /// Build clock for the held-time measurements; read only where they
+    /// are kept.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     started: Instant,
 }
 
@@ -335,13 +365,32 @@ impl SemanticGraphStore {
 
     construction_ordinal_seam! {
         /// Whether the task installed on this thread already has `key`'s
-        /// producer open, so a claim would answer with the same-path carrier.
-        /// A read-only preflight: the claim stays the sole authority that
-        /// records and returns the carrier.
+        /// type-site producer open, so a type-site claim would answer with
+        /// the same-path carrier ([`Self::is_same_path_claim_at`]).
+        #[cfg_attr(
+            not(any(test, feature = "test-support")),
+            expect(
+                dead_code,
+                reason = "production preflights name their checking site; this \
+                          type-site form is the fixtures' public seam"
+            )
+        )]
         fn is_same_path_claim(&self, key: &SemanticQueryKey) -> bool {
-            ExecutionScope::current(&self.task_registry)
-                .is_some_and(|task| task.produces_key(key, prepared::hash_key(key)))
+            self.is_same_path_claim_at(key, TupleSplicePosition::Type)
         }
+    }
+
+    /// Whether the task installed on this thread already has `key`'s
+    /// producer open at `site`, so a claim at that site would answer with
+    /// the same-path carrier. A read-only preflight: the claim stays the
+    /// sole authority that records and returns the carrier.
+    pub(crate) fn is_same_path_claim_at(
+        &self,
+        key: &SemanticQueryKey,
+        site: TupleSplicePosition,
+    ) -> bool {
+        ExecutionScope::current(&self.task_registry)
+            .is_some_and(|task| task.produces_key(key, prepared::hash_key(key), site))
     }
 
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
@@ -403,6 +452,7 @@ impl SemanticGraphStore {
                 Ok(attempt) => attempt,
                 Err(read) => return Acquired::Read(read),
             };
+            attempt.site = capture.site;
             if let Some(read) = unclaimed() {
                 return Acquired::Served(read);
             }
@@ -493,6 +543,7 @@ impl SemanticGraphStore {
             // hit there; that race is benign.
             self.note_lookup_miss(prepared.key());
             Ok(ClaimAttempt {
+                site: capture.site,
                 prepared,
                 independent,
                 miss_recorded: false,
@@ -517,6 +568,7 @@ impl SemanticGraphStore {
                 return Err(cancelled_cache_read());
             }
             Ok(ClaimAttempt {
+                site: TupleSplicePosition::Type,
                 prepared: self.prepare_rooted_key(key),
                 independent: true,
                 miss_recorded: false,
@@ -562,9 +614,10 @@ impl SemanticGraphStore {
             }
 
             // 2. Same-path recursion: the claiming task already produces this
-            //    key. Its producer is still open, so answering it would wait on
-            //    itself.
-            if task.produces(prepared) {
+            //    key at this checking site. Its producer is still open, so
+            //    answering it would wait on itself. The task's producer of the
+            //    key at the other site is a different computation.
+            if task.produces(prepared, attempt.site) {
                 self.stats
                     .same_path_sentinel_returns
                     .fetch_add(1, Ordering::Relaxed);
@@ -574,7 +627,9 @@ impl SemanticGraphStore {
 
             // 3. Become the producer, or subscribe to the one another task owns.
             if attempt.independent {
-                let inflight = Arc::new(FlightCell::charged(self.retention_account()));
+                let mut cell = FlightCell::charged(self.retention_account());
+                cell.site = attempt.site;
+                let inflight = Arc::new(cell);
                 {
                     let mut state = inflight.state.lock();
                     state.claimed = true;
@@ -588,10 +643,14 @@ impl SemanticGraphStore {
                 return Claim::Produce(self.open_producer(prepared.clone(), inflight, true, task));
             }
             let inflight = {
-                let mut table = self.inflight.lock();
+                let mut table = self.site_inflight(attempt.site).lock();
                 table
                     .entry(prepared.clone())
-                    .or_insert_with(|| Arc::new(FlightCell::charged(self.retention_account())))
+                    .or_insert_with(|| {
+                        let mut cell = FlightCell::charged(self.retention_account());
+                        cell.site = attempt.site;
+                        Arc::new(cell)
+                    })
                     .clone()
             };
             {
@@ -631,7 +690,7 @@ impl SemanticGraphStore {
         // RAII guards sharing the prepared key, so a producer abandoned
         // before it settles (a panic, an early return) closes itself and
         // releases its subscribers.
-        let open = task.open_producer(prepared.clone());
+        let open = task.open_producer(prepared.clone(), inflight.site);
         let panic_guard = if independent {
             InflightPanicGuard::new_independent(
                 Arc::clone(&inflight),
@@ -639,7 +698,11 @@ impl SemanticGraphStore {
                 prepared.clone(),
             )
         } else {
-            InflightPanicGuard::new(Arc::clone(&inflight), &self.inflight, prepared.clone())
+            InflightPanicGuard::new(
+                Arc::clone(&inflight),
+                self.site_inflight(inflight.site),
+                prepared.clone(),
+            )
         };
         ProducerLease {
             store: self,
@@ -649,6 +712,7 @@ impl SemanticGraphStore {
             panic_guard,
             open,
             stats,
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started: Instant::now(),
         }
     }
@@ -958,7 +1022,7 @@ impl Subscription<'_> {
                         .stats
                         .joiner_view_mismatch_forks
                         .fetch_add(1, Ordering::Relaxed);
-                    let mut table = store.inflight.lock();
+                    let mut table = store.site_inflight(inflight.site).lock();
                     if table
                         .get(prepared)
                         .is_some_and(|entry| Arc::ptr_eq(entry, &inflight))
@@ -1268,12 +1332,15 @@ impl<'s> ProducerLease<'s> {
             mut panic_guard,
             open,
             stats,
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             started,
         } = self;
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         let build_held_ns = started.elapsed().as_nanos() as u64;
         panic_guard.mark_finished();
         drop(panic_guard);
         drop(open);
+        #[cfg(feature = "semantic-observe")]
         if let Some(prov) = store.provenance.as_ref() {
             prov.execute_cooperative_held_ns
                 .fetch_add(build_held_ns, Ordering::Relaxed);

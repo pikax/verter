@@ -1621,11 +1621,14 @@ const VUE_ALL_BLOCKS: &str = "<script setup lang=\"ts\">\nconst a: number = 1\n<
 
 /// The host's cold-compile counter — the ARTIFACT that says whether a call
 /// recompiled. Bumped once per cold run past the warm-hit consult.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 pub(crate) fn cold_runs(host: &VerterHost) -> u64 {
     host.provenance_snapshot().compile_cold_runs
 }
 
 /// `ensure_compiled` reduced to a comparable answer.
+#[cfg(feature = "semantic-observe")]
 fn ensure_compiled_answer(host: &VerterHost, canonical: &str, profile: &CompileProfile) -> String {
     match host.ensure_compiled(canonical, profile) {
         Ok(()) => "Ok".to_string(),
@@ -1647,6 +1650,8 @@ fn ensure_compiled_answer(host: &VerterHost, canonical: &str, profile: &CompileP
 ///   validated slot whose cached arm it never inspected;
 /// * an identity that legitimately requests NO runtime module — it must not be
 ///   told a `Main` it never asked for is missing, on either path.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn ensure_compiled_answers_the_same_cold_and_warm_for_one_identity() {
     use crate::CompileTarget;
@@ -2127,6 +2132,8 @@ fn ensure_ide_compiled_and_get_ide_agree_under_session_cache_mode() {
 /// Asserted on the ARTIFACT — the host's cold-compile counter — because the
 /// returned `MissingVirtualNode` is identical whether or not a recompile
 /// happened, so the outcome alone proves nothing.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn reading_a_target_excluded_node_under_a_warm_identity_does_not_recompile() {
     use crate::CompileTarget;

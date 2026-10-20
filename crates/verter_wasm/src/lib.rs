@@ -1166,7 +1166,7 @@ impl WasmVerterHost {
     pub fn get_last_audit_record(&self) -> Result<JsValue, JsValue> {
         #[cfg(not(feature = "semantic-observe"))]
         {
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -1206,7 +1206,7 @@ impl WasmVerterHost {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (filter_json,);
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -1257,7 +1257,7 @@ impl WasmVerterHost {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (args_json,);
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -2553,7 +2553,7 @@ impl WasmMetaSession {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = (audit_json, canonical_id);
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {
@@ -2589,7 +2589,7 @@ impl WasmMetaSession {
                 decl_symbol_name,
                 args_fingerprint_hex,
             );
-            return Err(audit::capture_unavailable_error());
+            Err(audit::capture_unavailable_error())
         }
         #[cfg(feature = "semantic-observe")]
         {

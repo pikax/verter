@@ -55,6 +55,10 @@ try {
   native = null;
 }
 
+// The discriminator reads the audit footprint, which exists only in a
+// binding built with `semantic-observe`.
+const captured = native !== null && native.captureAvailability() === "Available";
+
 interface StructuredCustom {
   name?: string;
   detail?: string;
@@ -231,56 +235,64 @@ function resolvedTypeRootEventCount(bundle: AuditBundle): number {
   }).length;
 }
 
-describe("audit-harness — VFS bootstrap discriminator (Phase Y1)", () => {
-  it("audit_component_absolute_canonical_outperforms_root_relative_canonical", () => {
-    if (!native) {
-      // Native is only built in build:native; on platforms where
-      // it's unavailable just skip the discriminator rather than
-      // failing CI on environments that legitimately can't load
-      // the addon.
-      expect(true, "native module not built; skipping discriminator").toBe(true);
-      return;
-    }
+// Native is only built in build:native; where it is unavailable the
+// discriminator is skipped rather than failing CI on environments that
+// legitimately cannot load the addon.
+describe.skipIf(native === null)("audit-harness — VFS bootstrap discriminator", () => {
+  it.runIf(!captured)(
+    "the audited query reports unavailable capture when the binding does not capture",
+    () => {
+      const { uiRoot, componentFile } = buildFixture();
+      expect(() => runAudit(uiRoot, componentFile, "absolute")).toThrow(
+        /audit capture is unavailable/,
+      );
+    },
+  );
 
-    const { uiRoot, componentFile } = buildFixture();
+  it.runIf(captured)(
+    "audit_component_absolute_canonical_outperforms_root_relative_canonical",
+    () => {
+      const { uiRoot, componentFile } = buildFixture();
 
-    // Run the same audit flow twice with different canonical
-    // forms. The absolute form is the post-fix shape (matches
-    // `meta-ui-bench.ts`, `compat/checker.ts`, and the LSP); the
-    // root-relative form is the pre-fix shape that the V1 audit
-    // identified as the source of the empty-topology bug.
-    const absoluteBundle = runAudit(uiRoot, componentFile, "absolute");
-    const rootRelativeBundle = runAudit(uiRoot, componentFile, "root-relative");
+      // Run the same audit flow twice with different canonical
+      // forms. The absolute form is the post-fix shape (matches
+      // `meta-ui-bench.ts`, `compat/checker.ts`, and the LSP); the
+      // root-relative form is the pre-fix shape that the V1 audit
+      // identified as the source of the empty-topology bug.
+      const absoluteBundle = runAudit(uiRoot, componentFile, "absolute");
+      const rootRelativeBundle = runAudit(uiRoot, componentFile, "root-relative");
 
-    const absoluteResolved = resolvedTypeRootEventCount(absoluteBundle);
-    const rootRelativeResolved = resolvedTypeRootEventCount(rootRelativeBundle);
+      const absoluteResolved = resolvedTypeRootEventCount(absoluteBundle);
+      const rootRelativeResolved = resolvedTypeRootEventCount(rootRelativeBundle);
 
-    // Discriminator: the absolute canonical MUST resolve at least
-    // one imported type root; pre-fix the root-relative canonical resolved
-    // ZERO. The current single-authority resolver deliberately leaves the
-    // earlier import-route cache probe empty, so this observes the authoritative
-    // `resolve_imported_type_root_result` rather than that retired cache path.
-    // If a future change collapses the two paths into
-    // equivalent behavior, this assertion fails and the regression
-    // surfaces immediately.
-    expect(
-      absoluteResolved,
-      `absolute canonical must resolve at least one import; got ${absoluteResolved}. Pre-fix root-relative resolved ${rootRelativeResolved}.`,
-    ).toBeGreaterThanOrEqual(1);
+      // Discriminator: the absolute canonical MUST resolve at least
+      // one imported type root; pre-fix the root-relative canonical resolved
+      // ZERO. The current single-authority resolver deliberately leaves the
+      // earlier import-route cache probe empty, so this observes the authoritative
+      // `resolve_imported_type_root_result` rather than that retired cache path.
+      // If a future change collapses the two paths into
+      // equivalent behavior, this assertion fails and the regression
+      // surfaces immediately.
+      expect(
+        absoluteResolved,
+        `absolute canonical must resolve at least one import; got ${absoluteResolved}. Pre-fix root-relative resolved ${rootRelativeResolved}.`,
+      ).toBeGreaterThanOrEqual(1);
 
-    expect(
-      absoluteResolved,
-      `absolute canonical MUST resolve more imports than root-relative — pre-fix the harness used root-relative and ALL imports had target=<none>. Got absolute=${absoluteResolved}, root-relative=${rootRelativeResolved}.`,
-    ).toBeGreaterThan(rootRelativeResolved);
+      expect(
+        absoluteResolved,
+        `absolute canonical MUST resolve more imports than root-relative — pre-fix the harness used root-relative and ALL imports had target=<none>. Got absolute=${absoluteResolved}, root-relative=${rootRelativeResolved}.`,
+      ).toBeGreaterThan(rootRelativeResolved);
 
-    // Additional invariant: the absolute-canonical bundle must
-    // carry a non-degenerate topology. `imported_dependency_entries`
-    // counts the component + every transitively-loaded dep; pre-fix
-    // it was 1 (component only). Post-fix it MUST be >= 2 for the
-    // 1-import fixture.
-    expect(
-      absoluteBundle.record?.store?.imported_dependency_entries ?? 0,
-      "absolute canonical must produce a non-degenerate topology (>= 2 imported_dependency_entries for the 1-import fixture)",
-    ).toBeGreaterThan(1);
-  }, 60_000);
+      // Additional invariant: the absolute-canonical bundle must
+      // carry a non-degenerate topology. `imported_dependency_entries`
+      // counts the component + every transitively-loaded dep; pre-fix
+      // it was 1 (component only). Post-fix it MUST be >= 2 for the
+      // 1-import fixture.
+      expect(
+        absoluteBundle.record?.store?.imported_dependency_entries ?? 0,
+        "absolute canonical must produce a non-degenerate topology (>= 2 imported_dependency_entries for the 1-import fixture)",
+      ).toBeGreaterThan(1);
+    },
+    60_000,
+  );
 });

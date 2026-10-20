@@ -227,12 +227,33 @@ impl SubmissionToken {
 /// both counters would grow toward O(|edges|) on dense graphs.
 /// This struct lets tests assert the O(V) bound directly rather
 /// than indirectly via wall-clock.
+///
+/// Only this crate's tests read the counters, so outside `cfg(test)`
+/// the struct is zero-size and [`Self::record_enqueue`] is a no-op:
+/// the production walk carries no counter and does no bookkeeping.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct BfsMetrics {
     /// Total `frontier.push_back` invocations across the walk.
+    #[cfg(test)]
     pub(crate) enqueue_count: usize,
     /// Peak `frontier.len()` observed across the walk.
+    #[cfg(test)]
     pub(crate) max_frontier_len: usize,
+}
+
+impl BfsMetrics {
+    /// Record one `frontier.push_back`, given the frontier length just
+    /// after the push.
+    #[inline]
+    fn record_enqueue(&mut self, frontier_len: usize) {
+        #[cfg(test)]
+        {
+            self.enqueue_count = self.enqueue_count.saturating_add(1);
+            self.max_frontier_len = self.max_frontier_len.max(frontier_len);
+        }
+        #[cfg(not(test))]
+        let _ = frontier_len;
+    }
 }
 
 /// Request-group bookkeeping co-located on a DAG node.
@@ -325,7 +346,10 @@ pub type DedupJoinObservation = Option<DedupJoinerEvent>;
 /// What [`SchedulerDag::register_request`] hands back for a dedup join:
 /// the deferred audit event with `semantic-observe`, nothing without it.
 #[cfg(not(feature = "semantic-observe"))]
-pub type DedupJoinObservation = ();
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DedupJoinObservation {
+    _uncaptured: (),
+}
 
 /// Per-node bookkeeping inside the DAG. `pub(in crate::dag)` so the
 /// `terminal_failures` child module can mutate
@@ -1942,7 +1966,8 @@ impl SchedulerDag {
     /// — the cycle-filter contract is the bool, with no public API
     /// or result change from instrumentation. Metrics exist solely
     /// to make the enqueue-time-visited regression class
-    /// discriminable in tests.
+    /// discriminable in tests; outside `cfg(test)` they are
+    /// zero-size and record nothing.
     pub(crate) fn dep_reaches_owner_with_metrics(
         &self,
         owner_canonical: &Arc<str>,
@@ -2012,8 +2037,7 @@ impl SchedulerDag {
         // so a fan-in edge back to start can never re-enqueue it.
         visited.insert(start_id.clone());
         frontier.push_back(start_id);
-        metrics.enqueue_count = metrics.enqueue_count.saturating_add(1);
-        metrics.max_frontier_len = metrics.max_frontier_len.max(frontier.len());
+        metrics.record_enqueue(frontier.len());
 
         while let Some(current) = frontier.pop_front() {
             // Look up the current node's deps_remaining. A node that
@@ -2057,8 +2081,7 @@ impl SchedulerDag {
                     // makes it onto the frontier exactly once.
                     if next != owner_id && visited.insert(next.clone()) {
                         frontier.push_back(next);
-                        metrics.enqueue_count = metrics.enqueue_count.saturating_add(1);
-                        metrics.max_frontier_len = metrics.max_frontier_len.max(frontier.len());
+                        metrics.record_enqueue(frontier.len());
                     }
                 }
             }
@@ -2621,7 +2644,7 @@ impl SchedulerDag {
                     }
                 });
                 #[cfg(not(feature = "semantic-observe"))]
-                let event = ();
+                let event = DedupJoinObservation::default();
                 group.senders.push(sender);
                 return event;
             }

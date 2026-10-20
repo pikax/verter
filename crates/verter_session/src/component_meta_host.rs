@@ -741,7 +741,9 @@ impl ComponentMetaSession {
             .map_err(ComponentMetaHostError::from)
     }
 
-    /// Get provenance counters for observability.
+    /// Get provenance counters for observability. Exists only under
+    /// `semantic-observe`; a build without it keeps no provenance.
+    #[cfg(feature = "semantic-observe")]
     pub fn get_provenance(
         &self,
     ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, ComponentMetaHostError> {

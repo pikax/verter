@@ -36,6 +36,7 @@ fn target(outcome: &ResolutionOutcome) -> Option<String> {
     outcome.result().map(|result| result.source_id.clone())
 }
 
+#[cfg(feature = "semantic-observe")]
 fn producer_runs(workspace: &MemoryWorkspace) -> u64 {
     workspace
         .vfs_provenance_snapshot()
@@ -108,6 +109,8 @@ fn concurrent_identical_cold_queries_run_one_producer() {
         vec![(Some("/p/dep.ts".to_string()), true); 2],
         "both subscribers adopt the delivered answer"
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         1,
@@ -192,6 +195,8 @@ fn a_refused_retention_still_serves_the_flight_subscribers() {
             other => panic!("a subscriber's adopted answer is cacheable, got {other:?}"),
         }
     }
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         1,
@@ -327,6 +332,8 @@ fn a_cancelled_subscriber_detaches_and_the_flight_serves_the_others() {
         vec![(Some("/p/dep.ts".to_string()), true)],
         "the flight still serves its other subscriber"
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(producer_runs(&workspace), 1);
 }
 
@@ -394,6 +401,8 @@ fn an_abandoned_flight_sends_its_subscribers_back_to_resolve() {
         vec![(Some("/p/dep.ts".to_string()), false)],
         "the subscriber resolved for itself"
     );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         1,

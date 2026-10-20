@@ -15,4 +15,6 @@ mod file_audit_timing_gated_by_flag;
 #[cfg(feature = "semantic-observe")]
 mod file_audit_timing_only_for_triggering_request;
 #[path = "g_file/file_load_count_within_decl_graph.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod file_load_count_within_decl_graph;

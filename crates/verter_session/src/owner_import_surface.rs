@@ -23,7 +23,7 @@
 //!   caller folds into its dependency-fact set for the publish-side
 //!   completion-fence revalidation.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -81,7 +81,7 @@ pub struct OwnerImportSurface {
 /// at lookup time.
 pub struct OwnerImportSurfaceDb {
     entries: DashMap<Arc<str>, Arc<OwnerImportSurface>>,
-    live_counter: Arc<AtomicU64>,
+    live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`verter_type_engine::cache_schema`] for the contract. Production paths always use
     /// [`verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION`]; test fixtures
@@ -93,13 +93,15 @@ pub struct OwnerImportSurfaceDb {
 impl OwnerImportSurfaceDb {
     #[must_use]
     pub fn new() -> Self {
-        Self::with_counter(Arc::new(AtomicU64::new(0)))
+        Self::with_counter(verter_type_engine::cache_runtime::OccupancyCounter::new())
     }
 
     /// Construct with an externally-shared `live_counter` so the
     /// [`ProjectTypeStoreCounters`](crate::project_type_store::ProjectTypeStoreCounters)
     /// snapshot reflects live-entry changes without a second read.
-    pub(crate) fn with_counter(live_counter: Arc<AtomicU64>) -> Self {
+    pub(crate) fn with_counter(
+        live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counter_and_schema_version(
             live_counter,
             verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION,
@@ -111,10 +113,16 @@ impl OwnerImportSurfaceDb {
     /// entries under a prior cluster version.
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
-        Self::with_counter_and_schema_version(Arc::new(AtomicU64::new(0)), schema_version)
+        Self::with_counter_and_schema_version(
+            verter_type_engine::cache_runtime::OccupancyCounter::new(),
+            schema_version,
+        )
     }
 
-    fn with_counter_and_schema_version(live_counter: Arc<AtomicU64>, schema_version: u32) -> Self {
+    fn with_counter_and_schema_version(
+        live_counter: verter_type_engine::cache_runtime::OccupancyCounter,
+        schema_version: u32,
+    ) -> Self {
         Self {
             entries: DashMap::new(),
             live_counter,

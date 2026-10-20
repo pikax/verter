@@ -154,6 +154,8 @@ fn type_route_through_host(host: &Arc<VerterHost>, owner: &str, specifier: &str)
 }
 
 /// How many times the workspace's resolution producer has run.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 fn producer_runs(host: &VerterHost) -> u64 {
     host.ws()
         .vfs_provenance_snapshot()
@@ -339,6 +341,8 @@ fn every_view_answers_the_same_whatever_was_read_first() {
 /// One warm session walked through create, body edit, export change, revert
 /// and reveal answers every step exactly as a cold host does — and a body
 /// edit that changes no resolution fact runs no resolver.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn create_edit_revert_and_reveal_answer_as_cold() {
     let steps: [&[(&str, &str)]; 6] = [
@@ -536,6 +540,8 @@ fn a_pinned_session_request_outlives_overlay_churn() {
 /// the workspace's answers; and the overlay-side work — root construction,
 /// probes, manifest parses — is counted apart so a relocated cost cannot
 /// pass for an eliminated one.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_overlay_requests_run_each_resolution_producer_once() {
     const DEPS: usize = 6;
@@ -619,6 +625,8 @@ fn repeated_overlay_requests_run_each_resolution_producer_once() {
 /// answer an unresolved-wildcard route from the route cache, validated
 /// against each request's own effective world — no resolver run, no
 /// witness rebuilt, no witness replayed.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn repeated_session_route_reads_rebuild_nothing() {
     use crate::host_manage::import_route_witness::{

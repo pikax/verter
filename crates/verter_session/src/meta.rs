@@ -1117,7 +1117,9 @@ impl MetaSession {
         self.get_component_meta_payload(canonical_or_alias, encode_fn)
     }
 
-    /// Return provenance counters for this session's host.
+    /// Return provenance counters for this session's host. Exists only
+    /// under `semantic-observe`; a build without it keeps no provenance.
+    #[cfg(feature = "semantic-observe")]
     pub fn get_provenance(
         &self,
     ) -> Result<crate::meta_provenance::MetaProvenanceSnapshot, MetaError> {

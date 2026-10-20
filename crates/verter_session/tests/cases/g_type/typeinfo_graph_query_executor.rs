@@ -484,7 +484,9 @@ fn a_one_level_closure_bounds_the_exported_walk_depth() {
 /// the checker's error type and, when the request asks for diagnostics,
 /// carries the checker's TS2456 at the circular alias's name — measured on
 /// TypeScript 7.0.2 as `grow.ts(1,13): error TS2456: Type alias 'Grow'
-/// circularly references itself.` — on a cold and a warm request alike. A
+/// circularly references itself.` — on a cold and a warm request alike. The
+/// graph carries the root's TS2456 only; the checker's two TS2315 lines on the
+/// same text (`Type 'Grow' is not generic.`) are outside it. A
 /// request that does not ask for diagnostics carries none.
 #[test]
 fn resolve_symbol_graph_reports_the_checkers_ts2456_at_the_alias_name() {

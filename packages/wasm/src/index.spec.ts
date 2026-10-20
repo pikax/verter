@@ -40,6 +40,7 @@ const mockHostCompileRequest = vi.fn(() => ({
   diagnostics: { diagnostics: [], hasErrors: false },
   products: [{ kind: "analysis", analysis: { bindingOccurrences: [] } }],
 }));
+const mockCaptureAvailability = vi.fn<() => string>(() => "Unavailable");
 const mockHostCtor = vi.fn<(config?: unknown) => void>();
 class MockHost {
   constructor(config?: unknown) {
@@ -58,10 +59,11 @@ class MockHost {
 vi.mock("../wasm/verter_wasm.js", () => ({
   default: mockInit,
   VerterHost: MockHost,
+  captureAvailability: mockCaptureAvailability,
 }));
 
 // Import after mock setup so the module picks up mocked dependencies
-const { initialize, isInitialized, createHost } = await import("./index.js");
+const { initialize, isInitialized, createHost, captureAvailability } = await import("./index.js");
 
 beforeEach(async () => {
   mockInit.mockClear();
@@ -83,6 +85,20 @@ describe("@verter/wasm host wrapper", () => {
     // @ai-generated - Reports initialization state correctly
     it("should return true after initialization", () => {
       expect(isInitialized()).toBe(true);
+    });
+  });
+
+  describe("captureAvailability", () => {
+    it("forwards the module's capture availability", () => {
+      mockCaptureAvailability.mockReturnValueOnce("Unavailable");
+      expect(captureAvailability()).toBe("Unavailable");
+      mockCaptureAvailability.mockReturnValueOnce("Available");
+      expect(captureAvailability()).toBe("Available");
+    });
+
+    it("rejects a value outside the two capture states", () => {
+      mockCaptureAvailability.mockReturnValueOnce("Partial");
+      expect(() => captureAvailability()).toThrow(/unknown capture availability: Partial/);
     });
   });
 

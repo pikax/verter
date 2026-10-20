@@ -259,6 +259,8 @@ fn compile_slot_signature_roots_the_transitively_reached_file() {
 /// unless the footprint is replayed for it too. Each thread here brackets its
 /// own tracer and finalises it, and BOTH must contain a fact rooted at the
 /// transitively reached `inner.ts`.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn both_flight_arms_replay_the_producer_footprint() {

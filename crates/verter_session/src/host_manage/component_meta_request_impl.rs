@@ -126,7 +126,7 @@ fn uncaptured_component_meta_owner_hash_for_view(
     host.current_or_read_whole_hash(canonical)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "semantic-observe"))]
 pub(crate) fn uncaptured_component_meta_owner_hash_for_view_for_test(
     host: &VerterHost,
     view: &dyn crate::session_view::SessionView,

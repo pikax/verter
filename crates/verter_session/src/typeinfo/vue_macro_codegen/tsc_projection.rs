@@ -39,7 +39,7 @@ pub(super) fn render_tsc_node(
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<TscSpliceText, ProjectionFailure> {
-    counters.tsc_materializations += 1;
+    counters.record_tsc_materialization();
     // The widened carrier owns the rendered node until the text is produced.
     let nameable = nameable_render_node(dispatch, node, owner_canonical);
     let node = *nameable.value();
@@ -101,7 +101,7 @@ pub(super) fn render_tsc_testing_node(
     node: verter_type_engine::semantic_query::SemanticNodeId,
     counters: &mut VueMacroCodegenCounters,
 ) -> Result<(TscSpliceText, Option<TscDeclarationFailureReason>), ProjectionFailure> {
-    counters.tsc_materializations += 1;
+    counters.record_tsc_materialization();
     // The widened carrier owns the rendered node until the text is produced.
     let nameable = nameable_render_node(dispatch, node, owner_canonical);
     let node = *nameable.value();

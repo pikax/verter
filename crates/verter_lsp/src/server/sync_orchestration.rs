@@ -1941,11 +1941,15 @@ impl VerterLanguageServer {
 
         match result {
             Ok(CarrierDelivery::Refused) => {
-                // The document moved while this repair waited for the delivery
-                // lock, or the engine is holding a newer copy of the path: the
-                // newer revision's own repair delivers its bytes. Every
-                // remaining leg of THIS transaction is cancelled with it.
-                self.cancel_legs_after_moved_revision(&canonical_id);
+                // Either the document moved while this repair waited for the
+                // delivery lock, so the newer revision's own repair delivers
+                // its bytes, or the serving engine did not certify these bytes.
+                // Every remaining leg of THIS transaction stays owed either way.
+                if still_current() {
+                    self.defer_legs_until_certified(&canonical_id);
+                } else {
+                    self.cancel_legs_after_moved_revision(&canonical_id);
+                }
             }
             Ok(delivery) => {
                 // The receipt this transaction's own delivery produced. It is

@@ -359,6 +359,8 @@ fn post_trip_projection_op_queries_bypass_cooperative_admission() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// The post-trip early-exit ATTRIBUTION must mirror EVERY kind the
 /// aggregate work-budget gate counts — including the demand-bearing
 /// `TypeOf`. A post-trip `TypeOf` dispatch takes the early-exit (it

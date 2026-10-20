@@ -48,10 +48,14 @@ mod shallow_walk_no_over_materialise;
 #[path = "g_misc3/signature_width_pages.rs"]
 mod signature_width_pages;
 #[path = "g_misc3/slot_binding_graph_fact_tracer_emission.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod slot_binding_graph_fact_tracer_emission;
 #[path = "g_misc3/slot_binding_graph_matrix_member_presence.rs"]
 mod slot_binding_graph_matrix_member_presence;
 #[path = "g_misc3/slot_binding_graph_unrelated_edit_stays_warm.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod slot_binding_graph_unrelated_edit_stays_warm;
 #[path = "g_misc3/store_view_validates_fact_signature.rs"]
 mod store_view_validates_fact_signature;

@@ -40,7 +40,7 @@
 //!   input, and an execution abort are not retained.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use rustc_hash::FxHashMap;
@@ -516,11 +516,11 @@ pub struct ComponentMetaResultDb<P> {
     /// the exact `added - removed` delta via atomic `fetch_add` /
     /// `fetch_sub`, so concurrent mutations compose without an absolute
     /// snapshot clobbering a newer count.
-    live_counter: Arc<AtomicU64>,
+    live_counter: crate::cache_runtime::OccupancyCounter,
     /// Counts every eviction / removal — replaces the historical
     /// "stale sweep" counter.
     #[cfg(any(test, feature = "semantic-observe"))]
-    stale_sweeps: Arc<AtomicU64>,
+    stale_sweeps: crate::cache_runtime::OccupancyCounter,
     /// Cache-cluster schema version this Db was constructed under. See
     /// [`crate::cache_schema`] for the contract.
     schema_version: u32,
@@ -570,10 +570,16 @@ impl<P> ComponentMetaResultDb<P> {
 
     #[must_use]
     pub fn new() -> Self {
-        Self::with_counters(Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)))
+        Self::with_counters(
+            crate::cache_runtime::OccupancyCounter::new(),
+            crate::cache_runtime::OccupancyCounter::new(),
+        )
     }
 
-    pub fn with_counters(live_counter: Arc<AtomicU64>, stale_sweeps: Arc<AtomicU64>) -> Self {
+    pub fn with_counters(
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        stale_sweeps: crate::cache_runtime::OccupancyCounter,
+    ) -> Self {
         Self::with_counters_and_schema_version(
             live_counter,
             stale_sweeps,
@@ -586,8 +592,8 @@ impl<P> ComponentMetaResultDb<P> {
     /// retention account, so every admitted entry's bytes are charged
     /// against the one process-local ceiling.
     pub fn with_counters_and_account(
-        live_counter: Arc<AtomicU64>,
-        stale_sweeps: Arc<AtomicU64>,
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        stale_sweeps: crate::cache_runtime::OccupancyCounter,
         retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
         Self::with_counters_and_schema_version(
@@ -624,8 +630,8 @@ impl<P> ComponentMetaResultDb<P> {
         retention_account: Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> Self {
         Self::with_counters_and_account(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            crate::cache_runtime::OccupancyCounter::new(),
+            crate::cache_runtime::OccupancyCounter::new(),
             verter_session_query::retention::StoreAccount::new(retention_account),
         )
     }
@@ -635,16 +641,16 @@ impl<P> ComponentMetaResultDb<P> {
     #[cfg(any(test, feature = "test-support"))]
     pub fn new_with_schema_version_for_test(schema_version: u32) -> Self {
         Self::with_counters_and_schema_version(
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(AtomicU64::new(0)),
+            crate::cache_runtime::OccupancyCounter::new(),
+            crate::cache_runtime::OccupancyCounter::new(),
             schema_version,
             verter_session_query::retention::StoreAccount::default(),
         )
     }
 
     fn with_counters_and_schema_version(
-        live_counter: Arc<AtomicU64>,
-        stale_sweeps: Arc<AtomicU64>,
+        live_counter: crate::cache_runtime::OccupancyCounter,
+        stale_sweeps: crate::cache_runtime::OccupancyCounter,
         schema_version: u32,
         retention_account: verter_session_query::retention::StoreAccount,
     ) -> Self {
@@ -679,8 +685,8 @@ impl<P> ComponentMetaResultDb<P> {
     /// `fetch_add` / `fetch_sub` so concurrent mutations compose exactly
     /// — never by an absolute `store` of a re-derived snapshot, which a
     /// racing mutation could clobber. The subtract is saturated against
-    /// the counter's current value because `live_counter` is shared via
-    /// `Arc<AtomicU64>` across the `ProjectTypeStore` and an underflow
+    /// the counter's current value because `live_counter` is a shared
+    /// handle across the `ProjectTypeStore` and an underflow
     /// would corrupt every sibling DB's contribution to the shared sum.
     fn apply_live_delta(&self, added: usize, removed: usize) {
         if added > removed {
@@ -688,10 +694,7 @@ impl<P> ComponentMetaResultDb<P> {
                 .fetch_add((added - removed) as u64, Ordering::Relaxed);
         } else if removed > added {
             let delta = (removed - added) as u64;
-            self.live_counter.fetch_sub(
-                delta.min(self.live_counter.load(Ordering::Relaxed)),
-                Ordering::Relaxed,
-            );
+            self.live_counter.saturating_sub(delta);
         }
     }
 

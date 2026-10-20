@@ -4965,6 +4965,8 @@ async fn await_publish_for_version(
 /// whether or not the reloaded file would go on to compile (in a fixture with no
 /// file on disk it would not, which makes a compile-count assertion vacuous
 /// here).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(start_paused = true)]
 async fn a_closed_documents_pending_tick_never_reaches_into_the_host() {
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));

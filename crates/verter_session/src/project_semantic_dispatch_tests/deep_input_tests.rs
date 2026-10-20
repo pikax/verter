@@ -145,22 +145,34 @@ fn footprint_host() -> std::sync::Arc<crate::VerterHost> {
 }
 
 /// The typed outcome of `pf`'s body-derived return over `source`, and the
-/// structured events its request recorded.
+/// structured events its request recorded — `None` in a build without
+/// `semantic-observe`, whose records carry no observation.
 fn audited_return_on(
     host: &std::sync::Arc<crate::VerterHost>,
     source: &str,
 ) -> (
     Result<Option<verter_type_engine::semantic_query::FlowReturnDegradation>, FlowReturnError>,
-    Vec<StructuredAuditEvent>,
+    Option<Vec<StructuredAuditEvent>>,
 ) {
     let audited = flow_return_audited_on_host(host, source, "pf");
-    let events = audited
-        .audit()
-        .footprint
-        .as_ref()
-        .expect("the probe host captures the request's footprint")
-        .structured_events
-        .clone();
+    let events = if cfg!(feature = "semantic-observe") {
+        Some(
+            audited
+                .audit()
+                .footprint
+                .as_ref()
+                .expect("the probe host captures the request's footprint")
+                .structured_events
+                .clone(),
+        )
+    } else {
+        assert_eq!(
+            audited.audit().capture_state,
+            verter_audit::AuditCaptureState::Unavailable,
+            "a build without capture must report unavailable capture"
+        );
+        None
+    };
     (
         audited.into_result().map(|result| result.degradation()),
         events,
@@ -197,10 +209,14 @@ fn assert_returns_past_the_plan_budget(source: String) {
         audited_return_on(&host, &source)
     });
     assert_eq!(outcome, WORK_BUDGET_EXCEEDED);
-    assert!(
-        planner_refused_at(&events, PLAN_BUDGET),
-        "the planner refused the slice at {PLAN_BUDGET} nodes: {events:?}"
-    );
+    // The refusal's recorded reason is optional capture; the typed budget
+    // failure above holds in every build.
+    if let Some(events) = events {
+        assert!(
+            planner_refused_at(&events, PLAN_BUDGET),
+            "the planner refused the slice at {PLAN_BUDGET} nodes: {events:?}"
+        );
+    }
 }
 
 /// `pf`'s return over `source`, read on a thread of `stack` bytes under
@@ -213,12 +229,14 @@ fn assert_returns_past_a_work_budget(source: String, work: usize, stack: usize) 
         audited_return_on(&footprint_host(), &source)
     });
     assert_eq!(outcome, WORK_BUDGET_EXCEEDED);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, StructuredAuditEvent::FlowSliceBudgetExceeded { .. })),
-        "the plan budget, at its production default, did not trip: {events:?}"
-    );
+    if let Some(events) = events {
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, StructuredAuditEvent::FlowSliceBudgetExceeded { .. })),
+            "the plan budget, at its production default, did not trip: {events:?}"
+        );
+    }
 }
 
 /// The typed outcome of a return that evaluated to its value, undegraded.

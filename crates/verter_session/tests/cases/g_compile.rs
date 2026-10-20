@@ -1,16 +1,22 @@
 //! Consolidated integration-test group `compile`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
 #[path = "g_compile/compile_audit_css_analysis.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod compile_audit_css_analysis;
 #[path = "g_compile/compile_audit_filtered_and_parent.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.
 #[cfg(feature = "semantic-observe")]
 mod compile_audit_filtered_and_parent;
 #[path = "g_compile/compile_audit_ide.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod compile_audit_ide;
 #[path = "g_compile/compile_audit_no_hot_loop_instrumentation.rs"]
 mod compile_audit_no_hot_loop_instrumentation;
 #[path = "g_compile/compile_audit_sourcemap.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod compile_audit_sourcemap;
 #[path = "g_compile/compile_audit_unsanctioned_target_refuses.rs"]
 mod compile_audit_unsanctioned_target_refuses;
@@ -23,6 +29,8 @@ mod compile_cache_mode_classifier;
 #[path = "g_compile/compile_cache_mode_content_reuse.rs"]
 mod compile_cache_mode_content_reuse;
 #[path = "g_compile/compile_cache_mode_downgrade_audit.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod compile_cache_mode_downgrade_audit;
 #[path = "g_compile/compile_cache_mode_pipeline_consumption.rs"]
 mod compile_cache_mode_pipeline_consumption;

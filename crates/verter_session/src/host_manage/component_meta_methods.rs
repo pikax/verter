@@ -748,7 +748,7 @@ impl VerterHost {
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<CapturedComponentMetaInputs> {
-        let audit_enabled = cfg!(feature = "semantic-observe") && self.config.audit_enabled;
+        let audit_enabled = crate::capture::COMPILED && self.config.audit_enabled;
         let capture_started = audit_enabled.then(Instant::now);
         // Overlay-priority: when the view carries an **explicit
         // overlay** for the owner canonical, materialise its
@@ -896,7 +896,7 @@ impl VerterHost {
         // `ctx` is required, so every production caller supplies the exact
         // request-bound base or session context. The direct-host fixture
         // wrapper is compile-fenced to test support.
-        let audit_enabled = cfg!(feature = "semantic-observe") && self.config.audit_enabled;
+        let audit_enabled = crate::capture::COMPILED && self.config.audit_enabled;
         let mut audit_timings = if audit_enabled {
             captured
                 .map(|captured| crate::component_meta_audit::RequestTimingAudit {

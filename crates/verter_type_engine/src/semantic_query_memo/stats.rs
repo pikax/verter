@@ -150,6 +150,7 @@ pub(crate) struct AtomicSemanticGraphStats {
     /// counter; only a fork does.
     pub(super) joiner_view_mismatch_forks: Tally,
     pub(super) cold_aborts_swept: Tally,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) origin_edges_emitted: Tally,
     pub(super) instantiate_count: Tally,
     pub(super) conditional_decided_count: Tally,
@@ -228,6 +229,7 @@ impl Default for AtomicSemanticGraphStats {
             inflight_aborted_retries: Tally::default(),
             joiner_view_mismatch_forks: Tally::default(),
             cold_aborts_swept: Tally::default(),
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             origin_edges_emitted: Tally::default(),
             instantiate_count: Tally::default(),
             conditional_decided_count: Tally::default(),

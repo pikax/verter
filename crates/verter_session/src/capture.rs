@@ -12,10 +12,15 @@ use verter_audit::{AuditCaptureState, CaptureAvailability};
 
 use crate::HostConfig;
 
+/// `true` when this build compiles audit capture in (`semantic-observe`).
+/// A per-request capture branch guarded by it compiles away in a default
+/// build.
+pub(crate) const COMPILED: bool = cfg!(feature = "semantic-observe");
+
 /// Whether this build can capture audit records.
 #[must_use]
 pub const fn availability() -> CaptureAvailability {
-    if cfg!(feature = "semantic-observe") {
+    if COMPILED {
         CaptureAvailability::Available
     } else {
         CaptureAvailability::Unavailable
@@ -47,7 +52,7 @@ pub(crate) fn normalize_host_config(config: HostConfig) -> HostConfig {
 /// otherwise filtered by the consumer filter or disabled by host config.
 #[must_use]
 pub(crate) fn uncaptured_state(audit_enabled: bool) -> AuditCaptureState {
-    if cfg!(feature = "semantic-observe") {
+    if COMPILED {
         if audit_enabled {
             AuditCaptureState::FilteredNoop
         } else {

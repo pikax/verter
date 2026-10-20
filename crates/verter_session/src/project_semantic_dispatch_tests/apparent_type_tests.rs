@@ -596,6 +596,8 @@ fn with_fresh_dispatch<R>(
     f(&ProjectSemanticDispatch::new(&host_ctx))
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A flow whose return reads a primitive's or an array's wrapper member
 /// (`s.length`, `arr.length`) is admitted and served warm: two demands,
 /// one cold computation, one candidate, and the member's declared type.

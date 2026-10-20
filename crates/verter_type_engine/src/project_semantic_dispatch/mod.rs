@@ -151,6 +151,7 @@ pub mod inference;
 pub mod callable_view;
 pub mod flow_products;
 pub mod interior_source;
+pub mod object_spread_product;
 mod object_spread_program_lowering;
 mod object_spread_projection_eval;
 pub mod one_level_surface;
@@ -180,6 +181,7 @@ mod signature_instantiation;
 pub(crate) mod substitute;
 pub mod symbol_identity;
 pub mod symbolic_root;
+mod template_product;
 mod template_relation;
 pub mod walk;
 
@@ -310,17 +312,90 @@ pub(super) type InstantiateIdentity = (
 
 /// One build on the active-instantiation stack: the declaration it
 /// materialises and the arguments it materialises it over.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct ActiveInstantiation {
     identity: InstantiateIdentity,
     args: Arc<[SemanticNodeId]>,
 }
 
-impl ActiveInstantiation {
-    fn is(&self, identity: &InstantiateIdentity) -> bool {
-        self.identity.0.as_ref() == identity.0.as_ref()
-            && self.identity.1 == identity.1
-            && self.identity.2.as_ref() == identity.2.as_ref()
+/// A declaration identity borrowed from its parts, hashed exactly as the
+/// owned [`InstantiateIdentity`] tuple hashes, so the declaration index is
+/// read without building an owned key.
+#[derive(Hash)]
+struct DeclarationRef<'a>(&'a str, verter_type_expr::TopLevelOwnerId, &'a str);
+
+impl indexmap::Equivalent<InstantiateIdentity> for DeclarationRef<'_> {
+    fn equivalent(&self, key: &InstantiateIdentity) -> bool {
+        self.0 == key.0.as_ref() && self.1 == key.1 && self.2 == key.2.as_ref()
+    }
+}
+
+/// The dispatcher's active instantiations ([`ProjectSemanticDispatch::instantiate_active`]):
+/// the ordered stack, with its membership indexed both by instantiation
+/// and by declaration. Every membership question is one lookup, never a
+/// scan of the stack, so a chain of `n` nested instantiations asks `O(n)`
+/// questions at constant cost each, never `O(n²)` comparisons. The indexes
+/// change only with the stack: an entry enters all three on a push and
+/// leaves all three on a pop or a leave, so they hold nothing once the
+/// outermost build ends.
+#[derive(Debug, Default)]
+pub(super) struct ActiveInstantiations {
+    order: Vec<ActiveInstantiation>,
+    instances: rustc_hash::FxHashSet<ActiveInstantiation>,
+    /// How many active instantiations materialise each declaration.
+    declarations: indexmap::IndexMap<InstantiateIdentity, u32, rustc_hash::FxBuildHasher>,
+}
+
+impl ActiveInstantiations {
+    pub(super) fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Push `entry`; `false` (and nothing pushed) when it is active.
+    fn push(&mut self, entry: ActiveInstantiation) -> bool {
+        if !self.instances.insert(entry.clone()) {
+            return false;
+        }
+        *self.declarations.entry(entry.identity.clone()).or_insert(0) += 1;
+        self.order.push(entry);
+        true
+    }
+
+    fn forget(&mut self, entry: &ActiveInstantiation) {
+        self.instances.remove(entry);
+        if let Some(count) = self.declarations.get_mut(&entry.identity) {
+            *count -= 1;
+            if *count == 0 {
+                self.declarations.swap_remove(&entry.identity);
+            }
+        }
+    }
+
+    fn pop(&mut self) {
+        if let Some(entry) = self.order.pop() {
+            self.forget(&entry);
+        }
+    }
+
+    /// Remove `entry` wherever it stands on the stack.
+    fn leave(&mut self, entry: &ActiveInstantiation) {
+        if !self.instances.contains(entry) {
+            return;
+        }
+        if let Some(position) = self.order.iter().rposition(|existing| existing == entry) {
+            let entry = self.order.remove(position);
+            self.forget(&entry);
+        }
+    }
+
+    fn declares(
+        &self,
+        canonical_id: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        self.declarations
+            .contains_key(&DeclarationRef(canonical_id, owner, name))
     }
 }
 
@@ -351,7 +426,7 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// The request's host attachment, selected once at construction. The
     /// engine never reads it; host facades borrow it beside the dispatch.
     host_attachment: &'a C::HostAttachment,
-    pub(super) instantiate_active: std::cell::RefCell<smallvec::SmallVec<[ActiveInstantiation; 8]>>,
+    pub(super) instantiate_active: std::cell::RefCell<ActiveInstantiations>,
     /// The operands each awaited relation is unwrapping on the current
     /// path — the checker's `awaitedTypeStack`. A run pushes every operand
     /// it reaches, its query-free tail steps included, and pops them when
@@ -372,19 +447,21 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the active-instantiation back-edge are the PRIMARY termination mechanism,
     /// this is only the pre-memo guard). NOT an arbitrary depth budget.
     pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
-    /// In-flight KEY-DOMAIN closedness decl evaluations rooted at this
-    /// dispatcher — the DISPATCH-WIDE cycle guard of the fact-native
-    /// closedness evaluator (`raise::prepared_decl_body_is_closed` /
-    /// `raise::prepared_instantiation_key_domain_is_closed`). The recipe
-    /// escapes shallow-lower authored positions, and a lowering-time
-    /// execution (a literal indexed access, a decidable conditional) can
-    /// consult the enumeration/mapped key-domain gates, whose walks re-enter
-    /// the closedness evaluator with FRESH walk budgets — a per-chain
-    /// visited set cannot see across that re-entry, so a genuinely recursive
-    /// decl would recurse with unbounded stack. A back-edge on THIS
-    /// dispatch-wide in-flight set refuses (`Unavailable` — never a proof),
-    /// while sibling diamonds stay fine (entries pop on exit).
-    pub(super) closedness_active: std::cell::RefCell<smallvec::SmallVec<[InstantiateIdentity; 8]>>,
+    /// The KEY-DOMAIN closedness proofs in flight on this dispatcher — the
+    /// DISPATCH-WIDE cycle guard of the fact-native closedness evaluator
+    /// (`raise::prepared_decl_body_is_closed` /
+    /// `raise::prepared_instantiation_key_domain_is_closed`), shared by every
+    /// evaluation the dispatcher runs, including one a dispatcher query
+    /// re-enters from inside another's step. A back-edge on it refuses
+    /// (`Unavailable` — never a proof), while sibling diamonds stay fine
+    /// (entries pop on exit); the chain also records which in-flight proofs
+    /// each refusal depended on, so a completed proof is reused only while
+    /// those proofs are still in flight (see `raise::ClosednessChain`).
+    closedness: std::cell::RefCell<raise::ClosednessChain>,
+    /// The binder-aware free-type-variable summary of every node a
+    /// conditional decision or relation asked about, kept for this
+    /// dispatcher's lifetime ([`conditional_decision::FreeTypeVariables`]).
+    free_type_variables: std::cell::RefCell<conditional_decision::FreeTypeVariableSummaries>,
     /// Memoized transitive CLASS ANCESTRY, keyed by the rooted declaration
     /// identity ([`build::ClassAncestryReading`],
     /// [`Self::class_heritage_ancestry`]).
@@ -532,6 +609,10 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// across a walk suppresses the publish (and every enclosing
     /// publish, since ancestors observe the same advance).
     pub canonical_evidence_epoch: std::cell::Cell<u64>,
+    /// The current semantic demand's checking site, exchanged with a lent
+    /// task and explicitly installed by each resumed frame.
+    pub(super) checking_site:
+        std::cell::Cell<crate::semantic_query::checker_policy::TupleSplicePosition>,
     /// Monotonic count of operation-budget recoveries this dispatcher
     /// folded ([`PartialReasonSet::OPERATION_BUDGET`](crate::semantic_query::PartialReasonSet::OPERATION_BUDGET)).
     /// A structural-fact demand snapshots it and compares at its settle, so
@@ -554,10 +635,12 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// never served: the claim computes.
     published_results: std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKey, PublishedResult>>,
     /// The request-local completions this dispatcher has open
-    /// ([`completes_request_locally`]): a key read again while its own
+    /// ([`completes_request_locally`]), each at the checking site it is
+    /// evaluated at: a key read again at the same site while its own
     /// completion runs is the same-path recursion a family-memo claim would
-    /// answer with its recursion carrier.
-    request_local_open: std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+    /// answer with its recursion carrier. A read at the other site is a
+    /// distinct demand and never closes a cycle through it.
+    request_local_open: std::cell::RefCell<RequestLocalOpenSet>,
     /// The receipt of each root evaluation this dispatcher admitted as
     /// finishing as itself ([`Self::admit_self_evaluation`]): one step under
     /// the evaluation's own identity, a pure function of that identity, so
@@ -1012,10 +1095,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             host_attachment:
                 crate::resolver_core::request_ports::HostAttachmentPort::host_attachment(ctx),
             ctx,
-            instantiate_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            instantiate_active: std::cell::RefCell::new(ActiveInstantiations::default()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
-            closedness_active: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            closedness: std::cell::RefCell::default(),
+            free_type_variables: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             build_local_taint: std::cell::RefCell::new(smallvec::SmallVec::new()),
             homomorphic_aliases: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1032,6 +1116,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(feature = "semantic-observe")]
             relation_explanations: std::cell::RefCell::new(Vec::new()),
             canonical_evidence_epoch: std::cell::Cell::new(0),
+            checking_site: std::cell::Cell::new(Default::default()),
             operation_budget_epoch: std::cell::Cell::new(0),
             connected_demand: connected_demand::ConnectedDemandLedger::new(
                 connected_demand::DemandCancellation::from_flags(snapshot.flags()),
@@ -1065,10 +1150,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// Exchange all of this dispatcher's request state with `other`, a
     /// dispatcher of the same request ([`Self::task_dispatcher`]): every
-    /// active instantiation and recursion guard, the checker transaction
-    /// with its inference sessions, the build taint stack, the connected
-    /// demand and its cost recordings, and the request's kept results. A
-    /// semantic task borrows the state for its drive and gives it back.
+    /// active instantiation and recursion guard, the free-type-variable
+    /// summaries, the checker transaction with its inference sessions, the
+    /// build taint stack, the connected demand and its cost recordings, and
+    /// the request's kept results. A semantic task borrows the state for
+    /// its drive and gives it back.
     pub(super) fn exchange_request_state(&self, other: &Self) {
         let Self {
             binding: _,
@@ -1080,7 +1166,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiate_active,
             awaited_active,
             carrier_normalizing,
-            closedness_active,
+            closedness,
+            free_type_variables,
             heritage_ancestry,
             build_local_taint,
             homomorphic_aliases,
@@ -1095,6 +1182,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(feature = "semantic-observe")]
             relation_explanations,
             canonical_evidence_epoch,
+            checking_site,
             operation_budget_epoch,
             connected_demand,
             published_results,
@@ -1110,7 +1198,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         instantiate_active.swap(&other.instantiate_active);
         awaited_active.swap(&other.awaited_active);
         carrier_normalizing.swap(&other.carrier_normalizing);
-        closedness_active.swap(&other.closedness_active);
+        closedness.swap(&other.closedness);
+        free_type_variables.swap(&other.free_type_variables);
         heritage_ancestry.swap(&other.heritage_ancestry);
         build_local_taint.swap(&other.build_local_taint);
         homomorphic_aliases.swap(&other.homomorphic_aliases);
@@ -1135,6 +1224,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         #[cfg(feature = "semantic-observe")]
         relation_explanations.swap(&other.relation_explanations);
         canonical_evidence_epoch.swap(&other.canonical_evidence_epoch);
+        checking_site.swap(&other.checking_site);
         operation_budget_epoch.swap(&other.operation_budget_epoch);
         connected_demand.exchange_state(&other.connected_demand);
         published_results.swap(&other.published_results);
@@ -1703,10 +1793,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `key` has a request-local completion open on this dispatcher
-    /// ([`completes_request_locally`]).
+    /// ([`completes_request_locally`]) at the current checking site.
     fn request_local_is_open(&self, key: &SemanticQueryKey) -> bool {
         let open = self.request_local_open.borrow();
-        !open.is_empty() && completes_request_locally(key) && open.contains(key)
+        !open.is_empty()
+            && completes_request_locally(key)
+            && open.contains(&(key.clone(), self.checking_site.get()))
     }
 
     /// Keep a result this dispatcher's build just published, under the
@@ -1726,7 +1818,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         computed_at: WorkspaceEdit,
     ) {
-        if read.receipt.priced().is_none() {
+        if read.result_is_partial() || read.receipt.priced().is_none() {
             return;
         }
         let bytes = std::mem::size_of::<SemanticQueryKey>()
@@ -1787,6 +1879,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let request = crate::request_context::current_request_budget();
         Some(IsolatedRoot {
             key: key.clone(),
+            site: self.checking_site.get(),
             profile: self.connected_demand.profile_spec(request.as_deref()),
             request_entry: request.as_deref().map(|request| request.entry_state()),
             entered: self.graph().refusal_entry(self.ctx),
@@ -1812,9 +1905,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let request = crate::request_context::current_request_budget();
-        let summary =
-            self.graph()
-                .sealed_refusal(self.ctx, &root.key, &root.profile, request.as_deref())?;
+        let summary = self.graph().sealed_refusal(
+            self.ctx,
+            &root.key,
+            &root.profile,
+            request.as_deref(),
+            root.site,
+        )?;
         let prefix = &summary.prefix;
         match (request.as_deref(), prefix.request.as_ref()) {
             (Some(request), Some(spent)) => {
@@ -1921,6 +2018,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             root.key,
             cost_receipt::BudgetProfile::intern(root.profile),
             root.entered,
+            root.site,
             crate::semantic_query_memo::refusal_summary::RefusalSummary::new(
                 stored,
                 traced.carrier,
@@ -2800,15 +2898,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         identity: InstantiateIdentity,
         args: Arc<[SemanticNodeId]>,
     ) -> bool {
-        let mut active = self.instantiate_active.borrow_mut();
-        if active
-            .iter()
-            .any(|existing| existing.is(&identity) && existing.args == args)
-        {
-            return false;
-        }
-        active.push(ActiveInstantiation { identity, args });
-        true
+        self.instantiate_active
+            .borrow_mut()
+            .push(ActiveInstantiation { identity, args })
     }
 
     /// Leave `identity`'s active instantiation over `args` wherever it
@@ -2819,45 +2911,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         identity: &InstantiateIdentity,
         args: &Arc<[SemanticNodeId]>,
     ) {
-        let mut active = self.instantiate_active.borrow_mut();
-        if let Some(position) = active
-            .iter()
-            .rposition(|existing| existing.is(identity) && existing.args == *args)
-        {
-            active.remove(position);
-        }
+        self.instantiate_active
+            .borrow_mut()
+            .leave(&ActiveInstantiation {
+                identity: identity.clone(),
+                args: Arc::clone(args),
+            });
     }
 
     /// Pop the most-recent active-instantiation entry. Caller MUST only
     /// call this after a successful `push_instantiate_active`.
     pub fn pop_instantiate_active(&self) {
-        let mut active = self.instantiate_active.borrow_mut();
-        active.pop();
-    }
-
-    /// Push `identity` onto the in-flight closedness-evaluation stack.
-    /// Returns `true` when the identity was not already present (caller
-    /// MUST pair with [`Self::pop_closedness_active`]); `false` = a genuine
-    /// back-edge on the current closedness chain — the caller refuses
-    /// (`Unavailable`) and must NOT pop.
-    pub(super) fn push_closedness_active(&self, identity: InstantiateIdentity) -> bool {
-        let mut active = self.closedness_active.borrow_mut();
-        if active.iter().any(|existing| {
-            existing.0.as_ref() == identity.0.as_ref()
-                && existing.1 == identity.1
-                && existing.2.as_ref() == identity.2.as_ref()
-        }) {
-            return false;
-        }
-        active.push(identity);
-        true
-    }
-
-    /// Pop the most-recent in-flight closedness entry. Caller MUST only
-    /// call this after a successful `push_closedness_active`.
-    pub(super) fn pop_closedness_active(&self) {
-        let mut active = self.closedness_active.borrow_mut();
-        active.pop();
+        self.instantiate_active.borrow_mut().pop();
     }
 
     /// Check whether `identity` is currently being instantiated on this
@@ -2868,12 +2933,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> bool {
-        let active = self.instantiate_active.borrow();
-        active.iter().any(|existing| {
-            existing.identity.0.as_ref() == canonical_id
-                && existing.identity.1 == owner
-                && existing.identity.2.as_ref() == name
-        })
+        self.instantiate_active
+            .borrow()
+            .declares(canonical_id, owner, name)
     }
 
     pub(super) fn flow_slice_driver(&self) -> flow_slice_driver::FlowSliceDriver<'_> {
@@ -4081,8 +4143,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Option<connected_demand::ConnectedDemandGuard<'_>>,
         CacheRead<QueryResult<SemanticQueryValue>>,
     > {
-        let exact_same_path =
-            self.graph().is_same_path_claim(key) || self.request_local_is_open(key);
+        let exact_same_path = self
+            .graph()
+            .is_same_path_claim_at(key, self.checking_site.get())
+            || self.request_local_is_open(key);
         let mut query_depth_guard = None;
         if preexisting_trip.is_some_and(|reasons| {
             reasons.contains(crate::semantic_query::PartialReasonSet::CANCELLED)
@@ -4900,6 +4964,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => ReadCapture::default(),
             (Some(_), Some(_)) => unreachable!("capture modes are mutually exclusive"),
         };
+        capture.set_checking_site(self.checking_site.get());
         // The memo protocol: a warm lookup, then a claim for this
         // execution's task — the recursion carrier, another task's result
         // (waited out here, at the synchronous entry), or this key's
@@ -4925,7 +4990,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
             && self.dispatch_txn.borrow().obligations.decides_root()
-            && !graph.is_same_path_claim(key);
+            && !graph.is_same_path_claim_at(key, self.checking_site.get());
         let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
@@ -4963,7 +5028,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             match attempt {
                 Err(read) => read,
                 Ok(attempt) => {
-                    let _open = RequestLocalOpen::enter(&self.request_local_open, key);
+                    let _open = RequestLocalOpen::enter(
+                        &self.request_local_open,
+                        key,
+                        self.checking_site.get(),
+                    );
                     let traced_build = traced_build.take().expect("the completion runs once");
                     let computed_at = self.workspace_edit();
                     let request = crate::request_context::current_request_budget();
@@ -5107,30 +5176,40 @@ fn completes_request_locally(key: &SemanticQueryKey) -> bool {
     )
 }
 
-/// An open request-local completion of one key, closed when dropped
-/// (including on unwind) so a later read of the key is never mistaken for
-/// a same-path re-entry.
+/// The request-local completions a dispatcher has open, each with the
+/// checking site it is evaluated at: the same key at the other site is a
+/// distinct demand ([`completes_request_locally`]).
+type RequestLocalOpenSet = rustc_hash::FxHashSet<(
+    SemanticQueryKey,
+    crate::semantic_query::checker_policy::TupleSplicePosition,
+)>;
+
+/// An open request-local completion of one key at one checking site,
+/// closed when dropped (including on unwind) so a later read of the key is
+/// never mistaken for a same-path re-entry.
 struct RequestLocalOpen<'d> {
-    open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
-    key: SemanticQueryKey,
+    open: &'d std::cell::RefCell<RequestLocalOpenSet>,
+    demand: (
+        SemanticQueryKey,
+        crate::semantic_query::checker_policy::TupleSplicePosition,
+    ),
 }
 
 impl<'d> RequestLocalOpen<'d> {
     fn enter(
-        open: &'d std::cell::RefCell<rustc_hash::FxHashSet<SemanticQueryKey>>,
+        open: &'d std::cell::RefCell<RequestLocalOpenSet>,
         key: &SemanticQueryKey,
+        site: crate::semantic_query::checker_policy::TupleSplicePosition,
     ) -> Self {
-        open.borrow_mut().insert(key.clone());
-        Self {
-            open,
-            key: key.clone(),
-        }
+        let demand = (key.clone(), site);
+        open.borrow_mut().insert(demand.clone());
+        Self { open, demand }
     }
 }
 
 impl Drop for RequestLocalOpen<'_> {
     fn drop(&mut self) {
-        self.open.borrow_mut().remove(&self.key);
+        self.open.borrow_mut().remove(&self.demand);
     }
 }
 
@@ -5184,6 +5263,7 @@ pub fn finalised_build_certifies_refusal_for_tests<
 /// ([`ProjectSemanticDispatch::isolated_root_identity`]).
 pub(super) struct IsolatedRoot {
     key: SemanticQueryKey,
+    site: crate::semantic_query::checker_policy::TupleSplicePosition,
     profile: cost_receipt::BudgetProfileSpec,
     request_entry: Option<crate::request_budget::RequestEntryState>,
     entered: crate::semantic_query_memo::refusal_summary::RefusalEntryState,

@@ -31,18 +31,28 @@ mod dep_signature_to_fact_signature;
 #[path = "g_misc0/derived_raw_state_cached_fallthrough_matrix_member_presence.rs"]
 mod derived_raw_state_cached_fallthrough_matrix_member_presence;
 #[path = "g_misc0/derived_raw_state_cached_fallthrough_unrelated_edit_stays_warm.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod derived_raw_state_cached_fallthrough_unrelated_edit_stays_warm;
 #[path = "g_misc0/derived_raw_state_cached_meta_payload_fact_validation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod derived_raw_state_cached_meta_payload_fact_validation;
 #[path = "g_misc0/derived_raw_state_cached_meta_payload_matrix_member.rs"]
 mod derived_raw_state_cached_meta_payload_matrix_member;
 #[path = "g_misc0/derived_raw_state_cached_meta_payload_unrelated_edit_stays_warm.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod derived_raw_state_cached_meta_payload_unrelated_edit_stays_warm;
 #[path = "g_misc0/derived_raw_state_cached_resolved_meta_fact_validation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod derived_raw_state_cached_resolved_meta_fact_validation;
 #[path = "g_misc0/derived_raw_state_cached_resolved_meta_matrix_module_aug_index_shape.rs"]
 mod derived_raw_state_cached_resolved_meta_matrix_module_aug_index_shape;
 #[path = "g_misc0/derived_raw_state_cached_resolved_meta_unrelated_edit_stays_warm.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod derived_raw_state_cached_resolved_meta_unrelated_edit_stays_warm;
 #[path = "g_misc0/dispatch_bridges_convert_project_generation.rs"]
 mod dispatch_bridges_convert_project_generation;

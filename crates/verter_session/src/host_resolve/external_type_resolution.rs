@@ -216,7 +216,7 @@ impl VerterHost {
     }
 
     /// Base wrapper that fixes `view = None`. Test-only.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "semantic-observe"))]
     pub(crate) fn resolve_component_meta_macro_surface(
         &self,
         owner_canonical: &str,

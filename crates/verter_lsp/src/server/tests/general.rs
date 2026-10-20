@@ -1733,6 +1733,8 @@ async fn contract_longhand_kebab_v_slot_navigates_to_camel_define_slots() {
     drop(service);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test]
 async fn recognized_inexact_direct_component_contract_miss_is_request_cache_only() {
     const CHILD: &str = "<script setup lang=\"ts\">\ndefineProps<{ title: string; unusedOnly?: boolean }>()\n</script>\n<p>{{ title }}</p>\n";
@@ -1886,6 +1888,8 @@ async fn recognized_inexact_direct_component_contract_miss_is_request_cache_only
     }
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread")]
 async fn module_augmentation_body_edit_invalidates_child_contract_until_background_republication() {
     const TYPES: &str = "export interface DraftProps { title: string }\n";
@@ -2080,6 +2084,8 @@ async fn imported_child_contract_with_unchanged_dependency_stays_current_across_
     drop(service);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread")]
 async fn barrel_component_route_cache_is_binding_exact_and_provenance_fenced() {
     const ALPHA: &str = "<script lang=\"ts\">\ninterface Props { alphaOnly?: boolean }\nlet {}: Props = $props();\n</script>\n";
@@ -3131,6 +3137,8 @@ async fn child_reads_split_by_an_edit_never_mix_two_child_revisions() {
 ///
 /// Measured on `compile_cold_runs`, the host's own count of cold compiles
 /// STARTED.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_requests_on_a_broken_revision_compile_at_most_once() {
     let provider = Arc::new(MockTypeProvider::new());
@@ -5480,6 +5488,8 @@ async fn shortened_budget_cuts_the_dead_tail_without_dropping_answered_requests(
 ///
 /// One is the whole point of the design: 24 notifications, one compile. A
 /// per-notification compile reads 24 at the first assertion.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_burst_of_did_change_notifications_does_not_compile_once_per_notification() {
     const BURST: usize = 24;

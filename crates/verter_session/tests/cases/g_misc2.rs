@@ -94,6 +94,8 @@ mod scheduler_audit_queue_dwell_under_load;
 #[path = "g_misc2/scheduler_worker_tls_propagation.rs"]
 mod scheduler_worker_tls_propagation;
 #[path = "g_misc2/second_query_hits_cache.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod second_query_hits_cache;
 #[path = "g_misc2/shallow_walk_invariant.rs"]
 mod shallow_walk_invariant;

@@ -993,6 +993,8 @@ fn locator_shape_keeps_declared_type_parameters_as_shells() {
 /// A WARM `lower_locator` demand is a memo hit: the same node id returns and
 /// NO second snapshot re-borrow / re-lowering happens (the per-host
 /// `decl_bodies_lowered` counter stays flat across the warm demand).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn warm_lower_locator_demand_is_a_memo_hit_without_relowering() {
     let host = host();

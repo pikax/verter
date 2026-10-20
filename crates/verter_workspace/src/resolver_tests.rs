@@ -2584,20 +2584,23 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
         .expect("first resolution should succeed");
     let after_first_exists = reader.file_exists_calls();
     let after_first_reads = reader.read_file_calls();
-    let after_first_provenance = engine.vfs_provenance.snapshot();
-    assert_eq!(
-        after_first_provenance.import_resolution_cache_hit_count, 0,
-        "cold resolution should not report a lazy import cache hit",
-    );
-    assert_eq!(
-        after_first_provenance.import_resolution_cache_miss_count, 1,
-        "cold resolution should report a single lazy import cache miss",
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after_first_provenance = engine.vfs_provenance.snapshot();
+        assert_eq!(
+            after_first_provenance.import_resolution_cache_hit_count, 0,
+            "cold resolution should not report a lazy import cache hit",
+        );
+        assert_eq!(
+            after_first_provenance.import_resolution_cache_miss_count, 1,
+            "cold resolution should report a single lazy import cache miss",
+        );
+    }
 
     let second = engine
         .resolve_import(&reader, "/repo/src/App.vue", "pkg", ctx)
         .expect("warm resolution should succeed");
-    let after_second_provenance = engine.vfs_provenance.snapshot();
     assert_eq!(second, first, "warm cache hit should reuse the same result");
     assert_eq!(
         reader.file_exists_calls(),
@@ -2609,14 +2612,19 @@ fn resolve_import_reuses_lazy_resolution_cache_for_same_importer_and_specifier()
         after_first_reads,
         "warm resolution should not reread manifests or source files",
     );
-    assert_eq!(
-        after_second_provenance.import_resolution_cache_hit_count, 1,
-        "second resolution should come from the lazy import cache",
-    );
-    assert_eq!(
-        after_second_provenance.import_resolution_cache_miss_count, 1,
-        "warm resolution should not add another cache miss",
-    );
+    // Reads optional audit capture: runs in the instrumentation lane.
+    #[cfg(feature = "semantic-observe")]
+    {
+        let after_second_provenance = engine.vfs_provenance.snapshot();
+        assert_eq!(
+            after_second_provenance.import_resolution_cache_hit_count, 1,
+            "second resolution should come from the lazy import cache",
+        );
+        assert_eq!(
+            after_second_provenance.import_resolution_cache_miss_count, 1,
+            "warm resolution should not add another cache miss",
+        );
+    }
 }
 
 /// Resolving `#imports` through the workspace manifest API should not re-read

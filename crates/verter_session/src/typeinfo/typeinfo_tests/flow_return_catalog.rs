@@ -127,6 +127,7 @@ where
     assert_query_mode(&warm_record, ProjectionModeTag::Expanded);
 }
 
+#[cfg(feature = "semantic-observe")]
 fn assert_cross_alias_warm<F>(alias: &str, check: F, selected: &[&str], unselected: &[&str])
 where
     F: Fn(&TypeExpr),
@@ -1434,6 +1435,8 @@ future_cross_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn flow_return_xf02_expands_imported_value_function_return() {
     assert_cross_alias_warm(
@@ -1466,6 +1469,8 @@ future_cross_contract!(
     |expr| assert_primitive(expr, PrimitiveName::Number)
 );
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn flow_return_xf04_expands_barrel_imported_value_function_return() {
     assert_cross_alias_warm(
@@ -1504,6 +1509,8 @@ fn flow_return_xf04_records_barrel_route_before_selected_leaf() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn flow_return_xf05_resolves_namespace_import_value_call() {
     assert_cross_alias_warm(
@@ -1522,6 +1529,8 @@ fn flow_return_xf05_resolves_namespace_import_value_call() {
     );
 }
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn flow_return_xf06_keeps_value_type_namespace_separate() {
     assert_cross_alias_warm(
@@ -1570,6 +1579,8 @@ future_cross_contract!(
     |expr| assert_primitive(expr, PrimitiveName::String)
 );
 
+// Measures cold/warm work through optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn flow_return_xf09_terminates_cross_file_recursive_returns() {
     assert_cross_alias_warm(

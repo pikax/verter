@@ -184,6 +184,8 @@ fn prepared_decl_name_resolution_barrel_retarget_invalidates_final_canonical() {
 /// lookup REUSES the stale bundle — `bundle_materializations` stays 1 and
 /// `Base` keeps resolving to `/src/base.ts`. If reuse regressed, step 2
 /// rematerializes (`bundle_materializations` climbs to 2 prematurely).
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn prepared_decl_bundle_reuses_then_invalidates_on_exact_resolution_change() {
     let ws = Arc::new(CountingWorkspace::new());

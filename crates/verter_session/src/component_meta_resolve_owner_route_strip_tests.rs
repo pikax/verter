@@ -68,6 +68,7 @@ fn build_host() -> Arc<VerterHost> {
     Arc::new(VerterHost::new_standalone(HostConfig::default()))
 }
 
+#[cfg(feature = "semantic-observe")]
 fn build_reloadable_host(
     owner: &str,
     source: &'static str,
@@ -187,6 +188,8 @@ fn overlaid_component_meta_result_is_rooted_in_overlay_owner_hash() {
     assert_eq!(owner_whole_hash(&mirror, owner), Some(overlay_hash));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn host_view_ref_uncaptured_owner_reloads_once_and_warms_exact_hash() {
     use crate::session_view::{HostViewRef, SessionView};
@@ -236,6 +239,8 @@ fn host_view_ref_uncaptured_owner_reloads_once_and_warms_exact_hash() {
     assert_eq!(host.provenance_snapshot().ensure_loaded_calls, warm_before);
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn unmasked_overlaid_view_ref_uncaptured_owner_reloads_base_once() {
     use crate::session_view::{OverlaidViewRef, SessionView};
@@ -274,6 +279,8 @@ fn unmasked_overlaid_view_ref_uncaptured_owner_reloads_base_once() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn explicit_overlay_owner_never_reloads_evicted_base_and_uses_overlay_hash() {
     use crate::session_view::OverlaidViewRef;
@@ -314,6 +321,8 @@ fn explicit_overlay_owner_never_reloads_evicted_base_and_uses_overlay_hash() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn tombstoned_owner_never_reloads_evicted_base() {
     use crate::session_view::OverlaidViewRef;

@@ -24,8 +24,22 @@ occupancy/ownership charges remain independent of capture.
 when `semantic-observe` is off and `Available` when on. `observe::capture`
 returns `None` without calling its collector when off; it returns the collected
 payload when on, never fabricated zero metrics. `ObserveMode` supplies the
-uncaptured/captured vocabulary; root selection and existing audit-endpoint
-migration remain with the execution/consolidation owner. It is the only
+uncaptured/captured vocabulary and `ObserveMode::select` picks it at root entry.
+The whole audit envelope compiles only under `semantic-observe`: the observer
+TLS, `HostAuditRuntime`, the record store, the per-request accumulator, the
+scheduler and VFS audit sinks and the request context's audit counters are
+absent from default builds, `NoOpObserver` is deleted, and emission goes
+through `verter_audit::observe!` / `verter_type_engine::observe_request!` and
+the zero-size `observe::{ObservedU64, ObservedU32, ObservedU16, ObservedFlag,
+Stopwatch, Sample}`. A default build's audited entries still return their real
+result, with a record whose `capture_state` is `AuditCaptureState::Unavailable`;
+`verter_session::capture::normalize_host_config` clears the capture switches
+at host construction. NAPI/WASM export `captureAvailability()`, and their
+record readers plus the LSP audit methods fail with an error naming the
+missing feature. Tests that read a captured record carry
+`#[cfg(feature = "semantic-observe")]` and run in the instrumentation lane
+(`node scripts/observe-lane.mjs run`, CI `rust-observe`); keep a default-build
+test per public surface proving it reports unavailable capture. It is the only
 measurement feature: the former `attribution`, `currency_probe` and `hotpath`
 features are folded into it (the work-attribution table compiles under the
 audit crate's `semantic-observe`). The guard in
@@ -38,7 +52,7 @@ Audit state is split between a leaf substrate crate (`verter_audit`) and the ses
 
 | Layer | Crate | Owns |
 | --- | --- | --- |
-| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestTargetIdentity`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor, `NoOpObserver`, `AuditConfig` + `AuditConsumerFilter`, the `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditEvent` counter hook, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
+| **Substrate** (DTOs + observer trait) | `verter_audit` | `RequestAuditRecord`, `RequestTargetIdentity`, `RequestKind`, `RequestKindPayload`, per-kind payload structs, `AuditedResult<T, E>` (audit-bearing execution carrier), `AuditObserver` trait, `current_observer()` TLS accessor (compiled under `semantic-observe`), `observe!` emission macro, `AuditConfig` + `AuditConsumerFilter`, the `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditEvent` counter hook, `BatchAuditAggregator` + `AuditRecordSource`, `IncidentalFields` masking trait, `WALKER_DEPTH_CAP` |
 | **Session** (lifecycle + runtime) | `verter_session` | `HostAuditRuntime`, `AuditRequestRegistration::{Active, Noop}`, `AuditRecordsStore`, `RequestContext` (implements `AuditObserver`), `RequestContextGuard`, peak-RSS sampler thread, the per-request accumulator + footprint miner (audit endpoints `why_loaded` / `why_instantiated` read from the accumulator), `LspAuditSession`, audited entry-points (`compile_with_audit`, `analyze_with_audit`, `resolve_type_with_audit`, `audit_workspace_op`, `audit_mcp_tool_call`, `get_component_meta_with_resolution`) |
 
 Isolation enforced by: `verter_audit_no_upward_deps` guard (rejects any `verter_*` dep in `verter_audit/Cargo.toml` other than `verter_span`) and `audit_substrate_isolation` guard (rejects any `use verter_*` under `crates/verter_audit/src/` other than `verter_span`).
@@ -328,6 +342,8 @@ The guard's `MISSING_TLS_TEST` allow-list is empty: every Wave-3 entry-point is 
 | `getBundlerBatchSummary({ kind?, sinceRequestId? })` | invokes `BatchAuditAggregator` over the store | `Buffer` (JSON `BundlerBatchPayload`) |
 
 NAPI bindings: `crates/verter_napi/src/audit.rs` (helper types + decoders) and inline `#[napi] impl NapiVerterHost` in `crates/verter_napi/src/lib.rs`. WASM bindings: `crates/verter_wasm/src/audit.rs` + `crates/verter_wasm/src/lib.rs`. All exports return `Buffer` (JSON UTF-8 payload) for parity with the original `getComponentMetaWithAudit` contract; consumers decode against `@verter/types/audit.generated.ts`.
+
+TypeScript consumers branch on `captureAvailability()` (exported by `@verter/native` and `@verter/wasm`), never on a missing record. Without capture `compileWithAudit` / `analyzeWithAudit` / `resolveTypeWithAudit` return `null`, the `auditRecord` of `resolveSymbolWithAudit` / `evaluateTypeExpressionWithAudit` / `resolveFrameworkSurfaceWithAudit` is absent, `auditWorkspaceOp` returns a record with `capture_state: "Unavailable"`, and the store readers, `getComponentMetaWithAudit` and the `why*FromAuditJson` walkers throw "audit capture is unavailable". Capture-aware TS specs keep both branches: the default binding (`native-test`) asserts the unavailable outcome, and CI `native-observe-test` builds the binding with `pnpm --filter @verter/native build:observe:debug` and runs `@verter/native` and `@verter/typeinfo` with capture available.
 
 ## `BatchAuditAggregator`
 

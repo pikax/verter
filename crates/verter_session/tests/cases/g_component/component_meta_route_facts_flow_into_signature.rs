@@ -30,6 +30,7 @@
 
 #![cfg(test)]
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 
@@ -54,6 +55,7 @@ fn upsert(host: &VerterHost, id: &str, src: &str, kind: FileLanguage) {
 }
 
 const TYPES_A: &str = "export interface RProps { a: number; }\n";
+#[cfg(feature = "semantic-observe")]
 const TYPES_B: &str = "export interface RProps { a: number; b: string; }\n";
 const OWNER_VUE: &str = "<script setup lang=\"ts\">\n\
      import type { RProps } from './types';\n\
@@ -138,6 +140,8 @@ fn cross_file_route_facts_flow_owner_route_filtered() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn editing_route_dep_invalidates_warm_hit() {
     let host = build_host();

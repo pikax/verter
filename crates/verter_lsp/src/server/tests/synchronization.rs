@@ -1093,6 +1093,8 @@ async fn barrel_import_binding_in_vue_script_skips_type_provider_barrel_result()
 
 /// W02 deterministic bound: a syntax verdict binds only its exact source
 /// bytes, fails closed, and prevents later requests from recompiling it.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread")]
 async fn broken_projectionless_carrier_fails_closed_and_bounds_content_verdicts() {
     let provider = Arc::new(MockTypeProvider::new());

@@ -1725,6 +1725,8 @@ fn relation_family_dedups_full_identity_cold_insert_then_warm_hit() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// MODELESS WARM-HIT COUNTER RAIL — a `Relate`-family warm read through
 /// the modeless payload accessor must travel the ONE unified warm-hit
 /// implementation: it bumps `cache_counters.semantic_graph.hits` exactly
@@ -1786,6 +1788,8 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// MODELESS PROBE MISS-NEUTRALITY — a `Relate`-family probe miss through
 /// the modeless payload accessor must NOT bump
 /// `cache_counters.semantic_graph.misses`. The probe never short-circuits
@@ -4443,6 +4447,8 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Loop 6 — `execute_cooperative` warm-hit fast path bypasses the
 /// admission-overhead branches that the cooperative-admission slow
 /// path runs even on warm hits.
@@ -4795,6 +4801,8 @@ fn cold_abort_sweep_global_counter_increments_without_request_context() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Drive the production cold-abort path with an installed
 /// `RequestContext` and confirm the per-request `cold_aborts_swept`
 /// counter is bumped — this is what the audit miner reads at
@@ -4860,6 +4868,8 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     );
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// Drive the inflight-aborted-retry path with an installed
 /// `RequestContext` on the joiner thread and confirm the per-request
 /// `inflight_aborted_retries` counter is bumped — the audit miner

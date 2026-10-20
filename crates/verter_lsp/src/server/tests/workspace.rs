@@ -1611,6 +1611,8 @@ async fn swapping_the_vfs_workspace_evicts_the_import_set_memo() {
 /// there whether it compiled once per notification or never. The companion test
 /// `a_burst_of_did_change_notifications_does_not_compile_once_per_notification`
 /// covers the established-projection burst.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_invalid_burst_on_a_projectionless_carrier_does_not_compile_per_notification() {
     const BURST: usize = 24;

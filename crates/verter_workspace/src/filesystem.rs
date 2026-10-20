@@ -191,6 +191,9 @@ impl FilesystemWorkspace {
         &self.options
     }
 
+    /// Point-in-time VFS provenance counters; see
+    /// [`crate::types::VfsProvenance`].
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         self.engine.vfs_provenance.snapshot()
     }
@@ -862,9 +865,12 @@ impl FilesystemWorkspace {
     /// measurement rail: warm reuse on this backend is zero-syscall WITHIN a
     /// content generation and O(distinct witness path-canonicals) live reads
     /// per generation, so a change that turns it into O(reuses) is visible
-    /// as a number rather than as a regression nobody notices.
+    /// as a number rather than as a regression nobody notices. The counter
+    /// exists only under the observation gate; elsewhere this is a no-op.
     #[cfg(not(target_arch = "wasm32"))]
+    #[inline]
     fn count_live_evidence_read(&self) {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.engine
             .vfs_provenance
             .resolution_evidence_live_read_count
@@ -2135,6 +2141,7 @@ impl crate::traits::WorkspaceRead for FilesystemWorkspace {
         self.engine.record_content_transition(canonical_id);
     }
 
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     fn vfs_provenance_snapshot(&self) -> crate::types::VfsProvenanceSnapshot {
         FilesystemWorkspace::vfs_provenance_snapshot(self)
     }

@@ -26,6 +26,7 @@
 //! cold-dependency starvation path is covered separately by
 //! `batch_meta_cold_deps_no_pool_starvation`.
 
+#[cfg(feature = "semantic-observe")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -173,6 +174,8 @@ fn batch_preserves_input_order() {
 /// exactly once for a non-empty batch (the N jobs share one submission
 /// context and fan out on the host coordinator pool), so `submit_count`
 /// bumps by 1 regardless of input count.
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 #[test]
 fn batch_scheduler_submit_count_is_o1() {
     let n: usize = 10;

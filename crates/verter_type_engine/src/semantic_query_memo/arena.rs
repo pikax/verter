@@ -1735,6 +1735,7 @@ impl NodeArena {
     ) -> Result<SemanticNodeId, crate::semantic_query::QueryError> {
         // Capture the variant bucket before moving `data` so the
         // contention instrumentation can bucket per-variant pushes.
+        #[cfg(feature = "semantic-observe")]
         let discriminant = data.node_tag().bucket_index();
         let shard_idx = (fingerprint & SHARD_MASK) as usize;
 
@@ -1850,6 +1851,7 @@ impl NodeArena {
             }
         };
 
+        #[cfg(feature = "semantic-observe")]
         if let Some(prov) = self.provenance.as_ref() {
             use std::sync::atomic::Ordering::Relaxed;
             prov.node_arena_pushes.fetch_add(1, Relaxed);
@@ -1859,17 +1861,22 @@ impl NodeArena {
             // In range by construction: the array is sized to the tag bound.
             prov.node_arena_pushes_per_discriminant[discriminant].fetch_add(1, Relaxed);
         }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = is_miss;
 
         Ok(id)
     }
 
     /// Record acquisition time on every intern write, including dedup hits
-    /// and writes that subsequently refuse an invalid operand.
+    /// and writes that subsequently refuse an invalid operand. The clock is
+    /// read only under `semantic-observe`.
     fn write_for_intern(&self) -> parking_lot::RwLockWriteGuard<'_, ArenaInner> {
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeInnerWrite);
+        #[cfg(feature = "semantic-observe")]
         let start = self.provenance.as_ref().map(|prov| (prov, Instant::now()));
         let inner = self.inner.write();
+        #[cfg(feature = "semantic-observe")]
         if let Some((prov, start)) = start {
             prov.node_arena_inner_write_wait_ns.fetch_add(
                 start.elapsed().as_nanos() as u64,

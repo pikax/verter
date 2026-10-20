@@ -48,135 +48,146 @@ impl SemanticGraphStore {
             builder_fence: DepSignature,
         ) {
             verter_audit::attribute_n!(OriginEdgeRecord, sources.len());
-            // Diagnosis instrumentation: bracket the entire
-            // `record_origin_edge` call with `Instant::now()` deltas so the
-            // capture token can attribute per-call wall-clock cost. The
-            // timing measurement itself is two RDTSC reads (Linux) /
-            // QueryPerformanceCounter (Windows) — no allocation, no lock —
-            // so it does not perturb the production hot path beyond the
-            // `with_active_capture` thread-local lookup that is already
-            // present below. The deltas are only consumed when a token is
-            // bound (test/debug instrumentation only); the diagnosis
-            // benchmark is the only consumer; production-path behaviour is
-            // unchanged when no token is bound. The timestamp read and the
-            // recording site below both gate on the instrumentation module so
-            // release does not pay for them.
-            #[cfg(any(test, feature = "test-support"))]
-            let start = Instant::now();
-            // Build the edge under the derivation lock, then release the
-            // lock before pushing into the accumulator — the accumulator
-            // acquires its own mutex and we must not hold the graph lock
-            // across that boundary.
-            //
-            // The edge identity tuple is checked
-            // under the derivation lock for an existing match. When found,
-            // the ledger write is skipped (no `store.record` call) and the
-            // `already_recorded` flag flows through the rest of the
-            // function so the capture-token edge ledger and the
-            // `origin_edges_emitted` stats counter mirror the dedup. The
-            // audit-accumulator push and the `record_origin_edge_total_ns`
-            // wall-clock attribution are intentionally NOT gated by this
-            // flag — see the audit-mining contract preservation note above.
-            let (edge, already_recorded) = {
-                let mut store = self.derivation.lock();
-                let Some(edge_dep_signature) =
-                    store.intern_signature(builder_fence, self.charge_ctx())
-                else {
-                    // The account refused to retain the edge's fence: the
-                    // edge is not recorded, exactly as if FIFO-evicted.
-                    return;
-                };
-                let edge = OriginEdge {
-                    sources,
-                    meta,
-                    edge_dep_signature,
-                };
-                // Identity check: probe the existing `(result, kind)` bucket
-                // for an entry that matches this edge's full identity tuple
-                // (sources content, meta value, and interned dep_signature
-                // pointer). The interner guarantees identical signatures
-                // share a single Arc, so `Arc::ptr_eq` is a sound identity
-                // probe; `OriginMeta` derives `PartialEq` and `sources` is
-                // a content-comparable slice. The bucket narrows by the
-                // edge's identity key and confirms a match on the tuple.
-                let identity = super::derivation::edge_identity_key(
-                    &edge.edge_dep_signature,
-                    &edge.sources,
-                );
-                let already_recorded = store
-                    .bucket_for(result, kind)
-                    .is_some_and(|existing| existing.holds(identity, &edge));
-                if !already_recorded {
-                    store.record(result, kind, identity, edge.clone());
-                }
-                (edge, already_recorded)
-            };
-            if !already_recorded {
-                // Recorded first and marked after, so a node destroyed in
-                // between is either logged for cleanup or refused here.
-                let stale: Vec<SemanticNodeId> = std::iter::once(result)
-                    .chain(edge.sources.iter().copied())
-                    .filter(|node| !self.track_sidecar(*node))
-                    .collect();
-                if !stale.is_empty() {
-                    self.derivation
-                        .lock()
-                        .release_nodes(&|node| stale.contains(&node));
-                    return;
-                }
+            // Origin edges feed only the audit origin graph, which exists in
+            // a capture build, and the derivation-layer tests. A production
+            // build records none: no lock, no fence interning, no retention
+            // charge and no sidecar tracking per derivation.
+            #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+            {
+                let _ = (result, kind, sources, meta, builder_fence);
             }
-            if !already_recorded {
-                self.stats
-                    .origin_edges_emitted
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            // Feed the accumulator of the active audited
-            // request so the footprint miner sees every derivation hop.
-            // No-op when no request context is installed.
-            //
-            // Audit-mining contract preservation: this push is
-            // intentionally unconditional — it runs even on the dedup path
-            // so dropped ledger writes still surface in the audit trace.
-            #[cfg(feature = "semantic-observe")]
-            if let Some(acc) = crate::request_context::current_accumulator() {
-                acc.push_derivation_edge(result, kind, edge.clone());
-            }
-            // Test harness hook: when a CaptureToken is bound on the current
-            // thread, record the edge identity tuple in the per-request
-            // ledger so duplicate-derivation tests can read snapshots. The
-            // closure runs OUTSIDE the derivation lock (released above).
-            // The `with_active_capture` call returns immediately when no
-            // token is bound (the production hot path) — no lock, no
-            // allocation, one thread-local lookup.
-            //
-            // Skip the capture-token edge ledger insert + the
-            // `origin_edge_count` bump on the dedup path. The ledger / count
-            // mirror the production-side ledger writes so test snapshots
-            // observe the same dedup property.
-            #[cfg(any(test, feature = "test-support"))]
-            let elapsed_ns = start.elapsed().as_nanos();
-            #[cfg(any(test, feature = "test-support"))]
-            crate::capture_token::with_active_capture(|t| {
-                if !already_recorded {
-                    let dep_signature_hash =
-                        crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
-                    let identity = crate::capture_token::EdgeIdentity::from_record(
-                        result,
-                        kind,
-                        edge.sources.as_ref(),
-                        &edge.meta,
-                        dep_signature_hash,
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            {
+                // Diagnosis instrumentation: bracket the entire
+                // `record_origin_edge` call with `Instant::now()` deltas so the
+                // capture token can attribute per-call wall-clock cost. The
+                // timing measurement itself is two RDTSC reads (Linux) /
+                // QueryPerformanceCounter (Windows) — no allocation, no lock —
+                // so it does not perturb the production hot path beyond the
+                // `with_active_capture` thread-local lookup that is already
+                // present below. The deltas are only consumed when a token is
+                // bound (test/debug instrumentation only); the diagnosis
+                // benchmark is the only consumer; production-path behaviour is
+                // unchanged when no token is bound. The timestamp read and the
+                // recording site below both gate on the instrumentation module so
+                // release does not pay for them.
+                #[cfg(any(test, feature = "test-support"))]
+                let start = Instant::now();
+                // Build the edge under the derivation lock, then release the
+                // lock before pushing into the accumulator — the accumulator
+                // acquires its own mutex and we must not hold the graph lock
+                // across that boundary.
+                //
+                // The edge identity tuple is checked
+                // under the derivation lock for an existing match. When found,
+                // the ledger write is skipped (no `store.record` call) and the
+                // `already_recorded` flag flows through the rest of the
+                // function so the capture-token edge ledger and the
+                // `origin_edges_emitted` stats counter mirror the dedup. The
+                // audit-accumulator push and the `record_origin_edge_total_ns`
+                // wall-clock attribution are intentionally NOT gated by this
+                // flag — see the audit-mining contract preservation note above.
+                let (edge, already_recorded) = {
+                    let mut store = self.derivation.lock();
+                    let Some(edge_dep_signature) =
+                        store.intern_signature(builder_fence, self.charge_ctx())
+                    else {
+                        // The account refused to retain the edge's fence: the
+                        // edge is not recorded, exactly as if FIFO-evicted.
+                        return;
+                    };
+                    let edge = OriginEdge {
+                        sources,
+                        meta,
+                        edge_dep_signature,
+                    };
+                    // Identity check: probe the existing `(result, kind)` bucket
+                    // for an entry that matches this edge's full identity tuple
+                    // (sources content, meta value, and interned dep_signature
+                    // pointer). The interner guarantees identical signatures
+                    // share a single Arc, so `Arc::ptr_eq` is a sound identity
+                    // probe; `OriginMeta` derives `PartialEq` and `sources` is
+                    // a content-comparable slice. The bucket narrows by the
+                    // edge's identity key and confirms a match on the tuple.
+                    let identity = super::derivation::edge_identity_key(
+                        &edge.edge_dep_signature,
+                        &edge.sources,
                     );
-                    t.record_edge(identity);
-                    // Bump the per-call counter +
-                    // wall-clock cost only on actual ledger emissions. The
-                    // dedup-skipped path bypasses both so `origin_edge_count`
-                    // mirrors the ledger-write count and
-                    // `record_origin_edge_total_ns` reflects only the
-                    // cold-path wall-clock.
-                    t.record_origin_edge_call(elapsed_ns);
+                    let already_recorded = store
+                        .bucket_for(result, kind)
+                        .is_some_and(|existing| existing.holds(identity, &edge));
+                    if !already_recorded {
+                        store.record(result, kind, identity, edge.clone());
+                    }
+                    (edge, already_recorded)
+                };
+                if !already_recorded {
+                    // Recorded first and marked after, so a node destroyed in
+                    // between is either logged for cleanup or refused here.
+                    let stale: Vec<SemanticNodeId> = std::iter::once(result)
+                        .chain(edge.sources.iter().copied())
+                        .filter(|node| !self.track_sidecar(*node))
+                        .collect();
+                    if !stale.is_empty() {
+                        self.derivation
+                            .lock()
+                            .release_nodes(&|node| stale.contains(&node));
+                        return;
+                    }
                 }
-            });
+                if !already_recorded {
+                    self.stats
+                        .origin_edges_emitted
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                // Feed the accumulator of the active audited
+                // request so the footprint miner sees every derivation hop.
+                // No-op when no request context is installed.
+                //
+                // Audit-mining contract preservation: this push is
+                // intentionally unconditional — it runs even on the dedup path
+                // so dropped ledger writes still surface in the audit trace.
+                #[cfg(feature = "semantic-observe")]
+                if let Some(acc) = crate::request_context::current_accumulator() {
+                    acc.push_derivation_edge(result, kind, edge.clone());
+                }
+                // Test harness hook: when a CaptureToken is bound on the current
+                // thread, record the edge identity tuple in the per-request
+                // ledger so duplicate-derivation tests can read snapshots. The
+                // closure runs OUTSIDE the derivation lock (released above).
+                // The `with_active_capture` call returns immediately when no
+                // token is bound (the production hot path) — no lock, no
+                // allocation, one thread-local lookup.
+                //
+                // Skip the capture-token edge ledger insert + the
+                // `origin_edge_count` bump on the dedup path. The ledger / count
+                // mirror the production-side ledger writes so test snapshots
+                // observe the same dedup property.
+                #[cfg(any(test, feature = "test-support"))]
+                let elapsed_ns = start.elapsed().as_nanos();
+                #[cfg(any(test, feature = "test-support"))]
+                crate::capture_token::with_active_capture(|t| {
+                    if !already_recorded {
+                        let dep_signature_hash =
+                            crate::capture_token::stable_hash_slice(&edge.edge_dep_signature);
+                        let identity = crate::capture_token::EdgeIdentity::from_record(
+                            result,
+                            kind,
+                            edge.sources.as_ref(),
+                            &edge.meta,
+                            dep_signature_hash,
+                        );
+                        t.record_edge(identity);
+                        // Bump the per-call counter +
+                        // wall-clock cost only on actual ledger emissions. The
+                        // dedup-skipped path bypasses both so `origin_edge_count`
+                        // mirrors the ledger-write count and
+                        // `record_origin_edge_total_ns` reflects only the
+                        // cold-path wall-clock.
+                        t.record_origin_edge_call(elapsed_ns);
+                    }
+                });
+            }
         }
     }
 

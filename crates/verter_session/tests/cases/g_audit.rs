@@ -19,6 +19,8 @@ mod audit_event_shape;
 #[cfg(feature = "semantic-observe")]
 mod audit_helper_envelope_e2e;
 #[path = "g_audit/audit_observer_tls_propagation.rs"]
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 mod audit_observer_tls_propagation;
 #[path = "g_audit/audit_records_per_host_isolated.rs"]
 // Reads optional audit capture: runs in the instrumentation lane.

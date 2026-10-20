@@ -50,6 +50,11 @@ fn flow_return_dispatched(record: &verter_audit::RequestAuditRecord) -> bool {
 }
 
 fn assert_flow_return_dispatched(record: &verter_audit::RequestAuditRecord, alias: &str) {
+    // The dispatch mask is optional capture; a build without it checks the
+    // answers only.
+    if !super::support::records_capture(record) {
+        return;
+    }
     assert!(
         flow_return_dispatched(record),
         "{alias} must be served by a FlowReturn dispatch through ProjectSemanticDispatch"

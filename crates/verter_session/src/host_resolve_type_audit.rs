@@ -344,7 +344,7 @@ impl VerterHost {
         #[cfg(not(feature = "semantic-observe"))]
         {
             let _ = request_clock;
-            return audited_from_outcome(
+            audited_from_outcome(
                 outcome,
                 noop_type_resolution_record(
                     request_id,
@@ -352,7 +352,7 @@ impl VerterHost {
                     None,
                     crate::capture::uncaptured_state(self.config.audit_enabled),
                 ),
-            );
+            )
         }
 
         #[cfg(feature = "semantic-observe")]

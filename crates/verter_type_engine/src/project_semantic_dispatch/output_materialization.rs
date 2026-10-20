@@ -509,7 +509,6 @@ pub fn wrap_degraded_output(
 
 #[cfg(test)]
 mod unwrap_tests {
-    use std::sync::atomic::AtomicU64;
     use std::sync::Arc;
 
     use verter_type_expr::TypeExpr;
@@ -544,7 +543,7 @@ mod unwrap_tests {
         let (_stores, authority, _claims) = EngineStores::create(
             None,
             verter_session_query::retention::StoreAccount::default(),
-            &Arc::new(AtomicU64::new(0)),
+            &crate::cache_runtime::OccupancyCounter::new(),
             verter_execution::tasks::TaskRegistry::default(),
         );
         let authored = TypeExpr::Union(Arc::from([

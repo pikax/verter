@@ -3403,7 +3403,11 @@ fn imported_registry_coexisting_candidates_keep_live_counter_consistent() {
         verter_type_expr::OwnedStr::from("Probe"),
     );
 
-    let live_counter = Arc::clone(&host.project_type_store().counters.component_meta_cache_live);
+    let live_counter = host
+        .project_type_store()
+        .counters
+        .component_meta_cache_live
+        .clone();
     let counter_before = live_counter.load(Ordering::Relaxed);
     let entries_before = host
         .project_type_store()

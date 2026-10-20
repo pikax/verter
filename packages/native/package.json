@@ -1,6 +1,6 @@
 {
   "name": "@verter/native",
-  "version": "0.0.1-beta.6",
+  "version": "0.0.1-beta.7",
   "description": "Native Node.js bindings for Verter's Vue and experimental Svelte compiler host",
   "keywords": [
     "bindings",
@@ -45,6 +45,8 @@
     "copy-windows-artefact": "node ./scripts/copy-windows-artefact.mjs",
     "build": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "build:debug": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
+    "build:observe": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --release --features semantic-observe --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
+    "build:observe:debug": "pnpm run clean:dist && napi build -o dist --dts napi.generated.d.ts --platform --features semantic-observe --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types && pnpm run copy-windows-artefact",
     "artifacts": "napi artifacts",
     "ensure-native-loader": "node ./scripts/ensure-native-loader.mjs",
     "pretest": "pnpm run ensure-native-loader",

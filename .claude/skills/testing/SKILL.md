@@ -261,6 +261,20 @@ conformance, compile-fail fixtures, and proto freshness are outside the
 canonical nextest surface, so a green core gate is not evidence for any of
 them.
 
+The same holds for capture-dependent suites. Audit records, footprints, timing
+and every other optional observation compile only under `semantic-observe`
+(see `docs/arch/semantic-observe.md`), and the canonical gate builds without
+it. A Rust test that reads a captured record carries
+`#[cfg(feature = "semantic-observe")]` with the one-line comment
+`// Reads optional audit capture: runs in the instrumentation lane.` and is
+bound to `node scripts/observe-lane.mjs run` (CI `rust-observe`), which tests
+every workspace member declaring the feature with it on under the core filter.
+Keep a default-build test for each public audit surface asserting
+`AuditCaptureState::Unavailable` or the unavailable-capture error, so the
+default build still discriminates. TypeScript specs that read records branch on
+the binding's `captureAvailability()` and assert the unavailable outcome on a
+default binding.
+
 ### Deletion evidence
 
 Retiring a mechanism, guard, or test requires naming the removed mechanism, the

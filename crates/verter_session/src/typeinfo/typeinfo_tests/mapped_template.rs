@@ -515,6 +515,8 @@ fn recursive_mapped_index_budget_refusal_does_not_warm() {
     assert!(graph.contains_key(&memo_key));
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// What one cold evaluation of the mapped index `Paths<Api>` selects over
 /// `count` entities admits into the family memo, with the paths it publishes.
 fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
@@ -586,6 +588,8 @@ fn recursive_paths_admissions(count: usize, groups: usize) -> (u64, usize) {
     )
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
 /// A recursive evaluation admits what a later demand can reach — each
 /// instantiation and the projections that answer it — while the conditional
 /// decisions, template-literal reductions and index projections nested in
@@ -1153,4 +1157,47 @@ pub(crate) fn template_literal_reduce_models_ts_numeric_bigint_lexing() {
         ProjectionMode::Expanded,
     );
     assert_string_literal(&big, "id-1");
+}
+
+/// A bigint literal interpolates as TS's `pseudoBigIntToString`: a negated
+/// zero is the literal `0n` (`${-0n}` ⇒ `"0"`), a non-zero negative keeps its
+/// sign, and a hex literal reads as its base-10 value. `-0n` and `0n` are one
+/// literal type, so each is assignable to the other, and a `const` initialised
+/// with `-0n` has the literal type `0n`.
+#[test]
+pub(crate) fn template_literal_bigint_negative_zero_stringifies_unsigned() {
+    let host = make_host_with_footprint();
+    upsert_ts(
+        &host,
+        "/fixtures/template-bigint-sign.ts",
+        "type __BenchInit = 0;\n\
+         type Exclude<T, U> = T extends U ? never : T;\n\
+         type Extract<T, U> = T extends U ? T : never;\n\
+         export type __Probe = `${0x10n}|${-0n}|${10n}`;\n\
+         export type Negative = `${-5n}`;\n\
+         export type ZeroIdentity = -0n extends 0n ? (0n extends -0n ? true : false) : false;\n\
+         const negativeZero = -0n;\n\
+         export type ValueZero = `${typeof negativeZero}`;\n",
+    );
+
+    let resolve = |name: &str| {
+        resolve_expr(
+            &host,
+            "/fixtures/template-bigint-sign.ts",
+            name,
+            &[],
+            ProjectionMode::Expanded,
+        )
+        .0
+    };
+    assert_string_literal(&resolve("__Probe"), "16|0|10");
+    assert_string_literal(&resolve("Negative"), "-5");
+    assert_string_literal(&resolve("ValueZero"), "0");
+    assert!(
+        matches!(
+            resolve("ZeroIdentity"),
+            TypeExpr::Literal(verter_type_expr::LiteralValue::Boolean(true))
+        ),
+        "`-0n` and `0n` must be the same literal type"
+    );
 }
