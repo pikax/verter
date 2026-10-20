@@ -48,10 +48,9 @@ impl SemanticGraphStore {
     /// `entries` lock — and the publish-side `register_reverse_index`
     /// also under that lock — no concurrent publish can register a fresh
     /// `(family, slot)` in the gap, so there is no gap. The `entries →
-    /// canonical_to_entries shards` lock order PERMITS taking a shard
-    /// mutex while `entries` is held (`entries` is outermost), and no
-    /// path takes a `canonical_to_entries` shard mutex then `entries`, so
-    /// this nesting is sound.
+    /// canonical_to_entries` lock order PERMITS taking the index's leaf
+    /// lock while `entries` is held (`entries` is outermost), and the
+    /// index never takes another lock, so this nesting is sound.
     ///
     /// The injection point armed by
     /// [`Self::test_publish_post_memo_budget_record_gate`] fires after
@@ -163,19 +162,15 @@ impl SemanticGraphStore {
         let mut pruned_any = false;
         for (_victim_seq, victim) in victims {
             // Remove the victim from `entries` (keeping map and budget
-            // in lockstep), then prune its reverse-index registrations
-            // under the same lock. The prune walks the SAME union
-            // `register_reverse_index` iterates — carrier
-            // `canonical_ids()` PLUS `dispatch_dep_signature` — so a
-            // dispatch-only registration (notably `<project>` from
-            // `project_generation_signature()`) cannot survive FIFO
-            // eviction. `prune_reverse_index_registration` is
-            // idempotent, so a canonical in both rails is pruned twice
-            // harmlessly. Each candidate's registrations are keyed
-            // PER-CANDIDATE on `(family, slot, admission_seq)` so a
-            // multi-view slot's cleanup strips only this candidate's
-            // seq — surviving sibling candidates in the same slot
-            // keep their own seq registrations.
+            // in lockstep), then unregister its candidates under the same
+            // lock. Unregistration drops every edge the candidate
+            // registered — its carrier's and its dispatch-fence
+            // canonicals' — so a dispatch-only registration (notably
+            // `<project>` from `project_generation_signature()`) cannot
+            // survive FIFO eviction. Each registration is keyed
+            // PER-CANDIDATE on `admission_seq`, so a multi-view slot's
+            // cleanup releases only this candidate — surviving sibling
+            // candidates in the same slot keep their own registrations.
             if let Some(slots) = entries.remove(&victim) {
                 let drained = reverse_index::drain_family_slots_registrations(
                     &self.canonical_to_entries,

@@ -1788,7 +1788,6 @@ mod retention_tests {
             ),
             Arc::from(Vec::<Arc<str>>::new()),
             0,
-            1,
             footprint,
             &tight,
         );

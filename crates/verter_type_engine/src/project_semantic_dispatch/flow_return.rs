@@ -28965,8 +28965,23 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 crate::semantic_query::FlowReturnDegradation::OperationBudget,
                             );
                         }
-                        if let Some(diagnostic) = diagnostic {
-                            self.record_checker_diagnostic(diagnostic);
+                        // The carrier holds only the diagnostic, with no
+                        // bound arguments: it is reported at the call only when
+                        // its message takes none, never with a placeholder left
+                        // unfilled.
+                        if let Some(diagnostic) =
+                            diagnostic.filter(|d| !d.code.message().contains('{'))
+                        {
+                            let span = site.span();
+                            self.record_checker_diagnostic(
+                                crate::semantic_query::CheckerDiagnosticOccurrence::new(
+                                    span.start,
+                                    span.end,
+                                    diagnostic,
+                                    Box::default(),
+                                    Box::default(),
+                                ),
+                            );
                         }
                         if budget || diagnostic.is_some() {
                             returned = node;
