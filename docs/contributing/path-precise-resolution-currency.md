@@ -216,6 +216,11 @@ and forces typed non-admission. Overlay evidence is composed into the same
 capture, while the final bridge, world, epoch, and published-root comparisons
 remain mandatory.
 
+The frozen reader's bridge-coverage predicate reads its in-memory completeness
+flag. Its creator independently validates live inputs before replay and again
+at the operation's conditional-commit fence. Asking whether an immutable replay
+has complete coverage must not repeat those filesystem scans.
+
 A freeze-time re-read that CONFLICTS with the discovery observation is state
 newer than the captured root, so it enters through the ordinary invalidation
 protocol: the affected directory index and realpath memo are marked dirty
