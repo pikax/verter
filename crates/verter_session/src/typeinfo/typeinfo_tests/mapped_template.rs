@@ -19,12 +19,15 @@ type Grow<T> = (x: T) => Grow<T[]>;
 type Left<T> = (x: T) => Right<T>;
 type Right<T> = (x: T) => Left<T>;
 type Identity<T> = T;
+type Field<T> = T extends { a: infer V } ? V : never;
 type Finite<T extends { a: number }> = (x: Identity<T['a']>) => () => Identity<T['a']>;
+type ConditionalFinite<T extends { a: number }> = (x: Identity<T['a']>) => () => Field<T>;
 export type RecursiveReturn = { [K in 'a']: Loop<number> };
 export type RecursiveParameter = { [K in 'a']: Sink<number> };
 export type GrowingReturn = { [K in 'a']: Grow<number> };
 export type MutualReturn = { [K in 'a']: Left<number> };
 export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
+export type ConditionalFiniteSlots = { [K in 'a']: ConditionalFinite<{ a: 1 }> };
 "#,
     );
     let number = TypeExpr::Primitive(PrimitiveName::Number);
@@ -59,25 +62,18 @@ export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
         assert_eq!(arguments.as_ref(), std::slice::from_ref(expected_argument));
     };
     for _ in 0..2 {
-        eprintln!("publishing finite helper slots");
-        let (finite, _) = resolve_expr(&host, path, "FiniteSlots", &[], ProjectionMode::Expanded);
-        let props = object_props(&finite);
-        let signature = function_type(&props["a"].ty);
-        assert_number_literal(&signature.parameters[0].ty, 1.0);
-        let nested = function_type(signature.return_type.as_deref().expect("nested callable"));
-        assert_number_literal(nested.return_type.as_deref().expect("indexed return"), 1.0);
+        for name in ["FiniteSlots", "ConditionalFiniteSlots"] {
+            let (finite, _) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            let props = object_props(&finite);
+            let signature = function_type(&props["a"].ty);
+            assert_number_literal(&signature.parameters[0].ty, 1.0);
+            let nested = function_type(signature.return_type.as_deref().expect("nested callable"));
+            assert_number_literal(nested.return_type.as_deref().expect("indexed return"), 1.0);
+        }
 
-        for (
-            name,
-            recursive_name,
-            followed_name,
-            recursive_return,
-            expected_argument,
-            followed_argument,
-        ) in [
+        for (name, recursive_name, recursive_return, expected_argument, followed_argument) in [
             (
                 "RecursiveReturn",
-                "Loop",
                 "Loop",
                 true,
                 number.clone(),
@@ -86,7 +82,6 @@ export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
             (
                 "RecursiveParameter",
                 "Sink",
-                "Sink",
                 false,
                 number.clone(),
                 number.clone(),
@@ -94,13 +89,11 @@ export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
             (
                 "GrowingReturn",
                 "Grow",
-                "Grow",
                 true,
                 array.clone(),
                 nested_array.clone(),
             ),
         ] {
-            eprintln!("publishing mapped callable {name}");
             let (expr, _) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
             let props = object_props(&expr);
             assert_eq!(prop_names(&props), vec!["a"]);
@@ -120,7 +113,7 @@ export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
             );
             assert_callable(
                 &followed,
-                followed_name,
+                recursive_name,
                 recursive_return,
                 &expected_argument,
                 &followed_argument,
@@ -147,6 +140,105 @@ export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
             &number,
         );
     }
+}
+
+fn assert_composed_recursive_mapped_signature(nullable: bool, indexed: bool, conditional: bool) {
+    let host = make_host_with_footprint();
+    let path = "/composed-recursive-callable.ts";
+    let nullish = if nullable { " | null" } else { "" };
+    let index = if indexed { "['a' | 'b']" } else { "" };
+    let signature = format!("((x: T) => Loop<T>){nullish}");
+    let body = if conditional {
+        format!("T extends never ? never : {signature}")
+    } else {
+        signature
+    };
+    upsert_ts(
+        &host,
+        path,
+        &format!(
+            "type Loop<T> = {body};\n\
+             export type Probe = {{ [K in 'a' | 'b']: Loop<number> }}{index};"
+        ),
+    );
+    let assert_signature = |value: &TypeExpr| {
+        let callable = if nullable {
+            let TypeExpr::Union(arms) = value else {
+                panic!("expected a nullable callable, got {value:?}");
+            };
+            assert_eq!(arms.len(), 2);
+            assert!(arms.contains(&TypeExpr::Primitive(PrimitiveName::Null)));
+            arms.iter()
+                .find(|arm| matches!(arm, TypeExpr::Function(_)))
+                .expect("the non-null arm must be callable")
+        } else {
+            value
+        };
+        let signature = function_type(callable);
+        assert_eq!(signature.parameters.len(), 1);
+        assert_primitive(&signature.parameters[0].ty, PrimitiveName::Number);
+        let returned = signature.return_type.as_deref().expect("declared return");
+        assert_ref(returned, "Loop");
+        let arguments = match returned {
+            TypeExpr::Ref { type_arguments, .. }
+            | TypeExpr::RecursiveRef { type_arguments, .. } => type_arguments,
+            _ => unreachable!("assert_ref checked the carrier"),
+        };
+        assert_eq!(
+            arguments.as_ref(),
+            &[TypeExpr::Primitive(PrimitiveName::Number)]
+        );
+    };
+    let assert_complete = |record: &verter_audit::RequestAuditRecord| {
+        let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload else {
+            panic!("recursive callable publication must retain its resolution audit");
+        };
+        assert!(
+            !payload.cache_suppress
+                && !payload.recursion_limit_reached
+                && payload.walker_diagnostics.is_empty(),
+            "finite recursive callable publication must remain cacheable: {payload:?}"
+        );
+    };
+    for _ in 0..2 {
+        let (expr, record) = resolve_expr(&host, path, "Probe", &[], ProjectionMode::Expanded);
+        assert_complete(&record);
+        if indexed {
+            assert_signature(&expr);
+        } else {
+            let props = object_props(&expr);
+            assert_eq!(prop_names(&props), vec!["a", "b"]);
+            for prop in props.values() {
+                assert_signature(&prop.ty);
+            }
+        }
+        let (followed, record) = resolve_expr(
+            &host,
+            path,
+            "Loop",
+            &[Arc::new(TypeExpr::Primitive(PrimitiveName::Number))],
+            ProjectionMode::Expanded,
+        );
+        assert_complete(&record);
+        assert_signature(&followed);
+    }
+}
+
+#[test]
+fn mapped_member_union_signatures_keep_recursive_aliases_addressable() {
+    assert_composed_recursive_mapped_signature(true, false, false);
+}
+
+#[test]
+fn mapped_index_signatures_keep_recursive_aliases_addressable() {
+    assert_composed_recursive_mapped_signature(false, true, false);
+    assert_composed_recursive_mapped_signature(true, true, false);
+}
+
+#[test]
+fn mapped_signature_helpers_keep_recursive_conditional_callables_addressable() {
+    assert_composed_recursive_mapped_signature(true, false, true);
+    assert_composed_recursive_mapped_signature(true, true, true);
 }
 
 fn mapped_index_wire_answer(

@@ -391,13 +391,19 @@ pub(crate) enum DeferredEvaluationDemand {
     /// Declared signature slots reduce finite helpers while retaining
     /// recursive back-edges and container interiors for later demands.
     MappedSignatureSlot,
+    /// A named slot helper reduces to its value head before deciding
+    /// whether to retain its named carrier. Signature slots stay dormant.
+    MappedSignatureHead,
 }
 
 impl DeferredEvaluationDemand {
     fn follows_mapped_helpers(self) -> bool {
         matches!(
             self,
-            Self::MappedIndexValue | Self::MappedMemberValue | Self::MappedSignatureSlot
+            Self::MappedIndexValue
+                | Self::MappedMemberValue
+                | Self::MappedSignatureSlot
+                | Self::MappedSignatureHead
         )
     }
 
@@ -406,7 +412,10 @@ impl DeferredEvaluationDemand {
     }
 
     fn retains_container_interiors(self) -> bool {
-        matches!(self, Self::MappedMemberValue | Self::MappedSignatureSlot)
+        matches!(
+            self,
+            Self::MappedMemberValue | Self::MappedSignatureSlot | Self::MappedSignatureHead
+        )
     }
 
     fn value_source_context(
@@ -427,6 +436,9 @@ impl DeferredEvaluationDemand {
 /// by a Rust call frame.
 enum DeferredEvaluationStage {
     EvaluateCurrent,
+    AwaitMappedSignatureHead {
+        carrier: SemanticNodeId,
+    },
     AwaitKeyOfBase,
     AwaitIndexedObject {
         index: IndexKey,
@@ -2621,6 +2633,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 frame.merge_child(child);
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
+                    DeferredEvaluationStage::AwaitMappedSignatureHead { carrier } => {
+                        match self.mapped_signature_head_needs_carrier(child.node) {
+                            Ok(true) => DeferredEvaluationAction::Finish(carrier),
+                            Ok(false) => DeferredEvaluationAction::Finish(child.node),
+                            Err(reasons) => {
+                                frame.completeness = frame
+                                    .completeness
+                                    .merge(ResultCompleteness::partial(reasons));
+                                DeferredEvaluationAction::Finish(carrier)
+                            }
+                        }
+                    }
                     DeferredEvaluationStage::AwaitKeyOfBase => {
                         let mut read = self.execute_read(SemanticQueryKey::KeyOf {
                             base: child.node,
@@ -2904,7 +2928,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     base.owner,
                                     base.decl_name.clone(),
                                 );
-                                let mut read = self.execute_read(SemanticQueryKey::Instantiate(
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
                                     crate::semantic_query::InstantiateKey::new(
                                         slot,
                                         Arc::clone(args.as_arc()),
@@ -2914,21 +2938,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         ),
                                     ),
                                 ));
-                                // A named callable in a declared slot stays addressable;
-                                // its signature children belong to a later demand.
-                                if demand == DeferredEvaluationDemand::MappedSignatureSlot
-                                    && matches!(
-                                        &read.value,
-                                        QueryResult::Value(body) if matches!(
-                                            self.graph().node_data(*body).as_deref(),
-                                            Some(SemanticNodeData::Signature { .. })
-                                        )
-                                    )
-                                {
-                                    read.value = QueryResult::Value(current);
-                                }
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                self.deferred_read_action(frame, read, || current)
+                                if demand == DeferredEvaluationDemand::MappedSignatureSlot {
+                                    frame.merge_read(&read);
+                                    crate::request_context::observe_component_meta_read_suppress(&read);
+                                    if let QueryResult::Value(body) = read.value {
+                                        frame.stage = DeferredEvaluationStage::AwaitMappedSignatureHead {
+                                            carrier: current,
+                                        };
+                                        DeferredEvaluationAction::Push {
+                                            node: body,
+                                            context,
+                                        }
+                                    } else {
+                                        DeferredEvaluationAction::Finish(current)
+                                    }
+                                } else {
+                                    self.deferred_read_action(frame, read, || current)
+                                }
                             }
                             SemanticNodeData::Opaque(QueryError::RecursiveRef { .. })
                                 if demand.follows_recursive_helpers() =>
@@ -3005,10 +3032,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // Key enumeration consumes the source's domain,
                     // without demanding all of its member values.
                     let demand = match &parent.stage {
+                        DeferredEvaluationStage::AwaitMappedSignatureHead { .. } => {
+                            DeferredEvaluationDemand::MappedSignatureHead
+                        }
                         DeferredEvaluationStage::AwaitKeyOfBase => DeferredEvaluationDemand::Shell,
                         DeferredEvaluationStage::AwaitValueChildren { data, .. }
-                            if parent.demand == DeferredEvaluationDemand::MappedMemberValue
-                                && matches!(data.as_ref(), SemanticNodeData::Signature { .. }) =>
+                            if matches!(
+                                parent.demand,
+                                DeferredEvaluationDemand::MappedMemberValue
+                                    | DeferredEvaluationDemand::MappedIndexValue
+                            ) && matches!(data.as_ref(), SemanticNodeData::Signature { .. }) =>
                         {
                             DeferredEvaluationDemand::MappedSignatureSlot
                         }
@@ -3199,7 +3232,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return_type,
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
                 ..
-            } if whole => Some(
+            } if whole && demand != DeferredEvaluationDemand::MappedSignatureHead => Some(
                 params
                     .iter()
                     .map(|p| p.ty)
@@ -3208,6 +3241,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             _ => None,
         }
+    }
+
+    /// Inspect the completed helper head's composition without entering
+    /// signature slots or container interiors. Deferred operators have already
+    /// used the evaluator's ordinary continuation and receipt tracking.
+    /// Signature-bearing compositions, including nullable unions, keep their
+    /// named carrier. Discovery still owns callable semantics.
+    fn mapped_signature_head_needs_carrier(
+        &self,
+        head: SemanticNodeId,
+    ) -> Result<bool, PartialReasonSet> {
+        let mut pending = smallvec::SmallVec::<[SemanticNodeId; 8]>::from_slice(&[head]);
+        let mut visited = VisitedNodes::default();
+        while let Some(node) = pending.pop() {
+            if !visited.insert(node) {
+                continue;
+            }
+            // The completed head paid its root step; inspecting another
+            // composition node belongs to this consumer's work receipt.
+            if node != head {
+                self.charge_connected_work()?;
+            }
+            let data = self
+                .graph()
+                .node_data(node)
+                .ok_or(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA)?;
+            match data.as_ref() {
+                SemanticNodeData::Signature { .. } => return Ok(true),
+                SemanticNodeData::Alias(target) => pending.push(*target),
+                SemanticNodeData::Union(arms) => pending.extend(arms.iter().copied()),
+                SemanticNodeData::Intersection(arms) => pending.extend(arms.iter().copied()),
+                _ => {}
+            }
+        }
+        Ok(false)
     }
 
     fn rebuild_evaluated_value(
