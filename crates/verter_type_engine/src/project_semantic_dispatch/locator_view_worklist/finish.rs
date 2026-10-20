@@ -165,6 +165,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
+    /// The slot `child`, `parent`'s child at `index`, projects in. An
+    /// application a tuple spreads, under a carrier mode that splices it, is
+    /// [`ProjectionSlot::Spread`]: the tuple's own positions and length are
+    /// the application's, so it is instantiated there as the checker
+    /// instantiates it, while the same application stays a carrier anywhere
+    /// else. Its two readings are memoized apart, so neither depends on
+    /// which occurrence the projection meets first.
+    pub(super) fn child_projection_slot(
+        &self,
+        parent: &SemanticNodeData,
+        index: usize,
+        child: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionSlot {
+        let spread = matches!(
+            context.mode,
+            ProjectionMode::Navigate | ProjectionMode::Shallow
+        ) && matches!(
+            parent,
+            SemanticNodeData::Tuple { elements, .. }
+                if elements
+                    .get(index)
+                    .is_some_and(|element| element.rest && element.value == child)
+        ) && matches!(
+            self.graph().node_data(child).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        );
+        if spread {
+            ProjectionSlot::Spread
+        } else {
+            ProjectionSlot::Plain
+        }
+    }
+
+    /// The slot the node being finished projects in, read off the frame of
+    /// the composite enclosing it, whose cursor has just passed it.
+    pub(super) fn finishing_projection_slot(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        ancestors: &[ProjectionFrame],
+    ) -> ProjectionSlot {
+        match ancestors.last() {
+            Some(ProjectionFrame::CompositeResume {
+                data, next_child, ..
+            }) => next_child
+                .checked_sub(1)
+                .map_or(ProjectionSlot::Plain, |index| {
+                    self.child_projection_slot(data.as_ref(), index, node, context)
+                }),
+            _ => ProjectionSlot::Plain,
+        }
+    }
+
     /// Select through the shared indexed-access query at navigation altitude,
     /// then let this projection's worklist resolve the selected value at the
     /// caller's demand. A namespace's lazy TypeOf members can then suspend.
@@ -325,10 +379,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ));
         }
-        if matches!(
+        // The carrier modes keep an application a carrier, except one a
+        // tuple spreads over closed arguments, which is instantiated to
+        // splice (`[...Deep<[0, 0]>, 1]`).
+        let keeps_carrier = matches!(
             context.mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) {
+        ) && !(self.finishing_projection_slot(node, context, ancestors)
+            == ProjectionSlot::Spread
+            && !projected_args.iter().any(|argument| {
+                super::super::raise::builtin_lowering_argument_is_open(self, *argument)
+            }));
+        if keeps_carrier {
             ProjectionFinish::Node(rebuild(projected_args))
         } else if self.is_instantiate_active(
             base.canonical_id.as_ref(),
@@ -534,9 +596,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Tuple { elements, readonly } => {
                 let projected_elements: Vec<_> = elements
                     .iter()
-                    .map(|element| TupleElement {
+                    .enumerate()
+                    .map(|(index, element)| TupleElement {
                         label: element.label.clone(),
-                        value: projected(memo, element.value, context),
+                        value: projected_in(
+                            memo,
+                            element.value,
+                            context,
+                            self.child_projection_slot(data, index, element.value, context),
+                        ),
                         optional: element.optional,
                         rest: element.rest,
                     })
@@ -561,10 +629,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|expression| projected(memo, *expression, context))
                     .collect();
+                // A literal hole folds into the template's text, as the
+                // checker's template construction folds it.
+                let (quasis, expressions) = match self.folded_literal_holes(quasis, &expressions) {
+                    Some((folded, holes)) => {
+                        (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                    }
+                    None => ((*quasis).clone(), expressions),
+                };
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::TemplateLiteral {
-                        quasis: (*quasis).clone(),
+                        quasis,
                         expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
