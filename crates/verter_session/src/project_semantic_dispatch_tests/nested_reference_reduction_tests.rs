@@ -9,6 +9,8 @@
 //! answer is TypeScript 7.0.2's, read through its native API as the
 //! benchmark's tsc arm reads it (`getTypeAtPosition` on `__Probe`, then
 //! `typeToString`, a union member by member) over the same module.
+//! The object, tuple, key-union and route-union reproductions cover all
+//! four `strictNullChecks` / `noImplicitAny` combinations.
 //!
 //! An operator over a type parameter stays the deferred operator the
 //! checker prints, a `keyof` inside an object or a type argument stays the
@@ -31,9 +33,29 @@ const UTILITIES: &str = "type Exclude<T, U> = T extends U ? never : T;\n\
 /// Resolve `__Probe = probe` at `mode` in a fresh project holding `source`
 /// and decode its wire answer, as the benchmark's probe does.
 fn answer_at(source: &str, probe: &str, mode: Option<ProjectionMode>) -> TypeExpr {
+    answer_with_options(source, probe, mode, true, true)
+}
+
+const STRICTNESS: [(bool, bool); 4] = [(true, true), (false, true), (true, false), (false, false)];
+
+fn answer_with_options(
+    source: &str,
+    probe: &str,
+    mode: Option<ProjectionMode>,
+    strict_null_checks: bool,
+    no_implicit_any: bool,
+) -> TypeExpr {
+    let config = serde_json::json!({
+        "compilerOptions": {
+            "strict": true,
+            "strictNullChecks": strict_null_checks,
+            "noImplicitAny": no_implicit_any,
+        }
+    })
+    .to_string();
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig::default(),
-        &[("/nested", r#"{ "compilerOptions": { "strict": true } }"#)],
+        &[("/nested", &config)],
     );
     let _ = host
         .upsert(crate::UpsertRequest {
@@ -46,8 +68,16 @@ fn answer_at(source: &str, probe: &str, mode: Option<ProjectionMode>) -> TypeExp
             aliases: vec![],
         })
         .expect("fixture admitted");
+    resolve_answer(&host, SCENARIO, mode)
+}
+
+fn resolve_answer(
+    host: &crate::VerterHost,
+    canonical: &str,
+    mode: Option<ProjectionMode>,
+) -> TypeExpr {
     let (outcome, _) = host
-        .resolve_named_symbol_with_audit(SCENARIO, "__Probe", mode)
+        .resolve_named_symbol_with_audit(canonical, "__Probe", mode)
         .into_parts();
     let node = outcome
         .expect("the named demand completes")
@@ -110,13 +140,21 @@ fn property<'a>(answer: &'a TypeExpr, name: &str) -> &'a TypeExpr {
 /// O = { x: X["a"] }` with `type X = { a: 1 }`.
 #[test]
 fn a_closed_access_in_an_object_property_reads_the_member() {
-    let declared = answer("declare const __v: { x: { a: 1 }[\"a\"] };\n", "typeof __v");
-    assert_eq!(
-        property(&declared, "x"),
-        &TypeExpr::Literal(LiteralValue::Number(1.0)),
-        "`typeof __v` is `{}`",
-        display(&declared)
-    );
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let declared = answer_with_options(
+            "declare const __v: { x: { a: 1 }[\"a\"] };\n",
+            "typeof __v",
+            None,
+            strict_null_checks,
+            no_implicit_any,
+        );
+        assert_eq!(
+            property(&declared, "x"),
+            &TypeExpr::Literal(LiteralValue::Number(1.0)),
+            "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}: `{}`",
+            display(&declared)
+        );
+    }
     let aliased = answer("type X = { a: 1 };\ntype O = { x: X[\"a\"] };\n", "O");
     assert_eq!(display(&aliased), "{ x: 1 }");
 }
@@ -125,12 +163,24 @@ fn a_closed_access_in_an_object_property_reads_the_member() {
 /// `[keyof P, X["a"]]` is `[keyof P, 1]`.
 #[test]
 fn a_closed_access_in_a_tuple_element_reads_the_member() {
-    let tuple = answer("", "[[1, 2?][\"length\"]]");
-    let TypeExpr::Tuple { elements, .. } = &tuple else {
-        panic!("the answer is a tuple");
-    };
-    assert_eq!(elements.len(), 1);
-    assert_eq!(members(&elements[0].ty), set(["1", "2"]));
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let tuple = answer_with_options(
+            "",
+            "[[1, 2?][\"length\"]]",
+            None,
+            strict_null_checks,
+            no_implicit_any,
+        );
+        let TypeExpr::Tuple { elements, .. } = &tuple else {
+            panic!("the answer is a tuple");
+        };
+        assert_eq!(elements.len(), 1);
+        assert_eq!(
+            members(&elements[0].ty),
+            set(["1", "2"]),
+            "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}"
+        );
+    }
     let mixed = answer(
         "type P = { a: 1; b: 2 };\ntype X = { a: 1 };\n",
         "[keyof P, X[\"a\"]]",
@@ -143,10 +193,19 @@ fn a_closed_access_in_a_tuple_element_reads_the_member() {
 #[test]
 fn a_closed_keyof_in_a_union_reduces_over_its_keys() {
     let source = "type P = { a: 1; b: 2 };\n";
-    assert_eq!(
-        members(&answer(source, "keyof P | 3")),
-        set(["'a'", "'b'", "3"])
-    );
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        assert_eq!(
+            members(&answer_with_options(
+                source,
+                "keyof P | 3",
+                None,
+                strict_null_checks,
+                no_implicit_any,
+            )),
+            set(["'a'", "'b'", "3"]),
+            "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}"
+        );
+    }
     assert_eq!(
         members(&answer(source, "keyof P | \"a\"")),
         set(["'a'", "'b'"])
@@ -154,22 +213,86 @@ fn a_closed_keyof_in_a_union_reduces_over_its_keys() {
 }
 
 /// Measured on TypeScript 7.0.2: `RouteNamedMap["r19"]["params"] | string
-/// | undefined` is `undefined | string | { id19: string; }`, and inside an
-/// object property the same chain is `{ id19: string; }`.
+/// | undefined` is `undefined | string | { id19: string; }` with strict
+/// null checks, and omits `undefined` without them. Inside an object
+/// property the same chain is `{ id19: string; }`.
 #[test]
 fn a_closed_access_chain_in_a_union_member_reads_the_member() {
     let source = "interface RouteNamedMap { r19: { params: { id19: string } } }\n";
-    assert_eq!(
-        members(&answer(
-            source,
-            "RouteNamedMap[\"r19\"][\"params\"] | string | undefined"
-        )),
-        set(["{ id19: string }", "string", "undefined"])
-    );
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let expected = if strict_null_checks {
+            set(["{ id19: string }", "string", "undefined"])
+        } else {
+            set(["{ id19: string }", "string"])
+        };
+        assert_eq!(
+            members(&answer_with_options(
+                source,
+                "RouteNamedMap[\"r19\"][\"params\"] | string | undefined",
+                None,
+                strict_null_checks,
+                no_implicit_any,
+            )),
+            expected,
+            "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}"
+        );
+    }
     assert_eq!(
         display(&answer(source, "{ p: RouteNamedMap[\"r19\"][\"params\"] }")),
         "{ p: { id19: string } }"
     );
+}
+
+/// Identical syntax in strict and loose projects shares a graph, but a
+/// published union's nullability follows its declaring project even on
+/// alternating warm reads. A cold Navigate keeps the authored union;
+/// an Expanded answer may subsequently backfill that narrower demand.
+#[test]
+fn expanded_union_nullability_follows_its_project_on_warm_reads() {
+    let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
+        crate::HostConfig::default(),
+        &[
+            ("/strict", r#"{ "compilerOptions": { "strict": true } }"#),
+            (
+                "/loose",
+                r#"{ "compilerOptions": { "strict": true, "strictNullChecks": false } }"#,
+            ),
+        ],
+    );
+    for canonical in ["/strict/scenario.ts", "/loose/scenario.ts"] {
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(canonical.into()),
+                input_id: canonical.into(),
+                source: Arc::from("type __Probe = string | undefined;\nexport {};"),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: vec![],
+            })
+            .expect("fixture admitted");
+    }
+    let navigated = resolve_answer(&host, "/loose/scenario.ts", Some(ProjectionMode::Navigate));
+    assert!(
+        members(&navigated).contains("undefined"),
+        "a cold Navigate keeps the authored nullability carrier: {}",
+        display(&navigated)
+    );
+    for canonical in [
+        "/strict/scenario.ts",
+        "/loose/scenario.ts",
+        "/strict/scenario.ts",
+        "/loose/scenario.ts",
+    ] {
+        let expected = if canonical.starts_with("/strict/") {
+            set(["string", "undefined"])
+        } else {
+            set(["string"])
+        };
+        assert_eq!(
+            members(&resolve_answer(&host, canonical, None)),
+            expected,
+            "{canonical}"
+        );
+    }
 }
 
 /// Measured on TypeScript 7.0.2: over `type X = { a: Y }` with `interface

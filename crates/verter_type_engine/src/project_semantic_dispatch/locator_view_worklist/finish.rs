@@ -319,7 +319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
         data: &SemanticNodeData,
-        _inputs: &LocatorViewInputs<'_>,
+        inputs: &LocatorViewInputs<'_>,
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
         deferred_position: bool,
@@ -393,27 +393,60 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Union(arms) => {
+                use verter_session_query::flow::policy::NullabilityPolicy;
+
                 let category = arms.origin_category();
                 let ids: Vec<_> = arms
                     .iter()
                     .map(|arm| projected(memo, *arm, context))
                     .collect();
-                if ids.as_slice() == &***arms {
+                // A published expanded answer belongs to this declaration's
+                // project. Its union uses that project's null algebra; the
+                // shared structural carrier remains policy-neutral/strict.
+                // The canonical builder includes the policy in node identity.
+                let nullability = if context.mode == ProjectionMode::Expanded
+                    && may_reduce_operator(context)
+                {
+                    inputs
+                        .scope
+                        .canonical_file()
+                        .map_or(NullabilityPolicy::Strict, |canonical| {
+                            NullabilityPolicy::from_strict_null_checks(
+                                self.ctx
+                                    .semantic_compiler_options_for(&canonical)
+                                    .strict_null_checks,
+                            )
+                        })
+                } else {
+                    NullabilityPolicy::Strict
+                };
+                let re_decides = self.composite_rebuild_re_decides(category, &ids, true);
+                let erases_nullish = !nullability.is_strict()
+                    && ids.iter().any(|arm| {
+                        matches!(
+                            graph.node_data(*arm).as_deref(),
+                            Some(SemanticNodeData::Primitive(
+                                PrimitiveKind::Null | PrimitiveKind::Undefined
+                            ))
+                        )
+                    });
+                if ids.as_slice() == &***arms && (!erases_nullish || !re_decides) {
                     // Identity projection: nothing to rebuild and nothing to
                     // re-decide — the original carrier (its category, order
-                    // and interned identity) stays exactly itself.
+                    // and interned identity, including alias origin) stays
+                    // exactly itself when no nullable arm must be erased.
                     return node;
                 }
                 if ids.is_empty() {
                     graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
                 } else if ids.len() == 1 {
                     ids[0]
-                } else if self.composite_rebuild_re_decides(category, &ids, true) {
+                } else if re_decides {
                     // The projection of a canonical/authored composite is a
                     // DERIVED result — route it through the canonical
                     // authority (the authored shell stays recoverable via
                     // `node`); a derived multi-arm composite interns Global.
-                    self.intern_normalized_union_or_intersection(&ids, true)
+                    self.intern_normalized_union(&ids, nullability)
                 } else {
                     // Order- and scope-preserving projection rebuild for the
                     // carrier categories whose arm order is semantics.

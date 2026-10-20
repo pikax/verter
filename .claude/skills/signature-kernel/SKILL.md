@@ -77,7 +77,12 @@ Intersections run the strict algebra.
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
 through; its unions run the strict algebra. The flow-return evaluator, which
 answers under its function's own project policy, constructs through
-`intern_normalized_union` with the frame's policy instead. Two composite
+`intern_normalized_union` with the frame's policy instead. Published Expanded
+locator projections also use this explicit-policy builder with the declaring
+file's `strictNullChecks`; structural-transit and shallow carrier projections
+keep the strict carrier algebra. An unchanged authored arm list containing
+nullish arms still reduces when published under erased nullability; unchanged
+non-null unions retain their existing identity and alias origin. Two composite
 constructions are deliberately outside the funnel, both
 `CompositeList::ordered_carrier` mints, and both for the same reason — an
 ordered carrier is an authored sequence, not a commutative intersection, and

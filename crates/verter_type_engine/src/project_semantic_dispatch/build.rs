@@ -19257,8 +19257,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// operations and projections that construct through this funnel are
     /// shared across projects and do not model `strictNullChecks`. A
     /// producer that answers under one project's policy — the flow-return
-    /// evaluator — constructs through [`Self::intern_normalized_union`]
-    /// with that policy instead.
+    /// evaluator or a published Expanded locator projection — constructs
+    /// through [`Self::intern_normalized_union`] with that policy instead.
     /// The union an intersection of `arms` denotes when an arm is a union —
     /// the checker's distribution (`getIntersectionType`), even where the
     /// canonical construction keeps the written intersection as its printed
