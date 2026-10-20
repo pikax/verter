@@ -1350,6 +1350,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.connected_demand.has_tripped()
     }
 
+    /// The meter a canonical construction inside this dispatch's connected
+    /// demand pays before it builds: a distribution's cross product is
+    /// charged to this demand's ledger, work units and construction bytes,
+    /// before its first constituent exists. Outside any connected demand
+    /// there is no ledger to pay: the construction is weighed against the
+    /// checker's limit and charged to nothing, so it never reads a trip an
+    /// earlier demand left behind.
+    pub(super) fn construction_meter(&self) -> canonical_algebra::ConstructionMeter<'_> {
+        if !self.connected_demand.is_active() {
+            return canonical_algebra::ConstructionMeter::UNMETERED;
+        }
+        canonical_algebra::ConstructionMeter::charged(&self.connected_demand)
+    }
+
     pub fn charge_connected_work(&self) -> Result<(), crate::semantic_query::PartialReasonSet> {
         self.charge_connected_work_observed(self.snapshot.flags().is_cancelled())
     }
@@ -1922,8 +1936,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => {}
             _ => return None,
         }
-        self.connected_demand
-            .apply_refusal(prefix.work, prefix.bytes, prefix.trip);
+        self.connected_demand.apply_refusal(
+            prefix.work,
+            prefix.bytes,
+            prefix.advisory_bytes,
+            prefix.trip,
+        );
         crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&summary.carrier);
         let read = summary.read.clone();
         self.fold_local_partial_completeness(read.partial_reasons());
@@ -1977,7 +1995,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if trip.is_empty() && !reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
             return;
         }
-        let (work, bytes) = self.connected_demand.charged();
+        let (work, bytes, advisory_bytes) = self.connected_demand.charged();
         let request = match (
             crate::request_context::current_request_budget(),
             root.request_entry,
@@ -2026,6 +2044,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query_memo::refusal_summary::RefusalPrefix {
                     work,
                     bytes,
+                    advisory_bytes,
                     request,
                     trip,
                 },
@@ -2138,6 +2157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub fn deposit_canonical_evidence(&self, evidence: canonical_algebra::CanonicalEvidence) {
         if evidence.incomplete
             || evidence.refusal.is_some()
+            || !evidence.exhausted.is_empty()
             || !evidence.inspected_file_roots.is_empty()
         {
             self.canonical_evidence_epoch
@@ -2149,6 +2169,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A construction the connected demand could not pay for is a
+        // partial of the rails it exhausted.
+        if !evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(evidence.exhausted);
         }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
@@ -3382,6 +3407,9 @@ impl Drop for DispatchInjectParseFactGuard {
 pub(super) enum ConditionalBranchSelection {
     True,
     False,
+    /// An `any` check takes both branches, with the true branch's inferred
+    /// types fixed by the relation before the union is published.
+    Both,
     /// The checker defers the conditional (`getConditionalType`): an
     /// operand is generic, or the check fails the restrictive relation
     /// while its permissive instantiation still relates. An `error` check
@@ -3390,7 +3418,7 @@ pub(super) enum ConditionalBranchSelection {
     /// The checker decides the conditional and the lane cannot: the
     /// relation it asks is undecided (`Unknown`, a budget, a coinductive
     /// assumption), the `extends` pattern is one the lane does not infer
-    /// from, or an `any` check meets a pattern. The conditional is
+    /// from. The conditional is
     /// published as a typed gap
     /// ([`PartialReasonSet::UNDECIDED_CONDITIONAL`](crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL)),
     /// never as the checker's answer.
