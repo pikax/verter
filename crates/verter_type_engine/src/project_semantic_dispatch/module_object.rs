@@ -66,25 +66,37 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         qualifier: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticQueryKey> {
-        let (root, path) = if let Some(root) = self.export_assignment_root(module) {
-            (root, qualifier)
-        } else {
-            let (first, rest) = qualifier.split_first()?;
-            let table = self.ctx.module_export_table(module)?;
+        let mut module = verter_type_expr::OwnedStr::from(module);
+        let mut path = qualifier;
+        // bounded-loop: each namespace consumes a qualifier segment; work
+        // exhaustion folds a typed partial into the enclosing build.
+        let (root, path) = loop {
+            if let Some(root) = self.export_assignment_root(&module) {
+                break (root, path);
+            }
+            let (first, rest) = path.split_first()?;
+            let table = self.ctx.module_export_table(&module)?;
             self.ctx.observe_borrowed_signature(&table.facts);
-            let Some(Some(ModuleExportBinding::Value(identity))) =
-                table.bindings.get(first.as_ref())
-            else {
-                return None;
-            };
-            (
-                file_root(
-                    &identity.canonical_id,
-                    identity.owner,
-                    &identity.symbol_name,
-                ),
-                rest,
-            )
+            match table.bindings.get(first.as_ref())?.as_ref()? {
+                ModuleExportBinding::Value(identity) => {
+                    break (
+                        file_root(
+                            &identity.canonical_id,
+                            identity.owner,
+                            &identity.symbol_name,
+                        ),
+                        rest,
+                    );
+                }
+                ModuleExportBinding::Namespace(dependency) => {
+                    if let Err(reasons) = self.connected_demand().charge_units(1) {
+                        self.fold_local_partial_completeness(reasons);
+                        return None;
+                    }
+                    module = dependency.clone();
+                    path = rest;
+                }
+            }
         };
         Some(self.typeof_key_with_path(
             root,
