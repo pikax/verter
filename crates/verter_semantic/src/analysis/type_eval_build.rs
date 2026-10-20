@@ -1791,6 +1791,9 @@ fn instance_element_names(element: &ClassElement<'_>, source: &str) -> std::vec:
         ClassElement::PropertyDefinition(prop) if !prop.r#static => {
             class_member_spelling(&prop.key, source)
         }
+        ClassElement::AccessorProperty(property) if !property.r#static => {
+            class_member_spelling(&property.key, source)
+        }
         ClassElement::MethodDefinition(method)
             if method.kind == MethodDefinitionKind::Constructor =>
         {
@@ -3395,14 +3398,61 @@ fn collect_named_class_selecting(
                     members.push(ObjectMember::Method(signature));
                 }
             }
-            // `ClassElement::AccessorProperty` (the `accessor` keyword)
-            // deliberately does NOT fold — accessor lowering is out of the
-            // producer's scope on both the constructor (static) and
-            // instance surfaces. The future accessor-projection contract is
-            // tracked by the ignored
-            // `decorators_identity_accessor_decorator_publishes_public_property`
-            // typeinfo test; landing it means projecting the accessor's
-            // PUBLIC get/set surface, not folding the raw property shape.
+            ClassElement::AccessorProperty(property) => {
+                // An `accessor` field declares a get / set pair over private
+                // storage: to every reader it is one mutable PROPERTY of its
+                // annotated type, else its initializer's widened type, else
+                // `any`. `static` selects the constructor shape; a
+                // `#private` one is a private member, never a static one.
+                if property.r#static && matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let ty = property
+                    .type_annotation
+                    .as_ref()
+                    .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                    .or_else(|| {
+                        property.value.as_ref().map(|value| {
+                            infer_declaration_or_unknown(
+                                value,
+                                source,
+                                TopLevelLiteralPolicy::Widen,
+                                &mut inference_unavailable,
+                            )
+                        })
+                    })
+                    .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+                let spans = MemberSpans {
+                    declaration: Some(verter_span::Span::new(
+                        property.span.start,
+                        property.span.end,
+                    )),
+                    name: Some(verter_span::Span::new(
+                        property.key.span().start,
+                        property.key.span().end,
+                    )),
+                    type_annotation: property.type_annotation.as_ref().map(|ta| {
+                        verter_span::Span::new(
+                            ta.type_annotation.span().start,
+                            ta.type_annotation.span().end,
+                        )
+                    }),
+                };
+                let member =
+                    ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
+                        class_member_key(&property.key, source),
+                        ty,
+                        false,
+                        false,
+                        class_member_visibility(&property.key, property.accessibility),
+                        spans,
+                    ));
+                if property.r#static {
+                    static_members.push(member);
+                } else {
+                    members.push(member);
+                }
+            }
             _ => {}
         }
     }

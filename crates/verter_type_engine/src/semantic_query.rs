@@ -4643,6 +4643,115 @@ fn known_key_accessor<'a>(
     (accessor.getter.is_some() || accessor.setter.is_some()).then_some(accessor)
 }
 
+/// The accessors among a mapping source's `members`, by the key each names:
+/// for every key whose public members are all `get` / `set`, whether the
+/// accessor is `readonly` (it has no setter). A mapping maps such a key as
+/// the one property its readers see, reading its value through the key
+/// ([`SurfaceView::project_known_key_accessor`]) only when the mapping needs
+/// it, never as the accessor function.
+pub(crate) fn accessor_readonly_by_key(
+    members: &[SurfaceMember],
+) -> rustc_hash::FxHashMap<PropertyKey, bool> {
+    let mut groups: rustc_hash::FxHashMap<PropertyKey, Option<bool>> =
+        rustc_hash::FxHashMap::default();
+    for member in members
+        .iter()
+        .filter(|member| member.visibility.is_public())
+    {
+        let Some(key) = member.key.cloned_known() else {
+            continue;
+        };
+        let kind = member.method_kind;
+        let group = groups.entry(key).or_insert(Some(true));
+        *group = match (*group, kind) {
+            (Some(readonly), Some(verter_type_expr::ObjectMethodKind::Get)) => Some(readonly),
+            (Some(_), Some(verter_type_expr::ObjectMethodKind::Set)) => Some(false),
+            _ => None,
+        };
+    }
+    groups
+        .into_iter()
+        .filter_map(|(key, readonly)| Some((key, readonly?)))
+        .collect()
+}
+
+/// `members` with every accessor read as the one PROPERTY its readers see
+/// ([`KnownKeyAccessor::property_member`]): the public `get` / `set`
+/// members one key names become a single member at the position of the
+/// first, valued at the accessor's read type and `readonly` when it has no
+/// setter. The checker's `getPropertiesOfType` gives one property per
+/// accessor, so a mapped type, `keyof` or `Pick` reading a source's members
+/// reads these. A key whose members are not all accessors, or whose
+/// accessor carries no read type, keeps its members as declared.
+pub(crate) fn members_with_accessors_as_properties(
+    members: Vec<SurfaceMember>,
+    graph: &impl NodeRead,
+    materialize: impl Fn(SemanticNodeId) -> SemanticNodeId,
+) -> Vec<SurfaceMember> {
+    match accessor_property_slots(&members, graph, materialize) {
+        Some(slots) => slots.into_iter().flatten().collect(),
+        None => members,
+    }
+}
+
+/// [`members_with_accessors_as_properties`] slot by slot: for each of
+/// `members`, the member a reader sees in its place, `None` where an
+/// accessor's earlier member already stands for it. `None` overall when no
+/// member is an accessor, so a caller keeps its members untouched.
+pub(crate) fn accessor_property_slots(
+    members: &[SurfaceMember],
+    graph: &impl NodeRead,
+    materialize: impl Fn(SemanticNodeId) -> SemanticNodeId,
+) -> Option<Vec<Option<SurfaceMember>>> {
+    let is_accessor = |member: &SurfaceMember| {
+        member.visibility.is_public()
+            && matches!(
+                member.method_kind,
+                Some(
+                    verter_type_expr::ObjectMethodKind::Get
+                        | verter_type_expr::ObjectMethodKind::Set
+                )
+            )
+    };
+    if !members.iter().any(is_accessor) {
+        return None;
+    }
+    let spelling = |member: &SurfaceMember| member.key.cloned_known().map(property_spelling);
+    let mut by_spelling: rustc_hash::FxHashMap<PropertyKey, Vec<usize>> =
+        rustc_hash::FxHashMap::default();
+    for (ordinal, member) in members.iter().enumerate() {
+        if member.visibility.is_public() {
+            if let Some(key) = spelling(member) {
+                by_spelling.entry(key).or_default().push(ordinal);
+            }
+        }
+    }
+    let mut collapsed: rustc_hash::FxHashSet<PropertyKey> = rustc_hash::FxHashSet::default();
+    let slots = members
+        .iter()
+        .map(|member| {
+            let Some(key) = spelling(member).filter(|_| is_accessor(member)) else {
+                return Some(member.clone());
+            };
+            if collapsed.contains(&key) {
+                return None;
+            }
+            let property = by_spelling.get(&key).and_then(|ordinals| {
+                known_key_accessor(ordinals.iter().map(|ordinal| &members[*ordinal]))
+                    .and_then(|accessor| accessor.property_member(graph, &materialize))
+            });
+            match property {
+                Some(property) => {
+                    collapsed.insert(key);
+                    Some(property)
+                }
+                None => Some(member.clone()),
+            }
+        })
+        .collect();
+    Some(slots)
+}
+
 /// The one spelling of the JS property `key` addresses: a string that is
 /// the canonical spelling of an admissible integer is that number, so two
 /// keys collide under element access exactly when their spellings are

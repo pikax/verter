@@ -1075,6 +1075,24 @@ fn index_named_class(
                     instance_members.push(header);
                 }
             }
+            ClassElement::AccessorProperty(property) => {
+                // An `accessor` field is one mutable property to its readers.
+                if matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let header = MemberHeader {
+                    key: lower_property_key(&property.key, ctx.source),
+                    method_kind: None,
+                    has_implementation_body: false,
+                    optional: false,
+                    readonly: false,
+                };
+                if property.r#static {
+                    static_members.push(header);
+                } else {
+                    instance_members.push(header);
+                }
+            }
             ClassElement::MethodDefinition(method) => {
                 if method.kind == MethodDefinitionKind::Constructor {
                     continue;

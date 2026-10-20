@@ -986,14 +986,14 @@
       "function": "decorators_accessor_decorator_returning_same_target_publishes_public_property",
       "block": "U2.CLASS_SURFACES",
       "capability": "ClassFeatures",
-      "status": "ignored"
+      "status": "running_unratified"
     },
     {
       "file": "decorators.rs",
       "function": "decorators_identity_accessor_decorator_publishes_public_property",
       "block": "U2.CLASS_SURFACES",
       "capability": "ClassFeatures",
-      "status": "ignored"
+      "status": "running_unratified"
     },
     {
       "file": "function_advanced.rs",

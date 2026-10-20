@@ -5019,9 +5019,20 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 // Removing optionality consumes the authored
                                 // value before a member read adds absence. This
                                 // preserves explicit undefined in exact mode.
+                                // An accessor's stored member is its accessor
+                                // function: its value is read through the key.
                                 let stored = (mapper.optionality == crate::semantic_query::OptionalityMod::Remove)
                                     .then(|| self.dispatch.mapped_source_member(source, key_arg))
-                                    .flatten();
+                                    .flatten()
+                                    .filter(|member| {
+                                        !matches!(
+                                            member.method_kind,
+                                            Some(
+                                                verter_type_expr::ObjectMethodKind::Get
+                                                    | verter_type_expr::ObjectMethodKind::Set
+                                            )
+                                        )
+                                    });
                                 if let Some(member) = stored {
                                     member.value
                                 } else {
@@ -9374,6 +9385,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             index
         });
+        let source_accessors = source_members
+            .as_deref()
+            .map(crate::semantic_query::accessor_readonly_by_key)
+            .unwrap_or_default();
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9439,12 +9454,15 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         source_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
+                // An accessor maps as the property it is: `readonly`
+                // without a setter, its value read through the key.
+                let source_accessor_readonly = source_accessors.get(&key.key).copied();
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
-                    crate::semantic_query::ReadonlyMod::Keep => {
-                        source_member.map(|m| m.readonly).unwrap_or(false)
-                    }
+                    crate::semantic_query::ReadonlyMod::Keep => source_accessor_readonly
+                        .or(source_member.map(|m| m.readonly))
+                        .unwrap_or(false),
                 };
                 // Identity fast path — use source_member.value
                 // verbatim when the source enumeration captured a
@@ -9476,7 +9494,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 // Conditional carrier shell. Without this, the
                 // graph-native slot-binding consumer's `Function`-arm
                 // match would fail at the publication boundary.
-                let value = if let (Some(sm), true) = (source_member, value_is_identity) {
+                let value_member = source_member.filter(|_| source_accessor_readonly.is_none());
+                let value = if let (Some(sm), true) = (value_member, value_is_identity) {
                     sm.value
                 } else if value_is_identity {
                     match self.execute_read_folding_partial(SemanticQueryKey::IndexedAccess {

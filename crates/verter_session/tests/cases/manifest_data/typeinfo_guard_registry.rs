@@ -641,7 +641,7 @@ struct RowRegistryCounts {
 }
 
 #[rustfmt::skip]
-const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 365, ignored: 95, running_unratified: 203, lifted: 67, superseded: 0 };
+const ROW_REGISTRY_COUNTS: RowRegistryCounts = RowRegistryCounts { baseline: 365, ignored: 93, running_unratified: 205, lifted: 67, superseded: 0 };
 
 /// Per-block row-registry counts (same derivation; every block appears,
 /// zero-row blocks included).
@@ -669,7 +669,7 @@ const ROW_REGISTRY_PER_BLOCK: &[RowRegistryBlockCounts] = &[
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Utilities, total: 32, ignored: 9, running_unratified: 23, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2IndexedAccess, total: 25, ignored: 4, running_unratified: 5, lifted: 16, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2MappedTemplate, total: 18, ignored: 6, running_unratified: 7, lifted: 5, superseded: 0 },
-    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ClassSurfaces, total: 37, ignored: 21, running_unratified: 12, lifted: 4, superseded: 0 },
+    RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ClassSurfaces, total: 37, ignored: 19, running_unratified: 14, lifted: 4, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2Enums, total: 7, ignored: 0, running_unratified: 7, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2ModuleAugmentation, total: 4, ignored: 0, running_unratified: 4, lifted: 0, superseded: 0 },
     RowRegistryBlockCounts { block_id: TypeInfoParityBlockId::U2JsxFoundations, total: 7, ignored: 0, running_unratified: 7, lifted: 0, superseded: 0 },

@@ -35,9 +35,9 @@ const SCENARIO: &str = "/expand/scenario.ts";
 type Work = [(&'static str, u64); 3];
 
 /// A named demand's wire answer and the work it took.
-struct Answer {
+pub(super) struct Answer {
     wire: Vec<u8>,
-    answer: TypeExpr,
+    pub(super) answer: TypeExpr,
     work: Work,
 }
 
@@ -46,7 +46,7 @@ struct Answer {
 /// decodes it: with no depth limit, since a deep answer (a heritage chain's
 /// tuple nested a hundred levels) nests deeper than a default decoder
 /// allows.
-fn named_answer(source: &str, probe: &str) -> Answer {
+pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig::default(),
         &[("/expand", r#"{ "compilerOptions": { "strict": true } }"#)],
@@ -89,7 +89,7 @@ fn named_answer(source: &str, probe: &str) -> Answer {
     Answer { wire, answer, work }
 }
 
-fn display(expr: &TypeExpr) -> String {
+pub(super) fn display(expr: &TypeExpr) -> String {
     verter_type_expr::render_type_expr_display(expr)
         .expect("the answer renders")
         .text

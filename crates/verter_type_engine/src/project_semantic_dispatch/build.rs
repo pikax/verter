@@ -10954,6 +10954,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     })
                     .map(crate::semantic_query::SurfaceMember::clone)
                     .collect();
+                // `Pick` is a mapping over the source's properties: an
+                // accessor maps as the property it is.
+                let picked = crate::semantic_query::members_with_accessors_as_properties(
+                    picked,
+                    self.graph(),
+                    |signature| self.materialize_returned_callable(signature),
+                );
                 let result_surface = SurfaceView::from_members(picked, None);
                 let result = graph.intern_node(SemanticNodeData::Object(result_surface));
                 record_utility_edges(result);
@@ -11038,7 +11045,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &surface.construct_signatures,
                     &omitted_event_names,
                 );
-                let entries = surface
+                let entries: Vec<SurfaceEntry> = surface
                     .entries
                     .iter()
                     .filter_map(|entry| match entry {
@@ -11065,6 +11072,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         _ => None,
                     })
                     .collect();
+                // `Omit` is a mapping over the source's kept properties: an
+                // accessor maps as the property it is.
+                let kept_members: Vec<SurfaceMember> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        SurfaceEntry::Member(member) => Some(member.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                let entries = match crate::semantic_query::accessor_property_slots(
+                    &kept_members,
+                    self.graph(),
+                    |signature| self.materialize_returned_callable(signature),
+                ) {
+                    Some(slots) => {
+                        let mut slots = slots.into_iter();
+                        entries
+                            .into_iter()
+                            .filter_map(|entry| match entry {
+                                SurfaceEntry::Member(_) => {
+                                    slots.next().flatten().map(SurfaceEntry::Member)
+                                }
+                                other => Some(other),
+                            })
+                            .collect()
+                    }
+                    None => entries,
+                };
                 let result_surface = SurfaceView::from_entries(
                     entries,
                     surface.keyspace,
@@ -15219,6 +15254,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source_member_index.entry(key).or_insert(member);
             }
         }
+        let source_accessors = crate::semantic_query::accessor_readonly_by_key(&source_members);
         for key in &keys {
             // Cancellation before this key's remap substitution AND before
             // its value force — the two per-key forcing points.
@@ -15253,6 +15289,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             };
             let source_member = source_member_index.get(&key.key).copied();
+            // An accessor maps as the property it is: `readonly` without a
+            // setter, its value read through the key, never the accessor.
+            let source_accessor_readonly = source_accessors.get(&key.key).copied();
             let optional = match mapper.optionality {
                 crate::semantic_query::OptionalityMod::Add => true,
                 crate::semantic_query::OptionalityMod::Remove => false,
@@ -15263,9 +15302,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let readonly = match mapper.readonly {
                 crate::semantic_query::ReadonlyMod::Add => true,
                 crate::semantic_query::ReadonlyMod::Remove => false,
-                crate::semantic_query::ReadonlyMod::Keep => {
-                    source_member.map(|m| m.readonly).unwrap_or(false)
-                }
+                crate::semantic_query::ReadonlyMod::Keep => source_accessor_readonly
+                    .or(source_member.map(|m| m.readonly))
+                    .unwrap_or(false),
             };
             // Value selection branches:
             //
@@ -15305,7 +15344,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 cancelled = true;
                 break;
             }
-            let value = if let (Some(source_member), true) = (source_member, value_is_identity) {
+            let value_member = source_member.filter(|_| source_accessor_readonly.is_none());
+            let value = if let (Some(source_member), true) = (value_member, value_is_identity) {
                 source_member.value
             } else if value_is_identity {
                 let read = self.execute_read(SemanticQueryKey::IndexedAccess {
