@@ -593,7 +593,25 @@ impl crate::VerterHost {
                     &mut probes,
                 );
                 if fresh {
-                    pending.extend(children.into_iter().flatten().map(|file| file.to_string()));
+                    // Descend only into files this program has not discovered
+                    // yet. A discovered child that did not change keeps its
+                    // closure: an entry stale against the new publication is
+                    // re-read where an order consumes it, so re-walking it
+                    // here would re-read the whole import closure below every
+                    // changed file on every upsert.
+                    let discovered = index.discovered.read();
+                    pending.extend(
+                        children
+                            .into_iter()
+                            .flatten()
+                            .filter(|child| {
+                                !discovered.contains_key(&(
+                                    Arc::from(tsconfig_path.as_str()),
+                                    Arc::clone(child),
+                                ))
+                            })
+                            .map(|file| file.to_string()),
+                    );
                 }
             }
         }
