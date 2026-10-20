@@ -41,6 +41,11 @@ pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static OMIT_KEY_FILTER_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
 /// that exceeds it has NOT established its root set and the result it
@@ -555,6 +560,12 @@ pub(super) struct InferScan {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// Native Omit key insertions and membership probes on this thread.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn omit_key_filter_steps_for_tests() -> usize {
+        OMIT_KEY_FILTER_STEPS.with(std::cell::Cell::get)
+    }
+
     /// Collect the observed self-roots of a set of input `SemanticNodeId`s.
     ///
     /// A node kind keyed by already-interned input nodes (`ProjectPath` /
@@ -11155,7 +11166,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return (QueryResult::Value(result), fence, false, None);
                     }
                 };
-                let omit_set: FxHashSet<&PropertyKey> = omit_names.iter().collect();
+                let omit_set: FxHashSet<&PropertyKey> = omit_names
+                    .iter()
+                    .inspect(|_| {
+                        #[cfg(any(test, feature = "test-support"))]
+                        OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
+                    })
+                    .collect();
                 let omitted_event_names: FxHashSet<&str> = omit_names
                     .iter()
                     .filter_map(PropertyKey::as_string)
@@ -11189,10 +11206,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .filter_map(|entry| match entry {
                         SurfaceEntry::Member(member)
                             if member.visibility.is_public()
-                                && member
-                                    .key
-                                    .cloned_known()
-                                    .is_none_or(|key| !omit_set.contains(&key)) =>
+                                && member.key.cloned_known().is_none_or(|key| {
+                                    #[cfg(any(test, feature = "test-support"))]
+                                    OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
+                                    !omit_set.contains(&key)
+                                }) =>
                         {
                             Some(entry.clone())
                         }
@@ -13738,10 +13756,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .iter()
             .map(|arm| self.resolve_signature_source_carrier(*arm, published))
             .collect();
-        super::canonical_algebra::object_arms_conflict_on_a_literal_property(
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let conflicts = super::canonical_algebra::object_arms_conflict_on_a_literal_property(
             self.graph(),
             &surfaces,
-        )
+            self.construction_meter(),
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
+        conflicts
     }
 
     /// `keyof` over a union or intersection as the checker's `getIndexType`
@@ -16836,7 +16859,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_audit::attribute!(ReduceUnion);
             self.build_normalize_composite(
                 members,
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability),
+                super::canonical_algebra::intern_ordered_union_charged(
+                    self.graph(),
+                    members,
+                    nullability,
+                    self.construction_meter(),
+                ),
             )
         }
     }
@@ -16847,13 +16875,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         /// [`Self::build_reduce_union`]; the algebra additionally applies
         /// the intersection lattice laws and the PROVEN-disjoint scalar
         /// collapse (`string & number = never`). Operand order is preserved.
+        /// The purpose selects a derived intersection's reduction or a
+        /// written type node's, which keeps the written `string & {}` pair.
         fn build_reduce_intersection(
             &self,
             input: crate::semantic_query::IntersectionInputRef,
-            _purpose: crate::semantic_query::IntersectionPurpose,
+            purpose: crate::semantic_query::IntersectionPurpose,
             context: crate::semantic_query::SemanticContextId,
         ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
             verter_audit::attribute!(ReduceIntersection);
+            let reduce = |members: &[SemanticNodeId]| match purpose {
+                crate::semantic_query::IntersectionPurpose::CheckerReduction => {
+                    super::canonical_algebra::intern_ordered_intersection_charged(
+                        self.graph(),
+                        members,
+                        self.construction_meter(),
+                    )
+                }
+                crate::semantic_query::IntersectionPurpose::WrittenTypeNode(nullability) => {
+                    super::canonical_algebra::intern_written_intersection_charged(
+                        self.graph(),
+                        members,
+                        nullability,
+                        self.construction_meter(),
+                    )
+                }
+            };
             if let Some(steps) = input.as_steps() {
                 let mut members: Vec<SemanticNodeId> = Vec::with_capacity(steps.len());
                 for step in steps.iter() {
@@ -16880,16 +16927,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 let members: Arc<[SemanticNodeId]> = Arc::from(members.into_boxed_slice());
-                self.build_normalize_composite(
-                    &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
-                )
+                self.build_normalize_composite(&members, reduce(&members))
             } else {
                 let members: Arc<[SemanticNodeId]> = Arc::from(input.as_ordered_values());
-                self.build_normalize_composite(
-                    &members,
-                    super::canonical_algebra::intern_ordered_intersection(self.graph(), &members),
-                )
+                self.build_normalize_composite(&members, reduce(&members))
             }
         }
     }
@@ -16937,6 +16978,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A distribution the connected demand could not pay for is the
+        // written composite, a partial of the rails it exhausted.
+        if !composite.evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(composite.evidence.exhausted);
         }
         output
     }
@@ -19516,6 +19562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             arms,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
             super::canonical_algebra::DistributionOrigin::Distributed,
+            self.construction_meter(),
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
@@ -19546,10 +19593,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     crate::semantic_query::QueryResult::Value(node) => node,
                     crate::semantic_query::QueryResult::Recursive(node) => node,
                     crate::semantic_query::QueryResult::Error(_) => {
-                        let composite = super::canonical_algebra::intern_ordered_intersection(
-                            self.graph(),
-                            members,
-                        );
+                        let composite =
+                            super::canonical_algebra::intern_ordered_intersection_charged(
+                                self.graph(),
+                                members,
+                                self.construction_meter(),
+                            );
                         self.deposit_canonical_evidence(composite.evidence);
                         composite.node
                     }
@@ -19570,8 +19619,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             members: &[SemanticNodeId],
             nullability: verter_session_query::flow::policy::NullabilityPolicy,
         ) -> SemanticNodeId {
-            let composite =
-                super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+            let composite = super::canonical_algebra::intern_ordered_union_charged(
+                self.graph(),
+                members,
+                nullability,
+                self.construction_meter(),
+            );
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
         }

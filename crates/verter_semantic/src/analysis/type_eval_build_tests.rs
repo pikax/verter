@@ -2540,36 +2540,21 @@ fn let_widens_array_element_literals() {
 // satisfies expression inference
 // =============================================================================
 
+/// A `satisfies` object literal is contextually typed by its `satisfies`
+/// type, which decides the literals its members keep (`{ x: 1 } satisfies
+/// { x: number }` is `{ x: number }`, `satisfies { x: 1 }` keeps `1`):
+/// the declaration stores no syntactic type and is served as its
+/// evaluated initializer, as an initializer whose methods need the
+/// context is.
 #[test]
-fn satisfies_preserves_underlying_value_type() {
-    let parts =
-        lowered(r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#);
+fn satisfies_object_initializer_is_served_as_its_evaluated_value() {
+    let source = r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#;
+    let parts = lowered(source);
     let decl = parts.value_decl("config").expect("lowered config");
-    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
-        panic!(
-            "satisfies should infer the underlying object literal type, got {:?}",
-            decl.type_annotation
-        );
-    };
-
-    // The value type should have literal/inferred properties from the expression,
-    // not abstract types from the satisfies annotation
-    let x_prop = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "x" => {
-            Some(&p.ty)
-        }
-        _ => None,
-    });
-    assert!(
-        x_prop.is_some(),
-        "satisfies result should include x property from the value"
-    );
-
-    // x should be a number literal (1), not just `number`
-    assert!(
-        matches!(x_prop.unwrap(), TypeExpr::Literal(LiteralValue::Number(_))),
-        "satisfies should preserve literal types from the value expression, got {:?}",
-        x_prop,
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        source.find('{').map(|offset| offset as u32)
     );
 }
 

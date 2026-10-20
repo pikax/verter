@@ -646,6 +646,8 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the evaluation's own identity, a pure function of that identity, so
     /// every admission of it shares one receipt.
     self_evaluation_receipts: SelfEvaluationReceipts,
+    /// Literal target membership shared by the queries of one operation.
+    literal_union_indexes: relation::LiteralUnionIndexes,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -711,6 +713,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
 pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
+    literal_union_indexes: &'g relation::LiteralUnionIndexes,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
@@ -721,6 +724,8 @@ impl Drop for DispatchOperation<'_> {
         let depth = self.depth.get() - 1;
         self.depth.set(depth);
         if depth == 0 {
+            let indexes = std::mem::take(&mut *self.literal_union_indexes.borrow_mut());
+            drop(indexes);
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -1124,6 +1129,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             published_results: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
+            literal_union_indexes: Default::default(),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
@@ -1188,6 +1194,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             published_results,
             request_local_open,
             self_evaluation_receipts,
+            literal_union_indexes,
             driven_root_traced,
             decision_seam,
             call_seam,
@@ -1230,6 +1237,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         published_results.swap(&other.published_results);
         request_local_open.swap(&other.request_local_open);
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
+        literal_union_indexes.swap(&other.literal_union_indexes);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
@@ -1253,6 +1261,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         DispatchOperation {
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
+            literal_union_indexes: &self.literal_union_indexes,
             demand: &self.connected_demand,
             owner,
         }
@@ -1348,6 +1357,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// budget, not a semantic verdict.
     pub fn connected_demand_tripped(&self) -> bool {
         self.connected_demand.has_tripped()
+    }
+
+    /// The meter a canonical construction inside this dispatch's connected
+    /// demand pays before it builds: a distribution's cross product is
+    /// charged to this demand's ledger, work units and construction bytes,
+    /// before its first constituent exists. Outside any connected demand
+    /// there is no ledger to pay: the construction is weighed against the
+    /// checker's limit and charged to nothing, so it never reads a trip an
+    /// earlier demand left behind.
+    pub(super) fn construction_meter(&self) -> canonical_algebra::ConstructionMeter<'_> {
+        if !self.connected_demand.is_active() {
+            return canonical_algebra::ConstructionMeter::UNMETERED;
+        }
+        canonical_algebra::ConstructionMeter::charged(&self.connected_demand)
     }
 
     pub fn charge_connected_work(&self) -> Result<(), crate::semantic_query::PartialReasonSet> {
@@ -1922,8 +1945,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => {}
             _ => return None,
         }
-        self.connected_demand
-            .apply_refusal(prefix.work, prefix.bytes, prefix.trip);
+        self.connected_demand.apply_refusal(
+            prefix.work,
+            prefix.bytes,
+            prefix.advisory_bytes,
+            prefix.trip,
+        );
         crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&summary.carrier);
         let read = summary.read.clone();
         self.fold_local_partial_completeness(read.partial_reasons());
@@ -1977,7 +2004,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if trip.is_empty() && !reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
             return;
         }
-        let (work, bytes) = self.connected_demand.charged();
+        let (work, bytes, advisory_bytes) = self.connected_demand.charged();
         let request = match (
             crate::request_context::current_request_budget(),
             root.request_entry,
@@ -2026,6 +2053,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query_memo::refusal_summary::RefusalPrefix {
                     work,
                     bytes,
+                    advisory_bytes,
                     request,
                     trip,
                 },
@@ -2138,6 +2166,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     pub fn deposit_canonical_evidence(&self, evidence: canonical_algebra::CanonicalEvidence) {
         if evidence.incomplete
             || evidence.refusal.is_some()
+            || !evidence.exhausted.is_empty()
             || !evidence.inspected_file_roots.is_empty()
         {
             self.canonical_evidence_epoch
@@ -2149,6 +2178,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::OPERATION_BUDGET,
             );
+        }
+        // A construction the connected demand could not pay for is a
+        // partial of the rails it exhausted.
+        if !evidence.exhausted.is_empty() {
+            self.fold_local_partial_completeness(evidence.exhausted);
         }
         if evidence.incomplete {
             if self.build_local_taint.borrow().is_empty() {
