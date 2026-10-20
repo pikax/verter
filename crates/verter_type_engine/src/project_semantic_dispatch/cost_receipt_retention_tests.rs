@@ -86,6 +86,7 @@ fn a_budget_profile_lives_as_long_as_its_holders() {
     let spec = BudgetProfileSpec {
         work: 7_919,
         bytes: 104_729,
+        construction_byte_refusal: false,
         query_depth: 3,
         instantiation_depth: 5,
         tail_steps: 11,
