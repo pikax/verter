@@ -344,6 +344,9 @@ fn index_top_level_statement(
                 index,
             );
         }
+        Statement::TSImportEqualsDeclaration(import) => {
+            index_namespace_alias(import, ctx, index);
+        }
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             index_declaration(decl, ctx, index);
@@ -434,8 +437,38 @@ fn index_declaration(
                 index,
             );
         }
-        _ => {}
+        Declaration::TSImportEqualsDeclaration(import) => {
+            index_namespace_alias(import, ctx, index);
+        }
     }
+}
+
+/// Index a file-scope `import X = N.M` alias of an entity name: `X` names
+/// whatever `N.M` names, in type, value and namespace position. An
+/// `import X = require("…")` is a module import, recorded by the import
+/// inventory instead.
+fn index_namespace_alias(
+    import: &oxc_ast::ast::TSImportEqualsDeclaration<'_>,
+    ctx: HeaderStatementContext<'_>,
+    index: &mut DeclHeaderIndex,
+) {
+    let target = match &import.module_reference {
+        oxc_ast::ast::TSModuleReference::IdentifierReference(identifier) => {
+            Some(identifier.name.to_string())
+        }
+        oxc_ast::ast::TSModuleReference::QualifiedName(qualified) => {
+            crate::analysis::type_eval_build::heritage_type_name(&qualified.left)
+                .map(|left| format!("{left}.{}", qualified.right.name))
+        }
+        oxc_ast::ast::TSModuleReference::ExternalModuleReference(_) => None,
+    };
+    let Some(target) = target else {
+        return;
+    };
+    index.namespace_aliases.insert(
+        ctx.key(import.id.name.as_str()),
+        std::sync::Arc::from(target),
+    );
 }
 
 /// Index one `enum` declaration's HEADER facts: the member-name inventory

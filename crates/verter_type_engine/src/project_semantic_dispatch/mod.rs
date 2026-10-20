@@ -2882,6 +2882,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value_ref: &verter_type_expr::ValueRef,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticQueryKey> {
+        self.typeof_reference_key_in_scope(canonical, owner, None, value_ref, prc)
+    }
+
+    /// [`Self::typeof_reference_key`] for a reference written in a
+    /// declaration body whose `name_resolution` binds the names its
+    /// enclosing namespaces declare: a path such a name heads reads from the
+    /// namespace member it names ([`namespace_scoped_typeof_root`]).
+    pub(super) fn typeof_reference_key_in_scope(
+        &self,
+        canonical: &verter_type_expr::OwnedStr,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name_resolution: Option<
+            &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        >,
+        value_ref: &verter_type_expr::ValueRef,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticQueryKey> {
+        if let Some((root, consumed)) = name_resolution.and_then(|names| {
+            namespace_scoped_typeof_root(names, canonical.as_ref(), owner, &value_ref.path)
+        }) {
+            let root_key = crate::semantic_query::ValueRootKey {
+                scope: crate::semantic_query::ScopeId {
+                    canonical_id: canonical.clone(),
+                    owner,
+                    local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
+                },
+                name: root,
+            };
+            let rest: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = value_ref.path
+                [consumed..]
+                .iter()
+                .map(|segment| verter_type_expr::OwnedStr::from(segment.as_str()))
+                .collect();
+            return Some(self.typeof_key_with_path(root_key, rest, prc));
+        }
         let (root, rest) = value_ref.path.split_first()?;
         let root_key = crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
@@ -6357,4 +6393,42 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.build_classify_materialization_cycle_gate(key)
         }
     }
+}
+
+/// The namespace member a `typeof` path written in a namespaced declaration's
+/// body heads, as the qualified root it reads from and the number of path
+/// segments that root consumes. `name_resolution` binds each name relative to
+/// an enclosing namespace (`C.v` inside `namespace A.B` to `A.B.C.v`); the
+/// longest bound prefix of the path names the member. `None` when no prefix
+/// is such a namespace-scope binding of `canonical`'s `owner` (a file-scope
+/// name, an import), so the path reads from its written root.
+pub(super) fn namespace_scoped_typeof_root(
+    name_resolution: &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    path: &[String],
+) -> Option<(verter_type_expr::OwnedStr, usize)> {
+    let mut joined = String::new();
+    let mut prefixes = Vec::with_capacity(path.len());
+    for segment in path {
+        if !joined.is_empty() {
+            joined.push('.');
+        }
+        joined.push_str(segment);
+        prefixes.push(joined.clone());
+    }
+    prefixes
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, prefix)| {
+            let identity = name_resolution.get(prefix.as_str())?;
+            let qualified = identity.symbol_name.as_ref();
+            (identity.canonical_id.as_ref() == canonical
+                && identity.owner == owner
+                && qualified.len() > prefix.len()
+                && qualified.ends_with(prefix.as_str())
+                && qualified.as_bytes()[qualified.len() - prefix.len() - 1] == b'.')
+                .then(|| (identity.symbol_name.clone(), index + 1))
+        })
 }

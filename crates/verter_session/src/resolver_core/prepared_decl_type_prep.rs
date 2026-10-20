@@ -440,37 +440,41 @@ pub(super) fn build_value_name_resolution_base(
     Ok(table)
 }
 
-/// Map each DIRECT sibling member of a namespaced declaration's enclosing
-/// namespace to its qualified identity in `name_resolution`, so an unqualified
-/// body reference (`Ref("M")` inside `namespace NS { type V = M }`) resolves to
-/// `NS.M`. A no-op for a non-namespaced declaration (`symbol_name` has no `.`).
-/// Only single-segment direct siblings bind (a deeper-nested `NS.Sub.X` is not
-/// reachable as a bare name from `NS`'s own member bodies).
+/// Map each member of a namespaced declaration's enclosing namespaces to its
+/// qualified identity in `name_resolution`, so a body reference written by
+/// the member's name relative to an enclosing namespace resolves as the
+/// checker's namespace scope does: inside `namespace NS { type V = M }`,
+/// `Ref("M")` is `NS.M`; inside `namespace A.B { type V = C.T }`, `C.T` is
+/// `A.B.C.T`, whichever block of `A.B` declares it. Every enclosing
+/// namespace is a scope, innermost first: `A.B`'s members, then `A`'s. A
+/// member's first segment an inner namespace binds shadows the outer
+/// namespaces' members under that segment. A no-op for a non-namespaced
+/// declaration (`symbol_name` has no `.`).
 ///
-/// Siblings are drawn from the inventory visible for the declaration's `origin`
-/// scope, and ONLY where that sibling has a buildable prepared decl — binding a
-/// sibling the dispatch cannot resolve would dangle, and binding one from a
-/// different scope would leak across scopes:
+/// Members are drawn from the inventory visible for the declaration's
+/// `origin` scope, and ONLY where that member has a buildable prepared decl —
+/// binding a member the dispatch cannot resolve would dangle, and binding one
+/// from a different scope would leak across scopes:
 ///
 /// - File-scope decl (`origin = None`): file-scope `namespace NS { ... }` TYPE
 ///   and VALUE members, indexed under their qualified `NS.M` name in the
-///   file-scope inventory. Both are consumable — a type sibling through the
-///   prepared-type cache, a value sibling through `prepare_local_value_decl`.
+///   file-scope inventory. Both are consumable — a type member through the
+///   prepared-type cache, a value member through `prepare_local_value_decl`.
 /// - Global-augmentation decl (`origin = Global`): global `declare global {
 ///   namespace NS { ... } }` TYPE members, retained under `(Global, "NS.M")`
 ///   and never in file-scope `type_symbols`. TYPE-only: a `(Global, "NS.M")`
 ///   type key is consumable through [`prepare_local_type_decl`]'s global
-///   fallback, but a global VALUE sibling has no prepared-value slot or
+///   fallback, but a global VALUE member has no prepared-value slot or
 ///   fallback, so binding it would dangle. Without this scan an unqualified
 ///   reference inside a global-augmented namespace (e.g. `interface
 ///   IntrinsicElements { div: Common }` referencing the sibling `Common`)
 ///   would not resolve — the valid global `JSX` namespace form.
 /// - Module-augmentation decl (`origin = Module(spec)`): a `(Module(spec),
-///   "NS.M")` sibling has no prepared-decl slot today (the prepared-decl caches
-///   index file-scope + Global-augmentation symbols only), so no module sibling
-///   is consumable. Bind nothing — binding a Global sibling here would leak
+///   "NS.M")` member has no prepared-decl slot today (the prepared-decl caches
+///   index file-scope + Global-augmentation symbols only), so no module member
+///   is consumable. Bind nothing — binding a Global member here would leak
 ///   across scopes. When module-scope prepared decls become addressable, the
-///   matching `(Module(spec), …)` siblings bind here.
+///   matching `(Module(spec), …)` members bind here.
 fn add_namespace_sibling_resolutions(
     name_resolution: &mut FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     state: &ShallowFileState,
@@ -484,60 +488,55 @@ fn add_namespace_sibling_resolutions(
     let Some((namespace_prefix, _)) = symbol_name.rsplit_once('.') else {
         return;
     };
-    let dotted_prefix = format!("{namespace_prefix}.");
-
-    match origin {
-        // File-scope decl: bind file-scope TYPE + VALUE siblings (both
-        // consumable through the prepared-type / prepared-value caches).
-        None => {
-            for key in state
-                .headers
-                .type_headers
-                .keys()
-                .chain(state.headers.value_headers.keys())
-                .filter(|key| key.owner == owner)
-            {
-                let dep_name = key.name.as_ref();
-                if let Some(member) = dep_name.strip_prefix(&dotted_prefix) {
-                    if !member.contains('.') {
-                        name_resolution.insert(
-                            interner.intern(member),
-                            ResolvedRootIdentity::new_in_owner(
-                                canonical_id.clone(),
-                                owner,
-                                interner.intern(dep_name),
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        // Global-augmentation decl: bind global TYPE siblings ONLY — a global
-        // namespace's VALUE members are not modelled as bare-name siblings
-        // (RESTRICT). The key set spans every augmentation scope, so filter
-        // to `Global`.
-        Some(AugmentationScopeKind::Global) => {
-            for (scope, name) in state.augmentation_type_keys() {
-                if !matches!(scope, AugmentationScopeKind::Global) {
-                    continue;
-                }
-                if let Some(member) = name.strip_prefix(&dotted_prefix) {
-                    if !member.contains('.') {
-                        name_resolution.insert(
-                            interner.intern(member),
-                            ResolvedRootIdentity::new_in_owner(
-                                canonical_id.clone(),
-                                owner,
-                                interner.intern(name),
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        // Module-augmentation decl: no consumable module-scope sibling exists
-        // today, so bind nothing rather than dangle a module sibling or leak a
+    let names: Vec<&str> = match origin {
+        // File-scope decl: file-scope TYPE + VALUE members (both consumable
+        // through the prepared-type / prepared-value caches).
+        None => state
+            .headers
+            .type_headers
+            .keys()
+            .chain(state.headers.value_headers.keys())
+            .filter(|key| key.owner == owner)
+            .map(|key| key.name.as_ref())
+            .collect(),
+        // Global-augmentation decl: global TYPE members ONLY — a global
+        // namespace's VALUE members are not modelled as namespace-scope
+        // names (RESTRICT). The key set spans every augmentation scope, so
+        // filter to `Global`.
+        Some(AugmentationScopeKind::Global) => state
+            .augmentation_type_keys()
+            .filter(|(scope, _)| matches!(scope, AugmentationScopeKind::Global))
+            .map(|(_, name)| name)
+            .collect(),
+        // Module-augmentation decl: no consumable module-scope member exists
+        // today, so bind nothing rather than dangle a module member or leak a
         // global one across scopes.
-        Some(AugmentationScopeKind::Module(_)) => {}
+        Some(AugmentationScopeKind::Module(_)) => return,
+    };
+    let mut shadowed: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
+    let mut namespace = Some(namespace_prefix);
+    while let Some(current) = namespace {
+        let dotted_prefix = format!("{current}.");
+        let mut bound: Vec<&str> = Vec::new();
+        for name in &names {
+            let Some(member) = name.strip_prefix(&dotted_prefix) else {
+                continue;
+            };
+            let head = member.split('.').next().unwrap_or(member);
+            if shadowed.contains(head) {
+                continue;
+            }
+            bound.push(head);
+            name_resolution.insert(
+                interner.intern(member),
+                ResolvedRootIdentity::new_in_owner(
+                    canonical_id.clone(),
+                    owner,
+                    interner.intern(name),
+                ),
+            );
+        }
+        shadowed.extend(bound);
+        namespace = current.rsplit_once('.').map(|(outer, _)| outer);
     }
 }

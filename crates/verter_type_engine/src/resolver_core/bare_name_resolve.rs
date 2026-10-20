@@ -201,6 +201,22 @@ pub fn resolve_bare_name_in_scope<C: crate::resolver_core::ResolverCapabilities>
         .ensure_indexed_ready_serve(scope_canonical_id)
         .map(|serve| serve.indexed);
     if let Some(entry) = indexed.as_ref() {
+        // An `import X = N.M` alias names what `N.M` names: a name it heads
+        // resolves as the entity's qualified name.
+        if let Some(expanded) = entry
+            .shallow_state
+            .headers
+            .expand_namespace_alias(scope_owner, name)
+        {
+            return resolve_bare_name_in_scope(
+                ctx,
+                dispatch,
+                scope_canonical_id,
+                scope_owner,
+                scope_payload,
+                &expanded,
+            );
+        }
         if symbol_exists_in_facts(entry.as_ref(), scope_owner, name) {
             return Some(mint_in_owner(scope_owner));
         }

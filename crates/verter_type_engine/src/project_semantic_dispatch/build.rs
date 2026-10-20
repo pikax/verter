@@ -1376,6 +1376,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let shallow = &indexed.shallow_state;
         let observed_hash = indexed.whole_hash;
 
+        // An `import X = N.M` alias names what `N.M` names: a path it heads
+        // reads from the entity's qualified path.
+        if value_root.scope.local_scope.is_none() {
+            if let Some(expanded) = shallow
+                .headers
+                .expand_namespace_alias(value_root.scope.owner, value_root.name.as_ref())
+            {
+                let mut segments = expanded.split('.').map(verter_type_expr::OwnedStr::from);
+                let root = segments
+                    .next()
+                    .expect("a qualified name has a first segment");
+                let aliased_path: Vec<verter_type_expr::OwnedStr> =
+                    segments.chain(path.iter().cloned()).collect();
+                let aliased_root = ValueRootKey {
+                    scope: value_root.scope.clone(),
+                    name: root,
+                };
+                return self.build_typeof(&aliased_root, &aliased_path, context);
+            }
+        }
+
         // A namespace member path: a namespace block has no value surface
         // the path could walk, and its members register under their
         // QUALIFIED names, so `typeof N.M.f` reads the value `N.M.f` names
@@ -2190,6 +2211,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        // A namespace of a class's name merges into its value: the
+        // namespace's exported values are properties of the class's static
+        // side (a function's join in `finish_value_signatures`).
+        let node_id = if synthesised_default.is_none()
+            && prepared.kind == verter_session_query::declarations::ValueDeclKind::Class
+        {
+            match self.namespace_merged_into_value(
+                effective_canonical.as_ref(),
+                effective_owner,
+                effective_symbol.as_ref(),
+                context,
+            ) {
+                Some((object, roots)) => {
+                    augmentation_roots.extend(roots);
+                    self.merged_value_and_namespace(
+                        node_id,
+                        object,
+                        NodeScopeId::File {
+                            canonical_id: value_root.scope.canonical_id.clone(),
+                            owner: value_root.scope.owner,
+                            whole_hash: observed_hash,
+                            local_scope: value_root.scope.local_scope,
+                        },
+                    )
+                }
+                None => node_id,
+            }
+        } else {
+            node_id
+        };
         let output = self.typeof_output(
             node_id,
             composed_partial,
@@ -2454,9 +2505,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.merged_declaration_signatures_node(groups)
         } else {
             let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
-            self.value_signature_surface(signature_nodes, is_class, scope)
+            let surface = self.value_signature_surface(signature_nodes, is_class, scope);
+            // A namespace of the function's name merges into its value: the
+            // namespace's exported values are properties of `typeof f`.
+            let identity = &own.root_identity;
+            let is_function = matches!(
+                own.kind,
+                verter_session_query::declarations::ValueDeclKind::Function
+                    | verter_session_query::declarations::ValueDeclKind::AsyncFunction
+            );
+            match is_function
+                .then(|| {
+                    self.namespace_merged_into_value(
+                        identity.canonical_id.as_ref(),
+                        identity.owner,
+                        identity.symbol_name.as_ref(),
+                        context,
+                    )
+                })
+                .flatten()
+            {
+                Some((object, roots)) => {
+                    augmentation_roots.extend(roots);
+                    self.merged_value_and_namespace(surface, object, scope.clone())
+                }
+                None => surface,
+            }
         };
         (node, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// A function's or a class's value merged with the object of the
+    /// namespace of its name: one merged declaration whose contributors are
+    /// the value, then the namespace, in declaration order. The peer-merge
+    /// reducer keeps the value's call and construct signatures and adds the
+    /// namespace's values as properties.
+    fn merged_value_and_namespace(
+        &self,
+        value: SemanticNodeId,
+        namespace: SemanticNodeId,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        self.graph().intern_node_with_scope(
+            SemanticNodeData::MergedDecl {
+                contributors: crate::semantic_query::PayloadArray::from(
+                    vec![value, namespace].into_boxed_slice(),
+                ),
+            },
+            scope,
+        )
     }
 
     /// A function value's signatures as one surface: its call signatures,

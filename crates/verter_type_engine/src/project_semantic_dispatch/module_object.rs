@@ -401,6 +401,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         ))
     }
 
+    /// The object of the namespace a function or a class named `name` in
+    /// `canonical` merges with, when that namespace exports a value: its own
+    /// file's namespace, or for a script's global every script's namespace of
+    /// that name. `None` when no such namespace exports a value, so the value
+    /// stays a single declaration.
+    pub(super) fn namespace_merged_into_value(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<ModuleObject> {
+        let object = if !name.contains('.') && !self.canonical_is_module(canonical) {
+            self.global_namespace_object(canonical, name, context)
+        } else {
+            self.namespace_object(canonical, owner, None, name, context)
+        }?;
+        let has_members = matches!(
+            self.graph().node_data(object.0).as_deref(),
+            Some(SemanticNodeData::Object(surface)) if !surface.positive_members().is_empty()
+        );
+        has_members.then_some(object)
+    }
+
     /// The object of the namespace `name` declared in `canonical` (in its
     /// own scope, or in the `declare module` block `scope`); `None` when it
     /// is not instantiated.

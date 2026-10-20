@@ -401,9 +401,48 @@ pub struct DeclHeaderIndex {
     /// it instead of walking an initializer again. Empty in the
     /// `from_eval_env` mirror.
     pub class_field_values: std::sync::Arc<crate::declarations::class_fields::ClassFieldValues>,
+    /// The entity each file-scope `import X = N.M` alias names, as its
+    /// dotted qualified name (`N.M`): the alias names what that entity
+    /// names, in type, value and namespace position. Empty in the
+    /// `from_eval_env` mirror.
+    pub namespace_aliases: FxHashMap<DeclBindingKey, std::sync::Arc<str>>,
 }
 
 impl DeclHeaderIndex {
+    /// `name` with the `import X = N.M` alias heading it replaced by the
+    /// entity it names (`X.T` → `N.M.T`), repeatedly while the result is
+    /// headed by another alias. `None` when no alias heads `name`, or when
+    /// the aliases name each other in a cycle (the checker's circular
+    /// alias, which names nothing).
+    #[must_use]
+    pub fn expand_namespace_alias(&self, owner: TopLevelOwnerId, name: &str) -> Option<String> {
+        if self.namespace_aliases.is_empty() {
+            return None;
+        }
+        let mut expanded = name.to_string();
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            let (head, rest) = match expanded.split_once('.') {
+                Some((head, rest)) => (head, Some(rest)),
+                None => (expanded.as_str(), None),
+            };
+            let Some(target) = self
+                .namespace_aliases
+                .get(&DeclBindingKey::new(owner, head))
+            else {
+                return (!seen.is_empty()).then_some(expanded);
+            };
+            if seen.iter().any(|alias| alias == head) {
+                return None;
+            }
+            seen.push(head.to_string());
+            expanded = match rest {
+                Some(rest) => format!("{target}.{rest}"),
+                None => target.to_string(),
+            };
+        }
+    }
+
     /// Whether a reference from outside the namespace body can name the
     /// qualified member `name` (`Ns.Inner.T`): neither it nor a namespace
     /// on its path is private to its enclosing namespace.

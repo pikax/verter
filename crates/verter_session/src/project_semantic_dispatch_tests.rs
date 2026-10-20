@@ -113,6 +113,7 @@ mod module_object_tests;
 mod module_value_surface_tests;
 mod named_arm_reduction_tests;
 mod namespace_member_value_tests;
+mod namespace_merge_tests;
 mod namespace_value_tests;
 mod narrowing_ledger_tests;
 mod never_callee_tests;

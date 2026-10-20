@@ -1959,9 +1959,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
+                // A name an enclosing namespace declares heads the path at
+                // that namespace's member.
+                let (root_name, rest) = match ctx.name_resolution.and_then(|names| {
+                    super::namespace_scoped_typeof_root(
+                        names,
+                        root_scope.canonical_id.as_ref(),
+                        root_scope.owner,
+                        &value_ref.path,
+                    )
+                }) {
+                    Some((qualified, consumed)) => (qualified, &value_ref.path[consumed..]),
+                    None => (verter_type_expr::OwnedStr::from(root.as_str()), rest),
+                };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: verter_type_expr::OwnedStr::from(root.as_str()),
+                    name: root_name,
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
