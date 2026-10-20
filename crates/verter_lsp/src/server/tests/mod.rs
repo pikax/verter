@@ -3035,6 +3035,8 @@ struct WatchedDependencyFixture {
     published_changed: Arc<tokio::sync::Notify>,
     sync_complete: Arc<parking_lot::Mutex<Vec<u64>>>,
     store_changed: Arc<std::sync::atomic::AtomicUsize>,
+    /// Every server-to-client method, in wire order.
+    methods: Arc<parking_lot::Mutex<Vec<String>>>,
     drain: tokio::task::JoinHandle<()>,
 }
 
@@ -3044,7 +3046,20 @@ impl Drop for WatchedDependencyFixture {
     }
 }
 
+/// The watched-dependency fixture for a client subscribed to carrier-store
+/// changes, as the VS Code extension is.
 async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFixture {
+    watched_dependency_fixture_declaring(
+        helper_exists,
+        serde_json::json!({ "subscriptions": { "carrierStoreChanged": true } }),
+    )
+    .await
+}
+
+async fn watched_dependency_fixture_declaring(
+    helper_exists: bool,
+    initialization_options: serde_json::Value,
+) -> WatchedDependencyFixture {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::test_utils::canonical_test_path(temp.path());
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
@@ -3077,7 +3092,12 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         &mut service,
         tower_lsp_server::jsonrpc::Request::build("initialize")
             .id(1)
-            .params(serde_json::json!({ "processId": null, "rootUri": null, "capabilities": {} }))
+            .params(serde_json::json!({
+                "processId": null,
+                "rootUri": null,
+                "capabilities": {},
+                "initializationOptions": initialization_options,
+            }))
             .finish(),
     )
     .await
@@ -3093,8 +3113,11 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
     let captured_complete = sync_complete.clone();
     let store_changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let captured_store_changed = store_changed.clone();
+    let methods = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_methods = methods.clone();
     let drain = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
+            captured_methods.lock().push(message.method().to_string());
             if message.method() == "$/verter/carrierStoreChanged" {
                 captured_store_changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
@@ -3166,6 +3189,7 @@ async fn watched_dependency_fixture(helper_exists: bool) -> WatchedDependencyFix
         published_changed,
         sync_complete,
         store_changed,
+        methods,
         drain,
     }
 }
@@ -4050,6 +4074,7 @@ fn lane_interleaving_deps(
     crate::sync_coordinator::SyncCoordinatorDeps {
         documents: Arc::clone(&server.documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: server.project_sync.clone(),
         needs_provider_sync: Arc::clone(&server.needs_deferred_sync),
         pending_snapshot_provider_sync: Arc::clone(&server.pending_snapshot_provider_sync),

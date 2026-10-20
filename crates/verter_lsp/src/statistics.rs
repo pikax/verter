@@ -105,14 +105,14 @@ impl Statistics {
 
     /// Create a scoped timer that records the event when dropped.
     /// Returns `None` if statistics are disabled (zero overhead).
-    pub fn timer(&self, event_type: &'static str, uri: Option<String>) -> Option<Timer<'_>> {
+    pub fn timer(&self, event_type: &'static str, uri: Option<&str>) -> Option<Timer<'_>> {
         if !self.is_enabled() {
             return None;
         }
         Some(Timer {
             stats: self,
             event_type,
-            uri,
+            uri: uri.map(str::to_owned),
             start: Instant::now(),
         })
     }
@@ -233,7 +233,7 @@ mod tests {
         stats.set_enabled(true);
 
         {
-            let _timer = stats.timer("slow_op", Some("file:///test.vue".to_string()));
+            let _timer = stats.timer("slow_op", Some("file:///test.vue"));
             // Deterministically force a measured interval instead of
             // sleeping and hoping. The timer's internal `start` was
             // captured inside `stats.timer(...)` above, strictly before

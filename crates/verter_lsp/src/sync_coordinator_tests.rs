@@ -204,6 +204,7 @@ async fn sync_file_queues_pending_snapshot_sync_when_resolver_snapshot_is_missin
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(provider, ProjectSyncMode::FullProject)),
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -249,6 +250,7 @@ async fn preserve_open_unresolved_carrier_no_ide_no_prior_commits_empty_unresolv
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -322,6 +324,7 @@ async fn publish_merged_diagnostics_skips_type_provider_without_committed_state(
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -386,6 +389,7 @@ async fn merged_diagnostics_surface_verter_project_warning_on_unowned_carrier() 
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -486,6 +490,7 @@ async fn merged_diagnostics_stay_silent_for_resolved_multi_claimant_carrier() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -545,6 +550,7 @@ async fn merged_diagnostics_surface_verter_project_warning_on_carrier_path_confl
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -634,6 +640,7 @@ async fn sync_file_preserves_open_vue_state_on_owner_none_ready_snapshot() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -725,6 +732,7 @@ async fn rune_module_debounced_diagnostics_map_through_self_file_projection() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -887,6 +895,7 @@ async fn sync_file_routes_open_rune_module_through_self_file_shadow_not_carrier(
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1000,6 +1009,7 @@ async fn sync_file_routes_open_plain_script_through_self_file_shadow_not_carrier
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1116,6 +1126,7 @@ async fn sync_file_clears_non_open_plain_script_dependency_state_once_ready() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1217,6 +1228,7 @@ defineProps<{ msg: string }>()
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1332,6 +1344,7 @@ async fn coordinator_direct_ide_sync_records_carrier_ide_surface() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1454,6 +1467,7 @@ async fn coordinator_direct_ide_sync_must_not_pair_stale_content_with_a_mid_flig
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1580,6 +1594,7 @@ async fn coordinator_direct_ide_sync_pin_is_captured_before_the_compile_not_afte
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1675,6 +1690,7 @@ async fn coordinator_open_unresolved_preserve_records_carrier_ide_surface() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1758,6 +1774,7 @@ async fn coordinator_open_unresolved_preserve_pin_is_captured_before_the_compile
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -1919,6 +1936,7 @@ async fn carrier_diagnostics_fixture(
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2536,6 +2554,7 @@ async fn rune_diagnostics_drop_provider_results_when_shadow_surface_regenerates_
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2670,6 +2689,7 @@ async fn provider_less_coordinator_still_publishes_verter_owned_diagnostics() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync,
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -2745,6 +2765,7 @@ async fn semantic_completion_republishes_without_provider_file_sync() {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -2801,6 +2822,7 @@ fn verter_only_deps(documents: Arc<DocumentRegistry>) -> SyncCoordinatorDeps {
     SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -3053,6 +3075,7 @@ fn debounce_probe_deps() -> (SyncCoordinatorDeps, Arc<DashSet<String>>) {
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::clone(&needs_provider_sync),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -4559,6 +4582,7 @@ async fn a_projectionless_carrier_recovers_without_a_provider_or_a_snapshot() {
         let mut deps = SyncCoordinatorDeps {
             documents: Arc::clone(&documents),
             dependency_receipts: Default::default(),
+            subscriptions: Default::default(),
             project_sync: None,
             needs_provider_sync: Arc::new(DashSet::new()),
             pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -4638,6 +4662,7 @@ fn make_provider_less_deps(documents: &Arc<DocumentRegistry>) -> SyncCoordinator
     SyncCoordinatorDeps {
         documents: Arc::clone(documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: None,
         needs_provider_sync: Arc::new(DashSet::new()),
         pending_snapshot_provider_sync: Arc::new(DashSet::new()),
@@ -5314,6 +5339,7 @@ async fn a_svelte_childs_settled_edit_republishes_the_open_parent_bounded_by_the
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new_with_kind(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6113,6 +6139,7 @@ async fn coordinator_direct_ide_sync_does_not_deliver_a_compile_of_a_moved_revis
     let deps = SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6213,6 +6240,7 @@ async fn coordinator_restart_pulse_listener_stops_with_the_loop() {
     let deps = Arc::new(SyncCoordinatorDeps {
         documents: Arc::clone(&documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             provider.clone(),
             ProjectSyncMode::FullProject,
@@ -6333,6 +6361,7 @@ fn lane_test_deps(
     SyncCoordinatorDeps {
         documents: Arc::clone(documents),
         dependency_receipts: Default::default(),
+        subscriptions: Default::default(),
         project_sync: Some(ProjectSync::new(
             Arc::clone(provider) as Arc<dyn crate::type_provider::traits::TypeProvider>,
             ProjectSyncMode::FullProject,

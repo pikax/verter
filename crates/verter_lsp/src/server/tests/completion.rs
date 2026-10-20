@@ -5315,6 +5315,128 @@ async fn a_carrier_publication_never_announces_provider_sync_completion() {
     );
 }
 
+/// The carrier-store ping is a subscription. A client that did not ask for it
+/// (an editor with no TypeScript service of its own over the store) receives
+/// none, however many carriers are published, while its diagnostics still
+/// arrive. Opening and publishing documents then puts nothing on the wire
+/// except those documents' diagnostics.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unsubscribed_client_receives_no_carrier_store_pings() {
+    let fixture = watched_dependency_fixture_declaring(true, serde_json::json!({})).await;
+    assert_eq!(
+        fixture
+            .store_changed
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no carrier-store ping may reach a client that did not subscribe"
+    );
+    let unrequested: Vec<String> = fixture
+        .methods
+        .lock()
+        .iter()
+        .filter(|method| method.as_str() != "textDocument/publishDiagnostics")
+        .cloned()
+        .collect();
+    assert!(
+        unrequested.is_empty(),
+        "an unsubscribed client receives only its open documents' diagnostics, got {unrequested:?}"
+    );
+    let published = fixture.published.lock();
+    for name in ["Consumer.vue", "Unrelated.vue"] {
+        let uri = workspace_uri(&fixture.root, &format!("src/{name}"));
+        assert!(
+            published.iter().any(|params| params.uri == uri),
+            "{name} still receives its diagnostics without the subscription"
+        );
+    }
+    let open = ["Consumer.vue", "Unrelated.vue"]
+        .map(|name| workspace_uri(&fixture.root, &format!("src/{name}")));
+    assert!(
+        published.iter().all(|params| open.contains(&params.uri)),
+        "only open documents are published"
+    );
+}
+
+/// The heartbeat is a subscription too: a subscribed client's watchdog gets a
+/// beat every few seconds; a client that did not subscribe gets no task and no
+/// message, however long the session runs.
+#[tokio::test(start_paused = true)]
+async fn only_a_subscribed_client_receives_heartbeats() {
+    async fn heartbeats_within(
+        initialization_options: serde_json::Value,
+        window: std::time::Duration,
+    ) -> (bool, usize) {
+        let (mut service, _socket) = tower_lsp_server::LspService::new(|_client| {
+            VerterLanguageServer::new(
+                crate::outbound::Outbound::default(),
+                LspConfig {
+                    host: Arc::new(VerterHost::new_standalone(HostConfig::default())),
+                    type_provider: None,
+                    project_sync_mode: ProjectSyncMode::FullProject,
+                    type_provider_kind: crate::TypeProviderKind::None,
+                    type_provider_topology: crate::TypeProviderTopology::implied_by(
+                        crate::TypeProviderKind::None,
+                    ),
+                    mcp_port: None,
+                    type_provider_reason: None,
+                    type_provider_advisory: None,
+                    suppress_imported_carrier_prewarm: false,
+                },
+            )
+        });
+        let mut wire = service.inner().outbound().wire();
+        let response = tower_service::Service::call(
+            &mut service,
+            tower_lsp_server::jsonrpc::Request::build("initialize")
+                .id(1)
+                .params(serde_json::json!({
+                    "processId": null,
+                    "rootUri": null,
+                    "capabilities": {},
+                    "initializationOptions": initialization_options,
+                }))
+                .finish(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(response.is_ok());
+        service.inner().outbound().assume_initialized();
+        let task = super::super::background_init::spawn_heartbeat(service.inner());
+        let spawned = task.is_some();
+        let _abort = task.map(AbortTaskOnDrop);
+        let mut beats = 0;
+        let deadline = tokio::time::Instant::now() + window;
+        while let Ok(Some(message)) = tokio::time::timeout_at(deadline, wire.next()).await {
+            if message.method() == "$/verter/heartbeat" {
+                beats += 1;
+            }
+        }
+        (spawned, beats)
+    }
+
+    let window = std::time::Duration::from_secs(12);
+    let (spawned, beats) = heartbeats_within(
+        serde_json::json!({ "subscriptions": { "heartbeat": true } }),
+        window,
+    )
+    .await;
+    assert!(spawned, "a subscribed client gets the heartbeat task");
+    assert_eq!(beats, 3, "beats at 0s, 5s and 10s of a 12s window");
+
+    for unsubscribed in [
+        serde_json::json!({}),
+        serde_json::json!({ "subscriptions": { "carrierStoreChanged": true } }),
+    ] {
+        let (spawned, beats) = heartbeats_within(unsubscribed.clone(), window).await;
+        assert!(
+            !spawned,
+            "{unsubscribed}: no heartbeat task without the subscription"
+        );
+        assert_eq!(beats, 0, "{unsubscribed}: no heartbeat on the wire");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn post_scan_completion_refreshes_healthy_documents_while_another_carrier_is_pending() {
     let fixture = watched_dependency_fixture(true).await;

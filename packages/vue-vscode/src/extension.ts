@@ -891,6 +891,13 @@ async function startVueLanguageServer(
         html: workspace.getConfiguration("html"),
       },
       statistics: getStatisticsInitialization(rootPath),
+      // The server sends recurring notifications only to a client that asks:
+      // the heartbeat feeds this extension's restart watchdog, and the
+      // carrier-store ping refreshes VS Code's own TypeScript service.
+      subscriptions: {
+        heartbeat: true,
+        carrierStoreChanged: true,
+      },
       analysis: {
         enabled: workspace.getConfiguration("verter.analysis").get<boolean>("enabled", false),
       },

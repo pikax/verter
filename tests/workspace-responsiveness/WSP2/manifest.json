@@ -1,0 +1,55 @@
+{
+  "node": "WSP2",
+  "kind": "implementation",
+  "finalOwner": "expansion.workspace-responsiveness",
+  "products": [
+    "LspDemandPlan (crates/verter_lsp/src/demand_plan.rs): the one negotiation of client demand, read once in initialize from the client capabilities (semantic-token and inlay-hint refresh, versioned edits), the enabled Verter features (analysis/lint semantic enrichment, statistics, interaction trace) and the explicit recurring-notification subscriptions (initializationOptions.subscriptions.heartbeat / carrierStoreChanged). Anything undeclared is off",
+    "Bounded initial capability and settings exchange: initialize installs the plan once; the remaining initialized notifications are one-shot lifecycle signals bounded by the session, and every recurring server notification is a subscription (ClientSubscriptions, shared with the sync coordinator)",
+    "DisabledFeatureZeroWork assertions: an unsubscribed client gets no heartbeat task and no heartbeat, no carrier-store ping on carrier publication, and only its open documents' diagnostics on the wire; disabled statistics allocate nothing per request; disabled semantic enrichment spawns no task and constructs no semantic host"
+  ],
+  "retiredRoutes": [
+    "Unconditional $/verter/heartbeat broadcast every 5s from initialized() to every client (real Lapce captures in WSP1L/WSP1B log each one as an unhandled host notification); it now runs only for a subscribed client",
+    "Unconditional $/verter/carrierStoreChanged after every carrier publication (sync coordinator and editor-membership publication); it now reaches only a subscribed client",
+    "Scattered inline parsing of client capabilities and feature options in handle_initialize, replaced by LspDemandPlan::from_initialize",
+    "Per-request URI String allocation for statistics timers while statistics are disabled (Statistics::timer now borrows the URI)"
+  ],
+  "migration": "The VS Code extension (packages/vue-vscode/src/extension.ts) subscribes to heartbeat and carrierStoreChanged, so its restart watchdog and its own TypeScript service keep their signals. Any other client that relied on receiving them unasked must declare initializationOptions.subscriptions (docs/api-stability.md).",
+  "preservedOwners": [
+    "semantic algorithms",
+    "project resolution and the workspace scanner (closed-file cross-file rename/references stay fed)",
+    "TypeScript projection and provider sync",
+    "diagnostics publication (DocumentRegistry::publish_diagnostics through the outbound replaceable lane)",
+    "readiness ladder ($/verter/ready, $/verter/typeProviderSyncComplete)",
+    "request-only workspace-scale handlers ($/verter/getProjectOverview, getComponentParents, getRouteTree, getStatistics, audit), reachable only through their main.rs custom_method registrations"
+  ],
+  "cases": [
+    {
+      "id": "WSP2-AC1",
+      "binding": "crates/verter_lsp/src/server/tests/completion.rs an_unsubscribed_client_receives_no_carrier_store_pings (opening and publishing documents puts nothing on the wire except those open documents' diagnostics) + the request-only workspace-scale handlers listed in preservedOwners. The 50k-source equal-work corpus run is unavailable on the landing worker and is not reported as a number"
+    },
+    {
+      "id": "WSP2-AC2",
+      "binding": "crates/verter_lsp/src/server/tests/completion.rs only_a_subscribed_client_receives_heartbeats and an_unsubscribed_client_receives_no_carrier_store_pings (zero unrequested messages and bytes) + crates/verter_lsp/src/documents/mod_tests.rs optional_semantic_analysis_is_isolated_and_published_asynchronously (disabled enrichment spawns no task and constructs no semantic host) + crates/verter_lsp/src/interaction_trace.rs disabled_records_nothing + crates/verter_lsp/src/statistics.rs tests. No analysis-only provider request exists outside client requests ($/verter/getBindingTypes is request-only)"
+    },
+    {
+      "id": "WSP2-AC3",
+      "binding": "existing diagnostics and hover suites run with no analysis option and no sidebar (crates/verter_lsp/src/server/tests/diagnostics.rs, crates/verter_lsp/src/server/tests/hover.rs); an_unsubscribed_client_receives_no_carrier_store_pings proves both open documents still receive diagnostics without any subscription"
+    },
+    {
+      "id": "WSP2-AC-OWNER",
+      "binding": "LspDemandPlan::from_initialize is the single demand negotiation; ClientSubscriptions is the single gate both carrier-store producers and the heartbeat read. WSP1A is consumed as the operator-approved retirement; no historical hang repair is claimed"
+    },
+    {
+      "id": "WSP2-AC-BASIS",
+      "binding": "not applicable at runtime: no caching, mapping, snapshot, result-handle or incremental-publication change; only unrequested notifications are suppressed"
+    },
+    {
+      "id": "WSP2-AC-RESOURCE",
+      "binding": "work-count evidence only: heartbeat task count and per-window beat count, carrier-store ping count, and the set of methods on the wire are asserted in tests. Client application/paint, provider process cost, outbound bytes per corpus run and retained memory are unavailable on the landing worker and are not reported as numbers"
+    },
+    {
+      "id": "WSP2-AC-EXPOSURE",
+      "binding": "not applicable: no new protocol operation; subscriptions are initialization options"
+    }
+  ]
+}

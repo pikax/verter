@@ -5,20 +5,29 @@ use super::{drain_pending_snapshot_provider_sync_owned, PendingSyncDrain, PENDIN
 
 // ── Background initialization ───────────────────────────────────────────
 
-/// Spawn the heartbeat task. Sends `$/verter/heartbeat` every 5 seconds.
-/// Called first in `initialized()` so the extension always sees heartbeats,
-/// even during long background initialization.
+/// Spawn the heartbeat task when the client subscribed to it
+/// (`initializationOptions.subscriptions.heartbeat`). Sends
+/// `$/verter/heartbeat` every 5 seconds. Called first in `initialized()` so a
+/// subscribed client's watchdog sees heartbeats even during long background
+/// initialization. A client that did not subscribe gets no task and no
+/// periodic message: an editor without a watchdog only logs an unhandled
+/// notification for each one.
 ///
 /// Takes the SERVER, not loose handles: the heartbeat's view of the
 /// interactive lane is the server's own handler activity by construction —
 /// there is no call-site wiring that could substitute another activity.
 /// The active-count trace line that reads it is OPTIONAL freeze diagnosis,
 /// compiled in only under the default-off `semantic-observe` feature.
-pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
+pub(super) fn spawn_heartbeat(
+    server: &VerterLanguageServer,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !server.subscriptions.heartbeat() {
+        return None;
+    }
     let client = server.client.clone();
     #[cfg(feature = "semantic-observe")]
     let handler_activity = Arc::clone(&server.handler_activity);
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
@@ -37,9 +46,9 @@ pub(super) fn spawn_heartbeat(server: &VerterLanguageServer) {
             client
                 .send_notification::<Heartbeat>(HeartbeatParams { timestamp: ts })
                 .await;
-            tracing::info!("heartbeat SENT ts={ts}");
+            tracing::debug!("heartbeat SENT ts={ts}");
         }
-    });
+    }))
 }
 
 /// Arguments for the background initialization task.

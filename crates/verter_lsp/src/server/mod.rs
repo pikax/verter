@@ -436,6 +436,9 @@ pub struct ServerCore {
     /// (`workspace.workspaceEdit.documentChanges`). Every foreground request
     /// captures it at admission, so one request delivers its edits in one shape.
     pub(crate) client_applies_versioned_edits: std::sync::atomic::AtomicBool,
+    /// The recurring notifications the client subscribed to at `initialize`;
+    /// shared with every producer of one.
+    pub(crate) subscriptions: Arc<crate::demand_plan::ClientSubscriptions>,
     /// Cached verter diagnostics per document:
     /// URI → (document_version, diagnostics_generation, diagnostics).
     /// Avoids re-running host + lint + component diagnostics when both push and
@@ -1280,6 +1283,7 @@ impl VerterLanguageServer {
         // The DependencyReady receipts: minted by the background import
         // publication, read by the coordinator while a workspace scan runs.
         let import_sync = Arc::new(ImportSyncMemo::default());
+        let subscriptions = Arc::new(crate::demand_plan::ClientSubscriptions::default());
 
         let sync_coordinator = crate::sync_coordinator::spawn_sync_coordinator(
             crate::sync_coordinator::SyncCoordinatorDeps {
@@ -1297,6 +1301,7 @@ impl VerterLanguageServer {
                 carrier_publish_coordinator: carrier_publish_coordinator.clone(),
                 carrier_transaction_coordinator: Arc::clone(&carrier_transaction_coordinator),
                 dependency_receipts: Arc::clone(&import_sync),
+                subscriptions: Arc::clone(&subscriptions),
             },
         );
 
@@ -1318,6 +1323,7 @@ impl VerterLanguageServer {
             client_refreshes_semantic_tokens: std::sync::atomic::AtomicBool::new(false),
             client_refreshes_inlay_hints: std::sync::atomic::AtomicBool::new(false),
             client_applies_versioned_edits: std::sync::atomic::AtomicBool::new(false),
+            subscriptions,
             cached_verter_diags,
             provider_sync_states,
             decl_overlay_owner,

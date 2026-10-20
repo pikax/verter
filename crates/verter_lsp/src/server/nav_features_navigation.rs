@@ -158,9 +158,7 @@ pub(super) async fn handle_goto_definition(
 ) -> Result<Option<GotoDefinitionResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "goto_definition");
     let uri = &params.text_document_position_params.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("definition", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("definition", Some(uri.as_str()));
     let position = &params.text_document_position_params.position;
     tracing::debug!(
         "definition: {} at {}:{}",
@@ -755,7 +753,7 @@ pub(super) async fn handle_goto_type_definition(
     let uri = &params.text_document_position_params.text_document.uri;
     let _timer = server
         .statistics
-        .timer("type_definition", Some(uri.as_str().to_string()));
+        .timer("type_definition", Some(uri.as_str()));
     let position = &params.text_document_position_params.position;
     tracing::debug!(
         "type_definition: {} at {}:{}",
@@ -944,9 +942,7 @@ pub(super) async fn handle_references(
 ) -> Result<Option<Vec<Location>>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "references");
     let uri = &params.text_document_position.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("references", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("references", Some(uri.as_str()));
     let position = &params.text_document_position.position;
     let include_declaration = params.context.include_declaration;
     tracing::debug!(

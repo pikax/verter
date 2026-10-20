@@ -200,9 +200,7 @@ pub(super) async fn handle_hover(
         position.line,
         position.character
     );
-    let _timer = server
-        .statistics
-        .timer("hover", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("hover", Some(uri.as_str()));
     // The whole response settles against the request admitted before the
     // route's current-file repair, computed once.
     server
@@ -675,9 +673,7 @@ async fn handle_completion_attempt(
 ) -> Result<Option<CompletionResponse>> {
     let _hg = HandlerGuard::new(&server.handler_activity, "completion");
     let uri = &params.text_document_position.text_document.uri;
-    let _timer = server
-        .statistics
-        .timer("completion", Some(uri.as_str().to_string()));
+    let _timer = server.statistics.timer("completion", Some(uri.as_str()));
     let position = &params.text_document_position.position;
     let trigger_character = params
         .context

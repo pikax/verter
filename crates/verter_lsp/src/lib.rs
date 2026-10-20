@@ -111,6 +111,7 @@ pub mod carrier_registry;
 pub mod config;
 pub mod configured_owner;
 pub mod css;
+pub mod demand_plan;
 pub(crate) mod document_sync_lane;
 pub mod documents;
 pub(crate) mod edit_quiet_window;

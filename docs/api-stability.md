@@ -67,9 +67,15 @@ The inline suppression syntax is stable:
 | `$/verter/getVirtualFiles`         | Stable                |
 | `$/verter/getAnalysis`             | Stable                |
 | `$/verter/getRouteTree`            | Stable                |
-| `$/verter/heartbeat`               | Stable                |
+| `$/verter/heartbeat`               | Stable (subscription) |
 | `$/verter/tsgoLimitation`          | Stable (notification) |
 | `$/verter/viteConfigTrustRequired` | Stable (notification) |
+
+Recurring server notifications are subscriptions: the server sends
+`$/verter/heartbeat` and `$/verter/carrierStoreChanged` only to a client whose
+`initializationOptions.subscriptions` sets `heartbeat: true` /
+`carrierStoreChanged: true`. A client that relied on receiving the heartbeat
+unasked must now declare the subscription.
 
 The pre-release `$/verter/applyStyleOverrides` method was removed by the sealed
 block-content cutover. The LSP does not accept processor-produced bytes;
