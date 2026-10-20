@@ -1598,6 +1598,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
             .then(|| self.sole_arity_fitting_candidate(visible, arguments))
             .flatten();
+        let mut raw_pairing = RawCandidatePairing::new(raw);
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
                 if resuming {
@@ -1623,10 +1624,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // are the same callee's ordered bucket, so its raw form is the
                 // candidate at the same flat position.
                 let raw_candidate = match candidate.occurrence.authored() {
-                    Some(occurrence) => raw.iter().find(|raw| {
-                        raw.occurrence.authored() == Some(occurrence)
-                            && bucket_kind(raw.node) == Some(kind)
-                    }),
+                    Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
                     None => raw.get(position).filter(|raw| {
                         raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
                     }),
@@ -4677,6 +4675,62 @@ fn signature_bucket(call: CallKind) -> SignatureKind {
     match call {
         CallKind::Call => SignatureKind::Call,
         CallKind::Construct => SignatureKind::Construct,
+    }
+}
+
+/// A call bucket's RAW candidates, indexed by their (authored occurrence,
+/// bucket kind) as candidate pairing reaches them. Each raw candidate is
+/// read at most once however many candidates pair against the list, and a
+/// lookup returns the FIRST raw candidate with that occurrence and kind.
+struct RawCandidatePairing<'r> {
+    raw: &'r [SignatureRef],
+    scanned: usize,
+    first: FxHashMap<
+        (
+            &'r crate::semantic_query::SignatureOccurrenceIdentity,
+            SignatureKind,
+        ),
+        usize,
+    >,
+}
+
+impl<'r> RawCandidatePairing<'r> {
+    fn new(raw: &'r [SignatureRef]) -> Self {
+        Self {
+            raw,
+            scanned: 0,
+            first: FxHashMap::default(),
+        }
+    }
+
+    /// The first raw candidate authored at `occurrence` in bucket `kind`.
+    /// Every raw candidate before the scan cursor is already indexed, so a
+    /// miss scans forward only from the cursor.
+    fn authored(
+        &mut self,
+        occurrence: &'r crate::semantic_query::SignatureOccurrenceIdentity,
+        kind: SignatureKind,
+        kind_of: impl Fn(SemanticNodeId) -> Option<SignatureKind>,
+    ) -> Option<&'r SignatureRef> {
+        if let Some(&index) = self.first.get(&(occurrence, kind)) {
+            return Some(&self.raw[index]);
+        }
+        while let Some(raw) = self.raw.get(self.scanned) {
+            let index = self.scanned;
+            self.scanned += 1;
+            let (Some(raw_occurrence), Some(raw_kind)) =
+                (raw.occurrence.authored(), kind_of(raw.node))
+            else {
+                continue;
+            };
+            self.first
+                .entry((raw_occurrence, raw_kind))
+                .or_insert(index);
+            if raw_occurrence == occurrence && raw_kind == kind {
+                return Some(raw);
+            }
+        }
+        None
     }
 }
 
