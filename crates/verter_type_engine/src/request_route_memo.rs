@@ -4,10 +4,12 @@
 use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// What resolving one owner's specifier set observed: whether a resolution
-/// was refused, and every observation the admitted ones recorded, in order.
+/// was refused, whether one was delivered unretained, and every observation
+/// the admitted ones recorded, in order.
 #[derive(Debug)]
 pub struct ImportRouteObservation {
     pub refused: bool,
+    pub unretained: bool,
     pub observed: Vec<FactVersionRef>,
 }
 

@@ -3229,6 +3229,20 @@ impl FileArtifactStore {
         key: AugmentationTargetKey,
         set: Arc<AugmenterSet>,
     ) -> Option<Arc<AugmenterSet>> {
+        self.install_augmenter_set_if(key, set, |_| true)
+            .expect("an unconditional install always installs")
+    }
+
+    /// [`Self::install_augmenter_set`], applied only when `admit` accepts
+    /// the set the index holds at `key` (`None` when vacant), decided under
+    /// the same entry guard as the install. `None` when nothing was
+    /// installed; otherwise the displaced set, if any.
+    fn install_augmenter_set_if(
+        &self,
+        key: AugmentationTargetKey,
+        set: Arc<AugmenterSet>,
+        admit: impl FnOnce(Option<&AugmenterSet>) -> bool,
+    ) -> Option<Option<Arc<AugmenterSet>>> {
         let reservation = self.reserve_membership_epoch();
         let epoch = reservation.epoch();
         let version = AugmenterVersion {
@@ -3249,7 +3263,17 @@ impl FileArtifactStore {
         //   version reaches the retired chain before the live slot stops
         //   holding it, so a root-relative reader can never find it in
         //   neither map.
-        let retired = match self.augmentation_index.entry(key.clone()) {
+        let entry = self.augmentation_index.entry(key.clone());
+        let admitted = match &entry {
+            AugmentationIndexEntry::Occupied(slot) => admit(Some(&slot.get().set)),
+            AugmentationIndexEntry::Vacant(_) => admit(None),
+        };
+        if !admitted {
+            drop(entry);
+            drop(reservation);
+            return None;
+        }
+        let retired = match entry {
             AugmentationIndexEntry::Occupied(mut slot) => {
                 let previous = slot.get();
                 self.retired_augmenters
@@ -3274,7 +3298,7 @@ impl FileArtifactStore {
         if retired.is_some() {
             self.note_retirements(1);
         }
-        retired
+        Some(retired)
     }
 
     /// THE sole augmentation-index retirement combinator. Logical, like
@@ -3395,25 +3419,31 @@ impl FileArtifactStore {
         observed: &AugmenterSet,
         refreshed: Vec<(usize, FileArtifactKey)>,
     ) -> bool {
-        if refreshed.is_empty()
-            || self
-                .get_augmenter_set(key)
-                .is_none_or(|held| held.fingerprint != observed.fingerprint)
-        {
+        let holds_observed = |held: Option<&AugmenterSet>| {
+            held.is_some_and(|held| held.fingerprint == observed.fingerprint)
+        };
+        if refreshed.is_empty() || !holds_observed(self.get_augmenter_set(key).as_deref()) {
             return false;
         }
         let mut entries = observed.entries.clone();
         for (index, artifact_key) in refreshed {
             entries[index].artifact_key = artifact_key;
         }
-        self.populate_augmenter_set(
-            key.clone(),
-            Arc::new(AugmenterSet {
-                entries,
-                fingerprint: observed.fingerprint,
-            }),
-        );
-        true
+        let set = Arc::new(AugmenterSet {
+            entries,
+            fingerprint: observed.fingerprint,
+        });
+        // The held-set check repeats under the install's entry guard: an
+        // invalidation or a differently-fingerprinted publish that lands
+        // after the check above must not be overwritten by the observed set.
+        // A same-fingerprint re-key changes no recorded shape fact, so it
+        // moves neither the route-surface generation nor the artifact one.
+        self.route_surface_generation.mutate(|| {
+            let installed = self
+                .install_augmenter_set_if(key.clone(), set, holds_observed)
+                .is_some();
+            (installed, false)
+        })
     }
 
     /// Snapshot the base-artifact augmenter rows into an owned `Vec`,

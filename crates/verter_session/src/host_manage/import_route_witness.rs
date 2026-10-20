@@ -328,7 +328,9 @@ impl VerterHost {
     /// wide set rather than refusing it.
     ///
     /// `None` means a specifier's resolution was REFUSED, so the witness is
-    /// unrootable: a refusal carries no observations at all.
+    /// unrootable: a refusal carries no observations at all. A resolution
+    /// delivered unretained also yields `None`, marked as a declined
+    /// retention rather than as an unrootable route.
     fn observed_import_route_witness(
         &self,
         canonical_id: &str,
@@ -340,6 +342,16 @@ impl VerterHost {
         let observation = self.import_route_observation(canonical_id, specifiers);
         if observation.refused {
             return self.decline_import_route_witness();
+        }
+        // A witness roots a retained entry, and an unretained resolution is
+        // one no entry may root on. The answer itself is complete and
+        // current, so the enclosing compute is marked for the declined
+        // retention, not for an unrootable route.
+        if observation.unretained {
+            verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                verter_session_query::facts::reuse::NonCacheableReadReason::UnretainedResolution,
+            );
+            return None;
         }
 
         // Dedup while preserving first-observation order. The consuming
@@ -391,6 +403,7 @@ impl VerterHost {
         let observation = {
             let scope = ResolutionWitnessScope::enter();
             let mut refused = false;
+            let mut unretained = false;
             for (specifier, lane) in specifiers {
                 match self.generation_current_route_resolution_in(
                     None,
@@ -403,16 +416,17 @@ impl VerterHost {
                         // projected target is not consumed here.
                         let _ = admitted.into_result();
                     }
-                    // A witness roots a retained entry, and an unretained
-                    // resolution is one no entry may root on.
-                    verter_workspace::ResolutionPublication::Unretained(_)
-                    | verter_workspace::ResolutionPublication::Refused(_) => {
+                    verter_workspace::ResolutionPublication::Unretained(_) => {
+                        unretained = true;
+                    }
+                    verter_workspace::ResolutionPublication::Refused(_) => {
                         refused = true;
                     }
                 }
             }
             std::sync::Arc::new(ImportRouteObservation {
                 refused,
+                unretained,
                 observed: scope.collected(),
             })
         };

@@ -505,13 +505,17 @@ pub(crate) struct CompileEntryRefusal {
 /// `note_non_cacheable_read_fan_out` chokepoint on its own. The Session
 /// cold-compile branch replays this value INTO its tracer scope so the
 /// session-slot admission consults ONE rail (`non_cacheable_read_observed`)
-/// for both the in-scope and the prefetch-consumed fenced serves.
+/// for both the in-scope and the prefetch-consumed non-cacheable reads.
 #[derive(Debug, Clone, Copy, Default)]
 struct CompileTierPrefetchObservation {
     /// Whether ANY `IndexedReady` serve the prefetch consumed was FENCED
     /// (ReturnOnly, `store_published == false`) — a payload basis the
-    /// read-side fact rail cannot reject.
+    /// read-side fact rail cannot reject — or a resolution was refused.
     fenced_serve_observed: bool,
+    /// Whether the prefetch followed a complete resolution the retention
+    /// account declined to keep. Kept apart from a fenced serve: a compile
+    /// built only on such resolutions is the complete answer, uncached.
+    unretained_resolution_observed: bool,
 }
 
 impl VerterHost {
@@ -734,7 +738,8 @@ impl VerterHost {
         let mut fenced_serve_observed = false;
         // A complete resolution the retention account declined to keep:
         // the prefetch follows it, and the compile built on it is served,
-        // never published — the same decline a fenced serve takes.
+        // never published, as a declined retention rather than a fenced
+        // serve.
         let mut unretained_resolution = false;
         let mut note_serve =
             |serve: &Option<crate::host_manage::prepared_decl::IndexedReadyServe>| {
@@ -796,6 +801,7 @@ impl VerterHost {
                         None => {
                             return CompileTierPrefetchObservation {
                                 fenced_serve_observed: true,
+                                unretained_resolution_observed: unretained_resolution,
                             };
                         }
                     }
@@ -803,6 +809,7 @@ impl VerterHost {
                 None => {
                     return CompileTierPrefetchObservation {
                         fenced_serve_observed: true,
+                        unretained_resolution_observed: unretained_resolution,
                     };
                 }
             };
@@ -856,6 +863,7 @@ impl VerterHost {
                 None => {
                     return CompileTierPrefetchObservation {
                         fenced_serve_observed: true,
+                        unretained_resolution_observed: unretained_resolution,
                     };
                 }
             }
@@ -916,6 +924,7 @@ impl VerterHost {
                     None => {
                         return CompileTierPrefetchObservation {
                             fenced_serve_observed: true,
+                            unretained_resolution_observed: unretained_resolution,
                         };
                     }
                 };
@@ -946,7 +955,8 @@ impl VerterHost {
         }
 
         CompileTierPrefetchObservation {
-            fenced_serve_observed: fenced_serve_observed || unretained_resolution,
+            fenced_serve_observed,
+            unretained_resolution_observed: unretained_resolution,
         }
     }
 
@@ -2000,15 +2010,20 @@ impl VerterHost {
             let (result, fact_read_set) = self.with_fact_tracer(
                 verter_session_query::facts::fact_cache::AggregateBasisSeed::Unvouched,
                 || {
-                    // Replay the prefetch's BY-VALUE fenced-serve consumption
+                    // Replay the prefetch's BY-VALUE non-cacheable consumption
                     // into THIS tracer scope: the compile's payload derives from
-                    // the prefetch-populated state, so a fenced serve consumed
-                    // there taints this compile exactly as an in-scope fenced
-                    // serve would — one admission rail
-                    // (`non_cacheable_read_observed`), consulted below.
+                    // the prefetch-populated state, so a read consumed there
+                    // taints this compile exactly as the same in-scope read
+                    // would — one admission rail (`non_cacheable_read_observed`),
+                    // consulted below, which keeps each read's typed cause.
                     if prefetch_observation.fenced_serve_observed {
                         verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                             verter_session_query::facts::reuse::NonCacheableReadReason::FencedServe,
+                        );
+                    }
+                    if prefetch_observation.unretained_resolution_observed {
+                        verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
+                            verter_session_query::facts::reuse::NonCacheableReadReason::UnretainedResolution,
                         );
                     }
                     crate::compile_fact_emission::observe_compile_tier_dependencies(
@@ -2036,8 +2051,24 @@ impl VerterHost {
             // state — an entry the read-side fact rail cannot reject.
             // Consult the tracer's by-value flag and refuse admission;
             // the caller is still served the fresh output below.
+            //
+            // A compile whose ONLY non-cacheable reads were resolutions the
+            // retention account declined to keep is the complete, current
+            // answer: it is refused for retention pressure, so the document
+            // still holds its IDE surface, unless its basis moved mid-scope.
             let non_cacheable_read_observed = fact_read_set.non_cacheable_read_observed();
-            let admission = if non_cacheable_read_observed {
+            let admission = if non_cacheable_read_observed
+                && fact_read_set.non_cacheable_only_declined_retention()
+            {
+                verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
+                    match fact_read_set.finalise() {
+                        verter_session_query::facts::fact_read_set::FactReadSetFinalise::MutationUnstable => {
+                            verter_audit::NonAdmissionReason::MutationUnstable
+                        }
+                        _ => verter_audit::NonAdmissionReason::RetentionPressure,
+                    },
+                )
+            } else if non_cacheable_read_observed {
                 verter_session_query::facts::fact_cache::SignatureAdmission::NonCacheable(
                     verter_audit::NonAdmissionReason::GenerationSuperseded,
                 )

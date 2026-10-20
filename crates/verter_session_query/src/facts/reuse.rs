@@ -439,6 +439,25 @@ impl NonCacheableReadReason {
         }
     }
 
+    /// What this read says about a value computed from it. Only a declined
+    /// retention leaves the value complete and current: every other class
+    /// is a superseded, unrootable, degraded or lossy basis.
+    #[inline]
+    #[must_use]
+    pub fn basis(self) -> crate::facts::fact_read_set::NonCacheableBasis {
+        use crate::facts::fact_read_set::NonCacheableBasis;
+        match self {
+            Self::UnretainedResolution => NonCacheableBasis::RetentionDeclined,
+            Self::FencedServe
+            | Self::LeaseMiss
+            | Self::UnrootableRoute
+            | Self::UnobservableSource
+            | Self::InferenceBudgetExceeded
+            | Self::PreparationFailure
+            | Self::OutputMaterializationLoss => NonCacheableBasis::Untrusted,
+        }
+    }
+
     /// Whether a COMPLETE result whose compute consumed this read stays
     /// deterministic under the request's immutable view — the axis the
     /// [`ReuseClass`](super::reuse::ReuseClass) splits on.

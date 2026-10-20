@@ -242,8 +242,8 @@ impl VerterHost {
     /// workspace's own view (`None`) or a request overlay's effective view.
     ///
     /// `TypeImport` first; with no target, the `EsmImport` fallback; either
-    /// target normalized to its declaration companion
-    /// ([`Self::normalize_admitted_type_target`]). A refusal on any lane is
+    /// delivered target, admitted or unretained, normalized to its
+    /// declaration companion ([`Self::normalize_type_target`]). A refusal on any lane is
     /// the answer — never a "not found". Every lane resolves through the
     /// SAME snapshot, so an overlay view never mixes its own answer with a
     /// workspace one, and there is no second policy for overlays to drift

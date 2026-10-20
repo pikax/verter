@@ -2052,15 +2052,7 @@ pub(super) async fn sync_pending_non_carrier_provider_file(
             commit_sync_transition(provider_sync_states, canonical_id, committed_state);
             documents.host().set_import_dependencies(
                 canonical_id,
-                prepared
-                    .resolved_dependencies
-                    .iter()
-                    .map(|entry| verter_session::DependencyResolution {
-                        specifier: entry.provider_specifier.clone(),
-                        resolved_canonical_id: Some(entry.source_id.clone()),
-                        possible_canonical_ids: Vec::new(),
-                    })
-                    .collect(),
+                prepared.resolved_dependencies.route_snapshot(),
             );
             true
         }

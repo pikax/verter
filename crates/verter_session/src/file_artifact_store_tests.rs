@@ -1154,6 +1154,18 @@ fn augmenter_key_refresh_rekeys_only_the_set_the_index_holds() {
         Some([8u8; 16]),
         "control: the healed key is held"
     );
+
+    // The refresh's held-set check is decided under the install's own entry
+    // guard, so a set superseded after a caller's look still is not written.
+    assert!(
+        store
+            .install_augmenter_set_if(key.clone(), Arc::new(served.clone()), |held| {
+                held.is_some_and(|held| held.fingerprint == served.fingerprint)
+            })
+            .is_none(),
+        "a guarded install that rejects the held set writes nothing"
+    );
+    assert_eq!(held_hash(&store), Some([8u8; 16]), "the held set stays");
 }
 
 // ── Gap-free no-op: a base-equivalent no-op legacy replace must expose NO
