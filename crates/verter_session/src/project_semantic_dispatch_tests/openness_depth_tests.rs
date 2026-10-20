@@ -318,12 +318,12 @@ fn a_long_alias_chain_decides_on_a_small_stack() {
             "a mapped type over the deep chain enumerates the bottom's key, not a carrier-stop"
         );
 
-        let open = chain_host(alias_chain(DEPTH, "() => string"));
+        let open = chain_host(alias_chain(DEPTH, "keyof Missing"));
         let mut budget = full_budget();
         assert_eq!(
             decl_closedness(&open, "A0", &mut budget),
             ClosednessVerdict::ProvenOpen,
-            "the same chain onto a function body proves OPEN — the deep answer is the bottom's"
+            "the same chain onto the keys of an unresolvable name proves OPEN — the deep answer is the bottom's"
         );
 
         let cyclic = chain_host(alias_chain(DEPTH, "A0"));
@@ -395,7 +395,10 @@ fn mixed_declaration_hops_decide_on_a_small_stack() {
     // deep chain must still decide as its control does, on the small
     // stack, with work linear in its hops: no query rebuilt, no suffix
     // re-derived by each nested evaluation.
-    for (bottom, label) in [("() => string", "a function body"), ("A0", "its own head")] {
+    for (bottom, label) in [
+        ("keyof Missing", "an unresolvable key set"),
+        ("A0", "its own head"),
+    ] {
         let control = probe_chain_head(mixed_chain(6, bottom));
         assert_ne!(
             control.verdict,

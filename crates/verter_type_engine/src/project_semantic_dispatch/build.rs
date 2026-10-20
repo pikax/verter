@@ -13558,6 +13558,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .build_key_of(merged, context)
                     .with_observed_self_roots(observed_self_roots);
             }
+            // A function or constructor type has no properties: its call
+            // and construct signatures name no key.
+            Some(SemanticNodeData::Signature { .. }) => self.primitive_node(PrimitiveKind::Never),
             Some(SemanticNodeData::Mapped { .. }) => self
                 .key_of_through_carrier(base, context)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
@@ -14002,6 +14005,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &super::enumerate::KeyDomainKey,
     ) -> Option<SemanticNodeId> {
+        if let Some(binder) = key.binder {
+            return Some(binder);
+        }
         match (&key.literal, &key.key) {
             (Some(literal), _) => Some(
                 self.graph()
@@ -14183,7 +14189,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        match self.graph().node_data(node).as_deref() {
+        let projected = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some((
                 public_members(view.positive_members()),
                 read_partial_classes,
@@ -14211,6 +14217,93 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 }),
             _ => None,
+        };
+        // A surface that projected no member and no index signature may be
+        // a type whose properties the shallow surface does not carry: read
+        // what the source declares.
+        let projected_nothing = projected
+            .as_ref()
+            .is_none_or(|(members, _, _, signatures)| members.is_empty() && signatures.is_empty());
+        if projected_nothing {
+            if let Some(declared) = self.declared_non_object_projection(source, source_context) {
+                return Some(declared);
+            }
+        }
+        projected
+    }
+
+    /// The surface of a source that declares a function or constructor
+    /// type, an array or a tuple — kinds whose properties the shallow
+    /// projection does not list. A function type has no properties and no
+    /// index signatures (`keyof (() => void)` is `never`); an array or tuple
+    /// maps the properties of its apparent type, a tuple's positions and
+    /// `length` over the `Array` wrapper's members and index signature
+    /// (`{ [K in keyof [1, 'a'] as …]: … }`). `None` for any other kind.
+    fn declared_non_object_projection(
+        &self,
+        source: SemanticNodeId,
+        source_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<(
+        Vec<SurfaceMember>,
+        crate::semantic_query::PartialReasonSet,
+        bool,
+        Vec<crate::semantic_query::IndexSignature>,
+    )> {
+        let declared = self.resolve_signature_source_carrier(source, source_context);
+        let apparent = match self.graph().node_data(declared).as_deref()? {
+            SemanticNodeData::Signature { .. } => {
+                return Some((
+                    Vec::new(),
+                    crate::semantic_query::PartialReasonSet::empty(),
+                    true,
+                    Vec::new(),
+                ));
+            }
+            SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
+                self.array_like_apparent_object(declared)?
+            }
+            _ => return None,
+        };
+        match self.graph().node_data(apparent).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((
+                view.positive_members()
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                view.index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The apparent object type of the array or tuple `node`
+    /// (`getApparentType`): a tuple's own positions and `length` over the
+    /// project's `Array` / `ReadonlyArray` wrapper, an array that wrapper
+    /// alone. `None` when the wrapper read does not settle, or an array's
+    /// project declares none.
+    fn array_like_apparent_object(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let (name, args) = self.apparent_wrapper_of(node)?;
+        let canonical = self
+            .graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .or_else(|| self.wrapper_demand_canonical())?;
+        let wrapper = match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
+            super::apparent_type::GlobalWrapper::Absent => None,
+            super::apparent_type::GlobalWrapper::Unsettled => return None,
+        };
+        match self.graph().node_data(node).as_deref()? {
+            SemanticNodeData::Tuple { elements, readonly } => {
+                Some(self.tuple_apparent_surface(wrapper, elements, *readonly))
+            }
+            _ => wrapper,
         }
     }
 
@@ -14272,6 +14365,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// - a primitive, a literal, `object`, `null` and `undefined` pass
     ///   through unchanged (`Partial<string>` is `string`), with or without
     ///   an `as` clause; `never` is `never`, and `unknown` maps to `{}`;
+    /// - a function or constructor type, having no properties, maps to `{}`;
     /// - without an `as` clause, an array maps its element (`Partial<number[]>`
     ///   is `(number | undefined)[]`) and a tuple each element, the
     ///   modifiers applying to the element flags (`Partial<[1, 2?]>` is
@@ -14311,6 +14405,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
                 Some(finish(resolved, false))
+            }
+            // A function or constructor type is an object with no properties
+            // and no index signatures: its signatures are not mapped, so the
+            // mapping is `{}` (`Partial<() => void>`).
+            SemanticNodeData::Signature { .. } => {
+                drop(data);
+                Some(finish(self.empty_object(), false))
             }
             SemanticNodeData::Union(members) => {
                 let members = members.members_arc();
@@ -14852,8 +14953,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => source,
         };
-        if let Some(absorbed) = self.absorb_mapped(reduced_source) {
-            return absorbed;
+        // A mapping over `keyof S` (homomorphic) whose `S` is `any` maps the
+        // one key type the checker reads off `any`, `string`
+        // (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`): it
+        // is `{ [x: string]: … }` (`{ [K in keyof T]: T[K] }` over `any` is
+        // `{ [x: string]: any }`), never `any`.
+        let homomorphic_over_any = (mapper.over_type_variable || mapper.key_space != source)
+            && matches!(
+                self.graph().node_data(reduced_source).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            );
+        if !homomorphic_over_any {
+            if let Some(absorbed) = self.absorb_mapped(reduced_source) {
+                return absorbed;
+            }
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
@@ -14964,7 +15077,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through the source's heritage) is not re-lifted as the
         // anonymous `PROPAGATED` bridge downstream.
         let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
-        let source_projection = self.source_projection_with_key_domain(source, context);
+        let source_projection = if homomorphic_over_any {
+            Some((
+                Vec::new(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                vec![crate::semantic_query::IndexSignature {
+                    key_type: self.primitive_node(PrimitiveKind::String),
+                    value_type: source,
+                    readonly: false,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin: None,
+                }],
+            ))
+        } else {
+            self.source_projection_with_key_domain(source, context)
+        };
         // A source that RESOLVED (to any surface, including an EMPTY one)
         // is distinct from a source that did NOT project: only the latter
         // defers a homomorphic mapping — see the resolved-empty arm below.
@@ -15803,21 +15931,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Substitute one selected key, then evaluate its value through the
     /// shared continuation runtime. Instantiation and conditional reduction
     /// retain the full publication context and typed completion outcome.
-    pub(super) fn materialize_selected_key_mapped_value(
-        &self,
-        mapper: &crate::semantic_query::MapperKey,
-        key_literal: &LiteralValue,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let key_arg = self
-            .graph()
-            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
-        self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
-    }
-
-    /// Node-keyed selected value; numeric and nominal keys retain their
-    /// original identity during substitution. The active build adopts the
-    /// typed evaluation rails before receiving a node.
+    /// Numeric, enum-member and nominal keys retain their original identity
+    /// during substitution. The active build adopts the typed evaluation
+    /// rails before receiving a node.
     pub(super) fn materialize_selected_key_mapped_value_with_node(
         &self,
         mapper: &crate::semantic_query::MapperKey,

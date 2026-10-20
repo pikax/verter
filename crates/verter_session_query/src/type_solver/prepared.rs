@@ -1042,7 +1042,7 @@ fn closedness_recipe_of(
                 }
             }
         }
-        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => ClosednessRecipe::OpenLeaf,
+        TypeExpr::Function(_) | TypeExpr::ConstructorType(_) => ClosednessRecipe::CallableLeaf,
         TypeExpr::Union(arms) => collect_all_arms(root_identity, arms, path, |ordinal| {
             TypeBodyPathStep::UnionArm { ordinal }
         }),
@@ -3338,7 +3338,7 @@ mod key_domain_closedness_producer_tests {
                     None,
                     Vec::new(),
                 ))),
-                ClosednessRecipe::OpenLeaf,
+                ClosednessRecipe::CallableLeaf,
             ),
             (
                 TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax("??")),

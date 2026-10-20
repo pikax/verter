@@ -2664,8 +2664,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
         // content, so an edit here must reject the consuming warm entry.
         observe_closedness_walk_consult(ctx, canonical_id);
 
+        // An enum's type is the finite union of its members' literal types:
+        // a closed key domain, which no body recipe describes.
+        let is_enum = || {
+            ctx.prepared_value_decl_return_only(canonical_id, owner, decl_name)
+                .is_some_and(|value| {
+                    matches!(
+                        value.kind,
+                        verter_session_query::declarations::ValueDeclKind::Enum
+                    )
+                })
+        };
         let Some(prepared) = ctx.prepared_type_decl_return_only(canonical_id, owner, decl_name)
         else {
+            if is_enum() {
+                return Flow::verdict(ClosednessVerdict::ProvenClosed);
+            }
             // No local declaration at `(canonical, name)` — the name may be a
             // barrel RE-EXPORT (`export { LinkProps } from './link'`) rather
             // than a declaration in this file. Follow the re-export hop
@@ -2703,7 +2717,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             .map(|fact| fact.body_recipes.clone())
             .filter(|recipes| !recipes.is_empty())
         else {
-            return Flow::verdict(ClosednessVerdict::Unavailable);
+            return Flow::verdict(if is_enum() {
+                ClosednessVerdict::ProvenClosed
+            } else {
+                ClosednessVerdict::Unavailable
+            });
         };
         let bindings = ParamBindings::free(&prepared);
         let env = Rc::new(RecipeEnv { prepared, bindings });
@@ -2906,8 +2924,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
             // index-signature key is a syntactically closed scalar (anything
             // else escaped the whole object to the walker).
             ClosednessRecipe::ObjectClosed => ClosednessVerdict::ProvenClosed,
-            // A function/constructor TYPE is not an enumerable key surface.
-            ClosednessRecipe::OpenLeaf => ClosednessVerdict::ProvenOpen,
+            // A function/constructor TYPE has no properties: its key domain
+            // is the closed empty set, as an inline signature's is.
+            ClosednessRecipe::CallableLeaf => ClosednessVerdict::ProvenClosed,
             // Composites close iff every arm closes; the first non-closed
             // verdict (document order) is the fold's verdict.
             ClosednessRecipe::AllArms(arms) => {
@@ -3038,7 +3057,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
 /// `name_resolution`/registry gate, consulted by the enumeration-domain
 /// walk at a `ValueSensitive` operand with all-closed arguments: an
 /// unresolvable base is an undecidable surface, not a concrete one.
-/// `__builtin__` bases resolve through the `BuiltinUtility` registry;
+/// `__builtin__` bases resolve through the `BuiltinUtility` registry or as a
+/// global nominal (`RuntimeNominal`, whose carrier is the resolved type);
 /// file bases through the prepared-decl cache, with ONE barrel
 /// re-export hop (deeper re-export chains stay conservatively
 /// unresolvable ⇒ OPEN, the safe direction). The consult is rooted on
@@ -3050,10 +3070,13 @@ fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilitie
     charge: &mut dyn FnMut() -> bool,
 ) -> bool {
     if base.canonical_id.as_ref() == "__builtin__" {
+        // A registry utility, or a global nominal (`Function`, `Date`, …)
+        // whose carrier is the resolved type itself.
         return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
             base.decl_name.as_ref(),
         )
-        .is_some();
+        .is_some()
+            || crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base).is_some();
     }
     if !charge() {
         return false;

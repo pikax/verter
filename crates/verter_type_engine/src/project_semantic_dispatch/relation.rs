@@ -9993,7 +9993,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             == Some(crate::intrinsic_registry::RuntimeNominal::Function)
     }
 
-    /// The two relation judgements the lib `Function` global's TERMINAL
+    /// The relation judgements the lib `Function` global's TERMINAL
     /// carrier has to answer by tag, because it has no declaration body
     /// the `Instantiate` dispatch could expand into an object surface:
     ///
@@ -10001,7 +10001,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   non-primitive (and to another spelling of the same global);
     /// * every CALLABLE source inhabits the global `Function` surface —
     ///   a bare signature, or an object surface carrying a call or
-    ///   construct signature.
+    ///   construct signature;
+    /// * no string, number, boolean, bigint or symbol (nor a literal of
+    ///   one) does: its wrapper lacks `Function`'s `apply` / `call` /
+    ///   `bind`.
     ///
     /// `None` for every other pair, which then takes the ordinary arms:
     /// the deferred gate's `Unknown` is the honest answer for a carrier
@@ -10030,6 +10033,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::Object(surface) => (!surface.call_signatures.is_empty()
                     || !surface.construct_signatures.is_empty())
                 .then(|| assignable(bindings)),
+                // A primitive reads through its wrapper (`Number`, `String`,
+                // …), which declares none of `Function`'s `apply` / `call` /
+                // `bind`: `1 extends Function` is false.
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+                )
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::TypeOfNominal(_) => Some(RelationResult::NotAssignable),
                 _ => None,
             };
         }

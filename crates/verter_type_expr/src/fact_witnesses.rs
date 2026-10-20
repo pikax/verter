@@ -995,10 +995,14 @@ fn closedness_recipe_all_arms_is_structurally_recursive() {
     // did not flatten the arm away.
     let inner = ClosednessRecipe::ObjectClosed;
     let outer = ClosednessRecipe::AllArms(std::sync::Arc::from(
-        vec![inner.clone(), ClosednessRecipe::OpenLeaf].into_boxed_slice(),
+        vec![inner.clone(), ClosednessRecipe::CallableLeaf].into_boxed_slice(),
     ));
     let outer_same = ClosednessRecipe::AllArms(std::sync::Arc::from(
-        vec![ClosednessRecipe::ObjectClosed, ClosednessRecipe::OpenLeaf].into_boxed_slice(),
+        vec![
+            ClosednessRecipe::ObjectClosed,
+            ClosednessRecipe::CallableLeaf,
+        ]
+        .into_boxed_slice(),
     ));
     let outer_diff =
         ClosednessRecipe::AllArms(std::sync::Arc::from(vec![inner].into_boxed_slice()));
