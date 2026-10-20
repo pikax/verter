@@ -529,14 +529,14 @@ pub enum LiteralProvenanceResult {
 /// A shared literal payload with semantic value identity. Holding the node's
 /// Arc avoids copying string and bigint contents into membership sets. The
 /// operation-local inventory computes its semantic hash only on first read.
-#[derive(Clone)]
-struct LiteralValueIdentity {
+#[derive(Clone, Debug)]
+pub(super) struct LiteralValueIdentity {
     data: crate::semantic_query_memo::NodeData,
     semantic_hash: u64,
 }
 
 impl LiteralValueIdentity {
-    fn new(data: crate::semantic_query_memo::NodeData) -> Self {
+    pub(super) fn new(data: crate::semantic_query_memo::NodeData) -> Self {
         use std::hash::{Hash, Hasher};
         #[cfg(test)]
         literal_provenance_tests::PAYLOAD_HASHES.with(|count| count.set(count.get() + 1));
