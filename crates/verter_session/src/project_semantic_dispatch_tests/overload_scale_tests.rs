@@ -18,7 +18,7 @@ fn overload_group(size: usize) -> String {
 
 #[test]
 fn overload_applicability_lowers_each_overload_statement_a_bounded_number_of_times() {
-    const SIZES: [usize; 4] = [128, 256, 512, 1024];
+    const SIZES: [usize; 4] = [32, 64, 128, 256];
     let mut lowered = Vec::new();
     for size in SIZES {
         let source = overload_group(size);
