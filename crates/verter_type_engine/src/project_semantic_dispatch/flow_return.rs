@@ -10717,6 +10717,14 @@ pub(super) trait FlowDemandDriver {
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>>;
+    /// The occurrence of the diagnostic a recovery node carries, bound now to
+    /// where the checker reports it for the body of `canonical`.
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence>;
     /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
@@ -11346,6 +11354,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         self.indexed_call_return_key(node)
             .and_then(|key| self.read_declared_call_return(key))
+    }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -12126,6 +12142,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         self.driver.declared_call_return_read(node)
+    }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.driver
+            .bind_checker_recovery(node, canonical, call_span)
     }
     fn normalize_expression_tuple_spread(
         &self,
@@ -24255,6 +24280,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 if type_parameters.is_empty()
                         ) =>
                     {
+                        // The lone signature narrows only for a call it
+                        // applies to: the executor's applicability check
+                        // (the call's own evaluation reuses its cached
+                        // result) records the checker's diagnostic.
+                        self.record_lone_predicate_applicability(callee, site);
                         *only
                     }
                     _ => match self.resolve_call_step(
@@ -24370,6 +24400,35 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     ) {
         if !self.checker_diagnostics.contains(&occurrence) {
             self.checker_diagnostics.push(occurrence);
+        }
+    }
+
+    /// The applicability check of a call to a lone non-generic predicate
+    /// signature: the executor route's diagnostic for an argument the
+    /// signature does not accept, recorded like the multi-signature path's.
+    fn record_lone_predicate_applicability(
+        &mut self,
+        callee: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) {
+        let recipe = match self.resolve_call_step(
+            callee,
+            site,
+            &verter_session_query::flow::slice::SliceCallArguments::none(),
+        ) {
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Complete(
+                crate::semantic_query::ResolvedCallResult::Selected {
+                    recovery_diagnostic,
+                    ..
+                },
+            ))) => recovery_diagnostic,
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
+            ))) => Some(recipe),
+            _ => None,
+        };
+        if let Some(recipe) = recipe {
+            self.record_call_diagnostic(&recipe, site);
         }
     }
 
@@ -29025,10 +29084,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
             // A route that cannot type the call decides nothing: a lone
-            // declared callee's caller still reads its declared return.
+            // declared callee's caller still reads its declared return, but
+            // its applicability went unchecked, so the result is a recorded
+            // gap, never claimed complete.
             Some(Positional::Unmodeled) | None => {
-                return (!self.callee_is_lone_declared(callee))
-                    .then(|| self.degraded_unrepresentable_callee())
+                if self.callee_is_lone_declared(callee) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+                    );
+                    return None;
+                }
+                return Some(self.degraded_unrepresentable_callee());
             }
         };
         match step {
@@ -29077,39 +29143,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .partial_reasons()
                         .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET);
                     if let QueryResult::Value(node) = read.value {
-                        let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
-                            match data.as_ref() {
-                                SemanticNodeData::Opaque(QueryError::CheckerRecovery {
-                                    diagnostic,
-                                    ..
-                                }) => Some(*diagnostic),
-                                _ => None,
-                            }
-                        });
+                        let recovers = matches!(
+                            self.dispatch.arena().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+                        );
                         if budget {
                             self.record_degradation(
                                 crate::semantic_query::FlowReturnDegradation::OperationBudget,
                             );
                         }
-                        // The carrier holds only the diagnostic, with no
-                        // bound arguments: it is reported at the call only when
-                        // its message takes none, never with a placeholder left
-                        // unfilled.
-                        if let Some(diagnostic) =
-                            diagnostic.filter(|d| !d.code.message().contains('{'))
+                        // Bound now, to this body's file: the recovery's
+                        // message arguments and authored report location are
+                        // read off the carrier at this call, never kept from
+                        // another caller's bind.
+                        if let Some(occurrence) =
+                            self.dispatch
+                                .bind_checker_recovery(node, self.canonical, site.span())
                         {
-                            let span = site.span();
-                            self.record_checker_diagnostic(
-                                crate::semantic_query::CheckerDiagnosticOccurrence::new(
-                                    span.start,
-                                    span.end,
-                                    diagnostic,
-                                    Box::default(),
-                                    Box::default(),
-                                ),
-                            );
+                            self.record_checker_diagnostic(occurrence);
                         }
-                        if budget || diagnostic.is_some() {
+                        if budget || recovers {
                             returned = node;
                         }
                     }
