@@ -370,3 +370,82 @@ fn a_navigate_resolution_keeps_a_nested_access_as_its_carrier() {
         display(&navigated)
     );
 }
+
+/// Measured on TypeScript 7.0.2: `[X[Y["k"]], Y["k"]]` over `type X = { a:
+/// 1; b: 2 }` and `type Y = { k: "a" }` is `[1, "a"]` and its reverse is
+/// `["a", 1]`; `[keyof P] | keyof P | 3` and `keyof P | 3 | [keyof P]` are
+/// both `"a" | "b" | 3 | [keyof P]`. One operator written at two places
+/// answers by each place, whichever the projection reaches first.
+#[test]
+fn an_operator_written_at_two_places_answers_by_each_place() {
+    let accesses = "type X = { a: 1; b: 2 };\ntype Y = { k: \"a\" };\n";
+    let keys = "type P = { a: 1; b: 2 };\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        let answer = |source: &str, probe: &str| {
+            answer_with_options(source, probe, None, strict_null_checks, no_implicit_any)
+        };
+        assert_eq!(
+            display(&answer(accesses, "[X[Y[\"k\"]], Y[\"k\"]]")),
+            "[1, 'a']",
+            "{settings}"
+        );
+        assert_eq!(
+            display(&answer(accesses, "[Y[\"k\"], X[Y[\"k\"]]]")),
+            "['a', 1]",
+            "{settings}"
+        );
+        for probe in ["[keyof P] | keyof P | 3", "keyof P | 3 | [keyof P]"] {
+            assert_eq!(
+                members(&answer(keys, probe)),
+                set(["'a'", "'b'", "3", "[keyof P]"]),
+                "`{probe}`, {settings}"
+            );
+        }
+    }
+}
+
+/// Measured on TypeScript 7.0.2, under every `strictNullChecks` /
+/// `noImplicitAny` combination: `X["a"] & number` and `X["a"] & {}` over
+/// `type X = { a: 1 }` are `1`, `keyof P & string` over `type P = { a: 1;
+/// b: 2 }` is `"a" | "b"`, `(keyof P & string) | 3` is `"a" | "b" | 3`,
+/// and `Z["a"] & { d: 2 }` over `type Z = { a: { c: 1 } }` is `{ c: 1; }
+/// & { d: 2; }`.
+#[test]
+fn a_closed_operator_in_an_answer_intersection_reduces() {
+    let accesses = "type X = { a: 1 };\ntype Z = { a: { c: 1 } };\n";
+    let keys = "type P = { a: 1; b: 2 };\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        let answer = |source: &str, probe: &str| {
+            answer_with_options(source, probe, None, strict_null_checks, no_implicit_any)
+        };
+        assert_eq!(
+            display(&answer(accesses, "X[\"a\"] & number")),
+            "1",
+            "{settings}"
+        );
+        assert_eq!(
+            display(&answer(accesses, "X[\"a\"] & {}")),
+            "1",
+            "{settings}"
+        );
+        assert_eq!(
+            display(&answer(accesses, "Z[\"a\"] & { d: 2 }")),
+            "{ c: 1 } & { d: 2 }",
+            "{settings}"
+        );
+        assert_eq!(
+            members(&answer(keys, "keyof P & string")),
+            set(["'a'", "'b'"]),
+            "{settings}"
+        );
+        assert_eq!(
+            members(&answer(keys, "(keyof P & string) | 3")),
+            set(["'a'", "'b'", "3"]),
+            "{settings}"
+        );
+    }
+}

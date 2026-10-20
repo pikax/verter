@@ -95,6 +95,8 @@ enum BodyGroup {
         arms: Arc<[SemanticNodeId]>,
         next: usize,
         ids: Vec<SemanticNodeId>,
+        /// The context each projected arm was projected under, in order.
+        contexts: Vec<ProjectionReductionContext>,
         demand: ReferenceArmDemand,
     },
 }
@@ -433,6 +435,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arms: arms.to_vec().into(),
                 next: 0,
                 ids: Vec::new(),
+                contexts: Vec::new(),
                 demand: ReferenceArmDemand::CallerMode,
             }),
             Some(SemanticNodeData::Object(_)) => {
@@ -527,7 +530,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 None => {
-                    let projected = self.finish_body_plan(projection);
+                    let projected = self.finish_body_plan(projection, inputs);
                     return BodyProjectionPoll::Done(if projection.completeness.is_partial() {
                         substitutions.truncate(projection.substitution_checkpoint);
                         ProjectedViewOutcome {
@@ -604,6 +607,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arms: arms.to_vec().into(),
                 next: 0,
                 ids: Vec::new(),
+                contexts: Vec::new(),
                 demand: ReferenceArmDemand::Deferred,
             },
             _ => {
@@ -639,7 +643,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(*root)
             }
             BodyGroup::Arms {
-                arms, next, demand, ..
+                arms,
+                next,
+                demand,
+                contexts,
+                ..
             } => loop {
                 let arm = *arms.get(*next)?;
                 *next += 1;
@@ -689,13 +697,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     };
                     arm_ctx = arm_ctx.into_structural_transit_with_mode(mode);
                 }
+                contexts.push(arm_ctx);
                 return Some((arm, arm_ctx));
             },
         }
     }
 
     /// The projected body once every root is projected.
-    fn finish_body_plan(&self, projection: &mut DeclBodyProjection) -> SemanticNodeId {
+    fn finish_body_plan(
+        &self,
+        projection: &mut DeclBodyProjection,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
         let reference_arm_role = projection.reference_arm_role;
         match std::mem::replace(
             &mut projection.plan,
@@ -706,13 +719,64 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 current: None,
             },
         ) {
-            BodyPlan::Group(group) => self.finish_body_group(group, reference_arm_role),
+            BodyPlan::Group(group) => {
+                self.finish_answer_body_group(group, reference_arm_role, inputs)
+            }
             BodyPlan::Merged { ids, .. } => self.graph().intern_preserving_scope(
                 projection.shape,
                 SemanticNodeData::MergedDecl {
                     contributors: crate::semantic_query::PayloadArray::from(ids.into_boxed_slice()),
                 },
             ),
+        }
+    }
+
+    /// A single declaration's body as the answer holds it: the whole body's
+    /// own union or intersection reads its closed operator arms, and so does
+    /// an alias's intersection body over the arms it projected one by one,
+    /// rebuilt through the canonical intersection when an arm reduced. An
+    /// interface or class body keeps its heritage arms as they are.
+    fn finish_answer_body_group(
+        &self,
+        group: BodyGroup,
+        reference_arm_role: MemberMergeRole,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        if reference_arm_role == MemberMergeRole::Authored {
+            if let BodyGroup::Arms {
+                body,
+                ids,
+                contexts,
+                ..
+            } = &group
+            {
+                let reduced: Vec<SemanticNodeId> = ids
+                    .iter()
+                    .zip(contexts)
+                    .map(|(arm, context)| self.reduce_answer_arm(*arm, *context, inputs))
+                    .collect();
+                if reduced != *ids {
+                    let category = match self.graph().node_data(*body).as_deref() {
+                        Some(SemanticNodeData::Intersection(authored)) => {
+                            authored.origin_category()
+                        }
+                        _ => unreachable!("an arms group projects an intersection body"),
+                    };
+                    return self.rebuild_answer_intersection(*body, category, reduced);
+                }
+            }
+        }
+        match group {
+            BodyGroup::Whole {
+                root: (_, context),
+                projected,
+                ..
+            } => self.reduce_answer_constituents(
+                projected.expect("a whole-body group projects its root"),
+                context,
+                inputs,
+            ),
+            arms @ BodyGroup::Arms { .. } => self.finish_body_group(arms, reference_arm_role),
         }
     }
 

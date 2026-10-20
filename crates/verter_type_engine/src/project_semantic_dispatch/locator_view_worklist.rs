@@ -153,22 +153,6 @@ impl ProjectionFailure {
     }
 }
 
-/// The place of a projected node in the answer, from the outside in: an
-/// operator there reduces only where the answer itself holds it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum AnswerPosition {
-    /// The projection's own value: the demand that asked for it reads it
-    /// at its own altitude.
-    Root,
-    /// An arm of a union or intersection the answer holds.
-    Constituent,
-    /// Inside an object, array, tuple, signature, type argument or an
-    /// undecided conditional's branches.
-    Interior,
-    /// An operand an enclosing operator owns.
-    Operand,
-}
-
 enum ProjectionFrame {
     Enter {
         node: SemanticNodeId,
@@ -397,40 +381,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => false,
         });
         tail || self.in_deferred_interior(ancestors)
-    }
-
-    /// Where a node sits in the answer the projection builds, read off its
-    /// ancestors: the projection's own value, an arm of a union or
-    /// intersection, an interior of an object, array, tuple, signature,
-    /// type argument or undecided branch, or an operand an enclosing
-    /// operator demands at its own altitude. Aliases and selected branches
-    /// are transparent.
-    fn answer_position(&self, ancestors: &[ProjectionFrame]) -> AnswerPosition {
-        let mut position = AnswerPosition::Root;
-        for frame in ancestors {
-            let here = match frame {
-                ProjectionFrame::Enter { .. }
-                | ProjectionFrame::ConditionalSelectedFinish { .. } => continue,
-                ProjectionFrame::CompositeResume { data, .. } => match data.as_ref() {
-                    SemanticNodeData::Alias(_) => continue,
-                    SemanticNodeData::Union(_)
-                    | SemanticNodeData::Intersection(_)
-                    | SemanticNodeData::MergedDecl { .. } => AnswerPosition::Constituent,
-                    SemanticNodeData::Object(_)
-                    | SemanticNodeData::Array { .. }
-                    | SemanticNodeData::Tuple { .. }
-                    | SemanticNodeData::Signature { .. }
-                    | SemanticNodeData::InstantiationRef { .. } => AnswerPosition::Interior,
-                    _ => return AnswerPosition::Operand,
-                },
-                ProjectionFrame::ConditionalAfterTrue { .. }
-                | ProjectionFrame::ConditionalFinish { .. }
-                | ProjectionFrame::ReferenceArgsResume { .. } => AnswerPosition::Interior,
-                _ => return AnswerPosition::Operand,
-            };
-            position = position.max(here);
-        }
-        position
     }
 
     fn in_deferred_interior(&self, ancestors: &[ProjectionFrame]) -> bool {
@@ -1223,8 +1173,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 Self::conditional_check_context(context),
                             ),
                             extends: projected(memo, *extends, extends_context),
-                            true_branch: projected(memo, *true_branch_ref, context),
-                            false_branch: projected(memo, *false_branch_ref, context),
+                            true_branch: self
+                                .answer_member(projected(memo, *true_branch_ref, context), context),
+                            false_branch: self.answer_member(
+                                projected(memo, *false_branch_ref, context),
+                                context,
+                            ),
                             distributive: *distributive,
                             pending: pending.clone(),
                         },
@@ -1348,13 +1302,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .args
                                 .iter()
                                 .map(|argument| {
-                                    self.canonical_argument_carrier(projected(
-                                        memo,
+                                    let context = self.argument_operand_context(
                                         *argument,
-                                        self.argument_operand_context(
-                                            *argument,
-                                            state.argument_context,
-                                        ),
+                                        state.argument_context,
+                                    );
+                                    self.canonical_argument_carrier(self.answer_member(
+                                        projected(memo, *argument, context),
+                                        context,
                                     ))
                                 })
                                 .collect::<Vec<_>>()

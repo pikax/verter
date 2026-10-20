@@ -137,7 +137,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             memo,
             self.in_deferred_interior(ancestors),
-            self.answer_position(ancestors),
         ))
     }
 
@@ -159,11 +158,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| {
-                    self.canonical_argument_carrier(projected(
-                        memo,
-                        *argument,
-                        self.argument_operand_context(*argument, argument_context),
-                    ))
+                    let context = self.argument_operand_context(*argument, argument_context);
+                    self.canonical_argument_carrier(
+                        self.answer_member(projected(memo, *argument, context), context),
+                    )
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -281,6 +279,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// demand-driven shape there), an operand naming a type parameter or an
     /// `infer` binder (the operator is generic), or a read that stopped
     /// (its partiality folds into the build) or reads nothing.
+    ///
+    /// The projection of an operator itself is always its carrier, wherever
+    /// it is written, so one projected node serves every place that shares
+    /// it; the place that holds it reduces it — a composite for the
+    /// accesses among its children ([`Self::answer_member`]), the answer's
+    /// own union or intersection for its `keyof` and access arms
+    /// ([`Self::reduce_answer_constituents`]).
     fn reduce_closed_answer_operator(
         &self,
         operator: SemanticNodeId,
@@ -313,6 +318,226 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then_some(reduced)
     }
 
+    /// A projected child as the composite holding it keeps it: a closed
+    /// indexed access reads its member; anything else, a `keyof` included
+    /// (an object, tuple, signature or type argument prints it as `keyof
+    /// P`), stays itself.
+    pub(super) fn answer_member(
+        &self,
+        child: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> SemanticNodeId {
+        if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
+            return child;
+        }
+        match self.graph().node_data(child).as_deref() {
+            Some(SemanticNodeData::IndexedAccess { .. }) => self
+                .reduce_closed_answer_operator(child, context)
+                .unwrap_or(child),
+            _ => child,
+        }
+    }
+
+    /// A projection root's answer once its own union or intersection reads
+    /// its closed operator arms: an arm's `keyof` settles to its keys, so
+    /// the answer reduces over them, and an arm's access reads its member,
+    /// through every union or intersection the root is made of. The root
+    /// itself, an operator or not, stays for its demand to read, and an arm
+    /// inside any other composite keeps the carrier that composite prints.
+    ///
+    /// This runs on the projection's result, never on a memoized node: a
+    /// node the projection shares with an object, tuple or operand keeps
+    /// the carrier there.
+    pub(in crate::project_semantic_dispatch) fn reduce_answer_constituents(
+        &self,
+        root: SemanticNodeId,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
+            return root;
+        }
+        match self.graph().node_data(root).as_deref() {
+            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)) => {
+                self.reduce_answer_constituent(root, context, inputs)
+            }
+            _ => root,
+        }
+    }
+
+    /// One arm of the answer's own intersection, projected as a root of
+    /// its own, as [`Self::reduce_answer_constituents`] reads the arms of
+    /// the answer's union or intersection.
+    pub(in crate::project_semantic_dispatch) fn reduce_answer_arm(
+        &self,
+        arm: SemanticNodeId,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
+            return arm;
+        }
+        self.reduce_answer_constituent(arm, context, inputs)
+    }
+
+    /// An arm of the answer's own union or intersection, its closed
+    /// operators read. Unions and intersections nest only as deep as they
+    /// are written.
+    fn reduce_answer_constituent(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let data = graph.node_data(node);
+        match data.as_deref() {
+            Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::IndexedAccess { .. }) => self
+                .reduce_closed_answer_operator(node, context)
+                .unwrap_or(node),
+            Some(SemanticNodeData::Union(arms)) => {
+                let ids: Vec<_> = arms
+                    .iter()
+                    .map(|arm| self.reduce_answer_constituent(*arm, context, inputs))
+                    .collect();
+                if ids.as_slice() == &***arms {
+                    return node;
+                }
+                let nullability = self.answer_nullability(context, inputs);
+                self.rebuild_projected_union(node, arms.origin_category(), ids, nullability)
+            }
+            Some(SemanticNodeData::Intersection(arms)) => {
+                let ids: Vec<_> = arms
+                    .iter()
+                    .map(|arm| self.reduce_answer_constituent(*arm, context, inputs))
+                    .collect();
+                if ids.as_slice() == &***arms {
+                    return node;
+                }
+                self.rebuild_answer_intersection(node, arms.origin_category(), ids)
+            }
+            _ => node,
+        }
+    }
+
+    /// The null algebra a projected union uses: a published expanded answer
+    /// belongs to its declaration's project and uses that project's; the
+    /// shared structural carrier remains policy-neutral (strict). The
+    /// canonical builder includes the policy in node identity.
+    fn answer_nullability(
+        &self,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> verter_session_query::flow::policy::NullabilityPolicy {
+        use verter_session_query::flow::policy::NullabilityPolicy;
+
+        if context.mode == ProjectionMode::Expanded && may_reduce_operator(context) {
+            inputs
+                .scope
+                .canonical_file()
+                .map_or(NullabilityPolicy::Strict, |canonical| {
+                    NullabilityPolicy::from_strict_null_checks(
+                        self.ctx
+                            .semantic_compiler_options_for(&canonical)
+                            .strict_null_checks,
+                    )
+                })
+        } else {
+            NullabilityPolicy::Strict
+        }
+    }
+
+    /// A union rebuilt over its projected arms.
+    fn rebuild_projected_union(
+        &self,
+        node: SemanticNodeId,
+        category: crate::semantic_query::composite::CompositeOriginCategory,
+        ids: Vec<SemanticNodeId>,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        if ids.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        } else if ids.len() == 1 {
+            ids[0]
+        } else if self.composite_rebuild_re_decides(category, &ids, true) {
+            // The projection of a canonical/authored composite is a
+            // DERIVED result — route it through the canonical authority
+            // (the authored shell stays recoverable via `node`); a derived
+            // multi-arm composite interns Global.
+            self.intern_normalized_union(&ids, nullability)
+        } else {
+            // Order- and scope-preserving projection rebuild for the
+            // carrier categories whose arm order is semantics.
+            graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Union(
+                    crate::semantic_query::composite::CompositeList::preserving_rebuild(Arc::from(
+                        ids.into_boxed_slice(),
+                    )),
+                ),
+            )
+        }
+    }
+
+    /// An intersection of the answer's own, rebuilt over arms it reduced:
+    /// the union it denotes when an arm is a union, as the checker
+    /// distributes it (`getIntersectionType`), else the intersection.
+    pub(in crate::project_semantic_dispatch) fn rebuild_answer_intersection(
+        &self,
+        node: SemanticNodeId,
+        category: crate::semantic_query::composite::CompositeOriginCategory,
+        ids: Vec<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        use crate::semantic_query::composite::CompositeOriginCategory as C;
+
+        // A heritage body or an overload carrier keeps its arms in order.
+        let ordered = matches!(
+            category,
+            C::OrderedCarrier | C::OverloadGroup | C::MergedOverloadGroup | C::Heritage
+        );
+        if !ordered {
+            if let Some(distributed) = self.distributed_intersection(&ids) {
+                return distributed;
+            }
+        }
+        self.rebuild_projected_intersection(node, category, ids)
+    }
+
+    /// An intersection rebuilt over its projected arms.
+    fn rebuild_projected_intersection(
+        &self,
+        node: SemanticNodeId,
+        category: crate::semantic_query::composite::CompositeOriginCategory,
+        ids: Vec<SemanticNodeId>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        if ids.is_empty() {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        } else if ids.len() == 1 {
+            ids[0]
+        } else if self.composite_rebuild_re_decides(category, &ids, false) {
+            // Derived projection result (and provably order-safe: no
+            // rebuilt arm may contribute call signatures) — canonical
+            // authority, Global intern.
+            self.intern_normalized_union_or_intersection(&ids, false)
+        } else {
+            // Order- and scope-preserving projection rebuild: a heritage
+            // body or an ordered overload carrier (or a possibly-callable
+            // rebuilt arm set) keeps its verbatim order, and a heritage
+            // body stays one.
+            graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        category,
+                        Arc::from(ids.into_boxed_slice()),
+                    ),
+                ),
+            )
+        }
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn finish_projection_structure(
         &self,
@@ -323,7 +548,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
         deferred_position: bool,
-        position: AnswerPosition,
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
@@ -393,34 +617,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             SemanticNodeData::Union(arms) => {
-                use verter_session_query::flow::policy::NullabilityPolicy;
-
-                let category = arms.origin_category();
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| projected(memo, *arm, context))
+                    .map(|arm| self.answer_member(projected(memo, *arm, context), context))
                     .collect();
-                // A published expanded answer belongs to this declaration's
-                // project. Its union uses that project's null algebra; the
-                // shared structural carrier remains policy-neutral/strict.
-                // The canonical builder includes the policy in node identity.
-                let nullability = if context.mode == ProjectionMode::Expanded
-                    && may_reduce_operator(context)
-                {
-                    inputs
-                        .scope
-                        .canonical_file()
-                        .map_or(NullabilityPolicy::Strict, |canonical| {
-                            NullabilityPolicy::from_strict_null_checks(
-                                self.ctx
-                                    .semantic_compiler_options_for(&canonical)
-                                    .strict_null_checks,
-                            )
-                        })
-                } else {
-                    NullabilityPolicy::Strict
-                };
-                let re_decides = self.composite_rebuild_re_decides(category, &ids, true);
+                let nullability = self.answer_nullability(context, inputs);
                 let erases_nullish = !nullability.is_strict()
                     && ids.iter().any(|arm| {
                         matches!(
@@ -430,70 +631,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             ))
                         )
                     });
-                if ids.as_slice() == &***arms && (!erases_nullish || !re_decides) {
+                if ids.as_slice() == &***arms
+                    && (!erases_nullish
+                        || !self.composite_rebuild_re_decides(arms.origin_category(), &ids, true))
+                {
                     // Identity projection: nothing to rebuild and nothing to
                     // re-decide — the original carrier (its category, order
                     // and interned identity, including alias origin) stays
                     // exactly itself when no nullable arm must be erased.
                     return node;
                 }
-                if ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if ids.len() == 1 {
-                    ids[0]
-                } else if re_decides {
-                    // The projection of a canonical/authored composite is a
-                    // DERIVED result — route it through the canonical
-                    // authority (the authored shell stays recoverable via
-                    // `node`); a derived multi-arm composite interns Global.
-                    self.intern_normalized_union(&ids, nullability)
-                } else {
-                    // Order- and scope-preserving projection rebuild for the
-                    // carrier categories whose arm order is semantics.
-                    graph.intern_preserving_scope(
-                        node,
-                        SemanticNodeData::Union(
-                            crate::semantic_query::composite::CompositeList::preserving_rebuild(
-                                Arc::from(ids.into_boxed_slice()),
-                            ),
-                        ),
-                    )
-                }
+                self.rebuild_projected_union(node, arms.origin_category(), ids, nullability)
             }
             SemanticNodeData::Intersection(arms) => {
-                let category = arms.origin_category();
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| projected(memo, *arm, context))
+                    .map(|arm| self.answer_member(projected(memo, *arm, context), context))
                     .collect();
                 if ids.as_slice() == &***arms {
                     // Identity projection — see the Union arm.
                     return node;
                 }
-                if ids.is_empty() {
-                    graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never))
-                } else if ids.len() == 1 {
-                    ids[0]
-                } else if self.composite_rebuild_re_decides(category, &ids, false) {
-                    // Derived projection result (and provably order-safe:
-                    // no rebuilt arm may contribute call signatures) —
-                    // canonical authority, Global intern.
-                    self.intern_normalized_union_or_intersection(&ids, false)
-                } else {
-                    // Order- and scope-preserving projection rebuild: a
-                    // heritage body or an ordered overload carrier (or a
-                    // possibly-callable rebuilt arm set) keeps its verbatim
-                    // order, and a heritage body stays one.
-                    graph.intern_preserving_scope(
-                        node,
-                        SemanticNodeData::Intersection(
-                            crate::semantic_query::composite::CompositeList::rebuilt_from(
-                                category,
-                                Arc::from(ids.into_boxed_slice()),
-                            ),
-                        ),
-                    )
-                }
+                self.rebuild_projected_intersection(node, arms.origin_category(), ids)
             }
             SemanticNodeData::MergedDecl { contributors } => {
                 let ids: Vec<_> = contributors
@@ -508,7 +667,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             SemanticNodeData::Array { element, readonly } => {
-                let new_element = projected(memo, *element, context);
+                let new_element = self.answer_member(projected(memo, *element, context), context);
                 if new_element == *element {
                     node
                 } else {
@@ -526,7 +685,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|element| TupleElement {
                         label: element.label.clone(),
-                        value: projected(memo, element.value, context),
+                        value: self.answer_member(projected(memo, element.value, context), context),
                         optional: element.optional,
                         rest: element.rest,
                     })
@@ -593,7 +752,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 )
                             }
                         },
-                        value: projected(memo, member.value, member_context),
+                        value: self.answer_member(
+                            projected(memo, member.value, member_context),
+                            member_context,
+                        ),
                         optional: member.optional,
                         readonly: member.readonly,
                         method_kind: member.method_kind,
@@ -622,8 +784,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .index_signatures
                     .iter()
                     .map(|signature| IndexSignature {
-                        key_type: projected(memo, signature.key_type, context),
-                        value_type: projected(memo, signature.value_type, context),
+                        key_type: self.answer_member(projected(memo, signature.key_type, context), context),
+                        value_type: self.answer_member(
+                            projected(memo, signature.value_type, context),
+                            context,
+                        ),
                         readonly: signature.readonly,
                         spans: signature.spans,
                         declaration_origin: signature.declaration_origin.clone(),
@@ -698,7 +863,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|parameter| FunctionParam {
                         name: parameter.name.clone(),
-                        ty: projected(memo, parameter.ty, context),
+                        ty: self.answer_member(projected(memo, parameter.ty, context), context),
                         optional: parameter.optional,
                         rest: parameter.rest,
                         span: parameter.span,
@@ -712,30 +877,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint
-                            .map(|value| projected(memo, value, context)),
+                            .map(|value| self.answer_member(projected(memo, value, context), context)),
                         default: parameter
                             .default
-                            .map(|value| projected(memo, value, context)),
+                            .map(|value| self.answer_member(projected(memo, value, context), context)),
                         is_const: parameter.is_const,
                     })
                     .collect();
+                let projected_return =
+                    self.answer_member(projected(memo, *return_type, context), context);
                 let signature = graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Signature {
                         kind: *kind,
                         params: crate::semantic_query::PayloadArray::from(params.into_boxed_slice()),
-                        return_type: projected(memo, *return_type, context),
+                        return_type: projected_return,
                         type_parameters: crate::semantic_query::PayloadArray::from(type_parameters.into_boxed_slice()),
                         // Projection preserves the occurrence; a declared
                         // carrier retargets the projected return.
                         occurrence: occurrence.clone(),
                         return_carrier: match return_carrier {
                             crate::semantic_query::SignatureReturnCarrier::Declared(_) => {
-                                crate::semantic_query::SignatureReturnCarrier::Declared(projected(
-                                    memo,
-                                    *return_type,
-                                    context,
-                                ))
+                                crate::semantic_query::SignatureReturnCarrier::Declared(projected_return)
                             }
                             crate::semantic_query::SignatureReturnCarrier::Function(source) => {
                                 crate::semantic_query::SignatureReturnCarrier::Function(
@@ -765,22 +928,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context.into_structural_transit_with_mode(ProjectionMode::Navigate),
                 );
                 if may_reduce_operator(context) {
-                    let keys = match self.execute_type_node(SemanticQueryKey::KeyOf {
+                    match self.execute_type_node(SemanticQueryKey::KeyOf {
                         base: base_id,
                         context,
                     }) {
                         QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => return self.opaque(QueryError::Miss),
-                    };
-                    // An arm's keys are constituents of the union or
-                    // intersection the answer holds: it reduces over P's
-                    // keys, as the checker's union flattens them. Elsewhere
-                    // the carrier is the `keyof P` the checker prints.
-                    if position == AnswerPosition::Constituent {
-                        self.reduce_closed_answer_operator(keys, context)
-                            .unwrap_or(keys)
-                    } else {
-                        keys
+                        _ => self.opaque(QueryError::Miss),
                     }
                 } else {
                     match graph.node_data(base_id).as_deref() {
@@ -821,23 +974,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         || deferred_position
                         || !matches!(graph.node_data(object_id).as_deref(), Some(SemanticNodeData::Object(_))));
                 if should_defer {
-                    let access = graph.intern_preserving_scope(
+                    graph.intern_preserving_scope(
                         node,
                         SemanticNodeData::IndexedAccess {
                             object: object_id,
                             index,
                         },
-                    );
-                    // The checker never keeps an access over closed operands:
-                    // it reads the member when it builds the type, wherever
-                    // the answer holds the access. The projection's own value
-                    // is its demand's to read; an operand, its operator's.
-                    match position {
-                        AnswerPosition::Constituent | AnswerPosition::Interior => self
-                            .reduce_closed_answer_operator(access, context)
-                            .unwrap_or(access),
-                        AnswerPosition::Root | AnswerPosition::Operand => access,
-                    }
+                    )
                 } else {
                     match self.execute_type_node(SemanticQueryKey::IndexedAccess {
                         base: object_id,
