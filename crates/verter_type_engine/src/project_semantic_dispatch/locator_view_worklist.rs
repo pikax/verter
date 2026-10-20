@@ -531,7 +531,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         suspend: bool,
-        deferred_interior: bool,
+        ancestors: &[ProjectionFrame],
     ) -> ReferenceProjectionPlan {
         match data {
             // The terminal nominal carrier IS the type it denotes: resolving
@@ -648,7 +648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context,
                 inputs,
                 substitutions,
-                deferred_interior,
+                self.in_deferred_interior(ancestors),
             ),
             SemanticNodeData::ImportType(_) => {
                 self.plan_import_reference_projection(data, context, inputs)
@@ -1821,7 +1821,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inputs,
                     substitutions,
                     seam.suspend,
-                    self.in_deferred_interior(frames),
+                    frames,
                 );
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {

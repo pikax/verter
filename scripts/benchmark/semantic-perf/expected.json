@@ -1,5 +1,79 @@
 {
  "scenarios": {
+  "scale-ambient-export-equals": {
+   "sourceSha256": "6bafa61ad6dd66b21d5a1ba47bb2aa34a5c5214053129b81da992fef35db18ff",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "ff83811f81b5d0722ea3332bf0729ab7f23a5bf2852ceb4a8b4bc52a37dca988",
+      "stdoutBytes": 485,
+      "tsconfigSha256": "296ab2d032a163b4b8c3f201405bad0bd0e999bf97db917c56f1dd7d06c46b5a",
+      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
+      "termination": null
+     },
+     "printed": "[99]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "50e44bc6905ddcf1c98ebb425f815b85092250a9dcb03492f9be46caa808506a",
+      "stdoutBytes": 487,
+      "tsconfigSha256": "4a6d86dd7677d7464bb3aee880988bc602415cbb1d4d81cba81d77fae7bb94ee",
+      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
+      "termination": null
+     },
+     "printed": "[99]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "5e834076429a48c6234775876524af09bb3eabbe5cb35ac72325beebfae880b0",
+      "stdoutBytes": 487,
+      "tsconfigSha256": "4a9eb16648482bd7715bb84b8c25e192b038e09d784bdb572ee9210ea1edf33a",
+      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
+      "termination": null
+     },
+     "printed": "[99]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "baac380e86f1dd4c2df312f9a13aef5bc5c50a9f1b2d8dd6ef222a782e19a4af",
+      "stdoutBytes": 489,
+      "tsconfigSha256": "61a1a5bfe16021b05227508c3651ebf5b170e9f3a9939965325b1d8c7a9cd366",
+      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
+      "termination": null
+     },
+     "printed": "[99]"
+    }
+   },
+   "method": {
+    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
+    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
+    "tscExeSha256": "4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4",
+    "tscVersion": "Version 7.0.2",
+    "platform": "linux-x64",
+    "memMb": null,
+    "timeoutMs": 300000,
+    "launcher": "native CLI (uncontained)"
+   },
+   "files": {
+    "pkg.d.ts": "e5622903bb94039716a6cb810a7264dc1543038972f50ab727938d0e7e9a482f"
+   }
+  },
   "alias-chain-1000": {
    "sourceSha256": "4723e200a48c51a00d106a6da9dd76a3781cab10bc392985a4e7209eb44fb73d",
    "settings": {
@@ -11146,80 +11220,6 @@
     "memMb": 8192,
     "timeoutMs": 300000,
     "launcher": "verter-supervise"
-   }
-  },
-  "scale-ambient-export-equals": {
-   "sourceSha256": "6bafa61ad6dd66b21d5a1ba47bb2aa34a5c5214053129b81da992fef35db18ff",
-   "settings": {
-    "strict": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "ff83811f81b5d0722ea3332bf0729ab7f23a5bf2852ceb4a8b4bc52a37dca988",
-      "stdoutBytes": 485,
-      "tsconfigSha256": "296ab2d032a163b4b8c3f201405bad0bd0e999bf97db917c56f1dd7d06c46b5a",
-      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
-      "termination": null
-     },
-     "printed": "[99]"
-    },
-    "snc-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "50e44bc6905ddcf1c98ebb425f815b85092250a9dcb03492f9be46caa808506a",
-      "stdoutBytes": 487,
-      "tsconfigSha256": "4a6d86dd7677d7464bb3aee880988bc602415cbb1d4d81cba81d77fae7bb94ee",
-      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
-      "termination": null
-     },
-     "printed": "[99]"
-    },
-    "nia-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "5e834076429a48c6234775876524af09bb3eabbe5cb35ac72325beebfae880b0",
-      "stdoutBytes": 487,
-      "tsconfigSha256": "4a9eb16648482bd7715bb84b8c25e192b038e09d784bdb572ee9210ea1edf33a",
-      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
-      "termination": null
-     },
-     "printed": "[99]"
-    },
-    "both-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "baac380e86f1dd4c2df312f9a13aef5bc5c50a9f1b2d8dd6ef222a782e19a4af",
-      "stdoutBytes": 489,
-      "tsconfigSha256": "61a1a5bfe16021b05227508c3651ebf5b170e9f3a9939965325b1d8c7a9cd366",
-      "sourceSha256": "03038e3f53d9585a3f9c96275b3af9c15c0c10dd56b4a576810a14dc2f014819",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"linux-x64\",\"memMb\":null,\"timeoutMs\":300000,\"launcher\":\"native CLI (uncontained)\"}",
-      "termination": null
-     },
-     "printed": "[99]"
-    }
-   },
-   "method": {
-    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
-    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
-    "tscExeSha256": "4f2de678286401759b3fb4475bafe35b8f32b4b3a07d92642bbf37eadc9b34a4",
-    "tscVersion": "Version 7.0.2",
-    "platform": "linux-x64",
-    "memMb": null,
-    "timeoutMs": 300000,
-    "launcher": "native CLI (uncontained)"
-   },
-   "files": {
-    "pkg.d.ts": "e5622903bb94039716a6cb810a7264dc1543038972f50ab727938d0e7e9a482f"
    }
   },
   "spread-369x271": {
