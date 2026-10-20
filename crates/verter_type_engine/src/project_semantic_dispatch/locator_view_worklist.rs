@@ -181,6 +181,11 @@ enum ProjectionFrame {
         selected: SemanticNodeId,
         context: ProjectionReductionContext,
     },
+    IndexedSelectedFinish {
+        node: SemanticNodeId,
+        selected: SemanticNodeId,
+        context: ProjectionReductionContext,
+    },
     ConditionalAfterTrue {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -292,10 +297,13 @@ pub(super) enum ProjectionPoll {
     Need(SemanticQueryKey),
 }
 
-/// How a node's projection finishes: with a node, or with the
-/// instantiation whose node it is.
+/// How a node's projection finishes: a ready node, a selected value to
+/// project on the worklist, or the query whose answer it needs.
 pub(super) enum ProjectionFinish {
     Node(SemanticNodeId),
+    /// A selected value is projected on this same worklist, so any TypeOf
+    /// it needs can suspend instead of opening a native nested query.
+    Project(SemanticNodeId),
     Instantiate(SemanticQueryKey),
 }
 
@@ -522,6 +530,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then(|| self.recursive_ref_sentinel(identity, Arc::from([])))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_reference_projection(
         &self,
         node: SemanticNodeId,
@@ -530,6 +539,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         suspend: bool,
+        ancestors: &[ProjectionFrame],
     ) -> ReferenceProjectionPlan {
         match data {
             // The terminal nominal carrier IS the type it denotes: resolving
@@ -595,6 +605,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.recursive_ref_sentinel(identity, Arc::from([])),
                     );
                 }
+                // Only an indexed-access object demands the alias's value in
+                // navigation. Ordinary alias reads keep their reference
+                // carriers, including the back-edges used by cycle readers.
+                if context.mode == ProjectionMode::Navigate
+                    && !self.in_deferred_interior(ancestors)
+                    && ancestors.iter().any(|frame| {
+                        matches!(frame,
+                            ProjectionFrame::CompositeResume { data, next_child: 1, .. }
+                                if matches!(data.as_ref(), SemanticNodeData::IndexedAccess { .. }))
+                    })
+                    && matches!(
+                        self.prepared_decl_kind(identity),
+                        Some(verter_session_query::declarations::TypeDeclKind::Alias)
+                    )
+                {
+                    return ReferenceProjectionPlan::Query(SemanticQueryKey::Instantiate(
+                        crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(
+                                identity.canonical_id.clone(),
+                                identity.owner,
+                                identity.decl_name.clone(),
+                            ),
+                            Arc::from([]),
+                            self.instantiate_context_for(&identity.canonical_id, context),
+                        ),
+                    ));
+                }
                 if matches!(
                     context.mode,
                     ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
@@ -645,7 +682,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.plan_bare_reference_projection(data, context, inputs, substitutions)
             }
             SemanticNodeData::ImportType(_) => {
-                self.plan_import_reference_projection(data, context, inputs)
+                self.plan_import_reference_projection(data, context, inputs, suspend)
             }
             _ => unreachable!("non-reference node reached reference projection planner"),
         }
@@ -903,6 +940,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 frames,
                             ) {
                                 ProjectionFinish::Node(result) => result,
+                                ProjectionFinish::Project(selected) => {
+                                    if synchronize {
+                                        if let Err(reasons) = work_credit.refresh() {
+                                            trip = Some(reasons.into());
+                                            break;
+                                        }
+                                    }
+                                    frames.push(ProjectionFrame::IndexedSelectedFinish {
+                                        node,
+                                        selected,
+                                        context,
+                                    });
+                                    frames.push(ProjectionFrame::Enter {
+                                        node: selected,
+                                        context,
+                                    });
+                                    break;
+                                }
                                 ProjectionFinish::Instantiate(key) if seam.suspend => {
                                     frames.push(ProjectionFrame::AwaitInstantiation {
                                         node,
@@ -1117,6 +1172,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     });
                 }
                 ProjectionFrame::ConditionalSelectedFinish {
+                    node,
+                    selected,
+                    context,
+                }
+                | ProjectionFrame::IndexedSelectedFinish {
                     node,
                     selected,
                     context,
@@ -1682,6 +1742,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             frames,
         ) {
             ProjectionFinish::Node(result) => result,
+            ProjectionFinish::Project(selected) => {
+                if synchronize {
+                    work_credit.refresh()?;
+                }
+                frames.push(ProjectionFrame::IndexedSelectedFinish {
+                    node,
+                    selected,
+                    context,
+                });
+                frames.push(ProjectionFrame::Enter {
+                    node: selected,
+                    context,
+                });
+                return Ok(());
+            }
             ProjectionFinish::Instantiate(key) if seam.suspend => {
                 frames.push(ProjectionFrame::AwaitInstantiation { node, context });
                 seam.need = Some(key);
@@ -1825,6 +1900,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inputs,
                     substitutions,
                     seam.suspend,
+                    frames,
                 );
                 match plan {
                     ReferenceProjectionPlan::Ready(result) => {
