@@ -1934,8 +1934,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (None, None) => {}
             _ => return None,
         }
-        self.connected_demand
-            .apply_refusal(prefix.work, prefix.bytes, prefix.trip);
+        self.connected_demand.apply_refusal(
+            prefix.work,
+            prefix.bytes,
+            prefix.advisory_bytes,
+            prefix.trip,
+        );
         crate::fact_signature_helpers::ReadSetSignatureExt::bubble_via_tls(&summary.carrier);
         let read = summary.read.clone();
         self.fold_local_partial_completeness(read.partial_reasons());
@@ -1989,7 +1993,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if trip.is_empty() && !reasons.contains(PartialReasonSet::OPERATION_BUDGET) {
             return;
         }
-        let (work, bytes) = self.connected_demand.charged();
+        let (work, bytes, advisory_bytes) = self.connected_demand.charged();
         let request = match (
             crate::request_context::current_request_budget(),
             root.request_entry,
@@ -2038,6 +2042,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 crate::semantic_query_memo::refusal_summary::RefusalPrefix {
                     work,
                     bytes,
+                    advisory_bytes,
                     request,
                     trip,
                 },

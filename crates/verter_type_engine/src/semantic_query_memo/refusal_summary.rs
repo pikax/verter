@@ -50,8 +50,10 @@ pub const REFUSAL_SUMMARY_CAP: usize = 256;
 pub struct RefusalPrefix {
     /// Work units the connected demand charged.
     pub work: usize,
-    /// Construction bytes the connected demand reserved.
+    /// Construction bytes the connected demand charged.
     pub bytes: u64,
+    /// The part of `bytes` that is advisory construction footprint.
+    pub advisory_bytes: u64,
     /// The request the evaluation ran in: where it entered it, and what it
     /// did to it alone. `None` outside any request.
     pub request: Option<crate::request_budget::RequestSpent>,
@@ -370,6 +372,7 @@ impl SemanticGraphStore {
                 RefusalPrefix {
                     work: 0,
                     bytes: 0,
+                    advisory_bytes: 0,
                     request: None,
                     trip: PartialReasonSet::PROJECTION_WORK_LIMIT,
                 },
