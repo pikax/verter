@@ -174,7 +174,7 @@ pub(super) struct FlowSeam {
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
     /// The reads the run reached that no answer holds, in the order it
     /// reached them, each with the claim it entered with.
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
     /// How many queries the run is evaluating in place now: their reads
@@ -220,7 +220,7 @@ pub(super) struct CallSeam {
     key: crate::semantic_query::ResolveCallKey,
     resume: Option<Box<super::call_resolve::CallSuspension>>,
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
 }
@@ -263,6 +263,58 @@ pub(super) struct ConditionalBuild {
     pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
 }
 
+/// The reads a seam's run reached that no answer holds, in the order it
+/// reached them, each with the claim it entered with, and the demands among
+/// them. A run over a wide union reaches a read per member; asking whether
+/// one of them is already needed answers from the demands, not by comparing
+/// the read with every need before it.
+#[derive(Default)]
+pub(super) struct SeamNeeds {
+    reached: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    demands: rustc_hash::FxHashSet<QueryDemand>,
+}
+
+impl SeamNeeds {
+    fn push(&mut self, key: SemanticQueryKey, claim: ClaimAttempt) {
+        self.demands.insert(QueryDemand {
+            key: key.clone(),
+            site: claim.checking_site(),
+        });
+        self.reached.push((key, claim));
+    }
+
+    /// Whether `key`, at `site`, is one of the needs.
+    fn contains(&self, key: &SemanticQueryKey, site: TupleSplicePosition) -> bool {
+        if self.reached.is_empty() {
+            return false;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        SEAM_NEED_PROBES.with(|probes| probes.set(probes.get() + 1));
+        self.demands.contains(&QueryDemand {
+            key: key.clone(),
+            site,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.reached.is_empty()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn iter(&self) -> std::slice::Iter<'_, (SemanticQueryKey, ClaimAttempt)> {
+        self.reached.iter()
+    }
+}
+
+impl IntoIterator for SeamNeeds {
+    type Item = (SemanticQueryKey, ClaimAttempt);
+    type IntoIter = std::vec::IntoIter<(SemanticQueryKey, ClaimAttempt)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.reached.into_iter()
+    }
+}
+
 /// What a running conditional decision's reads are answered from: its
 /// frame's answers, and the reads they do not answer.
 pub(super) struct DecisionSeam {
@@ -270,7 +322,7 @@ pub(super) struct DecisionSeam {
     /// The reads the run reached that no answer holds, in the order it
     /// reached them, each with the claim it entered with for the runtime
     /// to produce it.
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
     /// How many queries the decision reached are evaluating in place now.
@@ -1511,7 +1563,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let installed = self.decision_seam.replace(Some(DecisionSeam {
             answers: std::mem::take(&mut build.answers),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
         }));
@@ -1596,12 +1648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let read = match answered {
                 Some(delivery) => Seam::Answered(delivery),
                 None if seam.nested > 0 => return None,
-                None if seam.needs.iter().any(|(needed, claim)| {
-                    needed == key && claim.checking_site() == self.checking_site.get()
-                }) =>
-                {
-                    Seam::Waiting
-                }
+                None if seam.needs.contains(key, self.checking_site.get()) => Seam::Waiting,
                 None => Seam::Enter,
             };
             (read, seam.depth)
@@ -1619,7 +1666,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.read_delivery(*delivery, nesting)
                 }
                 Ok(claim) => {
-                    self.with_decision_seam(|seam| seam.needs.push((key.clone(), claim)));
+                    self.with_decision_seam(|seam| seam.needs.push(key.clone(), claim));
                     self.suspended_decision_read()
                 }
             },
@@ -2064,7 +2111,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             key: (**call).clone(),
             resume: build.suspension.take(),
             answers: std::mem::take(&mut build.answers),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
         }));
         verter_debug_assert!(installed.is_none(), "one call walk runs per step");
@@ -2136,7 +2183,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let outer = self.decision_seam.replace(Some(DecisionSeam {
             answers,
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
         }));
@@ -2194,7 +2241,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let frame_depth = self.dispatch_txn.borrow().reentry().depth() + 1;
         let installed = self.flow_seam.replace(Some(FlowSeam {
             answers: std::mem::take(&mut build.answers),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
             windows: 0,
@@ -2267,12 +2314,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .cloned()
             {
                 Some(delivery) => Seam::Answered(delivery),
-                None if seam.needs.iter().any(|(needed, claim)| {
-                    needed == key && claim.checking_site() == self.checking_site.get()
-                }) =>
-                {
-                    Seam::Waiting
-                }
+                None if seam.needs.contains(key, self.checking_site.get()) => Seam::Waiting,
                 None => Seam::Enter,
             };
             (read, seam.depth)
@@ -2290,7 +2332,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.read_delivery(*delivery, nesting)
                 }
                 Ok(claim) => {
-                    self.with_flow_seam(|seam| seam.needs.push((key.clone(), claim)));
+                    self.with_flow_seam(|seam| seam.needs.push(key.clone(), claim));
                     self.suspended_decision_read()
                 }
             },
@@ -2504,6 +2546,19 @@ pub struct CallSuspensionForTests {
 thread_local! {
     static CALL_SUSPENSIONS_FOR_TESTS: std::cell::RefCell<Vec<CallSuspensionForTests>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SEAM_NEED_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The needs a seam's membership queries examined on this thread since it
+/// started: whether a read is already needed costs one hashed probe, never
+/// a comparison with every need the run reached before it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seam_need_probes_for_tests() -> u64 {
+    SEAM_NEED_PROBES.with(std::cell::Cell::get)
 }
 
 /// Take the suspensions call frames' walks made on this thread.

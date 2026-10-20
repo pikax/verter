@@ -38,6 +38,7 @@ use std::sync::Arc;
 use verter_type_engine::project_semantic_dispatch::raise::{
     enable_dispatch_trace_for_test, keys_built_cold_more_than_once, DISPATCH_TRACE,
 };
+use verter_type_engine::project_semantic_dispatch::seam_need_probes_for_tests;
 use verter_type_expr::{LiteralValue, TypeExpr};
 
 const SCENARIO: &str = "/scale/scenario.ts";
@@ -151,7 +152,7 @@ enum Literal {
 }
 
 /// The work a demand did, by the counters a growth test compares.
-type Work = [(&'static str, u64); 6];
+type Work = [(&'static str, u64); 7];
 
 /// Resolve `__Probe = probe` in a fresh project holding `source`, as the
 /// benchmark's probe does, and return its literal members and its work. An
@@ -177,6 +178,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         })
         .expect("fixture admitted");
     let _trace = enable_dispatch_trace_for_test();
+    let probes_before = seam_need_probes_for_tests();
     let ((outcome, _), usage) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
             || {
@@ -189,6 +191,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         .expect("the probe exists");
     let stats = host.project_type_store().semantic_graph().stats_snapshot();
     let dispatches = DISPATCH_TRACE.with(|trace| trace.borrow().len()) as u64;
+    let seam_need_probes = seam_need_probes_for_tests() - probes_before;
     let bytes = host
         .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
@@ -213,6 +216,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         ("decided conditionals", stats.conditional_decided_count),
         ("relation checks", stats.relation_check_count),
         ("substitutions", stats.substitute_memo_misses),
+        ("decision need probes", seam_need_probes),
     ];
     (literals, work)
 }
@@ -358,6 +362,35 @@ fn repeated_infer_answers_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("Pat", work[0], work[1]);
+}
+
+/// The decision over a wide union reaches a read per member, two per member
+/// over its operand passes, and asks for each whether it is already one of
+/// its needs. Comparing a read with every need reached before it made that
+/// question quadratic in the members, which was most of the work at 6,000
+/// members; it is one probe per read. Measured: the numbers `0` to `n - 1`.
+#[test]
+fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
+    let work = [30, 100, 300].map(|members| {
+        let (source, probe) = repeated_infer(members);
+        let (answer, work) = named_probe(
+            &source,
+            &probe,
+            checker_instantiations_repeated_infer(members),
+        );
+        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+        let probes = work
+            .iter()
+            .find(|(what, _)| *what == "decision need probes")
+            .map(|(_, value)| *value);
+        assert!(
+            probes.is_some_and(|probes| probes > 0),
+            "Pat over {members}: the decision asked no need question"
+        );
+        (members, work)
+    });
+    assert_linear_growth("Pat", work[0], work[1]);
+    assert_linear_growth("Pat", work[1], work[2]);
 }
 
 /// The distinct aliases answer at both listed sizes, with work linear from

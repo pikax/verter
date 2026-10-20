@@ -121,8 +121,8 @@ pub mod query_error_disposition;
 mod query_frames;
 #[cfg(any(test, feature = "test-support"))]
 pub use query_frames::{
-    take_call_suspensions_for_tests, CallSuspensionForTests, ContextualRouteEventForTests,
-    OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests,
+    seam_need_probes_for_tests, take_call_suspensions_for_tests, CallSuspensionForTests,
+    ContextualRouteEventForTests, OpenRequestStateForTests, SemanticTask, TaskOutcomeForTests,
 };
 pub mod signature_discovery;
 pub mod signature_utility;
