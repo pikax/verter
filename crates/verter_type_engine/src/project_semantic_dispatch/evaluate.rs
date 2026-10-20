@@ -3104,6 +3104,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         DeferredEvaluationDemand::MappedSource
                     } else if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase) {
                         DeferredEvaluationDemand::Shell
+                    } else if parent.demand == DeferredEvaluationDemand::MappedMemberValue
+                        && matches!(
+                            &parent.stage,
+                            DeferredEvaluationStage::AwaitValueChildren { data, .. }
+                                if matches!(data.as_ref(), SemanticNodeData::Signature { .. })
+                        )
+                    {
+                        // Declared signature type positions publish their selected
+                        // values, even when the enclosing mapped member keeps its
+                        // object surface addressable.
+                        DeferredEvaluationDemand::SelectedValue
                     } else {
                         parent.demand
                     };
@@ -3304,18 +3315,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<Vec<SemanticNodeId>> {
         let whole = crate::semantic_query::may_reduce_operator(context)
             && context.mode == ProjectionMode::Expanded
-            && !matches!(
-                demand,
-                DeferredEvaluationDemand::MappedSource
-                    | DeferredEvaluationDemand::MappedMemberValue
-            );
+            && demand != DeferredEvaluationDemand::MappedSource;
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
             SemanticNodeData::Tuple { elements, .. } if whole => {
                 Some(elements.iter().map(|e| e.value).collect())
             }
-            SemanticNodeData::Object(surface) if whole => {
+            SemanticNodeData::Object(surface)
+                if whole && demand != DeferredEvaluationDemand::MappedMemberValue =>
+            {
                 Some(surface.positive_members().iter().map(|m| m.value).collect())
             }
             SemanticNodeData::Signature {
