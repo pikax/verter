@@ -13559,6 +13559,8 @@ trait RelationDemandDriver {
     fn variance_marker_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> MarkerPair;
     fn weak_target_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool;
     fn relation_strict_config(&self) -> StrictFamilyConfig;
+    /// The union of `members`, through the shared ordered reducer.
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId;
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId;
 }
 impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
@@ -13946,6 +13948,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     }
     fn relation_strict_config(&self) -> StrictFamilyConfig {
         ProjectSemanticDispatch::relation_strict_config(self)
+    }
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        self.intern_normalized_union_or_intersection(members, true)
     }
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
         super::walk::reduce_merged_decl_with_graph(self.graph(), contributors)
@@ -14365,6 +14370,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn relation_strict_config(&self) -> StrictFamilyConfig {
         self.driver.relation_strict_config()
     }
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        self.driver.relation_intern_union(members)
+    }
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
         self.driver.reduce_merged_declaration(contributors)
     }
@@ -14427,7 +14435,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         work: &mut Vec<RelateWork>,
         results: &mut Vec<RelationResult>,
     ) {
-        use crate::signature_kernel::{TupleElementKind, TupleInferenceStep};
+        use crate::signature_kernel::{TupleElementKind, TupleInferenceStep, VariadicArityFacts};
         let graph = self.graph();
         let occurrence = self.relation_current_occurrence();
         let kind_of = |slot: &TupleSlot| match slot.kind {
@@ -14445,6 +14453,30 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             &generic_kinds,
             facts,
         );
+        // Two variadics split at an implied arity tile the concrete middle
+        // only when their slices neither overlap nor leave a gap. A split the
+        // checker clamps (an implied arity overrunning the fixed ends) still
+        // infers both halves, but the tuple instantiated with them is no
+        // answer: the checker relates the arguments to the FIXED inferences,
+        // which the call's post-fixation pass does.
+        let split_is_partial = concrete.is_some_and(|concrete| {
+            let (mut halves, mut covered, mut fixed, mut rest_array) = (0, 0, 0, false);
+            for step in &plan {
+                match *step {
+                    TupleInferenceStep::Slice { start, end, .. } => {
+                        halves += 1;
+                        covered += concrete.len() - end - start;
+                    }
+                    TupleInferenceStep::RestArray { .. } => {
+                        halves += 1;
+                        rest_array = true;
+                    }
+                    TupleInferenceStep::Element { .. } => fixed += 1,
+                    _ => {}
+                }
+            }
+            halves > 1 && (rest_array || covered + fixed != concrete.len())
+        });
         let mut inferred: Vec<Option<Vec<crate::semantic_query::TupleElement>>> =
             generic.iter().map(|_| None).collect();
         for step in plan {
@@ -14489,6 +14521,39 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     };
                     (target, slice, vec![element], false)
                 }
+                TupleInferenceStep::RestArray { start, target } => {
+                    let mut members = Vec::with_capacity(concrete_slots.len() - start);
+                    for slot in &concrete_slots[start..] {
+                        // A variadic member's element type is an indexed
+                        // access the plan does not build.
+                        if slot.kind == TupleSlotKind::Variadic {
+                            results.push(RelationResult::Unknown);
+                            return;
+                        }
+                        members.push(slot.type_argument);
+                    }
+                    let slice = graph.intern_node(SemanticNodeData::Array {
+                        element: self.relation_intern_union(&members),
+                        readonly: false,
+                    });
+                    let element = crate::semantic_query::TupleElement {
+                        label: None,
+                        value: slice,
+                        optional: false,
+                        rest: true,
+                    };
+                    (target, slice, vec![element], false)
+                }
+                // Matching structures infer elementwise: a variadic infers its
+                // type argument to the variadic it faces, which keeps that
+                // element in the instantiated tuple.
+                TupleInferenceStep::Element { source, target }
+                    if generic_kinds[target] == TupleElementKind::Variadic =>
+                {
+                    let Some(concrete) = concrete else { continue };
+                    let element = concrete[source].copy();
+                    (target, element.value, vec![element], false)
+                }
                 // Every other inference is a positional one the relation below
                 // makes as it relates the pair.
                 _ => continue,
@@ -14504,7 +14569,18 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 results.push(RelationResult::Unknown);
                 return;
             }
-            inferred[target] = Some(slice_elements);
+            // A slice the length of no fixed tuple constraint fails it, and
+            // the checker fixes the element to that constraint.
+            if facts
+                .fixed_constraint_arity(target)
+                .is_none_or(|arity| arity == slice_elements.len())
+            {
+                inferred[target] = Some(slice_elements);
+            }
+        }
+        if split_is_partial {
+            results.push(RelationResult::Unknown);
+            return;
         }
         let mut instantiated: Vec<crate::semantic_query::TupleElement> =
             Vec::with_capacity(generic.len());

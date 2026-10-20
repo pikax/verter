@@ -1035,11 +1035,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             // A conditional's `infer` declaration read outside its scope,
-            // with nothing else binding the name, is the checker's TS2304.
-            if arg_count == 0 {
-                if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
-                    return CarrierResolutionPlan::complete(*recovery);
-                }
+            // with nothing else binding the name, is the checker's TS2304 —
+            // applied (`U<string>`) or bare.
+            if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
+                return CarrierResolutionPlan::complete(*recovery);
             }
             // Currently-unresolved authored reference. Under the carrier
             // modes the head STAYS a scoped `BareRef` carrier — the authored

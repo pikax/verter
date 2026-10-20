@@ -2729,9 +2729,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }));
         }
 
-        // An `infer` declaration read outside its scope is the checker's
-        // TS2304, the error type.
-        if type_arguments.is_empty() && ctx.reads_out_of_scope_infer(name) {
+        // An `infer` declaration read outside its scope, applied or bare,
+        // is the checker's TS2304, the error type.
+        if ctx.reads_out_of_scope_infer(name) {
             return LocatorRefPlan::Ready(crate::semantic_query::checker_policy::checker_recovery(
                 self.graph(),
                 crate::semantic_query::checker_policy::unresolved_type_name(),

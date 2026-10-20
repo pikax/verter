@@ -461,6 +461,9 @@ declare function curry<A extends unknown[], B extends unknown[], R>(f: (...args:
 declare function leading<T extends [unknown, unknown]>(x: [...T, ...string[]]): T;
 declare function trailing<T extends [unknown]>(x: [...string[], ...T]): T;
 declare const fx: (x: number, y: string, z: boolean) => 0;
+declare function framed<A extends unknown[], B extends unknown[], R>(f: (...args: [string, ...A, ...B, boolean]) => R, ...a: A): (...b: B) => R;
+declare const fy: (tag: string, x: number, y: string, done: boolean) => 0;
+declare function after0<T extends unknown[]>(x: [0, ...T]): T;
 export function v1() { return tail([1, "a", true]); }
 export function v2() { return concat([1], ["a"]); }
 export function v3() { return pushF([1, 2], "x"); }
@@ -472,6 +475,8 @@ export function v8() { return optSuffix([1, "a", 2]); }
 export function v9() { return curry(fx, 1); }
 export function v10() { return leading([1, true, "a", "b"]); }
 export function v11() { return trailing(["a", "b", 1]); }
+export function v12() { return framed(fy); }
+export function v13<U extends unknown[]>(x: [0, ...U]) { return after0(x); }
 "##;
 
 /// Variadic tuple types spread, infer and instantiate as the checker's do.
@@ -2793,7 +2798,10 @@ fn const_type_parameters_in_mutable_array_contexts() {
 /// A call infers a variadic tuple type parameter from the slice of the
 /// argument tuple between the parameter's fixed prefix and suffix; two
 /// variadics split at the arity the call's arguments imply for the first,
-/// and a variadic beside a rest splits at its fixed constraint arity.
+/// and a variadic beside a rest splits at its fixed constraint arity. A
+/// split whose implied arity overruns the fixed ends clamps the first slice
+/// and still infers the second (`v12`); a generic tuple of the same shape
+/// infers elementwise, its variadic to the caller's parameter (`v13`).
 #[test]
 fn variadic_tuple_inference_in_calls() {
     let failures = Matrix::new(VARIADIC_TUPLES).same(&[
@@ -2806,6 +2814,8 @@ fn variadic_tuple_inference_in_calls() {
         (Read::Return(r#"v9"#), r#"(y: string, z: boolean) => 0"#),
         (Read::Return(r#"v10"#), r#"[number, boolean]"#),
         (Read::Return(r#"v11"#), r#"[number]"#),
+        (Read::Return(r#"v12"#), r#"(x: number, y: string) => 0"#),
+        (Read::Return(r#"v13"#), r#"U"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

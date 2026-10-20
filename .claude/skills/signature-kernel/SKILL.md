@@ -65,6 +65,12 @@ kinds and a variadic's arity facts, never types.
   element), a lone rest the union of the slice, two variadics split at the
   first's implied arity only, and a variadic beside a rest splits at the
   variadic's fixed constraint arity. Any other middle infers nothing.
+- Each slice is the checker's `sliceTupleType`: its bounds clamp as a
+  JavaScript `slice` does (a negative end counts from the back, an overlong
+  one stops at the length), so an implied arity overrunning the fixed ends
+  yields a shorter or empty slice rather than none, both halves of a split
+  infer independently, and a slice beginning past the source's fixed prefix
+  is the source's rest array (`TupleInferenceStep::RestArray`).
 
 The executor is `RelationCx::relate_generic_tuple` (in
 `project_semantic_dispatch/relation.rs`), entered when the active session
@@ -75,8 +81,13 @@ deposits each slice the plan assigns an inferable variadic
 rest; under a call's widening literal mode each element widens while the
 slice stays a tuple), then relates the concrete side to the generic tuple with
 each such element replaced by its slice — or, when the plan infers nothing to
-it, by its constraint, else `unknown[]` — through the ordinary
-`tuple_position_pairs` arity rules. In a contravariant position (a parameter
+it or the slice cannot satisfy its fixed tuple constraint, by its constraint,
+else `unknown[]` — through the ordinary `tuple_position_pairs` arity rules. A
+matching structure's variadic deposits the source variadic it faces and keeps
+it in the instantiated tuple (`tail(x)` with `x: [0, ...U]` infers `U`). A
+split whose clamped halves do not tile the concrete middle deposits both and
+relates `Unknown`: the call's post-fixation pass decides the argument against
+the fixed inferences. In a contravariant position (a parameter
 list) the generic tuple is the relation's source. A call's implied arity for
 a bare rest type parameter is set on the session before inference
 (`InferenceSession::set_implied_arity`); there is no separate two-variadic
