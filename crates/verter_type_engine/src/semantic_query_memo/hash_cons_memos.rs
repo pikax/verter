@@ -381,15 +381,15 @@ impl SemanticGraphStore {
             .then_some(())
     }
 
-    /// Inspect admission of a selected value, independently of its shell.
+    /// Inspect mapped-member admission independently of whole selected values.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn peek_selected_value_memo_for_tests(
+    pub fn peek_mapped_member_value_memo_for_tests(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> Option<()> {
         self.evaluate_deferred_memo
-            .contains_key(&(node, context, DeferredEvaluationDemand::SelectedValue))
+            .contains_key(&(node, context, DeferredEvaluationDemand::MappedMemberValue))
             .then_some(())
     }
 
