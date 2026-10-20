@@ -5426,14 +5426,16 @@ async fn an_unsubscribed_client_receives_no_carrier_store_pings() {
 }
 
 /// The heartbeat is a subscription too: a subscribed client's watchdog gets a
-/// beat every few seconds; a client that did not subscribe gets no task and no
-/// message, however long the session runs.
+/// beat every few seconds once the client has sent `initialized`; a client that
+/// did not subscribe gets no message, however long the session runs. Driven
+/// through the delivered `initialize` + `initialized` lifecycle, so the wiring
+/// from the handler to the heartbeat is what is proven.
 #[tokio::test(start_paused = true)]
 async fn only_a_subscribed_client_receives_heartbeats() {
     async fn heartbeats_within(
         initialization_options: serde_json::Value,
         window: std::time::Duration,
-    ) -> (bool, usize) {
+    ) -> usize {
         let (mut service, _socket) = tower_lsp_server::LspService::new(|_client| {
             VerterLanguageServer::new(
                 crate::outbound::Outbound::default(),
@@ -5470,9 +5472,18 @@ async fn only_a_subscribed_client_receives_heartbeats() {
         .unwrap();
         assert!(response.is_ok());
         service.inner().outbound().assume_initialized();
-        let task = super::super::background_init::spawn_heartbeat(service.inner());
-        let spawned = task.is_some();
-        let _abort = task.map(AbortTaskOnDrop);
+        // `initialized` parks on client round-trips this wire never answers
+        // (capability registration); the heartbeat is spawned before them.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_millis(1),
+            tower_service::Service::call(
+                &mut service,
+                tower_lsp_server::jsonrpc::Request::build("initialized")
+                    .params(serde_json::json!({}))
+                    .finish(),
+            ),
+        )
+        .await;
         let mut beats = 0;
         let deadline = tokio::time::Instant::now() + window;
         while let Ok(Some(message)) = tokio::time::timeout_at(deadline, wire.next()).await {
@@ -5480,27 +5491,22 @@ async fn only_a_subscribed_client_receives_heartbeats() {
                 beats += 1;
             }
         }
-        (spawned, beats)
+        beats
     }
 
     let window = std::time::Duration::from_secs(12);
-    let (spawned, beats) = heartbeats_within(
+    let beats = heartbeats_within(
         serde_json::json!({ "subscriptions": { "heartbeat": true } }),
         window,
     )
     .await;
-    assert!(spawned, "a subscribed client gets the heartbeat task");
     assert_eq!(beats, 3, "beats at 0s, 5s and 10s of a 12s window");
 
     for unsubscribed in [
         serde_json::json!({}),
         serde_json::json!({ "subscriptions": { "carrierStoreChanged": true } }),
     ] {
-        let (spawned, beats) = heartbeats_within(unsubscribed.clone(), window).await;
-        assert!(
-            !spawned,
-            "{unsubscribed}: no heartbeat task without the subscription"
-        );
+        let beats = heartbeats_within(unsubscribed.clone(), window).await;
         assert_eq!(beats, 0, "{unsubscribed}: no heartbeat on the wire");
     }
 }

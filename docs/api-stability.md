@@ -75,7 +75,13 @@ Recurring server notifications are subscriptions: the server sends
 `$/verter/heartbeat` and `$/verter/carrierStoreChanged` only to a client whose
 `initializationOptions.subscriptions` sets `heartbeat: true` /
 `carrierStoreChanged: true`. A client that relied on receiving the heartbeat
-unasked must now declare the subscription.
+unasked must now declare the subscription at `initialize`: the VS Code
+extension declares both in `packages/vue-vscode/src/extension.ts`, and every
+other client (Lapce, Neovim, JetBrains, custom) that consumes either
+notification must opt in the same way. The workspace scan is likewise not
+started at `initialized`; it starts on the first closed-file references/rename
+request that needs the complete carrier frontier, which fails closed until the
+frontier is built.
 
 The pre-release `$/verter/applyStyleOverrides` method was removed by the sealed
 block-content cutover. The LSP does not accept processor-produced bytes;

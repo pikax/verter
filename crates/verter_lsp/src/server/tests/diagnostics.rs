@@ -1215,6 +1215,44 @@ async fn sync_compiled_owner_resolved_publishes_ledger_via_reconciler() {
     );
 }
 
+/// Initialization and opening a document never walk the workspace: the scan
+/// exists only once a request demands the owning project's complete carrier
+/// frontier, and then it runs to completion without re-announcing level 2.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_workspace_scan_starts_only_on_frontier_demand() {
+    let fixture = scan_publication_fixture(true).await;
+    let server = fixture.server();
+    let _target = fixture.open("src/Target.vue").await;
+
+    server.spawn_background_init(None, "no demand").await;
+    fixture.await_ready_announced().await;
+    fixture.await_sync_complete().await;
+    assert!(
+        server.workspace_scanner.lock().await.is_none(),
+        "initialize/initialized and an open document must not start the workspace scan"
+    );
+    assert!(!server.sync_coordinator.workspace_scan_in_progress());
+
+    server.activate_workspace_scan().await;
+    assert!(
+        server.workspace_scanner.lock().await.is_some(),
+        "the first frontier demand starts the scan"
+    );
+    let announced = fixture.sync_complete.lock().len();
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while server.sync_coordinator.workspace_scan_in_progress() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a demanded scan completes");
+    assert_eq!(
+        fixture.sync_complete.lock().len(),
+        announced,
+        "a demanded scan does not re-announce level 2"
+    );
+}
+
 /// With the production workspace scan parked on an unrelated item, a replayed
 /// open document whose dependency content was already delivered is still not
 /// certified until its DependencyReady receipt is minted: the coordinator's
@@ -1241,6 +1279,7 @@ async fn a_scan_parked_on_unrelated_work_does_not_delay_an_open_documents_diagno
     let target = fixture.open("src/Target.vue").await;
     let holds_before = server.sync_coordinator.dependency_holds();
 
+    demand_workspace_scan(server);
     server.spawn_background_init(None, "parked scan").await;
     tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
         .await

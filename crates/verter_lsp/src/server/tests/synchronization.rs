@@ -11000,6 +11000,7 @@ async fn a_scan_keeps_a_document_unready_while_its_imported_dependency_is_parked
     let target = fixture.open("src/Target.vue").await;
     let holds_before = server.sync_coordinator.dependency_holds();
 
+    demand_workspace_scan(server);
     server
         .spawn_background_init(None, "parked dependency")
         .await;
@@ -11059,6 +11060,7 @@ async fn a_scan_keeps_an_edited_document_unready_while_its_imported_dependency_i
     let target = fixture.open("src/Target.vue").await;
     let holds_before = server.sync_coordinator.dependency_holds();
 
+    demand_workspace_scan(server);
     server.spawn_background_init(None, "parked edit").await;
     tokio::time::timeout(std::time::Duration::from_secs(20), scan_parked.notified())
         .await

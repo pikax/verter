@@ -3330,6 +3330,14 @@ impl ScanPublicationFixture {
 /// warmup of imported carriers, which would otherwise deliver `Child` inside
 /// the open itself. The import-dependency publication — the route that mints
 /// the DependencyReady receipt — is unaffected.
+/// Record that a request demanded the complete carrier frontier, so the next
+/// initialization generation starts the workspace scan.
+fn demand_workspace_scan(server: &VerterLanguageServer) {
+    server
+        .workspace_scan_demanded
+        .store(true, std::sync::atomic::Ordering::Release);
+}
+
 async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationFixture {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::test_utils::canonical_test_path(temp.path());

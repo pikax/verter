@@ -187,6 +187,22 @@ mod tests {
         assert!(stats.timer("test", None).is_none());
     }
 
+    /// The URI is borrowed (`Option<&str>`): a disabled collector never sees
+    /// an owned copy, so a handler passes `Some(uri.as_str())` at zero cost.
+    /// The owned copy is made only once the timer is armed.
+    #[test]
+    fn timer_with_uri_is_inert_until_enabled() {
+        let stats = Statistics::new(100);
+        assert!(stats.timer("hover", Some("file:///a.vue")).is_none());
+        assert!(stats.events().is_empty());
+
+        stats.set_enabled(true);
+        drop(stats.timer("hover", Some("file:///a.vue")));
+        let events = stats.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].uri.as_deref(), Some("file:///a.vue"));
+    }
+
     #[test]
     fn records_events_when_enabled() {
         let stats = Statistics::new(100);
