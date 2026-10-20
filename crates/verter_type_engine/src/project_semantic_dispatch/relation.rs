@@ -6227,18 +6227,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // `RelationKind::Identity` — bounded to the nominal axis
+    // `RelationKind::Identity` — semantic type identity
     // ──────────────────────────────────────────────────────────────────
 
     /// Reduce a [`RelationKind::Identity`] judgement.
     ///
-    /// BOUNDED: this authority owns the NOMINAL half of type identity —
-    /// whether two subjects denote the same `unique symbol` declaration.
-    /// Scope-insensitive STRUCTURAL constituent identity (the exhaustive
-    /// comparator the canonical union / intersection algebra needs) is a
-    /// DIFFERENT authority; answering it here would be two engines for one
-    /// question, so a non-nominal subject stays undecided — `ReturnOnly`,
-    /// never warm — rather than borrowing the assignability lattice.
+    /// Nominal types retain declaration identity. Closed structural types
+    /// compare by their semantic shape, independently of the construction
+    /// details that the canonical algebra deliberately preserves.
     fn reduce_identity(&self, key: &RelateMemoKey) -> RelationResult {
         if !self.relation_reads_node_pair_only(key) {
             return RelationResult::Unknown;
@@ -6251,21 +6247,338 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        match (
+        if let (Some(a), Some(b)) = (
             self.relation_nominal_identity(source),
             self.relation_nominal_identity(target),
         ) {
-            (Some(a), Some(b)) => {
-                if a == b {
-                    assignable(&[])
-                } else {
-                    RelationResult::NotAssignable
+            return if a == b {
+                assignable(&[])
+            } else {
+                RelationResult::NotAssignable
+            };
+        }
+        if let Some(result) =
+            self.enter_checker_recursion([key.source, key.target], [source, target])
+        {
+            return result;
+        }
+        // A heritage body represents one declaration's resolved members.
+        // Authored intersections keep their composite identity instead.
+        let heritage_surface = |node| {
+            if matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(members))
+                    if members.origin_category()
+                        == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+            ) {
+                self.resolve_typeinfo_surface_view_with_node(
+                    node,
+                    ProjectionReductionContext::structural_transit(),
+                )
+                .map(|(_, terminal)| terminal)
+            } else {
+                Some(node)
+            }
+        };
+        let (Some(source), Some(target)) = (heritage_surface(source), heritage_surface(target))
+        else {
+            return RelationResult::Unknown;
+        };
+        self.reduce_structural_identity(source, target)
+    }
+
+    /// Semantic identity is stricter than mutual assignability: readonly,
+    /// optionality and the exact member types matter. Construction order,
+    /// tuple labels and parameter names do not.
+    fn reduce_structural_identity(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> RelationResult {
+        if !self.charge_relation_work(1) {
+            return RelationResult::Unknown;
+        }
+        let graph = self.graph();
+        let (Some(a), Some(b)) = (graph.node_data(source), graph.node_data(target)) else {
+            return RelationResult::Unknown;
+        };
+        if matches!(
+            a.as_ref(),
+            SemanticNodeData::Opaque(_) | SemanticNodeData::RawFallback { .. }
+        ) || matches!(
+            b.as_ref(),
+            SemanticNodeData::Opaque(_) | SemanticNodeData::RawFallback { .. }
+        ) {
+            return RelationResult::Unknown;
+        }
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        evidence.record_file_root(graph, source);
+        evidence.record_file_root(graph, target);
+        self.deposit_canonical_evidence(evidence);
+        if source == target {
+            return assignable(&[]);
+        }
+        let identity = |a, b| match self.relate_type_identity(a, b) {
+            Some(true) => assignable(&[]),
+            Some(false) => RelationResult::NotAssignable,
+            None => RelationResult::Unknown,
+        };
+        match (a.as_ref(), b.as_ref()) {
+            (SemanticNodeData::Object(a), SemanticNodeData::Object(b)) => {
+                if a.positive_members().len() != b.positive_members().len()
+                    || a.call_signatures.len() != b.call_signatures.len()
+                    || a.construct_signatures.len() != b.construct_signatures.len()
+                    || a.index_signatures.len() != b.index_signatures.len()
+                {
+                    return RelationResult::NotAssignable;
+                }
+                if b.positive_members()
+                    .iter()
+                    .any(|member| member.key.as_known().is_none())
+                {
+                    return RelationResult::Unknown;
+                }
+                let target_members = b.key_index();
+                let mut result = assignable(&[]);
+                for member in a.positive_members() {
+                    let Some(key) = member.key.cloned_known() else {
+                        return RelationResult::Unknown;
+                    };
+                    let crate::semantic_query::SurfaceKeyProjection::Exact(other) =
+                        target_members.project_known_key(&key)
+                    else {
+                        return RelationResult::NotAssignable;
+                    };
+                    if member.optional != other.optional
+                        || member.readonly != other.readonly
+                        || member.visibility != other.visibility
+                        || (member.visibility != verter_type_expr::MemberVisibility::Public
+                            && (member.declaration_origin != other.declaration_origin
+                                || member.spans != other.spans))
+                    {
+                        return RelationResult::NotAssignable;
+                    }
+                    let strict = self.relation_strict_config();
+                    let member_type = |value| {
+                        if member.optional && !strict.exact_optional_property_types {
+                            let undefined = graph
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                            self.intern_normalized_union(
+                                &[value, undefined],
+                                verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                                    strict.strict_null_checks,
+                                ),
+                            )
+                        } else {
+                            value
+                        }
+                    };
+                    result = result_and(
+                        result,
+                        identity(member_type(member.value), member_type(other.value)),
+                    );
+                    if matches!(result, RelationResult::NotAssignable) {
+                        return result;
+                    }
+                }
+                for (a, b) in a
+                    .call_signatures
+                    .iter()
+                    .zip(b.call_signatures.iter())
+                    .chain(
+                        a.construct_signatures
+                            .iter()
+                            .zip(b.construct_signatures.iter()),
+                    )
+                {
+                    result = result_and(result, identity(*a, *b));
+                }
+                for index in a.index_signatures.iter() {
+                    let mut matched = RelationResult::NotAssignable;
+                    for other in b.index_signatures.iter() {
+                        if !self.charge_relation_work(1) {
+                            return RelationResult::Unknown;
+                        }
+                        if index.readonly == other.readonly {
+                            matched = result_or(
+                                matched,
+                                result_and(
+                                    identity(index.key_type, other.key_type),
+                                    identity(index.value_type, other.value_type),
+                                ),
+                            );
+                        }
+                        if matches!(matched, RelationResult::Assignable { .. }) {
+                            break;
+                        }
+                    }
+                    result = result_and(result, matched);
+                }
+                result
+            }
+            (
+                SemanticNodeData::Array {
+                    element: a,
+                    readonly: ra,
+                },
+                SemanticNodeData::Array {
+                    element: b,
+                    readonly: rb,
+                },
+            ) if ra == rb => identity(*a, *b),
+            (
+                SemanticNodeData::Tuple {
+                    elements: a,
+                    readonly: ra,
+                },
+                SemanticNodeData::Tuple {
+                    elements: b,
+                    readonly: rb,
+                },
+            ) => {
+                if ra != rb || a.len() != b.len() {
+                    return RelationResult::NotAssignable;
+                }
+                let mut result = assignable(&[]);
+                for (a, b) in a.iter().zip(b) {
+                    if a.optional != b.optional || a.rest != b.rest {
+                        return RelationResult::NotAssignable;
+                    }
+                    result = result_and(result, identity(a.value, b.value));
+                }
+                result
+            }
+            (
+                SemanticNodeData::Signature {
+                    kind: a,
+                    is_abstract: aa,
+                    ..
+                },
+                SemanticNodeData::Signature {
+                    kind: b,
+                    is_abstract: ab,
+                    ..
+                },
+            ) if a == b && aa == ab => match self.signature_types_identical(source, target, *a) {
+                Some(true) => assignable(&[]),
+                Some(false) => RelationResult::NotAssignable,
+                None => RelationResult::Unknown,
+            },
+            (SemanticNodeData::Union(a), SemanticNodeData::Union(b)) => {
+                self.identical_composite_members(a, b)
+            }
+            (SemanticNodeData::Intersection(a), SemanticNodeData::Intersection(b)) => {
+                self.identical_composite_members(a, b)
+            }
+            (SemanticNodeData::Conditional { .. }, SemanticNodeData::Conditional { .. }) => {
+                match (
+                    exact_reading(self.conditional_outcome(source)),
+                    exact_reading(self.conditional_outcome(target)),
+                ) {
+                    (Some(ConditionalReading::Reduced(a)), _) => identity(a, target),
+                    (_, Some(ConditionalReading::Reduced(b))) => identity(source, b),
+                    (
+                        Some(ConditionalReading::Deferred(a)),
+                        Some(ConditionalReading::Deferred(b)),
+                    ) => {
+                        if a.distributive != b.distributive {
+                            return RelationResult::NotAssignable;
+                        }
+                        let mut result = assignable(&[]);
+                        for (a, b) in [
+                            (a.check, b.check),
+                            (a.extends, b.extends),
+                            (a.true_branch, b.true_branch),
+                            (a.false_branch, b.false_branch),
+                        ] {
+                            result = result_and(result, identity(a, b));
+                        }
+                        result
+                    }
+                    _ => RelationResult::Unknown,
                 }
             }
-            // A nominal subject against anything else is left to the
-            // structural-identity authority: `typeof K` versus `symbol` is a
-            // STRUCTURAL question this bounded reduction does not answer.
-            _ => RelationResult::Unknown,
+            _ => {
+                let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+                let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+                let result = super::canonical_algebra::compare_structural(
+                    graph,
+                    source,
+                    target,
+                    &mut evidence,
+                    &mut budget,
+                );
+                self.deposit_canonical_evidence(evidence);
+                match result {
+                    super::canonical_algebra::StructuralIdentity::Equal => assignable(&[]),
+                    super::canonical_algebra::StructuralIdentity::Distinct => {
+                        if is_deferred(a.as_ref()) || is_deferred(b.as_ref()) {
+                            RelationResult::Unknown
+                        } else {
+                            RelationResult::NotAssignable
+                        }
+                    }
+                    super::canonical_algebra::StructuralIdentity::Incomplete => {
+                        RelationResult::Unknown
+                    }
+                }
+            }
+        }
+    }
+
+    fn identical_composite_members<K: crate::semantic_query::composite::CompositeKind>(
+        &self,
+        a: &crate::semantic_query::composite::CompositeList<K>,
+        b: &crate::semantic_query::composite::CompositeList<K>,
+    ) -> RelationResult {
+        let mut result = assignable(&[]);
+        // Both directions retain set identity even if a producer kept a
+        // duplicate. Signature overload lists are compared positionally above.
+        for (a, b) in [(a, b), (b, a)] {
+            for a in a.iter() {
+                let mut matched = RelationResult::NotAssignable;
+                for b in b.iter() {
+                    if !self.charge_relation_work(1) {
+                        return RelationResult::Unknown;
+                    }
+                    let pair = match self.relate_type_identity(*a, *b) {
+                        Some(true) => assignable(&[]),
+                        Some(false) => RelationResult::NotAssignable,
+                        None => RelationResult::Unknown,
+                    };
+                    matched = result_or(matched, pair);
+                    if matches!(matched, RelationResult::Assignable { .. }) {
+                        break;
+                    }
+                }
+                result = result_and(result, matched);
+                if matches!(result, RelationResult::NotAssignable) {
+                    return result;
+                }
+            }
+        }
+        result
+    }
+
+    /// A pure identity question inside another relation or signature read.
+    /// The binding barrier keeps surrounding inference sessions rigid; an
+    /// assumed edge remains owned by the relation transaction's SCC.
+    pub(super) fn relate_type_identity(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<bool> {
+        match self.execute_relate_pair_kind(source, target, RelationKind::Identity) {
+            RelationStep::Assignable { .. } | RelationStep::Assumed(_) => Some(true),
+            RelationStep::NotAssignable => Some(false),
+            RelationStep::Unknown => None,
+            RelationStep::BudgetExceeded(cap) => {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                if let Some(depth) = txn.reentry().depth().checked_sub(1) {
+                    txn.reentry_mut().note_budget_edge(depth, cap);
+                }
+                None
+            }
         }
     }
 
@@ -7619,7 +7932,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         if let Some(target_conditional) = target_conditional {
-            if source.extends == target_conditional.extends {
+            let Some(identical) =
+                self.relate_type_identity(source.extends, target_conditional.extends)
+            else {
+                return RelationResult::Unknown;
+            };
+            if identical {
                 let checks = match self.relate_member(
                     source.check,
                     target_conditional.check,
@@ -7816,11 +8134,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `node` is a type no constraint or reduction stands behind: a
-    /// primitive, a literal, or an object, array, tuple or function type.
+    /// primitive, a literal, an object, array, tuple or function type, or a
+    /// union composed only of those. A closed union's rejected conditional
+    /// target is a complete negative, including a deferred conditional's
+    /// default constraint (`1 | 2`), never a reason to lose that verdict.
     fn relation_source_is_closed(&self, node: SemanticNodeId) -> bool {
-        matches!(
-            self.graph().node_data(node).as_deref(),
-            Some(
+        let terminal = |data: &SemanticNodeData| {
+            matches!(
+                data,
                 SemanticNodeData::Primitive(_)
                     | SemanticNodeData::Literal(_)
                     | SemanticNodeData::EnumLiteral(_)
@@ -7829,7 +8150,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | SemanticNodeData::Tuple { .. }
                     | SemanticNodeData::Signature { .. }
             )
-        )
+        };
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return false;
+        };
+        if terminal(&data) {
+            return true;
+        }
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return false;
+        };
+        let mut pending = members.to_vec();
+        let mut seen = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                return false;
+            };
+            if let SemanticNodeData::Union(members) = data.as_ref() {
+                pending.extend(members.iter().copied());
+            } else if !terminal(&data) {
+                return false;
+            }
+        }
+        true
     }
 
     /// `source` related to a deferred conditional target
@@ -8126,6 +8473,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Opaque(err)) => !matches!(
                 query_error_disposition(err),
                 QueryErrorDisposition::Failure
+                    | QueryErrorDisposition::PermissiveWildcard
                     | QueryErrorDisposition::CheckerRecovery
                     | QueryErrorDisposition::BudgetRecovery
                     | QueryErrorDisposition::RecursionCarrier
