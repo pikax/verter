@@ -21,6 +21,24 @@ use crate::path_matches_prefix;
 use crate::types::{ExactResolution, ExactResolutionResult};
 use verter_session_query::resolution::{ResolutionContext, ResolvePhase, ResolveRequestKind};
 
+// Dependency entries the reverse-axis maintenance read on this thread: every
+// union an update builds counts its size, and a single-dep update counts one.
+#[cfg(test)]
+thread_local! {
+    static REVERSE_AXIS_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_reverse_axis_work(entries: usize) {
+    REVERSE_AXIS_WORK.with(|work| work.set(work.get() + entries as u64));
+}
+
+/// Reverse-axis work on this thread since the last call, then reset.
+#[cfg(test)]
+pub(crate) fn take_reverse_axis_work() -> u64 {
+    REVERSE_AXIS_WORK.with(|work| work.replace(0))
+}
+
 /// Coherent per-owner dependency state. Each class is owned by exactly one
 /// kind of writer event; the canonical reverse axis is maintained via
 /// union-diff so cross-class state is self-consistent.
@@ -91,7 +109,19 @@ impl DependencySnapshot {
         out.extend(self.lazy_resolved.iter().cloned());
         out.extend(self.ambient_resolved.iter().cloned());
         out.extend(self.semantic_transitive.iter().cloned());
+        #[cfg(test)]
+        record_reverse_axis_work(out.len());
         out
+    }
+
+    /// Whether any canonical-axis class names `dep`: membership in
+    /// [`Self::canonical_dep_union`] without building the union.
+    fn canonical_dep_union_contains(&self, dep: &str) -> bool {
+        self.parsed_resolved.contains(dep)
+            || self.exact_resolved.contains(dep)
+            || self.lazy_resolved.contains(dep)
+            || self.ambient_resolved.contains(dep)
+            || self.semantic_transitive.contains(dep)
     }
 
     /// Whether the owner has no dependency state in any class.
@@ -434,11 +464,7 @@ impl EdgeStore {
     /// unchanged and the reverse-bucket update is a no-op (correct: owner
     /// stays in the bucket).
     pub fn add_lazy_resolved_dep(&mut self, canonical_id: &str, dep_id: &str) -> bool {
-        let mut inserted = false;
-        self.write_pattern(canonical_id, |snap| {
-            inserted = snap.lazy_resolved.insert(dep_id.to_string());
-        });
-        inserted
+        self.insert_canonical_class_dep(canonical_id, dep_id, |snap| &mut snap.lazy_resolved)
     }
 
     /// Retract one lazy-resolved dep: the retained resolution answer that
@@ -456,9 +482,13 @@ impl EdgeStore {
         {
             return;
         }
-        self.write_pattern(canonical_id, |snap| {
-            snap.lazy_resolved.remove(dep_id);
+        let unnamed = self.files.get_mut(canonical_id).is_some_and(|state| {
+            state.deps.lazy_resolved.remove(dep_id);
+            !state.deps.canonical_dep_union_contains(dep_id)
         });
+        if unnamed {
+            self.remove_canonical_reverse_dep(canonical_id, dep_id);
+        }
         if self
             .files
             .get(canonical_id)
@@ -490,11 +520,7 @@ impl EdgeStore {
     /// `resolve_ambient_global` at `ambient_resolve.rs:44`).
     /// Returns `true` if newly inserted.
     pub fn add_ambient_resolved_dep(&mut self, canonical_id: &str, virtual_id: &str) -> bool {
-        let mut inserted = false;
-        self.write_pattern(canonical_id, |snap| {
-            inserted = snap.ambient_resolved.insert(virtual_id.to_string());
-        });
-        inserted
+        self.insert_canonical_class_dep(canonical_id, virtual_id, |snap| &mut snap.ambient_resolved)
     }
 
     /// Replace `semantic_transitive` set wholesale. Always fires regardless
@@ -610,12 +636,7 @@ impl EdgeStore {
             // Canonical-axis: clean using the pre-removal union (every dep
             // the owner participated in across all classes incl. ambient).
             for dep in state.deps.canonical_dep_union() {
-                if let Some(bucket) = self.reverse_deps_canonical.get_mut(&dep) {
-                    bucket.remove(canonical_id);
-                    if bucket.is_empty() {
-                        self.reverse_deps_canonical.remove(&dep);
-                    }
-                }
+                self.remove_canonical_reverse_dep(canonical_id, &dep);
             }
             // Stem-axis: clean using ACTIVE stems at time of removal (the
             // only ones that were actually inserted into reverse_deps_by_stem).
@@ -660,6 +681,45 @@ impl EdgeStore {
             .unwrap_or(&[])
     }
 
+    /// Insert one dep into one canonical-axis class. Returns `true` if newly
+    /// inserted into that class. Single-dep counterpart of
+    /// [`Self::write_pattern`]: the canonical-union diff of one insert is at
+    /// most that dep, and no stem class moves, so the reverse axis is kept by
+    /// the dep's own membership instead of rebuilding both unions — an owner
+    /// that accumulates `n` deps one at a time pays `O(n log n)`, not `O(n²)`.
+    fn insert_canonical_class_dep(
+        &mut self,
+        canonical_id: &str,
+        dep_id: &str,
+        class: fn(&mut DependencySnapshot) -> &mut BTreeSet<String>,
+    ) -> bool {
+        #[cfg(test)]
+        record_reverse_axis_work(1);
+        let state = self.files.entry(canonical_id.to_string()).or_default();
+        let named_before = state.deps.canonical_dep_union_contains(dep_id);
+        if !class(&mut state.deps).insert(dep_id.to_string()) {
+            return false;
+        }
+        if !named_before {
+            self.reverse_deps_canonical
+                .entry(dep_id.to_string())
+                .or_default()
+                .insert(canonical_id.to_string());
+        }
+        true
+    }
+
+    /// Drop `canonical_id` from `dep_id`'s canonical-axis bucket, and the
+    /// bucket once it is empty.
+    fn remove_canonical_reverse_dep(&mut self, canonical_id: &str, dep_id: &str) {
+        if let Some(bucket) = self.reverse_deps_canonical.get_mut(dep_id) {
+            bucket.remove(canonical_id);
+            if bucket.is_empty() {
+                self.reverse_deps_canonical.remove(dep_id);
+            }
+        }
+    }
+
     /// Common write pattern (R5 borrow-checker-explicit): take a single
     /// `&mut FileEdgeState`, compute BEFORE union/active-stems, run the
     /// caller's mutate closure, compute AFTER union/active-stems, then
@@ -688,12 +748,7 @@ impl EdgeStore {
         new_union: &BTreeSet<String>,
     ) {
         for old in old_union.difference(new_union) {
-            if let Some(bucket) = self.reverse_deps_canonical.get_mut(old) {
-                bucket.remove(canonical_id);
-                if bucket.is_empty() {
-                    self.reverse_deps_canonical.remove(old);
-                }
-            }
+            self.remove_canonical_reverse_dep(canonical_id, old);
         }
         for new in new_union.difference(old_union) {
             self.reverse_deps_canonical

@@ -113,18 +113,18 @@ pub(crate) mod allocation_footprint;
 pub(crate) mod node_payload_footprint;
 /// Selector-aware projection facts for authored object-spread programs.
 ///
-/// The result is an opaque correlated formula. Exact absence, emptiness,
-/// `keyof`, exhaustive iteration, and closed materialisation are available
-/// only through the module's sealed complete-domain witnesses.
+/// The result is an opaque, factored correlated formula whose alternatives
+/// are read on demand. Exact absence, emptiness, `keyof`, exhaustive
+/// iteration, and closed materialisation are available only through the
+/// module's sealed complete-domain witness.
 pub mod object_spread_projection;
 pub use object_spread_projection::{
-    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionFormula,
-    ClosedObjectProjectionSurface, CompleteObjectDomain, ExactOptionalPropertyPolicy,
-    ExcessEligibility, IndexDomain, MemberFacets, ObjectProjectionAlternative,
-    ObjectProjectionFormula, ObjectProjectionIndex, ObjectProjectionSelector,
-    ObjectProjectionSignature, ObjectSignatureKind, ObjectSpreadProjectionContext,
-    OpenSafeKeyEvidence, PositiveAlternativeEvidence, PositiveKeyFact, PositiveKeyPresence,
-    ProjectionEvidence,
+    ClosedKeyLookup, ClosedObjectProjectionAlternative, ClosedObjectProjectionSurface,
+    CompleteObjectDomain, ExactOptionalPropertyPolicy, ExcessEligibility, IndexDomain,
+    MemberFacets, ObjectProjectionAlternative, ObjectProjectionFormula, ObjectProjectionIndex,
+    ObjectProjectionSelector, ObjectProjectionSignature, ObjectSignatureKind,
+    ObjectSpreadProjectionContext, OpenSafeKeyEvidence, PositiveAlternativeEvidence,
+    PositiveKeyFact, PositiveKeyPresence, ProjectionEvidence,
 };
 
 /// The [`IndexKey::Number`] payload domain: the proof-carrying
@@ -2133,6 +2133,9 @@ pub enum ArgumentPathStep {
     Member(SemanticNodeId),
     /// An array literal's element at this index.
     Element(u32),
+    /// The one element type an array literal's elements join into when a
+    /// spread or an elision makes it no tuple.
+    Elements,
 }
 
 /// One authored nested position of a call argument a regular contributor
@@ -4602,19 +4605,19 @@ impl<'a> ClosedSurfaceView<'a> {
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
-    /// How many members this thread's key lookups compared by scanning a
-    /// surface; test-only.
+    /// Key lookup work on this thread: scanned members and canonical-index
+    /// hashing/equality operations; test-only.
     static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Count one member a key lookup compared by scanning a surface.
+/// Count one scanned member or canonical-index hashing/equality operation.
 pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
-/// How many members this thread's key lookups compared by scanning a
-/// surface; test-only.
+/// Key lookup work on this thread: scanned members and canonical-index
+/// hashing/equality operations; test-only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn key_scan_comparisons_for_tests() -> usize {
     KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)
@@ -10512,6 +10515,28 @@ impl ObjectSpreadProgram {
 }
 
 impl ObjectConstructionEffect {
+    /// This effect's child in its slot `slot` (`0` or `1`), in
+    /// [`Self::for_each_child_node`] order: a computed or index key first,
+    /// then the value. A one-child effect holds it in slot `1`.
+    fn child_in_slot(&self, slot: usize) -> Option<SemanticNodeId> {
+        match (self, slot) {
+            (Self::DirectProperty(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectProperty(effect), _) => Some(effect.value),
+            (Self::DirectMethod(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectMethod(effect), _) => Some(effect.signature),
+            (Self::DirectGet(effect) | Self::DirectSet(effect), 0) => {
+                authored_property_key_child(&effect.key)
+            }
+            (Self::DirectGet(effect) | Self::DirectSet(effect), _) => Some(effect.signature),
+            (Self::DirectIndex(effect), 0) => Some(effect.key_type),
+            (Self::DirectIndex(effect), _) => Some(effect.value_type),
+            (Self::DirectCall(_) | Self::DirectConstruct(_) | Self::Spread(_), 0) => None,
+            (Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node), _) => {
+                Some(*node)
+            }
+        }
+    }
+
     fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
@@ -10561,6 +10586,22 @@ impl ObjectSpreadProgram {
     pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
         for effect in self.effects.iter() {
             effect.for_each_child_node(&mut visit);
+        }
+    }
+
+    /// The first child at or after cursor slot `slot`, with the slot it
+    /// occupies; `None` past the last child. Effect `e` owns two slots,
+    /// `2e` and `2e + 1`, holding its children in [`Self::child_nodes`]
+    /// order and vacant where it has fewer, so a child is found without
+    /// counting the children of the effects before it.
+    pub fn child_at_slot(&self, slot: usize) -> Option<(usize, SemanticNodeId)> {
+        let mut slot = slot;
+        loop {
+            let effect = self.effects.get(slot / 2)?;
+            if let Some(child) = effect.child_in_slot(slot % 2) {
+                return Some((slot, child));
+            }
+            slot += 1;
         }
     }
 

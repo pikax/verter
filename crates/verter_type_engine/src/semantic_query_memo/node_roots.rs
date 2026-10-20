@@ -318,6 +318,18 @@ impl NodeRoot {
     pub fn node_ref(&self) -> Result<NodeRef<'_>, QueryError> {
         self.roots.node_ref(self.id)
     }
+    /// The checker diagnostic code when this node is the checker's recovered
+    /// error type (a TS2590 cross product, say) rather than a built type.
+    pub fn checker_recovery_code(&self) -> Option<u32> {
+        let data = self.node_ref().ok()?.read().ok()?;
+        match &*data {
+            crate::semantic_query::SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+                diagnostic,
+                ..
+            }) => Some(diagnostic.code.code()),
+            _ => None,
+        }
+    }
 }
 
 /// The authority to open construction scopes on one graph: the producer

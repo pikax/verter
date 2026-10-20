@@ -115,6 +115,22 @@ where
             priority,
         )
     }
+    /// An on-demand hub with no serving engine establishes one: the recorded
+    /// desired state IS its demand, and establishment replays it, so the bytes
+    /// held for `path` become certifiable. Any other hub without a serving
+    /// engine has nothing to drive; its recovery owns the next incarnation.
+    fn synchronize_pending_file(&self, path: &str) -> ProviderFuture<'_, ()> {
+        let path = path.to_owned();
+        Box::pin(async move {
+            let serving = match self.state.shared.serving() {
+                Some(serving) => serving,
+                None if self.state.policy.on_demand.is_some() => self.serving_for_query().await?,
+                None => return Ok(()),
+            };
+            serving.provider.synchronize_pending_file(&path).await
+        })
+    }
+
     fn applied_content(&self, path: &str) -> crate::traits::AppliedContent {
         let Some(serving) = self.state.shared.serving() else {
             return crate::traits::AppliedContent::NotApplied;

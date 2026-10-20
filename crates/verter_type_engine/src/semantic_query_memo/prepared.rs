@@ -37,6 +37,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxBuildHasher;
 
+use crate::semantic_query::checker_policy::TupleSplicePosition;
 use crate::semantic_query::demand::{MaterializedPoint, ProjectionPath};
 use crate::semantic_query::SemanticQueryKey;
 
@@ -106,6 +107,11 @@ impl PreparedKeyHandle {
 
     pub fn key(&self) -> &SemanticQueryKey {
         &self.0.key
+    }
+
+    /// The key's prepared hash.
+    pub(super) fn cached_hash(&self) -> u64 {
+        self.0.cached_hash
     }
 
     pub fn family(&self) -> &FamilyKey {
@@ -207,9 +213,28 @@ impl PreparedKeyHandle {
         Arc::clone(&self.0) as Arc<dyn verter_execution::tasks::ProducerIdentity>
     }
 
-    /// This handle as a producer identity to match against.
-    pub(super) fn as_task_producer_ref(&self) -> &dyn verter_execution::tasks::ProducerIdentity {
-        self.0.as_ref()
+    /// This handle as the producer a task opens for a demand at `site`. A
+    /// type-site producer is the prepared identity itself (a refcount bump);
+    /// an expression-site producer is a distinct identity over it, so a task
+    /// producing a key at one site never reads its demand of the key at the
+    /// other as same-path recursion.
+    pub(super) fn as_site_producer(
+        &self,
+        site: TupleSplicePosition,
+    ) -> Arc<dyn verter_execution::tasks::ProducerIdentity> {
+        match site {
+            TupleSplicePosition::Type => self.as_task_producer(),
+            TupleSplicePosition::Expression => Arc::new(ExpressionSiteProducer(self.clone())),
+        }
+    }
+
+    /// The task-producer hash of a key whose prepared hash is `key_hash`,
+    /// demanded at `site`.
+    pub(super) fn site_producer_hash(key_hash: u64, site: TupleSplicePosition) -> u64 {
+        match site {
+            TupleSplicePosition::Type => key_hash,
+            TupleSplicePosition::Expression => key_hash.rotate_left(1) ^ EXPRESSION_SITE_SALT,
+        }
     }
 
     /// The heap a prepared identity keeps reachable beyond its own block,
@@ -247,10 +272,39 @@ impl PreparedKeyHandle {
         producer: &dyn verter_execution::tasks::ProducerIdentity,
         key: &SemanticQueryKey,
         key_hash: u64,
+        site: TupleSplicePosition,
     ) -> bool {
-        producer
-            .downcast_ref::<PreparedQueryIdentity>()
-            .is_some_and(|identity| identity.cached_hash == key_hash && &identity.key == key)
+        let identity = match site {
+            TupleSplicePosition::Type => producer.downcast_ref::<PreparedQueryIdentity>(),
+            TupleSplicePosition::Expression => producer
+                .downcast_ref::<ExpressionSiteProducer>()
+                .map(|producer| producer.0 .0.as_ref()),
+        };
+        identity.is_some_and(|identity| identity.cached_hash == key_hash && &identity.key == key)
+    }
+}
+
+/// Mixed into an expression-site producer's hash, so its open slot rejects
+/// a type-site match on the hash alone.
+const EXPRESSION_SITE_SALT: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The producer of a prepared key demanded at the expression checking site.
+/// Its identity is the key and the site: the same key demanded at the type
+/// site is a different computation (it recovers with TS2799, not TS2800).
+struct ExpressionSiteProducer(PreparedKeyHandle);
+
+impl verter_execution::tasks::ProducerIdentity for ExpressionSiteProducer {
+    fn producer_hash(&self) -> u64 {
+        PreparedKeyHandle::site_producer_hash(
+            self.0 .0.cached_hash,
+            TupleSplicePosition::Expression,
+        )
+    }
+
+    fn same_producer(&self, other: &dyn verter_execution::tasks::ProducerIdentity) -> bool {
+        other
+            .downcast_ref::<Self>()
+            .is_some_and(|other| other.0 == self.0)
     }
 }
 

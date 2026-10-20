@@ -372,30 +372,6 @@ fn provenance_follows_the_charge_and_mixed_provenance_is_unknown() {
     drop(names);
 }
 
-/// Stops and joins the workers on every exit, an assertion failure included.
-struct Workers {
-    stop: Arc<std::sync::atomic::AtomicBool>,
-    handles: Vec<std::thread::JoinHandle<()>>,
-}
-
-impl Workers {
-    fn finish(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for handle in self.handles.drain(..) {
-            handle.join().expect("worker");
-        }
-    }
-}
-
-impl Drop for Workers {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        for handle in self.handles.drain(..) {
-            let _ = handle.join();
-        }
-    }
-}
-
 /// A window opened between an owned reservation and its release, and one
 /// finished before the release, each see the boundary on exactly one side:
 /// the held bytes are charged at open (rejecting the witness) or at close,
@@ -441,54 +417,82 @@ fn window_boundaries_fall_on_exactly_one_side_of_a_transition() {
 }
 
 /// Windows opened and finished while other threads reserve and release
-/// ACTIVE bytes lose no transition at either boundary: every report
-/// conserves its bytes and numbers exactly its own transitions. The workers
-/// keep running until every window has finished, and the windows start only
-/// once a worker has transitioned, so the two always overlap.
+/// ACTIVE bytes include exactly the transitions between open and finish.
+/// Barriers force, every round, a measured-owner and a foreign-owner
+/// transition before the window opens, inside it, and after it finishes:
+/// the report numbers exactly the in-window ones and conserves its bytes.
 #[test]
 fn concurrent_transitions_at_window_boundaries_are_never_lost() {
-    const WORKERS: usize = 4;
+    use std::sync::Barrier;
+    const ROUNDS: usize = 64;
     let account = account(1 << 30);
-    let owners: Vec<_> = (0..WORKERS).map(|_| account.mint_active_owner()).collect();
-    let measured = owners[0].clone();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let handles: Vec<_> = (0..WORKERS)
-        .map(|worker| {
-            let owner = owners[worker].clone();
+    let measured = account.mint_active_owner();
+    let foreign = account.mint_active_owner();
+    // Main plus the measured and foreign worker.
+    let opened_after_pre = Arc::new(Barrier::new(3));
+    let window_open = Arc::new(Barrier::new(3));
+    let inside_done = Arc::new(Barrier::new(3));
+    let window_closed = Arc::new(Barrier::new(3));
+    let workers: Vec<_> = [(measured.clone(), 5usize), (foreign.clone(), 7usize)]
+        .into_iter()
+        .map(|(owner, bytes)| {
             let account = Arc::clone(&account);
-            let stop = Arc::clone(&stop);
+            let barriers = [
+                Arc::clone(&opened_after_pre),
+                Arc::clone(&window_open),
+                Arc::clone(&inside_done),
+                Arc::clone(&window_closed),
+            ];
             std::thread::spawn(move || {
-                let mut round = 0usize;
-                while !stop.load(Ordering::Relaxed) {
-                    let charge = active_as(&account, &owner, 1 + (worker + round) % 13);
-                    if round.is_multiple_of(3) {
-                        drop(charge.commit_retained());
-                    } else {
-                        drop(charge);
-                    }
-                    round += 1;
+                for round in 0..ROUNDS {
+                    let transition = |extra: usize| {
+                        let charge = active_as(&account, &owner, bytes + extra);
+                        if round.is_multiple_of(2) {
+                            drop(charge.commit_retained());
+                        } else {
+                            drop(charge);
+                        }
+                    };
+                    transition(0);
+                    barriers[0].wait();
+                    barriers[1].wait();
+                    transition(1);
+                    barriers[2].wait();
+                    barriers[3].wait();
+                    transition(2);
                 }
             })
         })
         .collect();
-    let mut workers = Workers { stop, handles };
-    while account.active_transition_count() == 0 {
-        std::thread::yield_now();
-    }
-    // Keep opening windows until enough of them demonstrably spanned worker
-    // transitions: the overlap is required, never hoped for.
     let mut reports = Vec::new();
-    let mut overlapped = 0usize;
-    while reports.len() < 400 || overlapped < 20 {
+    for _ in 0..ROUNDS {
+        opened_after_pre.wait();
         let window = account.open_active_window(&measured);
-        reports.push(window.observe());
-        let report = window.finish();
-        overlapped += usize::from(report.closed_at > report.opened_at);
-        reports.push(report);
+        window_open.wait();
+        inside_done.wait();
+        reports.push(window.finish());
+        window_closed.wait();
     }
-    workers.finish();
+    for worker in workers {
+        worker.join().expect("worker");
+    }
     for report in &reports {
         assert_conserved(report);
+        assert_eq!(
+            (
+                report.active_at_open,
+                report.rise_bytes,
+                report.fall_bytes,
+                report.active_at_close,
+                report.transitions,
+                report.foreign_transitions,
+                report.unknown_transitions,
+                report.peak_active_bytes,
+            ),
+            (0, 6, 6, 0, 2, 2, 0, 6),
+            "{report:?}"
+        );
+        assert!(report.attributed().is_ok());
     }
     assert_eq!(account.snapshot().active_bytes, 0);
     assert_balances_cover_account(&account);

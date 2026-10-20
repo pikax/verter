@@ -1314,6 +1314,32 @@ export function literals_null() { return nn(an); }
 export function true_undefined() { return nn(tu); }
 export function numbers_undefined() { return nn(e2); }
 export function nested() { return one(one()); }
+declare function ns(x: string): void;
+declare const bl: boolean | "a";
+declare const bn: boolean | 1 | null;
+declare enum E { A, B }
+declare const eb: E.A | boolean;
+declare const w: { a?: string };
+declare function objm(x: { a: string; b?: number }): void;
+declare const sym: unique symbol;
+declare function us(x: typeof sym): void;
+declare function po(x: { a?: number }): void;
+declare const wo: { c: number };
+export function bool_str() { return nn(bl); }
+export function bool_num_null() { return nn(bn); }
+export function bool_enum() { return ns(eb); }
+export function optional_member_read() { return one(w); }
+export function optional_member_missing() { return objm({}); }
+export function unique_symbol() { return us("a"); }
+export function weak_primitive() { return po(1); }
+export function weak_object() { return po(wo); }
+const af: (x: number) => string = () => "";
+export function annotated_callee() { return af("x"); }
+declare const um: number | { a: 1 };
+export function weak_member() { return po(um); }
+declare function pn(x: { o: { a?: number } }): void;
+declare const on: { o: number };
+export function weak_nested() { return pn(on); }
 "#;
 
 /// An optional target property or parameter reports against its declared
@@ -1419,6 +1445,60 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
             &[],
         ),
         (
+            "bool_str",
+            "(48,40)",
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_num_null",
+            "(49,45)",
+            &["error TS2345: Argument of type 'number | boolean | null' is not assignable to parameter of type 'number'.\n  Type 'null' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'number | boolean' is not assignable to parameter of type 'number'.\n  Type 'boolean' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_enum",
+            "(50,41)",
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+        ),
+        (
+            "optional_member_read",
+            "(51,53)",
+            &["error TS2345: Argument of type '{ a?: string | undefined; }' is not assignable to parameter of type 'string'."],
+            &["error TS2345: Argument of type '{ a?: string; }' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "optional_member_missing",
+            "(52,57)",
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number | undefined; }'."],
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number; }'."],
+        ),
+        (
+            "unique_symbol",
+            "(53,45)",
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+        ),
+        // A primitive's apparent members are not modelled, so the weak-type
+        // diagnostic (TS2559) is not reported rather than reported as TS2345.
+        ("weak_primitive", "(54,43)", &[], &[]),
+        // The relation does not model the weak-type rule for an object source, so
+        // the checker's TS2559 is not reported at all.
+        ("weak_object", "(55,43)", &[], &[]),
+        // Below the head the checker explains a weak-type failure with TS2559's
+        // text, which the explanation chain cannot reproduce for a primitive:
+        // the whole diagnostic is withheld rather than reported with a wrong
+        // chain line.
+        ("weak_member", "(59,43)", &[], &[]),
+        ("weak_nested", "(62,43)", &[], &[]),
+        (
+            "annotated_callee",
+            "(57,48)",
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+        ),
+        (
             "mixed_literals",
             "(24,47)",
             &["error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'bigint'.\n  Type 'string' is not assignable to type 'bigint'."],
@@ -1461,6 +1541,46 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
         }
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+const CALL_REPORT_IDENTITY: &str = r#"declare function assertNever(x: never): never;
+export function f2() { return assertNever("a"); }
+declare function f(x?: string, cb?: (n: number) => number): void;
+export function f3() { return f(123, n => n); }
+declare function g(o: { "1": string; other: number }): void;
+declare const s: { 1: string };
+export function f4() { return g(s); }
+"#;
+
+/// A literal keeps its spelling against `never`, an eagerly rejected
+/// argument ahead of a callback is reported against the declared parameter
+/// type without the optionality's `undefined`, and a numeric key and its
+/// string spelling are one property. Measured on TypeScript 7.0.2.
+#[test]
+fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
+    let host = host_with(CALL_REPORT_IDENTITY);
+    let checker_report = super::signature_predicate_inference_tests::checker_report;
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, expected) in [
+            (
+                "f2",
+                "(2,43): error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'never'.",
+            ),
+            (
+                "f3",
+                "(4,33): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+            ),
+            ("f4", "(7,33): error TS2741: Property 'other' is missing in type"),
+        ] {
+            let reported = checker_report(&host, root, function, CALL_REPORT_IDENTITY);
+            // Only the message's leading text is compared: how a numeric key
+            // spells inside a printed object type is a separate printer concern.
+            assert!(
+                reported.len() == 1 && reported[0].starts_with(expected),
+                "`{function}` in {root}: {reported:#?}"
+            );
+        }
+    }
 }
 
 /// A message the printer cannot reproduce is not reported: the checker

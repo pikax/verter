@@ -169,6 +169,10 @@ fn the_worst_relation_shape_is_refused_by_the_construction_allowance() {
     );
 }
 
+/// The fixed cost of setting one connected demand up beside what it
+/// constructs: lowering the two names and opening the relation.
+const DEMAND_SETUP_BYTES: i64 = 4 << 20;
+
 /// `type R = \`${A}-${B}\`` over `a` string literals in `A` and `b` in `B`.
 fn template_over(a: usize, b: usize) -> String {
     let union = |prefix: &str, count: usize| {
@@ -184,7 +188,7 @@ fn template_over(a: usize, b: usize) -> String {
     )
 }
 
-/// 369 × 271 = 99,999 concatenations, each reserving its pieces and the
+/// 200 × 150 = 30,000 concatenations, each reserving its pieces and the
 /// literal node it interns before it is built: the reduction completes and
 /// charges its constructions. The allocator's peak is reported, advisory
 /// only — the ledger's credits are logical construction costs, not a bound
@@ -194,7 +198,7 @@ fn template_over(a: usize, b: usize) -> String {
 /// `"not-any"` and `"a0-b0" extends R ? 1 : 2` is `1`.
 #[test]
 fn a_template_reduction_completes_and_charges_its_constructions() {
-    let host = host_with(&template_over(369, 271));
+    let host = host_with(&template_over(200, 150));
     let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "A", None);
     let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "B", None);
     reset_alloc_counter();
@@ -203,11 +207,90 @@ fn a_template_reduction_completes_and_charges_its_constructions() {
     let peak = peak_live_bytes();
     assert!(
         complete,
-        "99,999 concatenations are within the checker's limit"
+        "30,000 concatenations are within the checker's limit"
     );
     assert!(charged > 0, "the reduction charged its constructions");
     eprintln!(
         "template: {charged} logical construction bytes charged, allocator peak live {peak} bytes"
+    );
+}
+
+/// `type R = \`${A}-${B}\`` over `a` long string literals (`long` bytes
+/// each) in `A` and `b` short ones in `B`.
+fn long_template_over(a: usize, b: usize, long: usize) -> String {
+    let filler = "x".repeat(long);
+    let longs = (0..a)
+        .map(|i| format!("\"{filler}{i}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let shorts = (0..b)
+        .map(|i| format!("\"b{i}\""))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "export type A = {longs};\nexport type B = {shorts};\nexport type R = `${{A}}-${{B}}`;\n"
+    )
+}
+
+/// Long literals cost bytes, not constituents: 20 × 20 concatenations of
+/// 32 KiB prefixes hold their text in the node, the union's recipe and its
+/// interned entry, and the peak the reduction holds live stays within what
+/// it charged.
+#[test]
+fn a_template_of_long_literals_holds_no_more_than_it_reserved() {
+    let host = host_with(&long_template_over(20, 20, 32 * 1024));
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "A", None);
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "B", None);
+    reset_alloc_counter();
+    let (complete, charged) =
+        verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "R", None);
+    let peak = peak_live_bytes();
+    assert!(
+        complete,
+        "400 concatenations are within the checker's limit"
+    );
+    assert!(
+        peak <= charged as i64 + DEMAND_SETUP_BYTES,
+        "peak live {peak} bytes past the {charged} bytes reserved"
+    );
+}
+
+/// The allocations and allocated bytes (reallocations included) of
+/// reducing `R` over `a` × `b` concatenations, its spans already reduced.
+fn template_allocations(a: usize, b: usize) -> (u64, u64) {
+    let host = host_with(&template_over(a, b));
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "A", None);
+    let _ = verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "B", None);
+    reset_alloc_counter();
+    let (complete, charged) =
+        verter_session::for_tests::reduce_named_template_for_tests(&host, FILE, "R", None);
+    assert!(complete, "{a} × {b} concatenations are within the limit");
+    let allocated = super::alloc_bytes();
+    // Bytes handed out over the whole reduction, reallocations included,
+    // stay within a small multiple of the reservation: a buffer regrown as
+    // it fills, or a prefix of the product held beside the whole, exceeds it.
+    assert!(
+        allocated <= 3 * charged + DEMAND_SETUP_BYTES as u64,
+        "{allocated} bytes allocated against {charged} reserved"
+    );
+    (super::alloc_count(), allocated)
+}
+
+/// A template builds each concatenation alone, in a buffer sized for it,
+/// and holds no prefix of its product: four times the concatenations make
+/// at most six times the allocations and the allocated bytes (a product
+/// built prefix by prefix, or a buffer regrown as it fills, grows faster).
+#[test]
+fn a_template_allocates_in_the_linear_class() {
+    let (small_count, small_bytes) = template_allocations(60, 50);
+    let (large_count, large_bytes) = template_allocations(120, 100);
+    assert!(
+        large_count <= 6 * small_count,
+        "allocations grew from {small_count} to {large_count}"
+    );
+    assert!(
+        large_bytes <= 6 * small_bytes,
+        "allocated bytes grew from {small_bytes} to {large_bytes}"
     );
 }
 

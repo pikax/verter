@@ -679,6 +679,63 @@ fn member_header_facts_match_production_index_across_body_shapes() {
 }
 
 #[test]
+fn accessor_kinds_survive_interface_and_type_literal_headers_and_bodies() {
+    use crate::analysis::type_eval_build::parse_and_lower_parts;
+    use verter_type_expr::{ObjectMember, ObjectMethodKind, TypeExpr};
+
+    for source in [
+        "interface Accessors { get read(): number; set write(value: string); method(): boolean }",
+        "type Accessors = { get read(): number; set write(value: string); method(): boolean }",
+    ] {
+        let expected = [
+            ("read", ObjectMethodKind::Get),
+            ("write", ObjectMethodKind::Set),
+            ("method", ObjectMethodKind::Method),
+        ];
+        let index = index_for(source);
+        let headers = &index
+            .type_header("Accessors")
+            .expect("header")
+            .member_headers;
+        let actual: Vec<_> = headers
+            .iter()
+            .map(|header| {
+                (
+                    header.string_name().expect("named member"),
+                    header.method_kind,
+                )
+            })
+            .collect();
+        assert_eq!(
+            actual,
+            expected.map(|(name, kind)| (name, Some(kind))),
+            "{source}"
+        );
+        assert!(headers.iter().all(|header| !header.has_implementation_body));
+
+        let parts = parse_and_lower_parts(source);
+        let declaration = parts.type_decl("Accessors").expect("lowered body");
+        let TypeExpr::Object(object) = &declaration.body else {
+            panic!("expected an object body: {:?}", declaration.body);
+        };
+        let actual: Vec<_> = object
+            .properties
+            .iter()
+            .map(|member| {
+                let ObjectMember::Method(method) = member else {
+                    panic!("expected a method or accessor: {member:?}");
+                };
+                (
+                    method.string_name().expect("named member"),
+                    method.method_kind,
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected, "{source}");
+    }
+}
+
+#[test]
 fn seeded_member_headers_carry_fact_flags_and_match_production_index() {
     // The env-seeded header mirror reads the stored `MemberHeaderFact`
     // inventory — real syntactic flags (method kind, `?`, `readonly`) — not a

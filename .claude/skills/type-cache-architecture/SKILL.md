@@ -1167,25 +1167,42 @@ window lacks it; `semantic_graph_read_set_signature` keys self-roots in a sorted
 small list and leaves sorting to the one seal. A sealed traced set that
 already holds the build's fence and every observed self-root at its observed
 version is shared as the completed carrier rather than copied and sealed
-again. The reverse index is registered when it is READ, not at publish: a
-publish leaves its candidate unindexed (`MemoEntry::reverse_indexed`) and notes
-its family and admission sequence in `PendingRegistrations`; every read of
-`canonical_to_entries` — `invalidate_canonical` and the diagnostic counts —
-first registers exactly those pending candidates under the same `entries` hold
-(`index_unregistered_candidates_locked`), so a read sees every resident
-candidate, its registration work follows the publishes since the previous read
-rather than the memo's size, and a candidate displaced or FIFO-evicted before
-any read is dropped with nothing to prune. A pending list that reaches the
-resident family count is dropped for one walk of every resident family at the
-next read, so it never outgrows the memo it indexes. The work counter
-`test_reverse_index_registration_visits` guards that bound
-(`reverse_index_read_registers_only_candidates_published_since_the_last_read`). Registration and every drain go through ONE
-borrowed projection (`RegisteredCanonicals` over
-`ReadSetSignature::for_each_canonical_id` ∪ the dispatch-fence canonicals), so
-they stay symmetric without allocating a canonical per call; an existing shard
-is reached by a read guard (which excludes the outer `remove_if` like the
-write-locked `entry` path), and a prune attempts the outer drop only when it
-emptied the inner map. The
+again. The reverse index
+(`semantic_query_memo::ReceiptReverseIndex`, shared by the family memo, the
+refusal-summary table and `cache_runtime::ReverseIndexedCandidateStore`)
+registers DIRECT edges, each once: canonical → the evidence (carrier, receipt
+or page, cached or not) whose own facts read it, consumed receipt → the
+evidence that consumed it, carrier → its candidates, dispatch fence → the
+candidates sharing that fence allocation (one node per interned fence, so its
+canonicals register once), plus each candidate's strict self-roots. A chain or diamond costs
+`O(F + E + C)` physical registrations however many candidates share it —
+never a per-candidate canonical closure — and `invalidate_canonical` walks up
+from the canonical, each node once. Unregistering a candidate drops every
+evidence node and canonical only it reached, so the index drains to empty with
+its last candidate; edges naming a candidate are charged by that candidate's
+reservation, everything else by the index's own pin. Each charge follows the
+allocation it covers, under the declared heap-block convention
+(`retention::allocation::heap_block_bytes`): every table and holder set by the
+layout of its backing allocation (`hashbrown` `allocation_size`), which no
+removal — tombstoned or not — shrinks, from its allocation until it is rebuilt
+(at a quarter live) or freed; each candidate's extra-canonical list and each
+canonical's text by its own block. A full drain, a clear or a drop releases
+exactly what was charged. The allocator canaries
+(`allocator_canaries` `reverse_index_backing`) measure the blocks the index
+holds from the allocator's layouts and require the index's charge plus its
+owners' reservations to cover them at every stage, within the charge granule. There is no
+account-less index: `Default` charges the process-local account, and
+`ReceiptReverseIndex::charging_registrations` (the candidate store, whose
+candidates charge nothing) charges the candidates' share too. The index drives
+explicit-invalidation cleanup only, never validity; its one leaf lock is taken
+inside each store's existing consistency boundary. Every store registers a
+candidate in the step that makes it visible — the family memo's publishes
+(ordinary, prefix backfill, SCC member) under the `entries` hold that installs
+it, the candidate store under the slot guard — and only then unregisters the
+candidates that step displaced, so evidence they share stays indexed across a
+replacement and a read of the index owes no registration work
+(`a_publish_registers_its_candidate_and_a_read_links_nothing`,
+`replacing_a_registration_keeps_its_shared_evidence`). The
 allocation canary `recursive_paths_allocations_per_entity_stay_flat` guards the
 per-entity allocation ceiling and its flat growth across layouts.
 
@@ -1289,8 +1306,9 @@ immutable evidence page — a `ResultReceipt` of `EvidenceKind::Page` — and pa
 the level of pages again until the top level fits one page. Pages are
 deterministic (cut points are positions in the canonical order), lossless,
 validated leaf by leaf through the same receipt walk as a consumed result's
-receipt, projected into reverse-index registration through their canonical
-summaries, and shared by `Arc` with every candidate, refusal summary and
+receipt, registered in the reverse index as evidence nodes like any consumed
+receipt (each page once, under the canonicals its own facts read and the
+evidence that consumed it), and shared by `Arc` with every candidate, refusal summary and
 enclosing signature that absorbs them. Each page holds ONE retention charge for
 its whole life, sized by what it stores (entry array, owned fact strings, the
 canonical-set storage it does not share), however many holders share it. A page
@@ -1416,10 +1434,12 @@ proof after the export table is evicted. Canonical summaries are persistent
 hash tries; their public iteration stays lexical through a byte radix walk.
 Radix ordering consumes common prefixes once per bucket (including small
 insertion buckets) and visits only the occupied bucket range when names
-diverge. Component publication projects its shared carrier's canonical union
-once, outside the memo lock, and reuses that temporary projection for every
-member and populated slot; each candidate still registers its own admission
-identity and the complete fact carrier. Export-table scale tests inspect all
+diverge. Component publication builds one set of registration inputs — the
+shared carrier and the dispatch-fence canonicals — and reuses it for every
+member and populated slot; the reverse index walks that carrier's direct facts
+and child receipts once, registering only the evidence not indexed yet, so the
+members share one carrier node and each registers only its own admission
+identity, its carrier edge and its fence edges. Export-table scale tests inspect all
 suffixes through one request context and count proof work
 across construction and those reads; the request's receipt validation memo
 remains responsible for sharing completed validation.
