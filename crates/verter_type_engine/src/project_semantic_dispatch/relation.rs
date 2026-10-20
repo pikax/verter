@@ -106,6 +106,21 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::InlineMemberFlight;
 
+/// An immutable target's literal values, shared only within its operation.
+/// `None` preserves the ordinary ordered relation for a nonliteral member.
+#[derive(Debug)]
+pub(super) struct LiteralUnionIndex {
+    values: Option<FxHashSet<super::canonical_algebra::LiteralValueIdentity>>,
+    roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    receipt: Arc<super::cost_receipt::DemandCostReceipt>,
+}
+
+pub(super) type LiteralUnionIndexes =
+    std::cell::RefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
+
+#[derive(Hash, PartialEq, Eq)]
+struct LiteralUnionIndexKey(SemanticNodeId);
+
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static REDISCHARGE_EXECUTE_VISITS: std::cell::Cell<usize> =
@@ -1624,9 +1639,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return false;
         }
-        let small_union = |data: &SemanticNodeData| {
-            matches!(data, SemanticNodeData::Union(members)
-                if self.relation_union_members(&members.members_arc()).len() < 4)
+        let small_union = |node, data: &SemanticNodeData| {
+            let SemanticNodeData::Union(members) = data else {
+                return false;
+            };
+            // A prepared literal index proves there are no alias arms to
+            // flatten. Re-scanning that same target just to classify the
+            // checker's small-union recursion exemption is quadratic too.
+            let literal_only = self
+                .literal_union_indexes
+                .borrow()
+                .get(&node)
+                .is_some_and(|index| index.values.is_some());
+            if literal_only {
+                members.len() < 4
+            } else {
+                self.relation_union_members(&members.members_arc()).len() < 4
+            }
         };
         let is_union = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(_));
         match (&*source_data, &*target_data) {
@@ -1637,8 +1666,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 false
             }
-            (source, target) if !is_union(target) && small_union(source) => false,
-            (source, target) if simple(source) && small_union(target) => false,
+            (source_data, target_data)
+                if !is_union(target_data) && small_union(source, source_data) =>
+            {
+                false
+            }
+            (source_data, target_data)
+                if simple(source_data) && small_union(target, target_data) =>
+            {
+                false
+            }
             _ => true,
         }
     }
@@ -9655,6 +9692,118 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result
     }
 
+    /// Exact value membership for a literal-only union. The index neither
+    /// reorders members nor unwraps carriers: mixed/deferred/enum members and
+    /// inference retain the ordinary authority. Reuse deposits every file
+    /// root inspected by a negative proof and consumes the shared cost receipt.
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        use super::canonical_algebra::LiteralValueIdentity;
+        use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
+
+        if self.relation_session_active() {
+            return None;
+        }
+        let graph = self.graph();
+        let source_data = graph.node_data(source)?;
+        if !matches!(source_data.as_ref(), SemanticNodeData::Literal(_)) {
+            return None;
+        }
+        let target_data = graph.node_data(target)?;
+        let SemanticNodeData::Union(members) = target_data.as_ref() else {
+            return None;
+        };
+        let cached = self.literal_union_indexes.borrow().get(&target).cloned();
+        let index = match cached.filter(|index| {
+            self.admits_served(&crate::semantic_query::ReadReceipt::Priced(Arc::clone(
+                &index.receipt,
+            )))
+        }) {
+            Some(index) => index,
+            None => {
+                let identity = CostIdentity::of_key(LiteralUnionIndexKey(target))
+                    .with_roots(graph.root_nodes([target]).expect("relation target is live"));
+                // A warm sibling can replay preparation after its operation
+                // released the index. Rebuild without paying it twice, but
+                // preserve its full cold price for future independent demands.
+                let already_paid = self.connected_demand.is_paid(&identity);
+                let recording =
+                    (!already_paid).then(|| self.connected_demand.record_cost(identity.clone()));
+                let mut usage = LogicalUsage::default();
+                let entry_bytes = 2 * std::mem::size_of::<LiteralValueIdentity>();
+                let mut values = Some(FxHashSet::default());
+                for member in members.iter() {
+                    #[cfg(any(test, feature = "test-support"))]
+                    RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
+                    if !self.charge_relation_work(u64::from(!already_paid)) {
+                        return Some(RelationResult::Unknown);
+                    }
+                    usage.work += 1;
+                    let Some(data) = graph.node_data(*member) else {
+                        values = None;
+                        break;
+                    };
+                    if !matches!(data.as_ref(), SemanticNodeData::Literal(_)) {
+                        values = None;
+                        break;
+                    }
+                    // The keys share immutable payloads, including text.
+                    // Reserve logical hash-table backing before inserting.
+                    if self
+                        .connected_demand
+                        .reserve_bytes(if already_paid { 0 } else { entry_bytes })
+                        .is_err()
+                    {
+                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+                        return Some(RelationResult::Unknown);
+                    }
+                    usage.bytes += entry_bytes as u64;
+                    values
+                        .as_mut()
+                        .expect("literal prefix")
+                        .insert(LiteralValueIdentity::new(data));
+                }
+                let roots = if values.is_some() {
+                    self.observed_self_roots_from_nodes(members.iter().copied())
+                } else {
+                    Vec::new()
+                };
+                let receipt = match recording {
+                    Some(recording) => {
+                        let request = crate::request_context::current_request_budget();
+                        recording.finish(true, request.as_deref())?
+                    }
+                    None => DemandCostReceipt::new(identity, usage, Vec::new()),
+                };
+                self.connected_demand
+                    .record_prerequisite(&receipt, Nesting::Entered);
+                let index = Arc::new(LiteralUnionIndex {
+                    values,
+                    roots,
+                    receipt,
+                });
+                self.literal_union_indexes
+                    .borrow_mut()
+                    .insert(target, Arc::clone(&index));
+                index
+            }
+        };
+        let values = index.values.as_ref()?;
+        self.deposit_operand_self_roots(&index.roots);
+        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
+        Some(
+            if values.contains(&LiteralValueIdentity::new(source_data)) {
+                assignable(bindings)
+            } else {
+                RelationResult::NotAssignable
+            },
+        )
+    }
+
     /// An intersection source: a member that relates alone, else the one
     /// object the members compose, as the checker relates an intersection
     /// source structurally after its members — against an object target or
@@ -13378,6 +13527,12 @@ fn recursion_identity_fingerprint(identity: &DeclIdentity) -> u64 {
 /// Only the structural reducer's finite semantic demands. The concrete
 /// implementation retains the root authority and transaction owner.
 trait RelationDemandDriver {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult>;
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -13611,6 +13766,14 @@ trait RelationDemandDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        ProjectSemanticDispatch::relate_literal_to_union(self, source, target, bindings)
+    }
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -14021,6 +14184,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities>
     }
 }
 impl<D: RelationDemandDriver> RelationCx<'_, D> {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        self.driver
+            .relate_literal_to_union(source, target, bindings)
+    }
     fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
         &self.arena
     }
@@ -15626,6 +15798,16 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         {
             results.push(RelationResult::Unknown);
             return;
+        }
+
+        if matches!(
+            (&*source_data, &*target_data),
+            (SemanticNodeData::Literal(_), SemanticNodeData::Union(_))
+        ) {
+            if let Some(result) = self.relate_literal_to_union(source, target, bindings) {
+                results.push(result);
+                return;
+            }
         }
 
         // ── Union/Intersection distribution ────────────────────────────
