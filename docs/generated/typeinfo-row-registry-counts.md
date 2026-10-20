@@ -39,7 +39,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U2.ENUMS | 7 | 0 | 7 | 0 | 0 |
 | U2.MODULE_AUGMENTATION | 4 | 0 | 4 | 0 | 0 |
 | U2.JSX_FOUNDATIONS | 7 | 0 | 7 | 0 | 0 |
-| U6.FLOW_RETURN_SUBSTRATE | 8 | 1 | 3 | 4 | 0 |
+| U6.FLOW_RETURN_SUBSTRATE | 7 | 1 | 3 | 3 | 0 |
 | U6.NARROW_TYPEOF | 15 | 0 | 15 | 0 | 0 |
 | U6.NARROW_EQUALITY | 15 | 0 | 15 | 0 | 0 |
 | U6.NARROW_TRUTHINESS | 15 | 1 | 14 | 0 | 0 |
@@ -49,7 +49,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U6.NARROW_SUBSTITUTION | 11 | 7 | 4 | 0 | 0 |
 | U6.NARROW_INVALIDATION | 5 | 0 | 5 | 0 | 0 |
 | U6.PREDICATE_ASSERTION | 3 | 2 | 1 | 0 | 0 |
-| U6.CALL_RESOLVE | 20 | 1 | 3 | 16 | 0 |
+| U6.CALL_RESOLVE | 21 | 1 | 3 | 17 | 0 |
 | U6.CONTEXTUAL_CALLBACK | 17 | 4 | 13 | 0 | 0 |
 | U6.VALUE_INFERENCE | 1 | 1 | 0 | 0 | 0 |
 | U6.ASYNC_GENERATOR | 1 | 0 | 1 | 0 | 0 |

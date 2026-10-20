@@ -558,6 +558,7 @@ pub(crate) fn resolve_macro_payload(
             macro_index,
             expansion_kind.clone(),
             payload_read.cache_suppress(),
+            &|diagnostic| dispatch.checker_message(diagnostic),
         ));
     }
 
@@ -671,6 +672,7 @@ pub(crate) fn resolve_macro_payload(
                         macro_index,
                         expansion_kind.clone(),
                         probe_read.cache_suppress(),
+                        &|diagnostic| dispatch.checker_message(diagnostic),
                     ));
                 }
                 match *probe_read.value() {
@@ -708,6 +710,7 @@ pub(crate) fn resolve_macro_payload(
                                 macro_index,
                                 expansion_kind.clone(),
                                 read.cache_suppress(),
+                                &|diagnostic| dispatch.checker_message(diagnostic),
                             ));
                         }
                         match *read.value() {
@@ -802,6 +805,7 @@ pub(crate) fn resolve_payload_surface(
             macro_index,
             expansion_kind.clone(),
             surface_read.cache_suppress(),
+            &|diagnostic| dispatch.checker_message(diagnostic),
         ));
     }
     let resolution = match surface_read.value() {

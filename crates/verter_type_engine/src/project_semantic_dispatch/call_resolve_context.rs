@@ -1572,6 +1572,429 @@ fn literal_members(
     }
 }
 
+/// Whether `name` is written bare as a property name: an identifier.
+pub(super) fn is_identifier_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// A property's name as a message names it (`symbolToString`): an
+/// identifier bare, any other string double-quoted, a number as written.
+/// `None` for a symbol or computed key.
+pub(super) fn checker_property_name(key: &AuthoredPropertyKey) -> Option<String> {
+    match key {
+        AuthoredPropertyKey::String(name) if is_identifier_name(name) => Some(name.to_string()),
+        AuthoredPropertyKey::String(name) => Some(format!("{:?}", &**name)),
+        AuthoredPropertyKey::Number(number) => Some(number.to_string()),
+        AuthoredPropertyKey::UniqueSymbol(_) | AuthoredPropertyKey::Computed(_) => None,
+    }
+}
+
+/// The length past which the checker abbreviates a type in a message
+/// (`defaultMaximumTruncationLength`).
+const DIAGNOSTIC_TYPE_TRUNCATION_LENGTH: usize = 160;
+
+/// How many levels of unions, intersections and constraints a relation's
+/// target is read through to decide whether it could hold a literal.
+const SINGLETON_SCAN_DEPTH: u32 = 16;
+
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The two types of a failed relation as the checker prints them in its
+    /// message (`reportRelationError`): a literal source is printed as its
+    /// base primitive unless the target could itself hold a literal at its
+    /// top level, where the literal is what tells the two apart.
+    pub(in crate::project_semantic_dispatch) fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)> {
+        // The checker keeps the literal against `never` so an exhaustiveness
+        // check (`assertNever(k)`) names the value that escaped.
+        let target_is_never = matches!(
+            self.graph().node_data(target).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        );
+        let generalized = if target_is_never
+            || self.could_hold_top_level_singleton(target, SINGLETON_SCAN_DEPTH)
+        {
+            None
+        } else {
+            self.literal_base_spelling(source)
+        };
+        Some((
+            match generalized {
+                Some(generalized) => generalized,
+                None => self.print_diagnostic_type(source)?,
+            },
+            self.print_diagnostic_type(target)?,
+        ))
+    }
+
+    /// The checker's diagnostic for one walker diagnostic the checker
+    /// itself reports, fully formatted as `TS<code>: <message>`: a relation
+    /// refused at its comparison allowance is TS2859 naming its two types.
+    /// `None` for a walker diagnostic the checker has no code for.
+    pub fn checker_message(
+        &self,
+        diagnostic: &super::super::walk::ShallowDiagnostic,
+    ) -> Option<String> {
+        match diagnostic {
+            super::super::walk::ShallowDiagnostic::RelationTooComplex { source, target } => {
+                let code = crate::semantic_query::CheckerDiagnosticCode::RelationTooComplex;
+                Some(format!(
+                    "TS{}: {}",
+                    code.code(),
+                    code.format(&[
+                        self.print_diagnostic_type_clipped(*source),
+                        self.print_diagnostic_type_clipped(*target),
+                    ])
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// The checker's diagnostic a recovery node carries, fully formatted as
+    /// `TS<code>: <message>`: the error type the checker continues with
+    /// after a diagnostic it recovers from
+    /// ([`QueryError::CheckerRecovery`](crate::semantic_query::QueryError::CheckerRecovery)).
+    /// TS2456 names the alias its origin refers to. `None` for any other
+    /// node, and for a recovery whose message needs an argument it does not
+    /// carry.
+    pub fn checker_recovery_message(&self, node: SemanticNodeId) -> Option<String> {
+        let (diagnostic, arguments) = self.checker_recovery_arguments(node)?;
+        let code = diagnostic.code;
+        Some(format!("TS{}: {}", code.code(), code.format(&arguments)))
+    }
+
+    /// The diagnostic a recovery node carries with the printed values of its
+    /// message's placeholders, in order: TS2456 names the alias its origin
+    /// refers to, a message with no placeholder takes none. `None` for any
+    /// other node, and for a recovery whose message needs an argument it
+    /// does not carry — never a message with a placeholder left unfilled.
+    pub fn checker_recovery_arguments(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(crate::semantic_query::CheckerDiagnostic, Vec<String>)> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            origin,
+            ..
+        }) = data.as_ref()
+        else {
+            return None;
+        };
+        let code = diagnostic.code;
+        let arguments: Vec<String> = match code {
+            crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias => {
+                match self.graph().node_data((*origin)?)?.as_ref() {
+                    SemanticNodeData::DeclRef { identity } => {
+                        vec![identity.decl_name.to_string()]
+                    }
+                    _ => return None,
+                }
+            }
+            _ if !code.message().contains('{') => Vec::new(),
+            _ => return None,
+        };
+        Some((*diagnostic, arguments))
+    }
+
+    /// The occurrence of the diagnostic a recovery node carries, bound NOW
+    /// to where the checker reports it for the body of `canonical`: its
+    /// bound message arguments ([`Self::checker_recovery_arguments`]) and
+    /// its authored report location. A recovery with an authored location
+    /// (TS2456, at the circular alias's name) is reported there, and only
+    /// by the body of the alias's own file — a name span of another file
+    /// is no position of this one; any other recovery is reported at the
+    /// call's `call_span`. The location is read freshly on every bind,
+    /// never kept from the first caller. `None` when the recovery has no
+    /// complete message or no position in this file.
+    pub fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        let (diagnostic, arguments) = self.checker_recovery_arguments(node)?;
+        let span = match diagnostic.code {
+            crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias => {
+                let (alias_file, span) = self.checker_recovery_location(node)?;
+                if alias_file.as_ref() != canonical {
+                    return None;
+                }
+                span
+            }
+            _ => call_span,
+        };
+        Some(crate::semantic_query::CheckerDiagnosticOccurrence::new(
+            span.start,
+            span.end,
+            diagnostic,
+            arguments
+                .into_iter()
+                .map(String::into_boxed_str)
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            Box::default(),
+        ))
+    }
+
+    /// Where the checker reports the diagnostic a recovery node carries
+    /// ([`Self::checker_recovery_message`]): the file and span of the node
+    /// it reports at — TS2456 at the circular alias's name. `None` for any
+    /// other node, and for a recovery carrying no such origin.
+    pub fn checker_recovery_location(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<(std::sync::Arc<str>, verter_span::Span)> {
+        let data = self.graph().node_data(node)?;
+        let SemanticNodeData::Opaque(crate::semantic_query::QueryError::CheckerRecovery {
+            diagnostic,
+            origin,
+            ..
+        }) = data.as_ref()
+        else {
+            return None;
+        };
+        if diagnostic.code != crate::semantic_query::CheckerDiagnosticCode::CircularTypeAlias {
+            return None;
+        }
+        let origin = self.graph().node_data((*origin)?)?;
+        let SemanticNodeData::DeclRef { identity } = origin.as_ref() else {
+            return None;
+        };
+        let canonical: std::sync::Arc<str> = std::sync::Arc::from(identity.canonical_id.as_ref());
+        let serve = self.ctx.ensure_indexed_ready_serve(&canonical)?;
+        let span = serve
+            .indexed
+            .shallow_state
+            .headers
+            .type_header_in(identity.owner, identity.decl_name.as_ref())?
+            .name_span;
+        Some((canonical, span))
+    }
+
+    /// One type as a message prints it, never withheld: past the string
+    /// length `typeToString` itself clips at (twice the truncation length)
+    /// the text is cut to that length with a trailing `...`. The node
+    /// builder's own abbreviation of a wide union or object (`... N more
+    /// ...`) runs on a running length count this printer does not model,
+    /// so a type between the two lengths prints whole. For a message with
+    /// no occurrence to withhold (a refused relation's two types).
+    fn print_diagnostic_type_clipped(&self, node: SemanticNodeId) -> String {
+        let printed = self.print_diagnostic_type_text(node);
+        let clip = DIAGNOSTIC_TYPE_TRUNCATION_LENGTH * 2;
+        if printed.chars().count() >= clip {
+            let kept: String = printed.chars().take(clip - 3).collect();
+            format!("{kept}...")
+        } else {
+            printed
+        }
+    }
+
+    /// One type as a diagnostic message prints it. `None` past the
+    /// checker's truncation length: `typeToString` abbreviates such a type
+    /// by a running length count this printer does not model, so no text
+    /// is claimed for it (`defaultMaximumTruncationLength`, TypeScript
+    /// 7.0.2).
+    pub(in crate::project_semantic_dispatch) fn print_diagnostic_type(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<String> {
+        let printed = self.print_diagnostic_type_text(node);
+        (printed.chars().count() <= DIAGNOSTIC_TYPE_TRUNCATION_LENGTH).then_some(printed)
+    }
+
+    fn print_diagnostic_type_text(&self, node: SemanticNodeId) -> String {
+        crate::semantic_query::display::display_type_node(
+            self.graph(),
+            node,
+            crate::semantic_query::DisplayNeeds::single(
+                crate::semantic_query::DisplayFacet::CheckerSpelling,
+            )
+            .union(crate::semantic_query::DisplayNeeds::single(
+                crate::semantic_query::DisplayFacet::IncludeReadonlyModifier,
+            )),
+            crate::semantic_query::display::MAX_DISPLAY_DEPTH,
+            &mut crate::semantic_query::display::DisplayContext::for_checker(
+                self.relation_strict_config().strict_null_checks,
+            ),
+        )
+        .0
+    }
+
+    /// The properties `target` requires that `source` lacks, named as the
+    /// checker's missing-properties elaboration names them
+    /// (`getUnmatchedProperties`), in the target's member order: an
+    /// identifier name bare, any other string name double-quoted. `None`
+    /// unless both resolve to object surfaces and the target names every
+    /// missing member by a string or number key.
+    pub(in crate::project_semantic_dispatch) fn missing_required_properties(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<Vec<String>> {
+        let transit =
+            crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
+                crate::semantic_query::ProjectionMode::Navigate,
+            );
+        let surface = |node| match self.normalize_node_for_structural_fact_demand(node, transit) {
+            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                match self.graph().node_data(node)?.as_ref() {
+                    SemanticNodeData::Object(view) => Some(view.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (source, target) = (surface(source)?, surface(target)?);
+        let mut missing = Vec::new();
+        for member in target.positive_members() {
+            if member.optional
+                || source
+                    .positive_members()
+                    .iter()
+                    .any(|present| same_property_key(&present.key, &member.key))
+            {
+                continue;
+            }
+            missing.push(checker_property_name(&member.key)?);
+        }
+        Some(missing)
+    }
+
+    /// Whether `target` could hold a literal or other unit type at its top
+    /// level (`typeCouldHaveTopLevelSingletonTypes`), read `depth` levels
+    /// of unions, intersections and constraints deep; past that (a
+    /// constraint chain that comes round again) the literal is kept. A
+    /// `boolean` is no such type, but inside a union the checker holds it as
+    /// `true | false`, whose members are.
+    fn could_hold_top_level_singleton(&self, target: SemanticNodeId, depth: u32) -> bool {
+        // A carrier — an alias or declaration reference to an enum or a
+        // named literal union — classifies as what it settles to, exactly as
+        // the checker reads the type the declaration names.
+        let Some(settled) = self.settle_through_carriers(target) else {
+            return true;
+        };
+        let Some(data) = self.graph().node_data(settled) else {
+            return true;
+        };
+        let Some(depth) = depth.checked_sub(1) else {
+            return true;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Primitive(PrimitiveKind::Boolean) => false,
+            SemanticNodeData::Union(members) => members.iter().any(|&member| {
+                matches!(
+                    self.graph().node_data(member).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+                ) || self.could_hold_top_level_singleton(member, depth)
+            }),
+            SemanticNodeData::Intersection(members) => members
+                .iter()
+                .any(|&member| self.could_hold_top_level_singleton(member, depth)),
+            SemanticNodeData::TypeParam { constraint, .. } => constraint
+                .is_some_and(|constraint| self.could_hold_top_level_singleton(constraint, depth)),
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
+            | SemanticNodeData::TemplateLiteral { .. }
+            | SemanticNodeData::IntrinsicApplication { .. }
+            | SemanticNodeData::TypeOfNominal(_) => true,
+            // Under `strictNullChecks: false` the checker never builds the
+            // `null` and `undefined` types, so neither holds a literal.
+            SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined) => {
+                self.relation_strict_config().strict_null_checks
+            }
+            _ => false,
+        }
+    }
+
+    /// The base type a literal source prints as
+    /// (`getBaseTypeOfLiteralType`): a literal's primitive, an enum member's
+    /// enum, and each member of a union of them mapped so, in order and
+    /// once. `None` for any type that is not a literal, an enum member or a
+    /// union of them.
+    fn literal_base_spelling(&self, source: SemanticNodeId) -> Option<String> {
+        let base = |node: SemanticNodeId| -> Option<String> {
+            match self.graph().node_data(node)?.as_ref() {
+                SemanticNodeData::Literal(value) => Some(
+                    match LiteralKind::of(value) {
+                        LiteralKind::String => "string",
+                        LiteralKind::Number => "number",
+                        LiteralKind::BigInt => "bigint",
+                        LiteralKind::Boolean => "boolean",
+                    }
+                    .to_owned(),
+                ),
+                SemanticNodeData::EnumLiteral(literal) => {
+                    Some(literal.enum_decl.decl_name.to_string())
+                }
+                _ => None,
+            }
+        };
+        if let Some(single) = base(source) {
+            return Some(single);
+        }
+        let data = self.graph().node_data(source)?;
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return None;
+        };
+        let strict = self.relation_strict_config().strict_null_checks;
+        let (mut has_null, mut has_undefined) = (false, false);
+        let mut bases: Vec<String> = Vec::new();
+        for &member in members.iter() {
+            // `null` and `undefined` are unit types the base mapping leaves
+            // as they are; without `strictNullChecks` the checker never
+            // builds them, so they leave the union.
+            match self.graph().node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => {
+                    has_null = strict;
+                    continue;
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
+                    has_undefined = strict;
+                    continue;
+                }
+                _ => {}
+            }
+            // Inside a union the checker holds `boolean` as `true | false`,
+            // two unit types whose base is `boolean`.
+            let spelled = match self.graph().node_data(member).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => "boolean".to_owned(),
+                _ => base(member)?,
+            };
+            if !bases.contains(&spelled) {
+                bases.push(spelled);
+            }
+        }
+        if bases.is_empty() {
+            return None;
+        }
+        // The checker prints the bases in its intrinsic type-id order, the
+        // enums a program declares after them.
+        bases.sort_by_key(|base| {
+            ["string", "number", "bigint", "boolean"]
+                .iter()
+                .position(|intrinsic| intrinsic == base)
+                .unwrap_or(4)
+        });
+        // `typeToString` prints a union's nullish members last, `null`
+        // before `undefined`.
+        if has_null {
+            bases.push("null".to_owned());
+        }
+        if has_undefined {
+            bases.push("undefined".to_owned());
+        }
+        Some(bases.join(" | "))
+    }
+}
+
 /// Whether `a` and `b` are the same literal type, whatever scope each
 /// node was interned in.
 fn same_literal(
@@ -1593,4 +2016,14 @@ enum PositionShape {
     Tuple(Vec<crate::semantic_query::TupleElement>, bool),
     Array(SemanticNodeId, bool),
     Union(Vec<SemanticNodeId>),
+}
+
+/// Whether two authored keys address the same JavaScript property: equal, or
+/// a numeric key and the string spelling of its canonical index (`1` and
+/// `"1"`).
+pub(super) fn same_property_key(a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
+    a == b
+        || a.as_known()
+            .zip(b.as_known())
+            .is_some_and(|(a, b)| a.element_access_collides(&b))
 }

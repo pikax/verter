@@ -287,6 +287,11 @@ impl VerterHost {
             Ok(Some(node)) => match self.project_node_to_semantic_type_graph(&node, &budgets) {
                 Some(mut graph) => {
                     graph.query = Some(query);
+                    if resolve.include_diagnostics {
+                        if let Some(diagnostic) = self.graph_root_checker_diagnostic(&node) {
+                            push_checker_diagnostic(&mut graph, diagnostic);
+                        }
+                    }
                     graph
                 }
                 None => single_opaque_root_graph(miss_error(), None, Some(query)),
@@ -304,6 +309,43 @@ impl VerterHost {
         let payload = graph_payload(mode, &resolve, &graph);
         (graph_response(graph), payload)
     }
+}
+
+/// Add the checker diagnostic the resolved root carries to `graph`'s
+/// diagnostics: an error with its formatted message and the span the
+/// checker reports it at, both interned in the graph's string table.
+fn push_checker_diagnostic(
+    graph: &mut SemanticTypeGraph,
+    (message, canonical, span): (String, Arc<str>, verter_span::Span),
+) {
+    let strings = &mut graph
+        .strings
+        .get_or_insert_with(|| GraphStringTable {
+            entries: vec![String::new()],
+        })
+        .entries;
+    let mut intern = |text: &str| {
+        let id = strings
+            .iter()
+            .position(|entry| entry == text)
+            .unwrap_or_else(|| {
+                strings.push(text.to_owned());
+                strings.len() - 1
+            });
+        u32::try_from(id).expect("a graph's string table indexes by u32 on the wire")
+    };
+    let message_name_id = intern(&message);
+    let span_canonical_name_id = intern(&canonical);
+    graph
+        .diagnostics
+        .push(verter_protocol::verter::v1::GraphDiagnostic {
+            severity: verter_protocol::verter::v1::GraphDiagnosticSeverity::Error as i32,
+            message_name_id,
+            span_canonical_name_id,
+            span_start: span.start,
+            span_end: span.end,
+            has_span: true,
+        });
 }
 
 /// The payload's canonical, best-effort for the audit target.
