@@ -4232,6 +4232,49 @@ import Poly from './Poly.vue'
     );
 }
 
+/// A child prop bound to a call's result specializes a generic child root
+/// by the literal the call infers: an asserted literal nested in the
+/// call's argument is regular, so the call keeps it (`pick({ v: "input" as
+/// "input" })` is `"input"`), where a fresh one would widen to `string`.
+#[test]
+fn generic_root_propagation_keeps_an_asserted_literal_nested_in_a_call_argument() {
+    let project = make_project_with_config(HostConfig {
+        generic_root_propagation: true,
+        ..HostConfig::default()
+    });
+    project
+        .upsert_base(
+            "/Poly.vue",
+            r#"<script setup lang="ts" generic="T extends 'button' | 'input'">
+defineProps<{ as: T }>()
+</script>
+<template><component :is="as" /></template>"#,
+        )
+        .unwrap();
+    project
+        .upsert_base(
+            "/App.vue",
+            r#"<script setup lang="ts">
+import Poly from './Poly.vue'
+declare function pick<T>(x: { v: T }): T
+</script>
+<template><Poly :as="pick({ v: 'input' as 'input' })" /></template>"#,
+        )
+        .unwrap();
+
+    let meta = get_meta(&project, "/App.vue");
+
+    let value_prop = meta
+        .accepted_props
+        .iter()
+        .find(|prop| prop.name == "value")
+        .expect("the call's asserted literal should specialize the child root to input");
+    assert!(
+        matches!(value_prop.availability, MemberAvailability::Always),
+        "a single specialized generic root yields always-available attrs"
+    );
+}
+
 #[test]
 fn generic_root_propagation_recurses_through_component_chain() {
     let project = make_project_with_config(HostConfig {

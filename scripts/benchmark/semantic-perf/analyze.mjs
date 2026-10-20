@@ -442,6 +442,7 @@ export function probeAnswer(inv, limits = {}) {
     observeError: probe.observation ? (obs.error ?? null) : "the answer was not observed",
     evidence: observationEvidence(result.tool, probe.observation),
     errorType: obs.errorType ?? null,
+    checkerRecovery: obs.checkerRecovery ?? null,
     unknownLeaves: obs.unknownLeaves ?? 0,
     unknownSamples: obs.unknownSamples ?? [],
     shape: obs.shape ?? null,
@@ -532,6 +533,18 @@ export function classifyVerterAnswer(answer, ctx = {}) {
     return {
       class: "matched",
       detail: limitCodes.length ? "equal to tsc's answer at its resource limit" : "",
+    };
+  }
+  // tsc's error type at a resource limit matches only Verter's recovery
+  // for the same diagnostic: a plain `any` is not that answer.
+  if (
+    reference.errorAny &&
+    limitCodes.includes(answer.checkerRecovery) &&
+    answer.digest.sha256 === reference.digest.sha256
+  ) {
+    return {
+      class: "matched",
+      detail: `the checker's TS${answer.checkerRecovery} recovery at Verter's limit`,
     };
   }
   if (limitCodes.length && beyond && answer.digest.sha256 === beyond.sha256) {
