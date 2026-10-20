@@ -179,76 +179,78 @@ fn finite_mapped_batch_stops_at_its_first_refusal_and_warms_when_complete() {
         DeclIdentity, IndexKey, LiteralValue, MapperKey, MapperKind, OptionalityMod,
         ProjectionMode, ReadonlyMod, SemanticNodeData, SemanticQueryKey,
     };
-    let host = host();
-    let _scope = host
-        .project_type_store()
-        .semantic_graph()
-        .enter_node_root_scope();
-    let dispatch = ProjectSemanticDispatch::new(&host);
-    let graph = host.project_type_store().semantic_graph();
-    let keys = (0..64)
-        .map(|i| {
-            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
-                "k{i}"
-            ))))
-        })
-        .collect::<Vec<_>>();
-    let domain = graph.intern_node(SemanticNodeData::Union(
-        verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
-            keys.into_boxed_slice(),
-        )),
-    ));
-    let binder = graph.intern_node(SemanticNodeData::TypeParam {
-        decl: DeclIdentity::synthetic("K"),
-        param_index: 0,
-        constraint: None,
-        default: None,
-        display_name: verter_type_expr::OwnedStr::from("K"),
-    });
-    let mapped = graph.intern_node(SemanticNodeData::Mapped {
-        source: domain,
-        mapper: MapperKey {
-            over_type_variable: false,
-            parameter_node: binder,
-            key_space: domain,
-            value_expr: binder,
-            optionality: OptionalityMod::Keep,
-            readonly: ReadonlyMod::Keep,
-            name_remap: None,
-            kind: MapperKind::Computed,
-        },
-    });
-    let key = SemanticQueryKey::IndexedAccess {
-        base: mapped,
-        index: IndexKey::Computed(domain),
-        mode: ProjectionMode::Expanded,
-    };
-    dispatch.connected_demand().set_limits_for_tests(200, 24);
-    let _trace = enable_dispatch_trace_for_test();
-    let tight = dispatch.execute_read(key.clone());
-    assert!(tight.result_is_partial());
-    assert!(tight
-        .partial_reason_classes()
-        .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
-    assert!(tight.cache_suppress());
-    let accesses = DISPATCH_TRACE.with(|trace| {
-        trace
-            .borrow()
-            .iter()
-            .filter(|kind| **kind == "IndexedAccess")
-            .count()
-    });
-    assert_eq!(
-        accesses, 1,
-        "a started batch must not restart through per-key dispatch after refusal"
-    );
-    dispatch.connected_demand().set_limits_for_tests(10_000, 24);
-    let complete = dispatch.execute_read(key.clone());
-    assert!(!complete.result_is_partial() && !complete.cache_suppress());
-    let before = graph.stats_snapshot();
-    let repeat = dispatch.execute_read(key);
-    assert!(!repeat.result_is_partial() && !repeat.cache_suppress());
-    assert!(matches!((repeat.value().clone(), complete.value().clone()),
+    for remap in [false, true] {
+        let host = host();
+        let _scope = host
+            .project_type_store()
+            .semantic_graph()
+            .enter_node_root_scope();
+        let dispatch = ProjectSemanticDispatch::new(&host);
+        let graph = host.project_type_store().semantic_graph();
+        let keys = (0..64)
+            .map(|i| {
+                graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                    "k{i}"
+                ))))
+            })
+            .collect::<Vec<_>>();
+        let domain = graph.intern_node(SemanticNodeData::Union(
+            verter_type_engine::semantic_query::composite::CompositeList::test_fixture(Arc::from(
+                keys.into_boxed_slice(),
+            )),
+        ));
+        let binder = graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic("K"),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from("K"),
+        });
+        let mapped = graph.intern_node(SemanticNodeData::Mapped {
+            source: domain,
+            mapper: MapperKey {
+                over_type_variable: false,
+                parameter_node: binder,
+                key_space: domain,
+                value_expr: binder,
+                optionality: OptionalityMod::Keep,
+                readonly: ReadonlyMod::Keep,
+                name_remap: remap.then_some(binder),
+                kind: MapperKind::Computed,
+            },
+        });
+        let key = SemanticQueryKey::IndexedAccess {
+            base: mapped,
+            index: IndexKey::Computed(domain),
+            mode: ProjectionMode::Expanded,
+        };
+        dispatch.connected_demand().set_limits_for_tests(200, 24);
+        let _trace = enable_dispatch_trace_for_test();
+        let tight = dispatch.execute_read(key.clone());
+        assert!(tight.result_is_partial());
+        assert!(tight
+            .partial_reason_classes()
+            .contains(PartialReasonSet::PROJECTION_WORK_LIMIT));
+        assert!(tight.cache_suppress());
+        let accesses = DISPATCH_TRACE.with(|trace| {
+            trace
+                .borrow()
+                .iter()
+                .filter(|kind| **kind == "IndexedAccess")
+                .count()
+        });
+        assert_eq!(
+            accesses, 1,
+            "a started batch must not restart through per-key dispatch after refusal"
+        );
+        dispatch.connected_demand().set_limits_for_tests(10_000, 24);
+        let complete = dispatch.execute_read(key.clone());
+        assert!(!complete.result_is_partial() && !complete.cache_suppress());
+        let before = graph.stats_snapshot();
+        let repeat = dispatch.execute_read(key);
+        assert!(!repeat.result_is_partial() && !repeat.cache_suppress());
+        assert!(matches!((repeat.value().clone(), complete.value().clone()),
         (verter_type_engine::semantic_query::QueryResult::Value(a), verter_type_engine::semantic_query::QueryResult::Value(b)) if a == b));
-    assert!(graph.stats_snapshot().hits > before.hits);
+        assert!(graph.stats_snapshot().hits > before.hits);
+    }
 }
