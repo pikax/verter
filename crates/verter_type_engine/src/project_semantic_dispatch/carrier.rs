@@ -330,6 +330,9 @@ pub(super) enum CarrierArgsContinuation {
         base: SemanticNodeId,
         source_status: FactStatus,
     },
+    ReadTypeof {
+        key: Box<SemanticQueryKey>,
+    },
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -347,6 +350,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         continuation: CarrierArgsContinuation,
         type_args: Arc<[SemanticNodeId]>,
     ) -> CarrierResolution {
+        if let CarrierArgsContinuation::ReadTypeof { key } = continuation {
+            let source = self.carrier_resolution_read(*key);
+            return CarrierResolution {
+                node: if type_args.is_empty() {
+                    source.node
+                } else {
+                    self.apply_typeof_instantiation_args(source.node, &type_args)
+                },
+                status: source.status,
+            };
+        }
         // Outside a projection run the reference keeps its declaration back-edge.
         let source_status = match &continuation {
             CarrierArgsContinuation::ApplyTypeof { source_status, .. }
@@ -546,6 +560,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             CarrierArgsContinuation::ApplyTypeof { base, .. } => {
                 CarrierFinish::Node(self.apply_typeof_instantiation_args(base, &type_args))
             }
+            continuation @ CarrierArgsContinuation::ReadTypeof { .. } => CarrierFinish::Node(
+                self.finish_carrier_resolution_fact(continuation, type_args)
+                    .node,
+            ),
         }
     }
 
@@ -1267,40 +1285,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
 
         if typeof_query {
-            // `typeof import("./m")` — the module's VALUE-export namespace. A
-            // trailing qualifier projects a member path; trailing type args
-            // apply the SAME positional binder substitution as
-            // `typeof C.make<string>` (the shared `apply_typeof_instantiation_args`).
-            let namespace = self.build_import_value_namespace(&dep_canonical, reduction_context);
-            let result = if qualifier.is_empty() {
-                CarrierResolution::complete(namespace)
-            } else {
-                let path: verter_type_expr::OwnedSlice<PathSegment> =
-                    verter_type_expr::OwnedSlice::from(
-                        qualifier
-                            .iter()
-                            .map(|seg| {
-                                PathSegment::Member(crate::semantic_query::PropertyKey::identifier(
-                                    seg.clone(),
-                                ))
-                            })
-                            .collect::<Vec<_>>()
-                            .into_boxed_slice(),
+            return match self.import_value_target(&dep_canonical, qualifier, reduction_context) {
+                Some(super::module_object::ImportValueTarget::Query(key)) => {
+                    CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof { key })
+                }
+                Some(super::module_object::ImportValueTarget::Namespace(module)) => {
+                    let result = CarrierResolution::complete(
+                        self.build_import_value_namespace(&module, reduction_context),
                     );
-                self.carrier_resolution_read(SemanticQueryKey::ProjectPath {
-                    base: namespace,
-                    path,
-                    context: ProjectionReductionContext::published(ProjectionMode::Navigate)
-                        .with_orthogonal_axes_from(reduction_context),
-                })
+                    if arg_count > 0 {
+                        CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ApplyTypeof {
+                            base: result.node,
+                            source_status: result.status,
+                        })
+                    } else {
+                        CarrierResolutionPlan::Ready(result)
+                    }
+                }
+                None => CarrierResolutionPlan::complete(self.opaque(QueryError::Miss)),
             };
-            if arg_count > 0 {
-                return CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ApplyTypeof {
-                    base: result.node,
-                    source_status: result.status,
-                });
-            }
-            return CarrierResolutionPlan::Ready(result);
         }
 
         // `import("./m").Member` in TYPE position — resolve the qualifier as a
