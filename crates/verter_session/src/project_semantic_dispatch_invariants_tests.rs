@@ -329,6 +329,7 @@ fn mapped_type_value_substitutes_into_keyspace_even_when_source_is_not_object() 
     let value_expr = parameter_node;
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -444,6 +445,7 @@ fn mapped_type_value_falls_back_to_substituted_shell_when_evaluation_yields_opaq
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -565,6 +567,7 @@ fn build_mapped_type_produces_canonical_mapped_shell_on_unresolvable_enumeration
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -854,6 +857,7 @@ fn mapped_type_with_as_clause_symbolic_remapping_defers_whole_shape_preserving_n
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -3379,6 +3383,7 @@ fn ax_hybrid_mapped_type_carrier_stops_under_structural_transit() {
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         key_space,
         value_expr,
@@ -3495,6 +3500,7 @@ fn ax_hybrid_userland_mypick_follows_same_carrier_stop_as_builtin_pick() {
     });
     let mapper = MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node,
         // Userland-style: key_space is a literal `'a'` union (one key).
         key_space: graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
@@ -4947,16 +4953,15 @@ fn contravariant_infer_candidates_intersect_not_union() {
 /// Axis refusal: a relation key outside a live relation's bounded domain, or
 /// with an unsupported overload-selection policy, must REFUSE — undecided,
 /// ReturnOnly, zero admission — never a silent assignability answer.
-/// `Identity` is live only for two nominal subjects, so
-/// `Identity(string, unknown)` is deliberately outside its domain. Routing
+/// Structural `Identity(string, unknown)` is a decided negative. Routing
 /// that pair through assignability would hit the `(_, Unknown) => Assignable`
-/// prefilter arm and publish a false identity verdict. The `Fresh` freshness
-/// axis and the excess-property policy are implemented and no longer refuse —
-/// see `fresh_excess_property_checking`.
+/// prefilter arm and publish a false identity verdict. Freshness and
+/// excess-property behavior are covered by `fresh_excess_property_checking`.
 #[test]
 fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
     use verter_type_engine::semantic_query::{
-        OverloadSelectionPolicy, QueryResult, RelateMemoKey, RelationKind, SemanticQueryApi,
+        OverloadSelectionPolicy, QueryResult, RelateMemoKey, RelationKind, RelationOutcome,
+        SemanticQueryApi,
     };
     let host = host_for_relation_tests();
     let dispatch = ProjectSemanticDispatch::new(&host);
@@ -4976,11 +4981,16 @@ fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
         key
     };
 
-    let before = graph.relation_memo_count();
-    for (name, key) in [
-        ("Identity", identity_key),
-        ("FirstApplicable overloads", overload_key),
+    for (name, key, expected) in [
+        (
+            "Identity",
+            identity_key,
+            Some(RelationOutcome::NotAssignable),
+        ),
+        ("FirstApplicable overloads", overload_key, None),
     ] {
+        let before = graph.relation_memo_count();
+        let should_admit = expected.is_some();
         let result = dispatch.execute(key.to_query_key());
         assert!(
             !matches!(
@@ -4991,13 +5001,26 @@ fn non_default_relation_axes_refuse_instead_of_answering_assignability() {
                         if p.outcome == verter_type_engine::semantic_query::RelationOutcome::Assignable
                 )
             ),
-            "{name}: an unimplemented relation axis must refuse, not answer \
+            "{name}: a distinct relation axis must not answer \
              assignability (string/unknown would be a FALSE {name} verdict): {result:?}"
         );
+        if let Some(expected) = expected {
+            assert!(
+                matches!(
+                    &result,
+                    QueryResult::Value(output) if matches!(
+                        &output.value,
+                        verter_type_engine::semantic_query::SemanticQueryValue::Relation(p)
+                            if p.outcome == expected
+                    )
+                ),
+                "{name}: exact identity decides the negative: {result:?}"
+            );
+        }
         assert_eq!(
             graph.relation_memo_count(),
-            before,
-            "{name}: a refused axis admits NOTHING (ReturnOnly)"
+            before + usize::from(should_admit),
+            "{name}: only a decided judgement admits a memo entry"
         );
     }
     // The default assignability axis still decides and admits normally.
@@ -5522,6 +5545,7 @@ fn mapped_extends_infer_declaration_shadows_outer_binder() {
         source: lit_a,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: infer_u,
@@ -5621,6 +5645,7 @@ fn mapped_own_key_param_shadows_same_named_outer_infer_binder() {
         source: lit_a,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: k_param,
@@ -5920,6 +5945,7 @@ fn mapped_constructor_value_substitutes_per_key() {
         source: lit_a,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: k_param,
             key_space: lit_a,
             value_expr: ctor,
