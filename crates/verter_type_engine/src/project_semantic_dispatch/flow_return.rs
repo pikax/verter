@@ -1308,11 +1308,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// overload order) keeps every combination, and the origin, in factor
     /// order.
     ///
-    /// The combinations are the checker's ([`Self::intersection_parts`]): a
-    /// cross product the checker refuses is its TS2590 recovery, a resource
-    /// partial holding the undistributed intersection as its origin. `None`
-    /// when every factor is empty, or when the connected-work ledger stops
-    /// the distribution (the demand is then partial).
+    /// The checker's strategies ahead of a cross product run first, from the
+    /// one distribution authority
+    /// ([`presimplify_factors`](super::canonical_algebra::presimplify_factors)):
+    /// unions of primitives intersect member-wise and a nullish member every
+    /// factor holds is set aside and added back, so a product written wide
+    /// is weighed at what it reduces to. The combinations are then the
+    /// checker's ([`Self::intersection_parts`]): a cross product the checker
+    /// refuses is its TS2590 recovery, a resource partial holding the
+    /// undistributed intersection as its origin. `None` when some factor is
+    /// empty, or when the connected demand cannot pay for the distribution
+    /// (the demand is then partial).
     pub(super) fn distribute_intersection(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1326,7 +1332,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         let mut undecided = false;
         let parts =
-            match self.intersection_parts(factors, false, nullability, ordered, &mut undecided) {
+            match self.simplified_parts(factors, false, nullability, ordered, &mut undecided) {
                 Ok(Some(parts)) => parts,
                 Ok(None) => return None,
                 Err(refusal) => {
@@ -1359,15 +1365,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some(DistributedIntersection { node, undecided })
     }
 
+    /// [`Self::distribute_intersection`] of `factors`, unordered, with
+    /// `origin` as the written intersection: the type the distribution
+    /// forms, `None` where it formed none. Test-only.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn distribute_intersection_for_tests(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        origin: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Option<SemanticNodeId> {
+        self.distribute_intersection(factors, origin, nullability, false)
+            .map(|distributed| distributed.node)
+    }
+
+    /// The parts of the intersection of `factors`, as the checker's
+    /// `getIntersectionType` forms them each time it intersects — the whole
+    /// intersection and each half it divides into alike: its strategies ahead
+    /// of a cross product run first
+    /// ([`presimplify_factors`](super::canonical_algebra::presimplify_factors)),
+    /// so a half is weighed at what it reduces to, then the surviving
+    /// combinations ([`Self::intersection_parts`]), with any nullish member
+    /// every factor held added back as a part of its own.
+    fn simplified_parts(
+        &self,
+        factors: &[Vec<SemanticNodeId>],
+        divided: bool,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ordered: bool,
+        undecided: &mut bool,
+    ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
+    {
+        let graph = self.graph();
+        let presimplified = super::canonical_algebra::presimplify_factors(graph, factors);
+        let (factors, nullish) = match &presimplified {
+            Some(presimplified) => (
+                presimplified.factors.as_slice(),
+                presimplified.nullish.as_slice(),
+            ),
+            None => (factors, &[][..]),
+        };
+        let mut parts = if factors.iter().any(Vec::is_empty) {
+            // The factors share no member: the intersection is empty.
+            Vec::new()
+        } else {
+            match self.intersection_parts(factors, divided, nullability, ordered, undecided)? {
+                Some(parts) => parts,
+                None => return Ok(None),
+            }
+        };
+        parts.extend(
+            nullish
+                .iter()
+                .map(|kind| graph.intern_node(SemanticNodeData::Primitive(*kind))),
+        );
+        Ok(Some(parts))
+    }
+
     /// The combinations of `factors` that survive, each interned, in the
     /// checker's order: three or more factors divide in half, each half
     /// distributed on its own and the two results distributed over each
-    /// other; two or fewer take the cross product, checked against the
-    /// checker's limit before a combination is formed
-    /// ([`checker_policy::cross_product_union`](crate::semantic_query::checker_policy::cross_product_union)).
-    /// `Err` is the product's TS2590 refusal; `Ok(None)` a connected-work trip, folded
-    /// into the demand as partial. Every combination is charged to the
-    /// connected-work ledger.
+    /// other; two or fewer take the cross product, admitted by the one
+    /// distribution authority before a combination is formed
+    /// ([`admit_cross_product`](super::canonical_algebra::admit_cross_product)):
+    /// weighed against the checker's limit from the factors' widths, then
+    /// paid for whole — every combination's work and construction bytes —
+    /// to the connected demand. `Err` is the product's TS2590 refusal;
+    /// `Ok(None)` a demand that could not pay, folded into it as partial.
+    /// A divided half is paid for the same way, before it is built.
     fn intersection_parts(
         &self,
         factors: &[Vec<SemanticNodeId>],
@@ -1378,7 +1443,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<Option<Vec<SemanticNodeId>>, crate::semantic_query::checker_policy::OperationRefusal>
     {
         use super::relation::ComparabilityVerdict;
-        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
         let graph = self.graph();
         if factors.len() >= 3 {
             let middle = factors.len() / 2;
@@ -1386,16 +1450,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             for half in [&factors[..middle], &factors[middle..]] {
                 let parts = match half {
                     [only] => only.clone(),
-                    _ => match self.intersection_parts(
-                        half,
-                        false,
-                        nullability,
-                        ordered,
-                        undecided,
-                    )? {
-                        Some(parts) => parts,
-                        None => return Ok(None),
-                    },
+                    _ => {
+                        match self.simplified_parts(half, false, nullability, ordered, undecided)? {
+                            Some(parts) => parts,
+                            None => return Ok(None),
+                        }
+                    }
                 };
                 // The half is a union: identical constituents are one.
                 let mut seen = rustc_hash::FxHashSet::default();
@@ -1406,16 +1466,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .collect(),
                 );
             }
-            return self.intersection_parts(&halves, true, nullability, ordered, undecided);
+            return self.simplified_parts(&halves, true, nullability, ordered, undecided);
         }
-        let combinations = cross_product_union(
-            factors.iter().map(|arms| match arms.len() {
-                0 => ProductFactor::Never,
-                1 => ProductFactor::Single,
-                width => ProductFactor::Union(width),
-            }),
-            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
-        )?;
+        let combinations = match super::canonical_algebra::admit_cross_product(
+            factors.iter().map(Vec::len),
+            // A combination holds each part's members once it is interned.
+            || super::canonical_algebra::flattened_arity(graph, factors.iter().map(Vec::as_slice)),
+            Some(self.construction_meter()),
+        ) {
+            Ok(combinations) => combinations,
+            Err(super::canonical_algebra::DistributionStop::Refused(refusal)) => {
+                return Err(refusal)
+            }
+            Err(super::canonical_algebra::DistributionStop::Exhausted(reasons)) => {
+                self.fold_local_partial_completeness(reasons);
+                return Ok(None);
+            }
+        };
         let nullish = |node: SemanticNodeId| {
             matches!(
                 graph.node_data(node).as_deref(),
@@ -1479,10 +1546,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut combination: Vec<(usize, SemanticNodeId)> = Vec::with_capacity(factors.len());
         let mut members: Vec<SemanticNodeId> = Vec::with_capacity(factors.len());
         for mut index in 0..combinations {
-            if let Err(reasons) = self.charge_connected_work() {
-                self.fold_local_partial_completeness(reasons);
-                return Ok(None);
-            }
             combination.clear();
             for (factor, arms) in factors.iter().enumerate() {
                 combination.extend(
@@ -11507,8 +11570,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[Vec<crate::semantic_query::SurfaceMember>],
     ) -> Vec<crate::semantic_query::SurfaceMember> {
         let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
-        let result =
-            super::walk::presence_intersection_members(self.graph(), members, &mut evidence);
+        let result = super::walk::presence_intersection_members(
+            self.graph(),
+            members,
+            self.construction_meter(),
+            &mut evidence,
+        );
         self.deposit_canonical_evidence(evidence);
         result
     }
@@ -11535,8 +11602,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         members: &[SemanticNodeId],
         nullability: verter_session_query::flow::policy::NullabilityPolicy,
     ) -> super::flow_products::FlowAlgebraComposite {
-        let composite =
-            super::canonical_algebra::intern_ordered_union(self.graph(), members, nullability);
+        let composite = super::canonical_algebra::intern_ordered_union_charged(
+            self.graph(),
+            members,
+            nullability,
+            self.construction_meter(),
+        );
         let incomplete = composite.evidence.incomplete;
         self.deposit_canonical_evidence(composite.evidence);
         super::flow_products::FlowAlgebraComposite {

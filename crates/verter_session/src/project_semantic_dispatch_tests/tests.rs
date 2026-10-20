@@ -32298,6 +32298,11 @@ use verter_type_engine::project_semantic_dispatch::walk::{
     ShallowSurfaceMember,
 };
 
+/// The surface merges run on a bare graph, outside any connected demand.
+const UNMETERED:
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'static> =
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED;
+
 fn shallow_member_full(
     name: &str,
     value: SemanticNodeId,
@@ -32615,15 +32620,20 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|&i| arms[i].as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         // Plain permutation.
-        let actual = merge_union_surfaces(&graph, &permuted, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual =
+            merge_union_surfaces(&graph, &permuted, UNMETERED, &mut test_canonical_evidence())
+                .expect("non-empty arm vector yields a surface");
         let expected =
             oracle_merge_union_surfaces(&graph, &permuted).expect("oracle yields a surface");
         assert_shallow_surface_eq(&actual, &expected, &format!("common-member perm {perm:?}"));
 
-        let actual_macro =
-            merge_union_surfaces_for_macro(&graph, &permuted, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro = merge_union_surfaces_for_macro(
+            &graph,
+            &permuted,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro = oracle_merge_union_surfaces_for_macro(&graph, &permuted)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32638,8 +32648,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|arm| arm.as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         with_none.push(None);
-        let actual_none = merge_union_surfaces(&graph, &with_none, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual_none = merge_union_surfaces(
+            &graph,
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_none =
             oracle_merge_union_surfaces(&graph, &with_none).expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32652,9 +32667,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             "a non-Object arm collapses the common-member surface to empty"
         );
 
-        let actual_macro_none =
-            merge_union_surfaces_for_macro(&graph, &with_none, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro_none = merge_union_surfaces_for_macro(
+            &graph,
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro_none = oracle_merge_union_surfaces_for_macro(&graph, &with_none)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32669,15 +32688,19 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     }
 
     // Degenerate inputs stay pinned.
-    assert!(merge_union_surfaces(&graph, &[], &mut test_canonical_evidence()).is_none());
-    assert!(merge_union_surfaces_for_macro(&graph, &[], &mut test_canonical_evidence()).is_none());
+    assert!(merge_union_surfaces(&graph, &[], UNMETERED, &mut test_canonical_evidence()).is_none());
+    assert!(
+        merge_union_surfaces_for_macro(&graph, &[], UNMETERED, &mut test_canonical_evidence())
+            .is_none()
+    );
     let single = vec![arms[0].as_ref().map(ShallowSurface::copy_for_tests)];
-    let actual_single = merge_union_surfaces(&graph, &single, &mut test_canonical_evidence())
-        .expect("single arm yields");
+    let actual_single =
+        merge_union_surfaces(&graph, &single, UNMETERED, &mut test_canonical_evidence())
+            .expect("single arm yields");
     let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
     assert_shallow_surface_eq(&actual_single, &expected_single, "single-arm common");
     let actual_single_macro =
-        merge_union_surfaces_for_macro(&graph, &single, &mut test_canonical_evidence())
+        merge_union_surfaces_for_macro(&graph, &single, UNMETERED, &mut test_canonical_evidence())
             .expect("single arm yields");
     let expected_single_macro =
         oracle_merge_union_surfaces_for_macro(&graph, &single).expect("oracle yields");
@@ -32737,8 +32760,8 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
 
     // Common-member rule: order follows ARM 0 (zebra, alpha), not arm 1
     // and not name order.
-    let common =
-        merge_union_surfaces(&graph, &arms, &mut test_canonical_evidence()).expect("surface");
+    let common = merge_union_surfaces(&graph, &arms, UNMETERED, &mut test_canonical_evidence())
+        .expect("surface");
     let common_names: Vec<&str> = common
         .members
         .iter()
@@ -32751,7 +32774,7 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
     );
     // Macro rule: first-seen order across arms in arm order.
     let macro_merged =
-        merge_union_surfaces_for_macro(&graph, &arms, &mut test_canonical_evidence())
+        merge_union_surfaces_for_macro(&graph, &arms, UNMETERED, &mut test_canonical_evidence())
             .expect("surface");
     let macro_names: Vec<&str> = macro_merged
         .members

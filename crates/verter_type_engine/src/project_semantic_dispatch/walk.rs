@@ -1046,6 +1046,7 @@ fn shallow_member_from_surface(m: &crate::semantic_query::SurfaceMember) -> Shal
 pub(crate) fn presence_intersection_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
@@ -1066,7 +1067,7 @@ pub(crate) fn presence_intersection_members(
             ))
         })
         .collect();
-    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
+    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, meter, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .iter()
@@ -1089,6 +1090,7 @@ pub(crate) fn presence_intersection_members(
 pub(crate) fn presence_union_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
@@ -1109,7 +1111,7 @@ pub(crate) fn presence_union_members(
             ))
         })
         .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+    match merge_union_surfaces_for_macro(graph, &arm_surfaces, meter, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .iter()
@@ -7553,6 +7555,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         let merged = merge_intersection_surfaces_with_graph(
                             self.graph(),
                             &arm_surfaces,
+                            self.dispatch.construction_meter(),
                             &mut canonical_evidence,
                         );
                         self.dispatch.deposit_canonical_evidence(canonical_evidence);
@@ -7633,12 +7636,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             merge_union_surfaces_for_macro(
                                 self.graph(),
                                 &arm_surfaces,
+                                self.dispatch.construction_meter(),
                                 &mut canonical_evidence,
                             )
                         } else {
                             merge_union_surfaces(
                                 self.graph(),
                                 &arm_surfaces,
+                                self.dispatch.construction_meter(),
                                 &mut canonical_evidence,
                             )
                         };
@@ -7785,9 +7790,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             let mut canonical_evidence =
                 crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
             let merged = if self.context.is_macro_object_surface() {
-                merge_union_surfaces_for_macro(self.graph(), &arms, &mut canonical_evidence)
+                merge_union_surfaces_for_macro(
+                    self.graph(),
+                    &arms,
+                    self.dispatch.construction_meter(),
+                    &mut canonical_evidence,
+                )
             } else {
-                merge_union_surfaces(self.graph(), &arms, &mut canonical_evidence)
+                merge_union_surfaces(
+                    self.graph(),
+                    &arms,
+                    self.dispatch.construction_meter(),
+                    &mut canonical_evidence,
+                )
             };
             self.dispatch.deposit_canonical_evidence(canonical_evidence);
             merged
@@ -8750,12 +8765,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 merge_union_surfaces_for_macro(
                                     self.graph(),
                                     &arm_surfaces,
+                                    self.dispatch.construction_meter(),
                                     &mut canonical_evidence,
                                 )
                             } else {
                                 merge_union_surfaces(
                                     self.graph(),
                                     &arm_surfaces,
+                                    self.dispatch.construction_meter(),
                                     &mut canonical_evidence,
                                 )
                             };
@@ -10104,6 +10121,7 @@ fn merge_declaration_surfaces(
 fn merge_intersection_surfaces_with_graph(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<ShallowSurface> {
     let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
@@ -10128,7 +10146,7 @@ fn merge_intersection_surfaces_with_graph(
                 .absorb(member);
         }
     }
-    let mut merged = by_key.map(|_, accum| Some(accum.finish(graph, evidence)));
+    let mut merged = by_key.map(|_, accum| Some(accum.finish(graph, meter, evidence)));
 
     // Scan the contributing canonical streams once. Merged members occupy
     // their first encountered slot; signatures retain their first encountered
@@ -10325,6 +10343,7 @@ impl MergedMemberAccum {
     fn finish(
         self,
         graph: &SemanticGraphStore,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> ShallowSurfaceMember {
         use crate::semantic_query::MemberMergeRole;
@@ -10361,7 +10380,7 @@ impl MergedMemberAccum {
             };
         let value = match values.as_slice() {
             [single] => *single,
-            _ => merge_value_nodes_recursive(graph, &values, evidence),
+            _ => merge_value_nodes_recursive(graph, &values, meter, evidence),
         };
         // Visibility aggregates to the MOST-RESTRICTIVE accessibility across the
         // contributors that ACTUALLY contribute to the surviving member (the
@@ -10431,6 +10450,7 @@ impl MergedMemberAccum {
 fn merge_value_nodes_recursive(
     graph: &SemanticGraphStore,
     values: &[SemanticNodeId],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     verter_debug_assert!(values.len() >= 2);
@@ -10481,7 +10501,8 @@ fn merge_value_nodes_recursive(
     if all_objects {
         let opt_surfaces: Vec<Option<ShallowSurface>> =
             shallow_surfaces.into_iter().map(Some).collect();
-        if let Some(merged) = merge_intersection_surfaces_with_graph(graph, &opt_surfaces, evidence)
+        if let Some(merged) =
+            merge_intersection_surfaces_with_graph(graph, &opt_surfaces, meter, evidence)
         {
             return graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
         }
@@ -10514,8 +10535,8 @@ fn merge_value_nodes_recursive(
         ))
     } else {
         let composite =
-            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
-                graph, values,
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection_charged(
+                graph, values, meter,
             );
         evidence.absorb(composite.evidence);
         composite.node
@@ -10714,6 +10735,7 @@ construction_ordinal_seam! {
     fn merge_union_surfaces(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
@@ -10753,7 +10775,7 @@ construction_ordinal_seam! {
                 key: first_member.key.clone(),
                 // Value type = union of the per-arm member values. A single
                 // shared value node stays as-is (no singleton union wrapper).
-                value: accum.value_node(graph, evidence),
+                value: accum.value_node(graph, meter, evidence),
                 optional: accum.optional_in_any,
                 readonly: accum.readonly_in_all,
                 method_kind: None,
@@ -10845,6 +10867,7 @@ impl UnionMemberAccum {
     fn value_node(
         &self,
         graph: &SemanticGraphStore,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> SemanticNodeId {
         match self.values.as_slice() {
@@ -10855,10 +10878,11 @@ impl UnionMemberAccum {
             // disposition boundary.
             values => {
                 let composite =
-                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
                         graph,
                         values,
                         verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                        meter,
                     );
                 evidence.absorb(composite.evidence);
                 composite.node
@@ -10916,6 +10940,7 @@ construction_ordinal_seam! {
     fn merge_union_surfaces_for_macro(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
@@ -10944,7 +10969,7 @@ construction_ordinal_seam! {
                 accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
             members.push(ShallowSurfaceMember {
                 key: key.clone(),
-                value: accum.value_node(graph, evidence),
+                value: accum.value_node(graph, meter, evidence),
                 optional,
                 readonly: accum.readonly_in_all,
                 method_kind: None,
@@ -11006,6 +11031,7 @@ construction_ordinal_seam! {
     fn spread_formula_positive_members_for_macro(
         graph: &SemanticGraphStore,
         alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Vec<crate::semantic_query::SurfaceMember> {
         if let [only] = alternatives {
@@ -11025,7 +11051,7 @@ construction_ordinal_seam! {
                 ))
             })
             .collect();
-        match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+        match merge_union_surfaces_for_macro(graph, &arm_surfaces, meter, evidence) {
             Some(merged) => surface_view_from_shallow(&merged)
                 .positive_members()
                 .iter()
@@ -11284,6 +11310,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let members = spread_formula_positive_members_for_macro(
                 self.graph(),
                 &alternatives,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
@@ -11403,13 +11430,23 @@ mod m1_merge_visibility_tests {
         graph: &SemanticGraphStore,
         arms: &[Option<ShallowSurface>],
     ) -> Option<ShallowSurface> {
-        super::merge_intersection_surfaces_with_graph(graph, arms, &mut Default::default())
+        super::merge_intersection_surfaces_with_graph(
+            graph,
+            arms,
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut Default::default(),
+        )
     }
     fn merge_union_surfaces_for_macro(
         graph: &SemanticGraphStore,
         arms: &[Option<ShallowSurface>],
     ) -> Option<ShallowSurface> {
-        super::merge_union_surfaces_for_macro(graph, arms, &mut Default::default())
+        super::merge_union_surfaces_for_macro(
+            graph,
+            arms,
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut Default::default(),
+        )
     }
     use crate::semantic_query::{MemberMergeRole, PrimitiveKind, SemanticNodeData};
     use crate::semantic_query_memo::SemanticGraphStore;
@@ -11824,6 +11861,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(alias_a), arm(alias_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -11886,6 +11924,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(object_a), arm(object_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -11946,6 +11985,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(value_a), arm(value_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -12046,9 +12086,13 @@ mod overload_carrier_exclusion_tests {
         };
         let mut evidence =
             crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-        let merged =
-            merge_intersection_surfaces_with_graph(graph, &[arm(a), arm(b)], &mut evidence)
-                .expect("two live arms merge");
+        let merged = merge_intersection_surfaces_with_graph(
+            graph,
+            &[arm(a), arm(b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut evidence,
+        )
+        .expect("two live arms merge");
         let value = merged
             .members
             .iter()
