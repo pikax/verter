@@ -37,6 +37,69 @@ pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
     MAPPED_NAME_REMAP_EVALUATIONS.get()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static WRITTEN_UNION_ARM_CLASSIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Written-union arms classified for literal absorption on this thread, for
+/// growth tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn written_union_arm_classifications_for_tests() -> u64 {
+    WRITTEN_UNION_ARM_CLASSIFICATIONS.get()
+}
+
+/// What a written-union arm can take part in when the checker absorbs
+/// literals into their supertypes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbsorptionRole {
+    /// A literal no other arm is absorbed into.
+    Literal,
+    /// A pattern template: a literal itself, and a supertype of the literals
+    /// it matches.
+    PatternTemplate,
+    /// A supertype a literal may be absorbed into: its primitive, `any` or
+    /// `unknown`.
+    Supertype,
+    /// Anything else.
+    Inert,
+}
+
+/// Whether some literal arm of `arms` has a supertype arm other than itself
+/// that may absorb it, deciding each arm's `role` once in one pass: a plain
+/// literal beside any supertype, or a pattern template beside a second,
+/// distinct supertype.
+fn may_absorb_a_literal(
+    arms: &[SemanticNodeId],
+    mut role: impl FnMut(SemanticNodeId) -> AbsorptionRole,
+) -> bool {
+    let mut literal = false;
+    let mut template = false;
+    let mut supertype: Option<SemanticNodeId> = None;
+    let mut distinct_supertypes = false;
+    for &arm in arms {
+        #[cfg(any(test, feature = "test-support"))]
+        WRITTEN_UNION_ARM_CLASSIFICATIONS.set(WRITTEN_UNION_ARM_CLASSIFICATIONS.get() + 1);
+        let arm_role = role(arm);
+        match arm_role {
+            AbsorptionRole::Literal => literal = true,
+            AbsorptionRole::PatternTemplate | AbsorptionRole::Supertype => {
+                template |= arm_role == AbsorptionRole::PatternTemplate;
+                match supertype {
+                    None => supertype = Some(arm),
+                    Some(first) if first != arm => distinct_supertypes = true,
+                    Some(_) => {}
+                }
+            }
+            AbsorptionRole::Inert => {}
+        }
+        if supertype.is_some() && (literal || (template && distinct_supertypes)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[path = "tuple_product.rs"]
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
@@ -19735,6 +19798,205 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
             self.deposit_canonical_evidence(composite.evidence);
             composite.node
+        }
+    }
+
+    construction_ordinal_seam! {
+        /// The type the checker constructs from a WRITTEN union
+        /// (`getUnionType` over its arms) when that construction absorbs a
+        /// literal: `"a" | string` is `string`, `1 | number | "x"` is
+        /// `number | "x"`, `"a1" | `a${number}` | "ab"` is
+        /// `"ab" | `a${number}``.
+        ///
+        /// An alias is transparent to that construction, so a named arm
+        /// (`type A = "a"`) is resolved before absorption is decided: an arm
+        /// resolving to a literal, primitive or pattern template stands for
+        /// its resolution, and one resolving to a union contributes that
+        /// union's arms, resolved the same way. Any other named arm stays
+        /// written by its name. A canonical union is offered too: the
+        /// canonical algebra keeps a named arm unresolved, so only its named
+        /// arms can still absorb or be absorbed.
+        ///
+        /// `None` for any other node and for a written union with no literal
+        /// beside a primitive or pattern template that could absorb it: such
+        /// a union is not re-decided here and stays the authored display form
+        /// in its written order (`"a" | "b" | never`, `A | "b"`).
+        ///
+        /// Otherwise the shared `ReduceUnion` query decides the resolved arms
+        /// under `nullability`, the root file's `null` / `undefined`
+        /// algebra, and the outcome is
+        /// returned typed: the reduced type when it absorbed a literal, the
+        /// written node itself when it absorbed none, and the reducer's (or a
+        /// named arm's resolution) error or opaque result verbatim, for the
+        /// caller to classify as a fault or a miss.
+        fn reduced_written_union(
+            &self,
+            node: SemanticNodeId,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ) -> Option<QueryResult<SemanticNodeId>> {
+            use crate::semantic_query::composite::CompositeOriginCategory as Category;
+            let graph = self.graph();
+            let arms = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms)
+                    if matches!(
+                        arms.origin_category(),
+                        Category::AuthoredShell
+                            | Category::PreservingRebuild
+                            | Category::Canonical(_)
+                            | Category::CanonicalUnproven
+                    ) =>
+                {
+                    arms.members_arc()
+                }
+                _ => return None,
+            };
+            // A named arm: a declaration reference, an alias shell or a
+            // declaration placeholder.
+            let is_named = |arm: SemanticNodeId| {
+                matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::Alias(_)
+                            | SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder { .. })
+                    )
+                )
+            };
+            // The arm a named arm stands for when deciding absorption: its
+            // resolution through the whole alias chain, unless that is
+            // neither a union nor a literal, primitive or pattern template. A
+            // chain is finite, as the declarations it names are; one that
+            // comes back to a node it already passed is a recursive alias,
+            // which stays written by its name. A resolution that fails is
+            // returned for the caller to classify.
+            let resolve_named = |arm: SemanticNodeId| -> Result<SemanticNodeId, QueryResult<SemanticNodeId>> {
+                let mut resolved = arm;
+                let mut passed: FxHashSet<SemanticNodeId> = FxHashSet::default();
+                loop {
+                    if !passed.insert(resolved) {
+                        return Ok(arm);
+                    }
+                    let key = match graph.node_data(resolved).as_deref() {
+                        Some(SemanticNodeData::Alias(inner)) => {
+                            resolved = *inner;
+                            continue;
+                        }
+                        Some(SemanticNodeData::DeclRef { identity }) => {
+                            SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+                                &identity.canonical_id,
+                                identity.owner,
+                                &identity.decl_name,
+                            ))
+                        }
+                        Some(SemanticNodeData::Opaque(
+                            crate::semantic_query::QueryError::DeclPlaceholder {
+                                canonical_id,
+                                owner,
+                                name,
+                                ..
+                            },
+                        )) => SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(canonical_id.clone(), *owner, name.clone()),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                            self.instantiate_context_for(
+                                canonical_id,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    ProjectionMode::Navigate,
+                                ),
+                            ),
+                        )),
+                        Some(
+                            SemanticNodeData::Union(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Primitive(_),
+                        ) => return Ok(resolved),
+                        Some(SemanticNodeData::Opaque(_)) if resolved != arm => {
+                            return Err(QueryResult::Value(resolved));
+                        }
+                        _ => return Ok(arm),
+                    };
+                    match self.execute_read(key).value {
+                        QueryResult::Value(next) => resolved = next,
+                        // A recursive alias stays written by its name.
+                        QueryResult::Recursive(_) => return Ok(arm),
+                        error @ QueryResult::Error(_) => return Err(error),
+                    }
+                }
+            };
+            // The written arms, nested and named unions flattened as the
+            // reducer reads them, and named arms standing for their
+            // resolution.
+            let mut flat = Vec::with_capacity(arms.len());
+            let mut seen_names: FxHashSet<SemanticNodeId> = FxHashSet::default();
+            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
+            while let Some(arm) = pending.pop() {
+                let arm = if is_named(arm) {
+                    if !seen_names.insert(arm) {
+                        flat.push(arm);
+                        continue;
+                    }
+                    match resolve_named(arm) {
+                        Ok(resolved) => resolved,
+                        Err(outcome) => return Some(outcome),
+                    }
+                } else {
+                    arm
+                };
+                match graph.node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Union(inner)) => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    _ => flat.push(arm),
+                }
+            }
+            // Each arm's part in absorption: a literal, a pattern template, or a
+            // supertype a literal may be absorbed into (its primitive, `any` or
+            // `unknown`).
+            let role = |arm: SemanticNodeId| match graph.node_data(arm).as_deref() {
+                Some(SemanticNodeData::Literal(_)) => AbsorptionRole::Literal,
+                Some(SemanticNodeData::TemplateLiteral { .. }) => AbsorptionRole::PatternTemplate,
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Any
+                    | PrimitiveKind::Unknown,
+                )) => AbsorptionRole::Supertype,
+                _ => AbsorptionRole::Inert,
+            };
+            let reducible = may_absorb_a_literal(&flat, role);
+            if !reducible {
+                return None;
+            }
+            let members: Arc<[SemanticNodeId]> = Arc::from(flat.as_slice());
+            let key = SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            };
+            let reduced = match self.execute_read(key).value {
+                QueryResult::Value(reduced) => reduced,
+                other => return Some(other),
+            };
+            let is_literal = |arm: SemanticNodeId| {
+                matches!(
+                    role(arm),
+                    AbsorptionRole::Literal | AbsorptionRole::PatternTemplate
+                )
+            };
+            let absorbed = match graph.node_data(reduced).as_deref() {
+                // An opaque reduction is the caller's to classify.
+                Some(SemanticNodeData::Opaque(_)) => true,
+                Some(SemanticNodeData::Union(kept)) => {
+                    let kept: FxHashSet<SemanticNodeId> = kept.iter().copied().collect();
+                    flat.iter()
+                        .any(|&arm| is_literal(arm) && !kept.contains(&arm))
+                }
+                Some(_) => flat.iter().any(|&arm| is_literal(arm) && arm != reduced),
+                None => false,
+            };
+            Some(QueryResult::Value(if absorbed { reduced } else { node }))
         }
     }
 
