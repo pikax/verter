@@ -2358,6 +2358,158 @@ fn the_refusal_table_keeps_the_newest_and_refuses_torn_evaluations() {
     ));
 }
 
+/// An explicit invalidation of a canonical drops every sealed refusal whose
+/// failed prefix consumed a result reading it — through receipts no cache
+/// holds — together with the memo candidates those receipts reach, and
+/// leaves refusals and candidates that never read it. The last release
+/// drains both reverse indexes.
+#[test]
+fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
+    use verter_session_query::facts::fact_cache::{
+        FactVersionRef, ReadSetSignature, ResultReceipt,
+    };
+    use verter_type_engine::semantic_query::{
+        CacheRead, LiteralValue, PartialReasonSet, QueryResult, RelateMemoKey, RelationContext,
+        RelationOutcome, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+        SemanticQueryValue,
+    };
+    use verter_type_engine::semantic_query_memo::ReverseIndexOccupancy;
+
+    let host = host();
+    let store = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
+    let profile = BudgetProfile::intern(BudgetProfileSpec {
+        work: 64,
+        bytes: 1_024,
+        query_depth: 24,
+        instantiation_depth: 10,
+        tail_steps: 10,
+        request_operations: 0,
+        relation_comparisons: 600,
+        cost_model_revision: COST_MODEL_REVISION,
+    });
+    let key = |name: &str| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+            },
+            name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let refusal = || {
+        CacheRead::unleased_for_tests(
+            QueryResult::<SemanticQueryValue>::Error(
+                verter_type_engine::semantic_query::QueryError::Miss,
+            ),
+            verter_type_engine::semantic_query_memo::empty_signature(),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
+            true,
+            verter_type_engine::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ),
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        )
+    };
+    let file = |canonical: &str| FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_owned(),
+        hash: [9; 16],
+    };
+    // The failed prefix consumed `mid`, which consumed `base`; neither is
+    // cached.
+    let base = ResultReceipt::new(vec![file("/w/base.ts")]);
+    let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
+    let through_prefix =
+        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
+    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+
+    let entry = store.refusal_entry_for_tests(&host);
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        entry,
+        refusal(),
+        through_prefix(),
+    ));
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Elsewhere"),
+        profile.clone(),
+        entry,
+        refusal(),
+        elsewhere,
+    ));
+    let source = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "source".into(),
+    )));
+    let target = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "target".into(),
+    )));
+    store.insert_relation_payload_for_tests(
+        RelateMemoKey::assignable(source, target, RelationContext::default()),
+        through_prefix(),
+        Arc::from(Vec::new()),
+        store.relation_payload_for_tests(RelationOutcome::Assignable),
+        0,
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 2);
+    assert_eq!(store.canonical_to_entries_count("/w/base.ts"), 1);
+
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 1);
+    let kept = store.refusal_carriers_for_tests();
+    assert_eq!(kept.len(), 1, "only the refusal that read the edit leaves");
+    assert!(kept[0]
+        .facts
+        .iter()
+        .any(|fact| fact.canonical_id() == Some("/w/other.ts")));
+    assert_eq!(
+        store.reverse_index_occupancy(),
+        ReverseIndexOccupancy::default()
+    );
+    assert_eq!(store.refusal_index_occupancy_for_tests().canonicals, 1);
+
+    assert_eq!(store.invalidate_canonical("/w/other.ts"), 0);
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+
+    // An evaluation in flight across an explicit invalidation read what the
+    // invalidation dropped, before the index could hold its summary: its
+    // refusal is never sealed. One entering after the invalidation is.
+    let before_invalidation = store.refusal_entry_for_tests(&host);
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 0);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            key("Prefixed"),
+            profile.clone(),
+            before_invalidation,
+            refusal(),
+            through_prefix(),
+        ),
+        "a refusal entered before an invalidation is never sealed after it"
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        store.refusal_entry_for_tests(&host),
+        refusal(),
+        through_prefix(),
+    ));
+}
+
 /// `{ ...a, ...b }` over two `arms`-member object unions, and an index
 /// target every alternative relates to.
 fn spread_unions(arms: usize) -> String {

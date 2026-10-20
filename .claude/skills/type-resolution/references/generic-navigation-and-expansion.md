@@ -75,6 +75,13 @@ A broad domain never proves finite emptiness, and unsupported source shapes
 cannot produce absence evidence. Finite mapped batches reuse membership instead
 of rebuilding a set per selected value. Mapped materializers index source members
 once and preserve the first matching member's modifiers and declaration metadata.
+For a closed string-key domain, a name remap that only keeps its input name or
+drops it is classified once for the selected batch. Every surviving key has one
+preimage, so the batch uses the shared mapped-value materializer without rescanning
+the domain per output key. Renames, collisions, numeric binders and undecidable
+remaps retain the ordinary walker. Classification observes only remap operands;
+excluded mapped values stay undemanded. Fact, cancellation and partial-result
+rails apply to the batch as they do to individual reads.
 
 Utility intrinsics follow eager alias argument semantics; nominal builtin
 interfaces and classes keep deferred argument semantics. A budget recovery in

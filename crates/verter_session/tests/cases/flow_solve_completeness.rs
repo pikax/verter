@@ -3198,6 +3198,58 @@ fn capture_value_requirements_are_local_to_each_closure_site() {
     assert!(plan.obligation_specs().iter().any(|spec| matches!(spec.basis(), FlowObligationBasis::Binding { slot, .. } if &slot.identity == captures[0].1)), "the reader still requires value products for their shared hub");
 }
 
+#[test]
+fn a_sibling_closure_retains_its_cell_without_demanding_its_value() {
+    let fixture = flow_graph_fixture_for_tests(
+        "function solve_me() { const x = 1; return { picked: 'ok', reader: () => x }; }",
+        65,
+    );
+    for (member, expected) in [
+        ("picked", FlowCaptureDemand::Effect),
+        ("reader", FlowCaptureDemand::Value),
+    ] {
+        let mut request = base_request();
+        let SemanticQueryKey::FlowReturn(query) = &mut request.query else {
+            unreachable!()
+        };
+        query.demand.point.projection.path = ProjectionPath::from_segments([PathSegment::Member(
+            PropertyKey::String(verter_type_expr::OwnedStr::from(member)),
+        )]);
+        let plan = fixture
+            .build_plan(request)
+            .expect("the member demand plans");
+        let captures: Vec<_> = plan
+            .obligation_specs()
+            .iter()
+            .filter_map(|spec| match spec.basis() {
+                FlowObligationBasis::CapturedBinding {
+                    node,
+                    identity,
+                    demand,
+                    ..
+                } if identity.name.as_ref() == "x" => Some((*node, *demand)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            captures.len(),
+            1,
+            "{member}: retain the exact captured cell"
+        );
+        let (node, demand) = captures[0];
+        assert_eq!(demand, expected, "{member}");
+        assert_eq!(
+            plan.structural_selection().is_value(node),
+            member == "reader",
+            "{member}: the capture follows its callable's selection"
+        );
+        assert!(plan.obligation_specs().iter().any(|spec| matches!(
+            spec.basis(),
+            FlowObligationBasis::Edge { from, class: FlowEdgeClass::EvalEffect, .. } if *from == node
+        )), "{member}: preserve the capture's effect dependency");
+    }
+}
+
 const TWO_CALLBACK_FIXTURE_SOURCE: &str = r#"
 function two_callbacks(x, y) {
   return sink(() => x, () => y);
