@@ -1018,6 +1018,25 @@ construction_ordinal_seam! {
     }
 }
 
+construction_ordinal_seam! {
+    /// Private intern of the intersection the checker constructs from a
+    /// WRITTEN intersection type node's arms (`getTypeFromIntersectionTypeNode`)
+    /// under `nullability`: every reduction a derived intersection runs,
+    /// except that the written `string & {}` pair stays as written
+    /// ([`is_kept_primitive_over_empty_object`]). An intersection over a
+    /// union keeps the written intersection as its printed origin when the
+    /// distribution is wider. Every distribution it runs pays `meter`
+    /// before it builds ([`admit_cross_product`]).
+    fn intern_written_intersection_charged(
+        graph: &SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: NullabilityPolicy,
+        meter: ConstructionMeter<'_>,
+    ) -> CanonicalComposite {
+        canonicalize(graph, members, /* is_union */ false, nullability, meter)
+    }
+}
+
 /// [`intern_ordered_intersection_charged`] on a bare graph, outside any
 /// connected demand: its distributions are weighed against the checker's
 /// limit and charged to no ledger. Tests only — production constructions
@@ -1057,8 +1076,10 @@ enum SupertypeReduction {
     /// (an instantiation, a merge, a constituent of a distributed
     /// intersection).
     Always,
-    /// Every shape but exactly `string & {}` (`number`, `bigint`) as
-    /// WRITTEN: the checker keeps that authored pair
+    /// Every shape but exactly `string & {}` (`number`, `bigint`, a pattern
+    /// template literal, in either order) as WRITTEN
+    /// ([`is_kept_primitive_over_empty_object`]): the checker keeps that
+    /// authored pair
     /// (`NoSupertypeReduction`), the idiom that keeps a literal union's
     /// suggestions open, and reduces it once instantiated (`type NN<T> = T
     /// & {}` makes `NN<string>` `string`).
@@ -1088,6 +1109,8 @@ fn canonicalize_with(
     // authored intersection the checker reduces is that reduced type.
     let flat = if is_union {
         reduce_authored_intersection_arms(graph, flat, nullability, meter, &mut evidence)
+    } else if nullability == NullabilityPolicy::Erased {
+        erase_nullable_union_arms(graph, flat, meter, &mut evidence)
     } else {
         flat
     };
@@ -1777,19 +1800,9 @@ fn remove_redundant_supertypes(
                     )
             )
     });
-    let written_pair_kept = supertype_reduction
-        == SupertypeReduction::ExceptPrimitiveOverEmptyObject
-        && matches!(
-            data.as_slice(),
-            [Some(first), Some(second)]
-                if matches!(
-                    first.as_ref(),
-                    SemanticNodeData::Primitive(
-                        PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
-                    )
-                ) && is_empty_object(second)
-        );
-    if written_pair_kept {
+    if supertype_reduction == SupertypeReduction::ExceptPrimitiveOverEmptyObject
+        && is_kept_primitive_over_empty_object(graph, arms)
+    {
         return;
     }
     let mut position = 0usize;
@@ -1807,6 +1820,39 @@ fn remove_redundant_supertypes(
         position += 1;
         !redundant
     });
+}
+
+/// Whether `arms` is the written pair the checker keeps as written
+/// (`getTypeFromIntersectionTypeNode`'s `NoSupertypeReduction`): `{}`
+/// beside exactly one `string`, `number`, `bigint` or pattern template
+/// literal type, in either order. `string & {}` keeps a literal union's
+/// suggestions open; once instantiated (`type NN<T> = T & {}` makes
+/// `NN<string>` `string`) the pair reduces.
+pub(crate) fn is_kept_primitive_over_empty_object(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
+    let is_empty_object = |arm: SemanticNodeId| {
+        matches!(
+            graph.node_data(arm).as_deref(),
+            Some(SemanticNodeData::Object(view)) if view.closed().is_empty()
+        )
+    };
+    let keeps_pair = |arm: SemanticNodeId| {
+        matches!(
+            graph.node_data(arm).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
+            ))
+        ) || super::template_relation::is_pattern_literal(graph, arm)
+    };
+    match arms {
+        [first, second] => {
+            (keeps_pair(*first) && is_empty_object(*second))
+                || (is_empty_object(*first) && keeps_pair(*second))
+        }
+        _ => false,
+    }
 }
 
 /// A union's AUTHORED intersection arms as the checker holds them: an arm
@@ -1847,6 +1893,36 @@ fn reduce_authored_intersection_arms(
         }
     }
     out
+}
+
+/// An intersection's union arms as the checker holds them with
+/// `strictNullChecks` off: it never adds `null` or `undefined` to a union, so
+/// an arm naming one is that union without it (`(string | null) & {}`
+/// intersects `string` with `{}`, the written pair it keeps). Every other arm
+/// stays as it is.
+fn erase_nullable_union_arms(
+    graph: &SemanticGraphStore,
+    arms: Vec<SemanticNodeId>,
+    meter: ConstructionMeter<'_>,
+    evidence: &mut CanonicalEvidence,
+) -> Vec<SemanticNodeId> {
+    arms.into_iter()
+        .map(|arm| {
+            let members: Vec<SemanticNodeId> = match graph.node_data(arm).as_deref() {
+                Some(SemanticNodeData::Union(members)) => members.iter().copied().collect(),
+                _ => return arm,
+            };
+            if !members
+                .iter()
+                .any(|member| peek_nullable_via_graph(graph, *member, evidence).is_some())
+            {
+                return arm;
+            }
+            let erased = canonicalize(graph, &members, true, NullabilityPolicy::Erased, meter);
+            evidence.absorb(erased.evidence);
+            erased.node
+        })
+        .collect()
 }
 
 /// The members of `node` when it is an AUTHORED intersection shell.

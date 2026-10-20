@@ -9869,6 +9869,21 @@ impl SemanticQueryKey {
         }
     }
 
+    /// `ReduceIntersection` of a WRITTEN intersection type node's arms
+    /// under `nullability` ([`IntersectionPurpose::WrittenTypeNode`]).
+    #[must_use]
+    pub fn reduce_written_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Self {
+        Self::ReduceIntersection {
+            input: IntersectionInputRef::from_operands(graph, members),
+            purpose: IntersectionPurpose::WrittenTypeNode(nullability),
+            context: SemanticContextId::production(),
+        }
+    }
+
     /// The content-free discriminant tag for this key. EXHAUSTIVE by
     /// construction — a new enum variant cannot compile until it gains a tag
     /// arm here, which is the mechanism that keeps the spec table honest.
