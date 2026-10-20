@@ -527,7 +527,9 @@ fn live_probe_outcome_on(row: &Row, host: &crate::VerterHost) -> LiveProbeOutcom
                     None,
                     matches!(
                         query_error_disposition(error),
-                        QueryErrorDisposition::OptionalAbsence | QueryErrorDisposition::Failure
+                        QueryErrorDisposition::OptionalAbsence
+                            | QueryErrorDisposition::Failure
+                            | QueryErrorDisposition::PermissiveWildcard
                     ),
                 )
             }
