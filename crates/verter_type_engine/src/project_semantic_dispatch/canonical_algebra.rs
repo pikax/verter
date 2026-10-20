@@ -2161,21 +2161,28 @@ pub(super) fn cross_product_under_limit(
 /// most once it is built: each factor contributes the most members any of
 /// its choices holds when nested intersections flatten into the
 /// constituent (`canonicalize_with`'s same-kind flattening), a
-/// non-intersection choice one. The arity [`admit_cross_product`] pays a
-/// constituent's footprint at.
+/// non-intersection choice one. A nested intersection is spliced once
+/// however often the choice reaches it, as [`flatten_members`] splices it,
+/// so a shared intersection DAG is sized — and walked — by its distinct
+/// intersection nodes, never by its unfolded tree. The arity
+/// [`admit_cross_product`] pays a constituent's footprint at.
 pub(super) fn flattened_arity<'f>(
     graph: &SemanticGraphStore,
     factors: impl Iterator<Item = &'f [SemanticNodeId]>,
 ) -> usize {
     let mut stack: Vec<SemanticNodeId> = Vec::new();
+    let mut spliced: FxHashSet<SemanticNodeId> = FxHashSet::default();
     let mut leaves = |choice: SemanticNodeId| -> usize {
         stack.clear();
+        spliced.clear();
         stack.push(choice);
         let mut count = 0usize;
         while let Some(node) = stack.pop() {
             match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Intersection(members)) => {
-                    stack.extend(members.iter().copied());
+                    if spliced.insert(node) {
+                        stack.extend(members.iter().copied());
+                    }
                 }
                 _ => count += 1,
             }

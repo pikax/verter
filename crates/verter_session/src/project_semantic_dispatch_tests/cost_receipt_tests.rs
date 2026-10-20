@@ -2547,6 +2547,159 @@ fn construction_byte_refusal_is_opt_in() {
     );
 }
 
+/// An explicit invalidation of a canonical drops every sealed refusal whose
+/// failed prefix consumed a result reading it — through receipts no cache
+/// holds — together with the memo candidates those receipts reach, and
+/// leaves refusals and candidates that never read it. The last release
+/// drains both reverse indexes.
+#[test]
+fn invalidating_a_canonical_drops_the_refusals_its_failed_prefix_reached() {
+    use verter_session_query::facts::fact_cache::{
+        FactVersionRef, ReadSetSignature, ResultReceipt,
+    };
+    use verter_type_engine::semantic_query::{
+        CacheRead, LiteralValue, PartialReasonSet, QueryResult, RelateMemoKey, RelationContext,
+        RelationOutcome, ResolveDeclKey, ScopeId, SemanticNodeData, SemanticQueryKey,
+        SemanticQueryValue,
+    };
+    use verter_type_engine::semantic_query_memo::ReverseIndexOccupancy;
+
+    let host = host();
+    let store = verter_type_engine::semantic_query_memo::SemanticGraphStore::new();
+    let profile = BudgetProfile::intern(BudgetProfileSpec {
+        work: 64,
+        bytes: 1_024,
+        construction_byte_refusal: false,
+        query_depth: 24,
+        instantiation_depth: 10,
+        tail_steps: 10,
+        request_operations: 0,
+        relation_comparisons: 600,
+        cost_model_revision: COST_MODEL_REVISION,
+    });
+    let key = |name: &str| {
+        SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+            scope: ScopeId {
+                canonical_id: verter_type_expr::OwnedStr::from("/refusals.ts"),
+                owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                local_scope: None,
+                binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                ),
+            },
+            name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let refusal = || {
+        CacheRead::unleased_for_tests(
+            QueryResult::<SemanticQueryValue>::Error(
+                verter_type_engine::semantic_query::QueryError::Miss,
+            ),
+            verter_type_engine::semantic_query_memo::empty_signature(),
+            verter_type_engine::project_semantic_dispatch::walk::WalkerDiagnostics::default(),
+            true,
+            verter_type_engine::semantic_query::FactStatus::unavailable(
+                PartialReasonSet::PROJECTION_WORK_LIMIT,
+            ),
+            verter_type_engine::semantic_query::ReadReceipt::Unpriced,
+        )
+    };
+    let file = |canonical: &str| FactVersionRef::FileWholeHash {
+        canonical_id: canonical.to_owned(),
+        hash: [9; 16],
+    };
+    // The failed prefix consumed `mid`, which consumed `base`; neither is
+    // cached.
+    let base = ResultReceipt::new(vec![file("/w/base.ts")]);
+    let mid = ResultReceipt::new(vec![file("/w/mid.ts"), FactVersionRef::Receipt(base)]);
+    let through_prefix =
+        || ReadSetSignature::new(Arc::from(vec![FactVersionRef::Receipt(mid.clone())]));
+    let elsewhere = ReadSetSignature::new(Arc::from(vec![file("/w/other.ts")]));
+
+    let entry = store.refusal_entry_for_tests(&host);
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        entry,
+        refusal(),
+        through_prefix(),
+    ));
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Elsewhere"),
+        profile.clone(),
+        entry,
+        refusal(),
+        elsewhere,
+    ));
+    let source = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "source".into(),
+    )));
+    let target = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "target".into(),
+    )));
+    store.insert_relation_payload_for_tests(
+        RelateMemoKey::assignable(source, target, RelationContext::default()),
+        through_prefix(),
+        Arc::from(Vec::new()),
+        store.relation_payload_for_tests(RelationOutcome::Assignable),
+        0,
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 2);
+    assert_eq!(store.canonical_to_entries_count("/w/base.ts"), 1);
+
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 1);
+    let kept = store.refusal_carriers_for_tests();
+    assert_eq!(kept.len(), 1, "only the refusal that read the edit leaves");
+    assert!(kept[0]
+        .facts
+        .iter()
+        .any(|fact| fact.canonical_id() == Some("/w/other.ts")));
+    assert_eq!(
+        store.reverse_index_occupancy(),
+        ReverseIndexOccupancy::default()
+    );
+    assert_eq!(store.refusal_index_occupancy_for_tests().canonicals, 1);
+
+    assert_eq!(store.invalidate_canonical("/w/other.ts"), 0);
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+
+    // An evaluation in flight across an explicit invalidation read what the
+    // invalidation dropped, before the index could hold its summary: its
+    // refusal is never sealed. One entering after the invalidation is.
+    let before_invalidation = store.refusal_entry_for_tests(&host);
+    assert_eq!(store.invalidate_canonical("/w/base.ts"), 0);
+    assert!(
+        !store.seal_refusal_for_tests(
+            &host,
+            key("Prefixed"),
+            profile.clone(),
+            before_invalidation,
+            refusal(),
+            through_prefix(),
+        ),
+        "a refusal entered before an invalidation is never sealed after it"
+    );
+    assert_eq!(store.refusal_summary_count_for_tests(), 0);
+    assert_eq!(
+        store.refusal_index_occupancy_for_tests(),
+        ReverseIndexOccupancy::default()
+    );
+    assert!(store.seal_refusal_for_tests(
+        &host,
+        key("Prefixed"),
+        profile.clone(),
+        store.refusal_entry_for_tests(&host),
+        refusal(),
+        through_prefix(),
+    ));
+}
+
 /// `{ ...a, ...b }` over two `arms`-member object unions, and an index
 /// target every alternative relates to.
 fn spread_unions(arms: usize) -> String {
@@ -2669,6 +2822,113 @@ fn a_spread_work_refusal_is_sealed_per_isolated_root_and_heals() {
     assert!(
         semantic_misses(&host) > before,
         "an edit to the construction evaluates afresh"
+    );
+}
+
+/// Unions `A` of 100 and `B` of 80 string literals.
+fn template_unions() -> String {
+    let union = |name: &str, prefix: &str, count: usize| {
+        let arms: Vec<String> = (0..count).map(|i| format!("\"{prefix}{i}\"")).collect();
+        format!("type {name} = {};\n", arms.join(" | "))
+    };
+    format!("{}{}", union("A", "a", 100), union("B", "b", 80))
+}
+
+/// The reduction of `${A}-${B}` over [`template_unions`] as a root key.
+fn template_reduction_key(
+    host: &Arc<VerterHost>,
+    source: &str,
+) -> verter_type_engine::semantic_query::SemanticQueryKey {
+    super::checker_probe_lane_tests::with_probe_on_host(
+        host,
+        Default::default(),
+        source,
+        "[A, B]",
+        |dispatch, node| {
+            let args = match dispatch.graph().node_data(node).as_deref() {
+                Some(verter_type_engine::semantic_query::SemanticNodeData::Tuple {
+                    elements,
+                    ..
+                }) => elements
+                    .iter()
+                    .map(|element| element.value)
+                    .collect::<Vec<_>>(),
+                other => panic!("the probe reads the pair [A, B], got {other:?}"),
+            };
+            verter_type_engine::semantic_query::SemanticQueryKey::TemplateLiteralReduce {
+                pattern: verter_type_expr::OwnedSlice::<verter_type_expr::OwnedStr>::from([
+                    verter_type_expr::OwnedStr::from(""),
+                    verter_type_expr::OwnedStr::from("-"),
+                    verter_type_expr::OwnedStr::from(""),
+                ]),
+                args: Arc::from(args),
+                context: dispatch.template_literal_reduce_context(),
+            }
+        },
+    )
+}
+
+/// A template whose product the work allowance cannot pay for stops as a
+/// typed work refusal, never as a smaller or empty union. The refusal is
+/// sealed for its isolated root and allowances only: an exact repeat
+/// answers it without reconstructing anything, a demand inside a different
+/// enclosing ledger evaluates for itself, a higher allowance completes the
+/// 8,000-arm union, and an edit to a span evaluates afresh.
+#[test]
+fn a_template_work_refusal_is_sealed_per_isolated_root_and_heals() {
+    use verter_type_engine::semantic_query::PartialReasonSet;
+    let full = super::connected_demand::MAX_CONNECTED_PROJECTION_WORK;
+    let source = template_unions();
+    let measured = {
+        let host = super::checker_probe_lane_tests::default_probe_host();
+        let key = template_reduction_key(&host, &source);
+        root_read(&host, &key, full)
+    };
+    assert!(
+        !measured.partial && measured.work >= 8_000,
+        "the full allowance builds all 8,000 concatenations: {measured:?}"
+    );
+
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let key = template_reduction_key(&host, &source);
+    let limited = measured.work / 2;
+    let refused = root_read(&host, &key, limited);
+    assert!(
+        refused.partial
+            && refused
+                .reasons
+                .contains(PartialReasonSet::PROJECTION_WORK_LIMIT),
+        "half the work cannot build every concatenation: {refused:?}"
+    );
+
+    let before = semantic_misses(&host);
+    assert_eq!(root_read(&host, &key, limited), refused);
+    assert_eq!(
+        semantic_misses(&host),
+        before,
+        "the exact repeat answers its sealed refusal without reconstruction"
+    );
+
+    let before = semantic_misses(&host);
+    let enclosed = root_read_with_context(&host, &key, limited, 24, 1);
+    assert!(enclosed.partial);
+    assert!(
+        semantic_misses(&host) > before,
+        "a demand inside another ledger never inherits the refusal"
+    );
+
+    let healed = root_read(&host, &key, full);
+    assert!(
+        !healed.partial && healed.work >= 8_000,
+        "a higher allowance recomputes and completes: {healed:?}"
+    );
+
+    let edited = template_reduction_key(&host, &source.replace("\"a0\"", "\"z0\""));
+    let before = semantic_misses(&host);
+    let _ = root_read(&host, &edited, limited);
+    assert!(
+        semantic_misses(&host) > before,
+        "an edit to a span evaluates afresh"
     );
 }
 

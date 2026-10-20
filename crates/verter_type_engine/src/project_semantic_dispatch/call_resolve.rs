@@ -11,9 +11,7 @@ use super::dispatch_txn::{
     ResolveCallPendingState, ResolveCallSelection, ReturnDomainMetadata, ReturnEquationFailure,
     ReturnEquationMember, ReturnObligationIdentity, SessionId,
 };
-use super::inference::session::{
-    InferenceInfoSetup, InferenceSessionSetup, InferenceSessionState, SessionCheckpoint,
-};
+use super::inference::session::{InferenceSessionSetup, InferenceSessionState, SessionCheckpoint};
 use super::walk::QueryBuildOutput;
 use super::ProjectSemanticDispatch;
 
@@ -29,6 +27,7 @@ use crate::semantic_query::{
     SemanticNodeId, SemanticQueryKey, SemanticQueryValue, SignatureKind, SignatureRef,
     SignatureReturnCarrier, VariancePhase,
 };
+pub(super) use context::{tuple_element_contexts, ArgumentReadLiterals, ArrayLiteralShape};
 pub(super) use contextual::ContextualCallState;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -207,11 +206,13 @@ impl<'l> CallResolutionBudget<'l> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct CallArgument {
     node: SemanticNodeId,
     freshness_origin: SemanticNodeId,
     literal_mode: ArgumentLiteralMode,
+    /// The regular literals the argument nests ([`CallArgKey::Eager`]).
+    literal_provenance: Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
     indefinite_spread: bool,
     /// A function-valued argument with at least one un-annotated parameter.
     /// Its provisional type is withheld from the first inference pass.
@@ -1582,6 +1583,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
+        let mut raw_pairing = RawCandidatePairing::new(raw);
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
                 if resuming {
@@ -1607,10 +1609,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // are the same callee's ordered bucket, so its raw form is the
                 // candidate at the same flat position.
                 let raw_candidate = match candidate.occurrence.authored() {
-                    Some(occurrence) => raw.iter().find(|raw| {
-                        raw.occurrence.authored() == Some(occurrence)
-                            && bucket_kind(raw.node) == Some(kind)
-                    }),
+                    Some(occurrence) => raw_pairing.authored(occurrence, kind, bucket_kind),
                     None => raw.get(position).filter(|raw| {
                         raw.occurrence.authored().is_none() && bucket_kind(raw.node) == Some(kind)
                     }),
@@ -2069,46 +2068,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for argument in key.args.iter() {
             record_argument_work(1);
             let context_sensitive = argument.is_context_sensitive();
-            let (node, spread, literal_mode, (const_view, first_pass)) = match argument {
-                CallArgKey::Eager {
-                    ty,
-                    spread,
-                    literal_mode,
-                    const_view,
-                    first_pass,
-                    ..
-                } => (*ty, *spread, *literal_mode, (*const_view, *first_pass)),
-                CallArgKey::ProgramExpression {
-                    point,
-                    spread,
-                    literal_mode,
-                    ..
-                } => {
-                    let (_serve, source_demand) = self
-                        .ctx
-                        .indexed_expression_source(point.canonical_id.as_ref())
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
-                        canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
-                        offset: point.offset,
-                    };
-                    let program_index = source_demand.function_program_index();
-                    let record = program_index
-                        .expression(&indexed_point)
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let expression = source_demand
-                        .indexed_program_expression_ir(record)
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    let node = self
-                        .evaluate_indexed_value_expression_node(
-                            point.canonical_id.as_ref(),
-                            record.locator.contributor.owner,
-                            expression.as_ref(),
-                        )
-                        .ok_or(ResolveCallFailure::Undecidable)?;
-                    (node, *spread, *literal_mode, (None, None))
-                }
-            };
+            let (node, spread, literal_mode, (const_view, first_pass), literal_provenance) =
+                match argument {
+                    CallArgKey::Eager {
+                        ty,
+                        spread,
+                        literal_mode,
+                        const_view,
+                        first_pass,
+                        literal_provenance,
+                        ..
+                    } => (
+                        *ty,
+                        *spread,
+                        *literal_mode,
+                        (*const_view, *first_pass),
+                        literal_provenance.clone(),
+                    ),
+                    CallArgKey::ProgramExpression {
+                        point,
+                        spread,
+                        literal_mode,
+                        ..
+                    } => {
+                        let (_serve, source_demand) = self
+                            .ctx
+                            .indexed_expression_source(point.canonical_id.as_ref())
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let indexed_point = verter_type_expr::facts::ProgramExpressionIdentity {
+                            canonical_id: std::sync::Arc::<str>::from(point.canonical_id.as_str()),
+                            offset: point.offset,
+                        };
+                        let program_index = source_demand.function_program_index();
+                        let record = program_index
+                            .expression(&indexed_point)
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let expression = source_demand
+                            .indexed_program_expression_ir(record)
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        let node = self
+                            .evaluate_indexed_value_expression_node(
+                                point.canonical_id.as_ref(),
+                                record.locator.contributor.owner,
+                                expression.as_ref(),
+                            )
+                            .ok_or(ResolveCallFailure::Undecidable)?;
+                        (node, *spread, *literal_mode, (None, None), None)
+                    }
+                };
             let freshness_origin = node;
             let node = self.substitute_canonical(node, &key.context.substitution);
             if !spread {
@@ -2116,6 +2123,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     freshness_origin,
                     literal_mode,
+                    literal_provenance,
                     indefinite_spread: false,
                     context_sensitive,
                     const_view: const_view
@@ -2150,6 +2158,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         },
                         freshness_origin,
                         literal_mode,
+                        literal_provenance: None,
                         indefinite_spread: false,
                         context_sensitive,
                         const_view: None,
@@ -2160,6 +2169,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     node,
                     freshness_origin,
                     literal_mode,
+                    literal_provenance: None,
                     indefinite_spread: true,
                     context_sensitive,
                     const_view: None,
@@ -2328,28 +2338,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return CandidateVerdict::Mismatch;
         }
 
-        #[allow(clippy::useless_conversion)]
-        let infer_params: Arc<[InferenceInfoSetup]> = Arc::from(
-            visible_type_params
-                .iter()
-                .map(|decl| {
-                    InferenceInfoSetup::for_call(
-                        decl.param,
-                        Arc::<str>::from(&decl.name),
-                        if decl.is_const {
-                            ConstParamPolicy::Const
-                        } else {
-                            ConstParamPolicy::NonConst
-                        },
-                        decl.constraint.is_some(),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-        );
         let setup = InferenceSessionSetup::new(
             self.graph(),
-            infer_params,
+            self.call_inference_infos(&visible_type_params),
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,
             InferenceCandidatePriority::Argument,
@@ -2542,7 +2533,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 rest,
                 index,
                 arguments.len(),
-                *argument,
+                argument.clone(),
                 graph,
                 self.construction_meter(),
                 &mut canonical_evidence,
@@ -2597,7 +2588,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // A context-sensitive literal still infers from its other
                 // members (`SkipContextSensitive` reads the sensitive ones
                 // as the non-inferring `anyFunctionType`); what it deposits
-                // is kept only when that reading relates.
+                // is kept only when that reading relates, and never the
+                // reading whole at a naked type parameter.
                 if let Some(view) = argument.first_pass {
                     let checkpoint = self.relation_session_checkpoint();
                     let deposits_before = self.accepted_inference_deposits();
@@ -2607,6 +2599,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.freshness_origin,
                         budget,
                         argument.literal_mode,
+                        argument.literal_provenance.as_deref(),
+                        &visible_type_params,
+                        true,
                     );
                     if !budget.charge_accepted_deposits(
                         self.accepted_inference_deposits() - deposits_before,
@@ -2626,8 +2621,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // assignability source.
             let (source, freshness_origin, literal_mode) = argument_source(argument, target);
             let deposits_before = self.accepted_inference_deposits();
-            let step =
-                self.call_argument_relation(source, target, freshness_origin, budget, literal_mode);
+            let step = self.call_argument_relation(
+                source,
+                target,
+                freshness_origin,
+                budget,
+                literal_mode,
+                argument.literal_provenance.as_deref(),
+                &visible_type_params,
+                false,
+            );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
             {
@@ -2715,6 +2718,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 argument.freshness_origin,
                 budget,
                 argument.literal_mode,
+                argument.literal_provenance.as_deref(),
+                &visible_type_params,
+                false,
             );
             if !budget
                 .charge_accepted_deposits(self.accepted_inference_deposits() - deposits_before)
@@ -3011,7 +3017,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 substituted_rest,
                 index,
                 arguments.len(),
-                *argument,
+                argument.clone(),
                 graph,
                 self.construction_meter(),
                 &mut canonical_evidence,
@@ -3747,19 +3753,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Ok(self.instantiate_signature_in_context_of(signature, contextual, SignatureKind::Call))
     }
 
-    fn call_argument_relation(
+    /// Relate one call argument to its parameter type `target` under the
+    /// candidate whose type parameters are `declared`. A bare literal
+    /// argument's nested literals are first read against their contextual
+    /// types in `target`, one authored expression at a time, and the
+    /// argument relates as the type that reading gives it
+    /// ([`Self::checked_literal_argument`]), so its deposits compose
+    /// each position's decision.
+    pub(super) fn call_argument_relation(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         freshness_origin: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         literal_mode: ArgumentLiteralMode,
+        literal_provenance: Option<&crate::semantic_query::ArgumentLiteralProvenance>,
+        declared: &[crate::semantic_query::TypeParamDecl],
+        first_pass: bool,
     ) -> RelationStep {
         let top_level = self.top_level_type_param_targets(target);
+        let (source, context_keeps) = if literal_mode == ArgumentLiteralMode::Widened {
+            self.checked_literal_argument(source, target, declared, literal_provenance)
+        } else {
+            (source, Vec::new())
+        };
         self.dispatch_txn.borrow_mut().begin_call_argument(
             Some(literal_mode),
             top_level,
             Some(source),
+            context_keeps,
+            first_pass,
         );
         let step = self.call_relation(source, target, freshness_origin, budget, true, true);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3855,6 +3878,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(ArgumentLiteralMode::Literal),
             Vec::new(),
             None,
+            Vec::new(),
+            false,
         );
         let step = self.call_relation(source, target, source, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
@@ -3905,9 +3930,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         freshness_origin: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
     ) -> RelationStep {
-        self.dispatch_txn
-            .borrow_mut()
-            .begin_call_argument(None, Vec::new(), None);
+        self.dispatch_txn.borrow_mut().begin_call_argument(
+            None,
+            Vec::new(),
+            None,
+            Vec::new(),
+            false,
+        );
         let step = self.call_relation(source, target, freshness_origin, budget, true, false);
         self.dispatch_txn.borrow_mut().end_call_argument();
         step
@@ -4430,30 +4459,47 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         policy: ConstParamPolicy,
     ) -> SemanticNodeId {
-        self.call_shape_transform(node, policy, &mut FxHashMap::default())
+        self.call_inference_candidate_keeping(node, policy, &[])
+    }
+
+    /// [`Self::call_inference_candidate`] with each literal in `keeps` (a
+    /// literal the argument's contextual typing kept) left as written.
+    pub(super) fn call_inference_candidate_keeping(
+        &self,
+        node: SemanticNodeId,
+        policy: ConstParamPolicy,
+        keeps: &[SemanticNodeId],
+    ) -> SemanticNodeId {
+        self.call_shape_transform(node, policy, keeps, &mut FxHashMap::default())
     }
 
     fn call_shape_transform(
         &self,
         node: SemanticNodeId,
         policy: ConstParamPolicy,
+        keeps: &[SemanticNodeId],
         memo: &mut FxHashMap<SemanticNodeId, SemanticNodeId>,
     ) -> SemanticNodeId {
         if let Some(cached) = memo.get(&node) {
             return *cached;
         }
+        // A kept node — a literal, or a composite the argument wrote as a
+        // regular value — is deposited as written.
+        if keeps.contains(&node) {
+            return node;
+        }
         let graph = self.graph();
         memo.insert(node, node);
         let result = match graph.node_data(node).as_deref() {
             Some(SemanticNodeData::Literal(_) | SemanticNodeData::EnumLiteral(_))
-                if policy == ConstParamPolicy::NonConst =>
+                if policy == ConstParamPolicy::NonConst && !keeps.contains(&node) =>
             {
                 self.widened_literal(node)
             }
             Some(SemanticNodeData::Tuple { elements, .. }) => {
                 let values = elements
                     .iter()
-                    .map(|element| self.call_shape_transform(element.value, policy, memo))
+                    .map(|element| self.call_shape_transform(element.value, policy, keeps, memo))
                     .collect::<Vec<_>>();
                 if policy == ConstParamPolicy::Const {
                     let mut mapped = elements
@@ -4488,7 +4534,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
             Some(SemanticNodeData::Array { element, .. }) => {
-                let element = self.call_shape_transform(*element, policy, memo);
+                let element = self.call_shape_transform(*element, policy, keeps, memo);
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Array {
@@ -4498,17 +4544,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             Some(SemanticNodeData::Union(members)) => {
-                let members = members
+                let transformed = members
                     .iter()
-                    .map(|member| self.call_shape_transform(*member, policy, memo))
+                    .map(|member| self.call_shape_transform(*member, policy, keeps, memo))
                     .collect::<Vec<_>>();
-                self.relation_combine_candidates(&members, VariancePhase::Covariant)
+                let widened = transformed
+                    .iter()
+                    .zip(members.iter())
+                    .any(|(arm, member)| arm != member);
+                if widened && transformed.len() >= 2 {
+                    // Arms the widening made alike reduce as the checker
+                    // reduces its conditional's arms: under the shared
+                    // strict subtype relation (`c ? { a: 1 } : { a: 2 }`
+                    // is `{ a: number }`). An undecided pair keeps every
+                    // arm and leaves the result partial.
+                    let nullability =
+                        verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                            self.relation_strict_config().strict_null_checks,
+                        );
+                    let reduced = self.subtype_reduced_union(&transformed, nullability);
+                    if reduced.incomplete {
+                        crate::request_context::mark_request_result_partial();
+                    }
+                    reduced.node
+                } else {
+                    self.relation_combine_candidates(&transformed, VariancePhase::Covariant)
+                }
             }
             Some(SemanticNodeData::Intersection(members)) => {
                 let category = members.origin_category();
                 let members = members
                     .iter()
-                    .map(|member| self.call_shape_transform(*member, policy, memo))
+                    .map(|member| self.call_shape_transform(*member, policy, keeps, memo))
                     .collect::<Vec<_>>();
                 // Order- and scope-preserving rebuild: an intersection
                 // reaching call-shape transformation may be an
@@ -4532,7 +4599,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .map(crate::semantic_query::SurfaceMember::clone)
                     .collect::<Vec<_>>();
                 for member in &mut members {
-                    member.value = self.call_shape_transform(member.value, policy, memo);
+                    member.value = self.call_shape_transform(member.value, policy, keeps, memo);
                     member.readonly = policy == ConstParamPolicy::Const;
                 }
                 graph.intern_preserving_scope(
@@ -4572,6 +4639,62 @@ fn signature_bucket(call: CallKind) -> SignatureKind {
     match call {
         CallKind::Call => SignatureKind::Call,
         CallKind::Construct => SignatureKind::Construct,
+    }
+}
+
+/// A call bucket's RAW candidates, indexed by their (authored occurrence,
+/// bucket kind) as candidate pairing reaches them. Each raw candidate is
+/// read at most once however many candidates pair against the list, and a
+/// lookup returns the FIRST raw candidate with that occurrence and kind.
+struct RawCandidatePairing<'r> {
+    raw: &'r [SignatureRef],
+    scanned: usize,
+    first: FxHashMap<
+        (
+            &'r crate::semantic_query::SignatureOccurrenceIdentity,
+            SignatureKind,
+        ),
+        usize,
+    >,
+}
+
+impl<'r> RawCandidatePairing<'r> {
+    fn new(raw: &'r [SignatureRef]) -> Self {
+        Self {
+            raw,
+            scanned: 0,
+            first: FxHashMap::default(),
+        }
+    }
+
+    /// The first raw candidate authored at `occurrence` in bucket `kind`.
+    /// Every raw candidate before the scan cursor is already indexed, so a
+    /// miss scans forward only from the cursor.
+    fn authored(
+        &mut self,
+        occurrence: &'r crate::semantic_query::SignatureOccurrenceIdentity,
+        kind: SignatureKind,
+        kind_of: impl Fn(SemanticNodeId) -> Option<SignatureKind>,
+    ) -> Option<&'r SignatureRef> {
+        if let Some(&index) = self.first.get(&(occurrence, kind)) {
+            return Some(&self.raw[index]);
+        }
+        while let Some(raw) = self.raw.get(self.scanned) {
+            let index = self.scanned;
+            self.scanned += 1;
+            let (Some(raw_occurrence), Some(raw_kind)) =
+                (raw.occurrence.authored(), kind_of(raw.node))
+            else {
+                continue;
+            };
+            self.first
+                .entry((raw_occurrence, raw_kind))
+                .or_insert(index);
+            if raw_occurrence == occurrence && raw_kind == kind {
+                return Some(raw);
+            }
+        }
+        None
     }
 }
 

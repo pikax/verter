@@ -217,6 +217,15 @@ impl ComponentMetaQueryEngine<'_> {
                         continue;
                     };
                     let argument = &call.args[top.args.len()];
+                    let literal_provenance = self
+                        .dispatch
+                        .owning()
+                        .resolve_argument_literal_provenance(
+                            scope_canonical_id,
+                            scope_owner,
+                            argument.literal_provenance.as_deref(),
+                        )
+                        .into_value_in(self.builder());
                     top.args
                         .push(verter_type_engine::semantic_query::CallArgKey::Eager {
                             ty,
@@ -232,6 +241,7 @@ impl ComponentMetaQueryEngine<'_> {
                                     verter_type_engine::semantic_query::ArgumentLiteralMode::Literal
                                 }
                             },
+                            literal_provenance,
                         });
                 }
                 if let Some(argument) = call.args.get(top.args.len()) {

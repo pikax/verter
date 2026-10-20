@@ -472,3 +472,65 @@ fn a_distribution_outside_a_demand_never_inherits_an_earlier_trip() {
         },
     );
 }
+
+/// A constituent's footprint is sized by the members it holds once its
+/// nested intersections flatten, each intersection spliced once as the
+/// constituent builder splices it: a shared DAG `I0 = p & q`,
+/// `I(n + 1) = I(n) & I(n)` flattens to `p` and `q` however deep, so
+/// distributing `(I8 | r) & (s | t)` pays exactly what `(I0 | r) & (s | t)`
+/// pays, and fits the byte allowance the shallow form needs.
+#[test]
+fn a_shared_intersection_dag_is_charged_for_its_flattened_members() {
+    use std::sync::Arc;
+    use verter_session_query::flow::policy::NullabilityPolicy;
+    use verter_type_engine::project_semantic_dispatch::canonical_algebra::{
+        intern_ordered_intersection_paying_for_tests, intern_ordered_union,
+    };
+    use verter_type_engine::semantic_query::composite::CompositeList;
+    use verter_type_engine::semantic_query::{DeclIdentity, PartialReasonSet, SemanticNodeId};
+    use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+
+    let graph = SemanticGraphStore::new();
+    let _scope = graph.enter_node_root_scope();
+    let param = |name: &str| {
+        graph.intern_node(SemanticNodeData::TypeParam {
+            decl: DeclIdentity::synthetic(name),
+            param_index: 0,
+            constraint: None,
+            default: None,
+            display_name: verter_type_expr::OwnedStr::from(name),
+        })
+    };
+    let carrier = |members: [SemanticNodeId; 2]| {
+        graph.intern_node(SemanticNodeData::Intersection(
+            CompositeList::ordered_carrier_for_tests(Arc::from(members)),
+        ))
+    };
+    let [p, q, r, s, t] = ["P", "Q", "R", "S", "T"].map(param);
+    let shallow = carrier([p, q]);
+    let deep = (0..8).fold(shallow, |inner, _| carrier([inner, inner]));
+    let right = intern_ordered_union(&graph, &[s, t], NullabilityPolicy::Strict).node;
+    let arms = |nested: SemanticNodeId| {
+        [
+            intern_ordered_union(&graph, &[nested, r], NullabilityPolicy::Strict).node,
+            right,
+        ]
+    };
+    let paying = |nested: SemanticNodeId, bytes: usize| {
+        intern_ordered_intersection_paying_for_tests(&graph, &arms(nested), usize::MAX, bytes)
+    };
+    let control = paying(shallow, usize::MAX);
+    assert_eq!(control.exhausted, PartialReasonSet::empty(), "{control:?}");
+    assert_eq!(control.work, 4, "two by two constituents");
+    let nested = paying(deep, usize::MAX);
+    assert_eq!(
+        (nested.work, nested.bytes),
+        (control.work, control.bytes),
+        "the shared DAG flattens to the members the shallow form holds"
+    );
+    assert_eq!(
+        paying(deep, control.bytes).exhausted,
+        PartialReasonSet::empty(),
+        "the shallow form's allowance pays for the shared DAG"
+    );
+}
