@@ -486,17 +486,36 @@ impl<'a> Matrix<'a> {
 
     /// Each row's verdict in each setting, in row then setting order.
     pub(super) fn verdicts(&self, rows: &[(Read<'_>, Vec<&str>)]) -> Vec<Vec<Verdict>> {
-        let (host, roots, _workspace) = if self.installed_packages.is_some() {
-            let (host, roots, workspace) = self.installed_packages_host(rows);
-            (host, roots, Some(workspace))
-        } else {
-            let roots = self
-                .settings
-                .iter()
-                .map(|setting| setting.root.to_owned())
-                .collect();
-            (self.host(rows), roots, None)
-        };
+        if self.installed_packages.is_some() {
+            let (host, roots, _workspace) = self.installed_packages_host(rows);
+            return self.verdicts_at(&host, &roots, rows);
+        }
+        self.verdicts_on(&self.host(rows), rows)
+    }
+
+    /// [`Self::verdicts`] read from `host`, a host [`Self::host`] built for
+    /// the same rows.
+    pub(super) fn verdicts_on(
+        &self,
+        host: &Arc<VerterHost>,
+        rows: &[(Read<'_>, Vec<&str>)],
+    ) -> Vec<Vec<Verdict>> {
+        let roots: Vec<String> = self
+            .settings
+            .iter()
+            .map(|setting| setting.root.to_owned())
+            .collect();
+        self.verdicts_at(host, &roots, rows)
+    }
+
+    /// Each row's verdict read from `host` at each setting's project
+    /// `roots`, in row then setting order.
+    fn verdicts_at(
+        &self,
+        host: &Arc<VerterHost>,
+        roots: &[String],
+        rows: &[(Read<'_>, Vec<&str>)],
+    ) -> Vec<Vec<Verdict>> {
         rows.iter()
             .enumerate()
             .map(|(index, (read, answers))| {
@@ -510,7 +529,7 @@ impl<'a> Matrix<'a> {
                     .map(|(root, expected)| {
                         let canonical = format!("{root}/probe.ts");
                         let (observed, diagnostics) =
-                            observe_with_deadline(&host, &canonical, &symbol, self.lib.is_some());
+                            observe_with_deadline(host, &canonical, &symbol, self.lib.is_some());
                         let matched = match &observed {
                             Observed::Clean(text) => {
                                 canonical_text(text) == canonical_text(expected)
@@ -529,7 +548,7 @@ impl<'a> Matrix<'a> {
             .collect()
     }
 
-    fn module(&self, rows: &[(Read<'_>, Vec<&str>)]) -> String {
+    pub(super) fn module(&self, rows: &[(Read<'_>, Vec<&str>)]) -> String {
         let mut module = String::from(self.source);
         module.push('\n');
         // A global script's probes are not exported: an export would make it
