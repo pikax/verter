@@ -514,6 +514,7 @@ fn root_only_projection_matches_full_fold_across_all_arms() {
             source: dummy,
             mapper: MapperKey {
                 over_type_variable: false,
+                modifiers_type: None,
                 parameter_node: dummy,
                 key_space: dummy,
                 value_expr,
@@ -679,6 +680,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
 
     let mapper_with = |key_space, value_expr| MapperKey {
         over_type_variable: false,
+        modifiers_type: None,
         parameter_node: present,
         key_space,
         value_expr,
@@ -783,6 +785,7 @@ fn root_only_projection_returns_none_on_malformed_required_child_like_full_fold(
                 source: present,
                 mapper: MapperKey {
                     over_type_variable: false,
+                    modifiers_type: None,
                     parameter_node: present,
                     key_space: present,
                     value_expr: present,

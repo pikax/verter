@@ -1305,6 +1305,7 @@ fn materialize_output_source(
                             | QueryErrorDisposition::UnsupportedSurface
                             | QueryErrorDisposition::UnsupportedPosition
                             | QueryErrorDisposition::Partial
+                            | QueryErrorDisposition::PermissiveWildcard
                             | QueryErrorDisposition::Failure => {
                                 crate::meta_resolve::ComponentMetaOutputFailure::UnknownMaterializingSourceInterior {
                                     path: std::sync::Arc::from(Vec::new().into_boxed_slice()),

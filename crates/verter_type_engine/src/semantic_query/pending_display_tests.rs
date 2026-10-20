@@ -215,6 +215,7 @@ fn pending_display_preserves_a_mapped_binder_and_its_value_scope() {
         source: key,
         mapper: super::super::MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: key,
             key_space: key,
             value_expr: key,

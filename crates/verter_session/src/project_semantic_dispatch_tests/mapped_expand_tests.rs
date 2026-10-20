@@ -32,13 +32,15 @@ use verter_type_expr::{ObjectMember, TypeExpr};
 const SCENARIO: &str = "/expand/scenario.ts";
 
 /// The work a demand did, by the counters a growth proof compares.
-type Work = [(&'static str, u64); 3];
+type Work<const N: usize = 3> = [(&'static str, u64); N];
 
 /// A named demand's wire answer and the work it took.
 pub(super) struct Answer {
     wire: Vec<u8>,
     pub(super) answer: TypeExpr,
     work: Work,
+    flow_obligations: u64,
+    name_remaps: u64,
 }
 
 /// Resolve `__Probe = probe` in a fresh project holding `source`, as the
@@ -47,10 +49,48 @@ pub(super) struct Answer {
 /// tuple nested a hundred levels) nests deeper than a default decoder
 /// allows.
 pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
+    named_answer_in_mode(source, probe, None)
+}
+
+fn named_answer_in_mode(
+    source: &str,
+    probe: &str,
+    mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
+) -> Answer {
+    named_answer_with_library(source, probe, mode, false)
+}
+
+fn named_answer_with_library(
+    source: &str,
+    probe: &str,
+    mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
+    benchmark_library: bool,
+) -> Answer {
+    let config = if benchmark_library {
+        r#"{ "compilerOptions": { "strict": true, "noLib": true }, "files": ["lib.bench.d.ts", "scenario.ts"] }"#
+    } else {
+        r#"{ "compilerOptions": { "strict": true } }"#
+    };
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig::default(),
-        &[("/expand", r#"{ "compilerOptions": { "strict": true } }"#)],
+        &[("/expand", config)],
     );
+    if benchmark_library {
+        let library = "/expand/lib.bench.d.ts";
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some(library.into()),
+                input_id: library.into(),
+                source: Arc::from(include_str!(
+                    "../../../../scripts/benchmark/semantic-perf/lib/bench-globals.d.ts"
+                )),
+                file_language: crate::LanguageRegistry::global()
+                    .classify_static(library)
+                    .static_resolution(),
+                aliases: vec![],
+            })
+            .expect("benchmark library admitted");
+    }
     let _ = host
         .upsert(crate::UpsertRequest {
             canonical_id: Some(SCENARIO.into()),
@@ -62,10 +102,13 @@ pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
             aliases: vec![],
         })
         .expect("fixture admitted");
+    let obligations_before =
+        verter_type_engine::project_semantic_dispatch::flow_solve::planned_obligations_for_tests();
+    let remaps_before = verter_type_engine::project_semantic_dispatch::build::mapped_name_remap_evaluations_for_tests();
     let ((outcome, _), usage) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
             || {
-                host.resolve_named_symbol_with_audit(SCENARIO, "__Probe", None)
+                host.resolve_named_symbol_with_audit(SCENARIO, "__Probe", mode)
                     .into_parts()
             },
         );
@@ -86,7 +129,17 @@ pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
         ("cold builds", stats.misses),
         ("substitutions", stats.substitute_memo_misses),
     ];
-    Answer { wire, answer, work }
+    let flow_obligations =
+        verter_type_engine::project_semantic_dispatch::flow_solve::planned_obligations_for_tests()
+            - obligations_before;
+    let name_remaps = verter_type_engine::project_semantic_dispatch::build::mapped_name_remap_evaluations_for_tests() - remaps_before;
+    Answer {
+        wire,
+        answer,
+        work,
+        flow_obligations,
+        name_remaps,
+    }
 }
 
 pub(super) fn display(expr: &TypeExpr) -> String {
@@ -166,10 +219,10 @@ fn assert_properties(label: &str, answer: &TypeExpr, expected: BTreeMap<String, 
 /// Between a size and a larger one each work counter may grow at most 1.5
 /// times faster than the input: a quadratic term grows with the square of
 /// the step.
-fn assert_linear_growth(
+fn assert_linear_growth<const N: usize>(
     label: &str,
-    (small, before): (usize, Work),
-    (large, after): (usize, Work),
+    (small, before): (usize, Work<N>),
+    (large, after): (usize, Work<N>),
 ) {
     for ((what, before), (_, after)) in before.into_iter().zip(after) {
         println!("{label}: {what} {before} at {small}, {after} at {large}");
@@ -178,6 +231,118 @@ fn assert_linear_growth(
             "{label}: {what} grew from {before} at {small} to {after} at {large}"
         );
     }
+}
+
+/// A setup closure returns ref state and actions capturing that state. The
+/// remap tests every key, excludes actions, and unwraps each retained ref.
+fn setup_store(count: usize) -> String {
+    let mut source = String::from(
+        "interface Ref<T> { value: T }\n\
+         declare function ref<T>(value: T): Ref<T>;\n\
+         type State<S> = { [K in keyof S as S[K] extends Ref<any> ? K : never]: S[K] extends Ref<infer V> ? V : never };\n\
+         const setup = () => {\n",
+    );
+    for i in 0..count {
+        source.push_str(&format!("const n{i} = ref(0); const s{i} = ref('');\n"));
+    }
+    source.push_str("return {");
+    for i in 0..count {
+        source.push_str(&format!(
+            "n{i}: ref([n{i}.value] as const), s{i}: ref([s{i}.value] as const), action{i}: () => n{i}.value,"
+        ));
+    }
+    source.push_str("}; };\ntype Store = State<ReturnType<typeof setup>>;\n");
+    source
+}
+
+#[test]
+fn setup_store_remap_answers_and_grows_linearly() {
+    let work = [5, 10, 20, 80].map(|count| {
+        let answer =
+            named_answer_with_library(&setup_store(count), "Store[keyof Store]", None, true);
+        println!(
+            "setup store {count}: {} {:?}",
+            display(&answer.answer),
+            answer.work
+        );
+        assert_eq!(
+            display(&answer.answer),
+            "readonly [number] | readonly [string]"
+        );
+        let work = [
+            answer.work[0],
+            answer.work[1],
+            answer.work[2],
+            ("key remaps", answer.name_remaps),
+            ("flow obligations", answer.flow_obligations),
+        ];
+        (count, work)
+    });
+    assert_linear_growth("setup store", work[0], work[1]);
+    assert_linear_growth("setup store", work[1], work[2]);
+    assert_linear_growth("setup store", work[2], work[3]);
+}
+
+#[test]
+fn setup_store_selected_state_and_action_keep_their_capture_values() {
+    let source = setup_store(2);
+    let failures = super::differential_harness_tests::Matrix::new(&source)
+        .settings(&super::differential_harness_tests::ALL)
+        .types(&[(
+            "Store[keyof Store]",
+            "readonly [number] | readonly [string]",
+        )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    for (probe, expected) in [
+        (
+            "ReturnType<typeof setup>['n1']['value']",
+            "readonly [number]",
+        ),
+        ("ReturnType<ReturnType<typeof setup>['action1']>", "number"),
+    ] {
+        assert_eq!(
+            display(&named_answer(&source, probe).answer),
+            expected,
+            "{probe}"
+        );
+    }
+    for mode in [
+        verter_type_engine::semantic_query::ProjectionMode::Shallow,
+        verter_type_engine::semantic_query::ProjectionMode::Navigate,
+    ] {
+        let answer = named_answer_with_library(&source, "Store[keyof Store]", Some(mode), true);
+        assert_eq!(
+            display(&answer.answer),
+            "readonly [number] | readonly [string]",
+            "{mode:?}"
+        );
+    }
+}
+
+#[test]
+fn filtered_mapped_indices_preserve_modifiers_and_rename_fallbacks() {
+    let source = "interface Src { readonly a: 1; b?: 2; c: 3 }\n\
+                  interface Plain { readonly a: 1; b: 2; c: 3 }\n\
+                  type Filter<T> = { [K in keyof T as K extends 'c' ? never : K]: readonly [T[K]] };\n\
+                  type RequiredFilter<T> = { -readonly [K in keyof T as K extends 'c' ? never : K]-?: readonly [T[K]] };\n\
+                  type Collide<T> = { [K in keyof T as 'a']: K };\n\
+                  type Rename<T> = { [K in keyof T as K extends 'a' ? 'b' : K extends 'b' ? 'a' : K]: K };";
+    let failures = mismatches(
+        source,
+        &[
+            (
+                "Filter<Src>[keyof Filter<Src>]",
+                "readonly [1] | readonly [2 | undefined] | undefined",
+            ),
+            (
+                "RequiredFilter<Src>[keyof RequiredFilter<Src>]",
+                "readonly [1] | readonly [2 | undefined]",
+            ),
+            ("Collide<Plain>['a']", "\"a\" | \"b\" | \"c\""),
+            ("Rename<Plain>['a' | 'c']", "\"b\" | \"c\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A class built by `count` mixins over `Base`, and the homomorphic mapping

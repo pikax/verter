@@ -3016,8 +3016,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         keys: &[IndexKey],
         index_node: SemanticNodeId,
     ) -> FiniteMappedIndexValues {
-        if mapper.name_remap.is_some()
-            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+        if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
             || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
         {
             return FiniteMappedIndexValues::NotApplicable;
@@ -3042,8 +3041,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return FiniteMappedIndexValues::NotApplicable;
             }
         }
-        // Prove membership once for the whole finite batch. A dictionary,
-        // remapping or open domain retains the ordinary per-key walker.
+        // Prove membership once for the whole finite batch. A dictionary or
+        // open domain retains the ordinary per-key walker.
         let domain_read = self
             .dispatch
             .observe_read(|| self.dispatch.key_space_domain(mapper.key_space));
@@ -3065,6 +3064,71 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             _ => false,
         }) {
             return FiniteMappedIndexValues::NotApplicable;
+        }
+        if mapper.name_remap.is_some() {
+            // A same-name filter has a unique preimage for every surviving
+            // string key. Classify its domain once for this batch rather than
+            // rediscovering every output key's preimage separately. Renames,
+            // collisions, numeric binders and undecidable remaps keep the
+            // ordinary path. This probe never forces the mapped VALUE body.
+            let remap_context = self.context_from_template(
+                crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+            );
+            let filter = self.dispatch.observe_read(|| {
+                if super::raise::mapped_type_key_domain_is_open_or_unknown(
+                    self.dispatch,
+                    source,
+                    mapper,
+                ) {
+                    return None;
+                }
+                let mut kept = rustc_hash::FxHashSet::default();
+                for key in domain.literal_keys() {
+                    let (
+                        PropertyKey::String(name),
+                        Some(crate::semantic_query::LiteralValue::String(literal)),
+                    ) = (&key.key, &key.literal)
+                    else {
+                        return None;
+                    };
+                    if name.as_ref() != literal.as_str()
+                        || self.dispatch.cancellation.is_cancelled()
+                    {
+                        return None;
+                    }
+                    use super::build::MappedKeyRemapOutcome;
+                    match self.dispatch.mapped_member_name_remap_outcome(
+                        mapper,
+                        key,
+                        remap_context,
+                    ) {
+                        MappedKeyRemapOutcome::Drop => continue,
+                        MappedKeyRemapOutcome::Keep(produced) if produced == key.key => {}
+                        MappedKeyRemapOutcome::Keys(produced)
+                            if matches!(produced.as_slice(), [produced] if produced == &key.key) => {}
+                        _ => return None,
+                    }
+                    kept.insert(name.clone());
+                }
+                Some(kept)
+            });
+            if filter.value().is_none() {
+                let _ = filter.discard();
+                return FiniteMappedIndexValues::NotApplicable;
+            }
+            let completion = filter.result_completeness();
+            let kept = match filter.adopt(self.dispatch) {
+                Ok(Some(kept)) if !completion.is_partial() => kept,
+                _ => {
+                    return self.stop_finite_mapped_batch(object, index_node, completion.reasons())
+                }
+            };
+            if !keys
+                .iter()
+                .all(|key| matches!(key, IndexKey::String(name) if kept.contains(name)))
+            {
+                return FiniteMappedIndexValues::NotApplicable;
+            }
         }
         self.original_path_non_empty = true;
         self.origin_file = self
@@ -9385,6 +9449,46 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             .as_deref()
             .map(crate::semantic_query::accessor_readonly_by_key)
             .unwrap_or_default();
+        // A kept modifier is read off the modifiers type — the
+        // `build_mapped_type` mirror: `source` itself, or the `X` of a key
+        // parameter constrained to `keyof X`, whose `X[P]` read leaves a
+        // kept-optional member's `undefined` to its `?`.
+        let inherits_modifiers = optionality == crate::semantic_query::OptionalityMod::Keep
+            || readonly_mod == crate::semantic_query::ReadonlyMod::Keep;
+        let modifiers_members = mapper
+            .modifiers_type
+            .filter(|_| inherits_modifiers)
+            .and_then(|modifiers| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(modifiers, self.context)
+            })
+            .map(|(members, partial_classes)| {
+                if !partial_classes.is_empty() {
+                    self.mark_partial_with(partial_classes);
+                }
+                members
+            });
+        let modifiers_member_index = modifiers_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
+        let value_reads_modifiers_member = modifiers_member_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    self.graph(),
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
+        let modifiers_accessors = modifiers_members
+            .as_deref()
+            .map(crate::semantic_query::accessor_readonly_by_key);
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9436,6 +9540,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let source_member = source_member_index
                     .as_ref()
                     .and_then(|index| index.get(&key.key).copied());
+                let modifiers_member = match &modifiers_member_index {
+                    Some(index) => index.get(&key.key).copied(),
+                    None => source_member,
+                };
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -9447,17 +9555,21 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     crate::semantic_query::OptionalityMod::Add => true,
                     crate::semantic_query::OptionalityMod::Remove => false,
                     crate::semantic_query::OptionalityMod::Keep => {
-                        source_member.map(|m| m.optional).unwrap_or(false)
+                        modifiers_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
                 // An accessor maps as the property it is: `readonly`
                 // without a setter, its value read through the key.
                 let source_accessor_readonly = source_accessors.get(&key.key).copied();
+                let modifiers_accessor_readonly = match &modifiers_accessors {
+                    Some(accessors) => accessors.get(&key.key).copied(),
+                    None => source_accessor_readonly,
+                };
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
-                    crate::semantic_query::ReadonlyMod::Keep => source_accessor_readonly
-                        .or(source_member.map(|m| m.readonly))
+                    crate::semantic_query::ReadonlyMod::Keep => modifiers_accessor_readonly
+                        .or(modifiers_member.map(|m| m.readonly))
                         .unwrap_or(false),
                 };
                 // Identity fast path — use source_member.value
@@ -9542,25 +9654,38 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 .mapped_member_optionality(mapper, value, source, key_node)
                         })
                 } else {
-                    value
+                    match (modifiers_member, mapper.modifiers_type) {
+                        (Some(member), Some(modifiers))
+                            if value_reads_modifiers_member && optional && member.optional =>
+                        {
+                            self.dispatch.read_without_optional_member_undefined(
+                                value,
+                                member.value,
+                                modifiers,
+                            )
+                        }
+                        _ => value,
+                    }
                 };
                 let visibility = source_member
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
                         sm.visibility
                     });
-                // The matched source member's declaration site — whether a
-                // produced member inherits it is judged PER PRODUCED NAME
-                // inside the loop below (mirrors the Expanded path in
+                // The matched source member's declaration site — or the
+                // modifiers member's, which the produced member links to —
+                // whether a produced member inherits it is judged PER PRODUCED
+                // NAME inside the loop below (mirrors the Expanded path in
                 // `build.rs`).
-                let source_spans = source_member.map(|sm| sm.spans).unwrap_or_default();
+                let declaring_member = source_member.or(modifiers_member);
+                let source_spans = declaring_member.map(|sm| sm.spans).unwrap_or_default();
                 let source_declaration_origin =
-                    source_member.and_then(|sm| sm.declaration_origin.clone());
+                    declaring_member.and_then(|sm| sm.declaration_origin.clone());
                 (
                     value,
                     optional,
                     readonly,
                     visibility,
-                    source_member.is_some(),
+                    declaring_member.is_some(),
                     source_spans,
                     source_declaration_origin,
                 )
