@@ -13,7 +13,9 @@ use crate::facts::resolution::ResolutionFactKey;
 #[cfg(test)]
 use crate::resolution::ResolutionPopulation;
 
-pub use crate::facts::receipt::{drop_subsumed_receipts, EvidenceKind, ReceiptWalk, ResultReceipt};
+pub use crate::facts::receipt::{
+    drop_subsumed_receipts, EvidenceKind, ReceiptVerdict, ReceiptWalk, ResultReceipt,
+};
 
 /// A fact signature as a reader receives it: a sealed, self-charged list.
 /// Every clone shares the list's one charge, so a signature a reader keeps

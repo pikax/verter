@@ -242,6 +242,9 @@ struct TypedArgument {
     node: Option<SemanticNodeId>,
     fresh_call: bool,
     const_view: Option<SemanticNodeId>,
+    /// The regular literals the argument nests, when its value is the
+    /// indexed program's own in owner scope.
+    literal_provenance: Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
 }
 
 /// The operand a call's value computation evaluates first, if it has one.
@@ -617,6 +620,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 node: Some(node),
                 fresh_call: self.is_fresh_call_value(lowered, node),
                 const_view: None,
+                literal_provenance: None,
             },
             Positional::Hold => {
                 self.adopt_argument_observations(&mut route.argument_observations);
@@ -626,6 +630,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 node: None,
                 fresh_call: false,
                 const_view: None,
+                literal_provenance: None,
             },
         };
         self.advance_resolve_call(route, Some(typed))
@@ -643,7 +648,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let arguments: &'e SliceCallArguments = route.arguments;
         while let Some(argument) = indexed.call.args.get(route.args.len()) {
             let ordinal = route.args.len();
-            let (binding, typed) = match delivered.take() {
+            let (binding, mut typed) = match delivered.take() {
                 Some(typed) => (
                     route
                         .awaiting
@@ -748,12 +753,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                         FlowIndexedArgumentBinding::NonBindingExpression,
                                         Some(frame_arguments),
                                     ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
-                                        let value =
-                                            self.eval_frame_call_argument(&frame_argument.value)?;
+                                        let authored_literal = argument.literal_mode
+                                            == verter_type_expr::IndexedValueLiteralMode::Widened;
+                                        let value = self.eval_frame_call_argument(
+                                            &frame_argument.value,
+                                            authored_literal,
+                                        )?;
                                         const_view = frame_argument
                                             .const_context
                                             .as_ref()
-                                            .and_then(|expr| self.eval_frame_call_argument(expr));
+                                            .and_then(|expr| {
+                                                self.eval_frame_call_argument(
+                                                    expr,
+                                                    authored_literal,
+                                                )
+                                            });
                                         Some(value)
                                     }),
                                     _ => None,
@@ -785,10 +799,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             node,
                             fresh_call,
                             const_view,
+                            literal_provenance: None,
                         },
                     )
                 }
             };
+            // The regular literals the argument nests, whichever route typed
+            // it: its reads resolve in this frame's scope. A whole read of a
+            // binding nests none of its own.
+            if typed.node.is_some()
+                && !matches!(
+                    binding,
+                    FlowIndexedArgumentBinding::ValueRead(_)
+                        | FlowIndexedArgumentBinding::SourceTypeQuery(_)
+                )
+            {
+                typed.literal_provenance =
+                    self.frame_argument_literal_provenance(argument.literal_provenance.as_deref());
+            }
             let Some(ty) = typed.node else {
                 // An argument this substrate cannot type leaves
                 // applicability without its evidence: the executor refuses
@@ -857,6 +885,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     argument.literal_mode,
                     reads_widening_local || typed.fresh_call,
                 ),
+                literal_provenance: typed.literal_provenance,
             });
         }
         self.finish_resolve_call(route)
@@ -1086,6 +1115,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 const_view: None,
                 first_pass: None,
                 literal_mode: crate::semantic_query::ArgumentLiteralMode::Literal,
+                literal_provenance: None,
             };
             if let Some(old) = finish.argument_observations[position].take() {
                 let _ = old.discard();
