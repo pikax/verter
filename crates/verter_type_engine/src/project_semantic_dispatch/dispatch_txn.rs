@@ -870,7 +870,7 @@ pub enum ResolveCallSelection {
         fresh_literal_returns: Vec<SemanticNodeId>,
         /// The diagnostic of an error-recovery winner (see
         /// [`ResolvedCallResult::Selected`]).
-        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnostic>,
+        recovery_diagnostic: Option<Box<crate::semantic_query::CheckerDiagnosticRecipe>>,
     },
     DynamicAny,
 }
@@ -954,7 +954,7 @@ impl ResolveCallSelection {
                 substitution: substitution.clone(),
                 return_type,
                 fresh_literal_returns: fresh_literal_returns.clone().into(),
-                recovery_diagnostic: *recovery_diagnostic,
+                recovery_diagnostic: recovery_diagnostic.as_deref().copied(),
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
         }

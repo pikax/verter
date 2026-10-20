@@ -1060,6 +1060,10 @@ declare function ctx<T>(x: T, f: (v: T) => void): T;
 declare function box<T>(x: T[]): T;
 declare function ov(x: string): string;
 declare function ov(x: number): number;
+declare function cb(f: () => number): void;
+declare function g2<T>(x: T): T;
+declare function g2<T>(x: T, y: T): T;
+declare const o: { m(x: string): number };
 export function tu() { return takes(u); }
 export function tab(x: { a: 1 }, y: { b: 1 }) { return two(x, y); }
 export function o1(x: number) { return one(x); }
@@ -1071,70 +1075,639 @@ export function c1() { return con(1); }
 export function x1() { return ctx(1, (v: string) => {}); }
 export function bx(x: number) { return box(x); }
 export function v1(x: boolean) { return ov(x); }
+export function e1() { return cb(() => "s"); }
+export function eg() { return g2<string>(1); }
+export function eg1() { return con<"a">("b"); }
+export function cc() { return [con(1), con(true)]; }
+export function c3() { return con(1); }
+export function om() { return o.m(); }
+declare function ov3(f: (x: string) => string): void;
+declare function ov3(f: (x: string) => string, b: string, c: string): void;
+declare function ovc(f: (x: string) => number, n: number): void;
+declare function ovc(f: (x: number) => boolean, n: string): void;
+declare function lit(x: { a: number; b: string }): void;
+declare function lit2(x: { color: number }): void;
+declare function nested(x: { a: { b: number } }): void;
+declare const ob2: { a: { b: string } };
+declare function arr(x: number[]): void;
+declare function cbu(f: (() => number) | ((x: string) => boolean)): void;
+declare function two2(a: number, b: number): number;
+export function gap() { return ov3((x) => x, "b"); }
+export function lo() { return ovc((x) => "s", "n"); }
+export function lo2() { return ovc((x) => x, true); }
+export function el() { return lit({ a: "x", b: 1 }); }
+export function ex() { return lit({ a: 1, b: "x", c: 1 }); }
+export function sg() { return lit2({ colour: 1 }); }
+export function np() { return nested(ob2); }
+export function ae() { return arr(["a"]); }
+export function ur() { return cbu(() => "s"); }
+export function cbb() { return cb(() => { return "s"; }); }
+export function ts1() { return two2(...[1, "bad"] as const); }
+export function ts2() { return one(...([] as const), 1); }
+export function ts3() { return one(...["a", "b"] as const); }
+export function un1() { enum Local { K = 1 } return one(Local); }
+declare enum E { A, B }
+declare function sb(x: string | boolean): void;
+export function en() { return one(E.A); }
+export function bu() { return sb(1); }
+declare function fe(x: E): void;
+type AB = "a" | "b";
+declare function fab(x: AB): void;
+export function fe_s() { return fe("s"); }
+export function fab_s() { return fab("c"); }
+export function fab_n() { return fab(1); }
+export function wobj() { return one({ a: 1 }); }
+export function wobj2() { return one({ a: 1, b: { c: true } }); }
+export function warr() { return one([1]); }
+export function wl() { return lit({ a: 1 }); }
+declare function rnd(): boolean;
+export function lp1() { let x: string | number = 1; for (let i = 0; i < 3; i++) { if (rnd()) { return one(x); } x = "a"; } return 0; }
 "#;
 
 /// A call its only candidate does not accept continues with that
 /// candidate as the checker's error-recovery candidate
-/// (`getCandidateForOverloadFailure`), re-inferred from the arguments, and
-/// the diagnostic the checker reports rides with the answer. Measured on
-/// 7.0.2, identically without `strictNullChecks`: `takes(u)` is `A`
-/// (TS2345: the inferred `x is A` does not accept `B`'s predicate);
-/// `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
-/// candidates' common supertype, which `y` then fails — where the checker
-/// prints the argument failure's elaboration, TS2741 ("Property 'a' is
-/// missing");
-/// `con(1)` is `string` — the inference violating `T extends string`
-/// takes the constraint (TS2345); `ctx(1, (v: string) => {})` is `string`
-/// (TS2345).
+/// (`getCandidateForOverloadFailure`), re-inferred from the arguments.
+/// Measured on 7.0.2, identically without `strictNullChecks`: `takes(u)`
+/// is `A`; `two(x, y)` over `{ a: 1 }` and `{ b: 1 }` is `{ a: 1 }` — the
+/// candidates' common supertype, which `y` then fails; `con(1)` is
+/// `string` — the inference violating `T extends string` takes the
+/// constraint; `ctx(1, (v: string) => {})` is `string`. With explicit
+/// type arguments over overloads, the one candidate whose arity fits the
+/// call recovers it: `g2<string>(1)` is `string`.
 ///
 /// A call to a lone NON-generic signature is answered from its declared
-/// return without resolving the call — the checker's answer whatever the
-/// arguments: `one(x)` is `number` (TS2345), `one()` and `one("a", "b")`
-/// are `number` (TS2554), `rest()` is `number` (TS2555), `opt()` is
-/// `number` (TS2554). No applicability check runs there, so no diagnostic
-/// rides those answers.
+/// return whatever the arguments: `one(x)`, `one()`, `one("a", "b")`,
+/// `rest()` and `opt()` are `number`.
 ///
 /// A generic candidate whose inference relation fails (`box(x)`, the
 /// checker's `unknown`) and a call over several overloads (`ov(x)`, the
-/// checker's `never` with TS2769) keep the typed call gap: the first
-/// re-infers from a relation this executor abandoned, the second answers
-/// from a signature combining every overload.
+/// checker's `never`) keep the typed call gap: the first re-infers from a
+/// relation this executor abandoned, the second answers from a signature
+/// combining every overload.
 #[test]
 fn a_call_its_only_candidate_rejects_answers_the_checkers_recovery() {
-    use verter_type_engine::semantic_query::{
-        CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation,
-    };
     let rows = [
-        ("tu", "A", CheckerDiagnosticCode::ArgumentNotAssignable),
-        (
-            "tab",
-            "{ a: 1; }",
-            CheckerDiagnosticCode::ArgumentNotAssignable,
-        ),
-        ("c1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
-        ("x1", "string", CheckerDiagnosticCode::ArgumentNotAssignable),
+        ("tu", "A"),
+        ("tab", "{ a: 1; }"),
+        ("c1", "string"),
+        ("x1", "string"),
+        ("eg", "string"),
     ];
     let host = host_with(CALL_RECOVERY);
     for root in [STRICT_ROOT, LOOSE_ROOT] {
-        for (function, printed, code) in rows {
+        for (function, printed) in rows {
             assert_prints(&host, root, function, printed);
-            assert_eq!(
-                super::signature_predicate_inference_tests::checker_diagnostics(
-                    &host, root, function
-                ),
-                vec![CheckerDiagnostic {
-                    code,
-                    operation: CheckerDiagnosticOperation::CallResolution,
-                }],
-                "`{function}` in {root} carries the checker's TS{}",
-                code.code()
-            );
         }
         for function in ["o1", "o2", "o3", "r0", "op0"] {
             assert_prints(&host, root, function, "number");
         }
         for function in ["bx", "v1"] {
             super::signature_predicate_inference_tests::assert_degrades(&host, root, function);
+        }
+    }
+}
+
+/// The diagnostics riding each function's answer, through the public
+/// audited flow-return boundary, printed as `tsc --pretty false` prints
+/// each — `(line,col): error TS<code>: <message>`, then its message chain
+/// indented two spaces per level — in its order. Every expected line is
+/// TypeScript 7.0.2's on this fixture, identical with `strictNullChecks`
+/// off.
+///
+/// The positions are the checker's: an argument's start for TS2345 (a
+/// spread's `...` for every argument it expands to), the first argument
+/// past the candidates' arity for too many arguments, the callee — a
+/// property access's NAME — for too few and for TS2575, and the part of an
+/// authored argument the failure is elaborated into: an arrow callback's
+/// returned expression, an object literal's property name, an array
+/// literal's element. TS2769 is reported where its last overload's error
+/// is, with that error below it — the last overload's error names a
+/// context-sensitive callback as that overload's own parameters typed it
+/// (`lo2`, whose later `true` the same overloads also reject). A literal
+/// argument prints as its base primitive, and an enum member as its enum,
+/// unless the parameter could hold a literal (`"b"` against `"a"`, `1`
+/// against `string | boolean`, whose `boolean` the checker holds as
+/// `true | false`; an enum or aliased literal-union parameter reads
+/// through what it settles to, keeping `"s"` against `E` and `"c"` against
+/// `AB`). A fresh object or array literal argument prints as its widened
+/// literal tree (`{ a: number; }`, `number[]`, and the missing-property
+/// message's source likewise), and a union prints its members in the
+/// checker's order (`string | number`, the loop read `lp1` narrows to, is
+/// reported once — a provisional loop-head pass's occurrences are set
+/// aside with its other side outputs).
+///
+/// Two calls of one callee with equal arguments (`con(1)` in `c1` and
+/// `c3`) each report at their own call, and two failing calls of one body
+/// (`cc`) report in source order; a warm read serves the same occurrences.
+#[test]
+fn call_diagnostics_carry_the_checkers_code_message_position_and_order() {
+    let rows: &[(&str, &[&str])] = &[
+        ("tu", &["(19,37): error TS2345: Argument of type '((x: unknown) => x is A) | ((x: unknown) => x is B)' is not assignable to parameter of type '(x: unknown) => x is A'.\n  Type '(x: unknown) => x is B' is not assignable to type '(x: unknown) => x is A'.\n    Type predicate 'x is B' is not assignable to 'x is A'.\n      Property 'a' is missing in type 'B' but required in type 'A'."]),
+        ("tab", &["(20,63): error TS2741: Property 'a' is missing in type '{ b: 1; }' but required in type '{ a: 1; }'."]),
+        ("o1", &["(21,44): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("o2", &["(22,31): error TS2554: Expected 1 arguments, but got 0."]),
+        ("o3", &["(23,40): error TS2554: Expected 1 arguments, but got 2."]),
+        ("r0", &["(24,31): error TS2555: Expected at least 1 arguments, but got 0."]),
+        ("op0", &["(25,32): error TS2554: Expected 1-2 arguments, but got 0."]),
+        ("c1", &["(26,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("x1", &["(27,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("e1", &["(30,40): error TS2322: Type 'string' is not assignable to type 'number'."]),
+        ("eg", &["(31,42): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("eg1", &["(32,41): error TS2345: Argument of type '\"b\"' is not assignable to parameter of type '\"a\"'."]),
+        (
+            "cc",
+            &[
+                "(33,36): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+                "(33,44): error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'string'.",
+            ],
+        ),
+        ("c3", &["(34,35): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("om", &["(35,33): error TS2554: Expected 1 arguments, but got 0."]),
+        ("gap", &["(47,32): error TS2575: No overload expects 2 arguments, but overloads do exist that expect either 1 or 3 arguments."]),
+        ("lo", &["(48,42): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Type 'string' is not assignable to type 'boolean'."]),
+        ("lo2", &["(49,43): error TS2769: No overload matches this call.\n  The last overload gave the following error.\n    Type 'number' is not assignable to type 'boolean'."]),
+        (
+            "el",
+            &[
+                "(50,37): error TS2322: Type 'string' is not assignable to type 'number'.",
+                "(50,45): error TS2322: Type 'number' is not assignable to type 'string'.",
+            ],
+        ),
+        ("ex", &["(51,51): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type '{ a: number; b: string; }'."]),
+        ("sg", &["(52,38): error TS2561: Object literal may only specify known properties, but 'colour' does not exist in type '{ color: number; }'. Did you mean to write 'color'?"]),
+        ("np", &["(53,38): error TS2345: Argument of type '{ a: { b: string; }; }' is not assignable to parameter of type '{ a: { b: number; }; }'.\n  The types of 'a.b' are incompatible between these types.\n    Type 'string' is not assignable to type 'number'."]),
+        ("ae", &["(54,36): error TS2322: Type 'string' is not assignable to type 'number'."]),
+        ("ur", &["(55,41): error TS2322: Type 'string' is not assignable to type 'number | boolean'."]),
+        ("cbb", &["(56,35): error TS2345: Argument of type '() => string' is not assignable to parameter of type '() => number'.\n  Type 'string' is not assignable to type 'number'."]),
+        ("ts1", &["(57,37): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."]),
+        ("ts2", &["(58,54): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."]),
+        ("ts3", &["(59,36): error TS2554: Expected 1 arguments, but got 2."]),
+        ("en", &["(63,35): error TS2345: Argument of type 'E' is not assignable to parameter of type 'string'."]),
+        ("bu", &["(64,34): error TS2345: Argument of type '1' is not assignable to parameter of type 'string | boolean'."]),
+        ("fe_s", &["(68,36): error TS2345: Argument of type '\"s\"' is not assignable to parameter of type 'E'."]),
+        ("fab_s", &["(69,38): error TS2345: Argument of type '\"c\"' is not assignable to parameter of type 'AB'."]),
+        ("fab_n", &["(70,38): error TS2345: Argument of type '1' is not assignable to parameter of type 'AB'."]),
+        ("wobj", &["(71,37): error TS2345: Argument of type '{ a: number; }' is not assignable to parameter of type 'string'."]),
+        ("wobj2", &["(72,38): error TS2345: Argument of type '{ a: number; b: { c: boolean; }; }' is not assignable to parameter of type 'string'."]),
+        ("warr", &["(73,37): error TS2345: Argument of type 'number[]' is not assignable to parameter of type 'string'."]),
+        ("wl", &["(74,35): error TS2741: Property 'b' is missing in type '{ a: number; }' but required in type '{ a: number; b: string; }'."]),
+        ("lp1", &["(76,107): error TS2345: Argument of type 'string | number' is not assignable to parameter of type 'string'.\n  Type 'number' is not assignable to type 'string'."]),
+    ];
+    let host = host_with(CALL_RECOVERY);
+    let mut mismatches = Vec::new();
+    // Cold, then warm: a warm read serves the same occurrences.
+    for pass in ["cold", "warm"] {
+        for root in [STRICT_ROOT, LOOSE_ROOT] {
+            for (function, expected) in rows {
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    root,
+                    function,
+                    CALL_RECOVERY,
+                );
+                if reported != *expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// Declarations and calls whose messages depend on how the checker orders,
+/// prints and elaborates what an optional position or a nullable union holds.
+const CALL_REPORT_FORMS: &str = r#"
+declare function one(x: string): number;
+declare function obj(x: { a?: number }): void;
+declare function g3<T>(x: T, y: T, z: T): T;
+declare function g3<T>(x: T): T;
+declare function op2(x?: string): void;
+declare function opu(x?: string | undefined): void;
+declare const nu: number | undefined;
+declare const nl: null | number;
+declare const bu2: boolean | undefined;
+declare const bs: boolean | symbol;
+declare function bsf(x: string | number): void;
+declare const mix: true | 1 | "a";
+declare function big(x: bigint): void;
+export function optional() { return obj({ a: "bad" }); }
+export function optional_undefined() { return obj({ a: undefined }); }
+export function reversed_explicit() { return g3<string>(1); }
+export function optional_param() { return op2(1); }
+export function optional_param_undefined() { return opu(1); }
+export function nullish_number() { return one(nu); }
+export function null_number() { return one(nl); }
+export function boolean_undefined() { return one(bu2); }
+export function boolean_symbol() { return bsf(bs); }
+export function mixed_literals() { return big(mix); }
+declare function nlp(x: number | undefined): void;
+export function nullable_target() { return nlp("a"); }
+declare function nn(x: number): void;
+declare const au: "a" | undefined;
+declare const an: "a" | "b" | null;
+declare const tu: true | undefined;
+declare const e2: 1 | 2 | undefined;
+export function literal_undefined() { return nn(au); }
+export function literals_null() { return nn(an); }
+export function true_undefined() { return nn(tu); }
+export function numbers_undefined() { return nn(e2); }
+export function nested() { return one(one()); }
+declare function ns(x: string): void;
+declare const bl: boolean | "a";
+declare const bn: boolean | 1 | null;
+declare enum E { A, B }
+declare const eb: E.A | boolean;
+declare const w: { a?: string };
+declare function objm(x: { a: string; b?: number }): void;
+declare const sym: unique symbol;
+declare function us(x: typeof sym): void;
+declare function po(x: { a?: number }): void;
+declare const wo: { c: number };
+export function bool_str() { return nn(bl); }
+export function bool_num_null() { return nn(bn); }
+export function bool_enum() { return ns(eb); }
+export function optional_member_read() { return one(w); }
+export function optional_member_missing() { return objm({}); }
+export function unique_symbol() { return us("a"); }
+export function weak_primitive() { return po(1); }
+export function weak_object() { return po(wo); }
+const af: (x: number) => string = () => "";
+export function annotated_callee() { return af("x"); }
+declare const um: number | { a: 1 };
+export function weak_member() { return po(um); }
+declare function pn(x: { o: { a?: number } }): void;
+declare const on: { o: number };
+export function weak_nested() { return pn(on); }
+"#;
+
+/// An optional target property or parameter reports against its declared
+/// type (`Type 'string' is not assignable to type 'number'.`), an overload
+/// set under explicit type arguments reports its one arity-fitting
+/// candidate's argument error, a union is related and printed in the
+/// checker's own order, and `strictNullChecks: false` leaves `null` and
+/// `undefined` out of every message. Measured on TypeScript 7.0.2.
+#[test]
+fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability() {
+    const ARG: &str = "is not assignable to parameter of type";
+    let argument =
+        |source: &str, target: &str| format!("Argument of type '{source}' {ARG} '{target}'.");
+    let rows: Vec<(&str, &str, Vec<String>, Vec<String>)> = {
+        let number_string = vec![format!("error TS2345: {}", argument("number", "string"))];
+        vec![
+            (
+                "optional",
+                "(15,43)",
+                vec!["error TS2322: Type 'string' is not assignable to type 'number'.".into()],
+                vec!["error TS2322: Type 'string' is not assignable to type 'number'.".into()],
+            ),
+            ("optional_undefined", "", vec![], vec![]),
+            (
+                "nested",
+                "(36,39)",
+                vec![
+                    "error TS2554: Expected 1 arguments, but got 0.".into(),
+                    format!("error TS2345: {}", argument("number", "string")),
+                ],
+                vec![
+                    "error TS2554: Expected 1 arguments, but got 0.".into(),
+                    format!("error TS2345: {}", argument("number", "string")),
+                ],
+            ),
+            (
+                "reversed_explicit",
+                "(17,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "optional_param",
+                "(18,47)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+            (
+                "optional_param_undefined",
+                "(19,57)",
+                number_string.clone(),
+                number_string.clone(),
+            ),
+        ]
+    };
+    let nullable: &[(&str, &str, &[&str], &[&str])] = &[
+        (
+            "nullish_number",
+            "(20,47)",
+            &["error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'string'.\n  Type 'undefined' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "null_number",
+            "(21,44)",
+            &["error TS2345: Argument of type 'number | null' is not assignable to parameter of type 'string'.\n  Type 'null' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "boolean_undefined",
+            "(22,50)",
+            &["error TS2345: Argument of type 'boolean | undefined' is not assignable to parameter of type 'string'.\n  Type 'undefined' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "boolean_symbol",
+            "(23,47)",
+            &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
+            &["error TS2345: Argument of type 'symbol | boolean' is not assignable to parameter of type 'string | number'.\n  Type 'symbol' is not assignable to type 'string | number'."],
+        ),
+        (
+            "literal_undefined",
+            "(32,49)",
+            &["error TS2345: Argument of type 'string | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+        ),
+        (
+            "literals_null",
+            "(33,45)",
+            &["error TS2345: Argument of type 'string | null' is not assignable to parameter of type 'number'.\n  Type 'null' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+        ),
+        (
+            "true_undefined",
+            "(34,46)",
+            &["error TS2345: Argument of type 'boolean | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'boolean' is not assignable to parameter of type 'number'."],
+        ),
+        (
+            "numbers_undefined",
+            "(35,49)",
+            &["error TS2345: Argument of type 'number | undefined' is not assignable to parameter of type 'number'.\n  Type 'undefined' is not assignable to type 'number'."],
+            &[],
+        ),
+        (
+            "bool_str",
+            "(48,40)",
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'string | boolean' is not assignable to parameter of type 'number'.\n  Type 'string' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_num_null",
+            "(49,45)",
+            &["error TS2345: Argument of type 'number | boolean | null' is not assignable to parameter of type 'number'.\n  Type 'null' is not assignable to type 'number'."],
+            &["error TS2345: Argument of type 'number | boolean' is not assignable to parameter of type 'number'.\n  Type 'boolean' is not assignable to type 'number'."],
+        ),
+        (
+            "bool_enum",
+            "(50,41)",
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+            &["error TS2345: Argument of type 'boolean | E' is not assignable to parameter of type 'string'.\n  Type 'boolean' is not assignable to type 'string'."],
+        ),
+        (
+            "optional_member_read",
+            "(51,53)",
+            &["error TS2345: Argument of type '{ a?: string | undefined; }' is not assignable to parameter of type 'string'."],
+            &["error TS2345: Argument of type '{ a?: string; }' is not assignable to parameter of type 'string'."],
+        ),
+        (
+            "optional_member_missing",
+            "(52,57)",
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number | undefined; }'."],
+            &["error TS2741: Property 'a' is missing in type '{}' but required in type '{ a: string; b?: number; }'."],
+        ),
+        (
+            "unique_symbol",
+            "(53,45)",
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+            &["error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'unique symbol'."],
+        ),
+        // A primitive's apparent members are not modelled, so the weak-type
+        // diagnostic (TS2559) is not reported rather than reported as TS2345.
+        ("weak_primitive", "(54,43)", &[], &[]),
+        // The relation does not model the weak-type rule for an object source, so
+        // the checker's TS2559 is not reported at all.
+        ("weak_object", "(55,43)", &[], &[]),
+        // Below the head the checker explains a weak-type failure with TS2559's
+        // text, which the explanation chain cannot reproduce for a primitive:
+        // the whole diagnostic is withheld rather than reported with a wrong
+        // chain line.
+        ("weak_member", "(59,43)", &[], &[]),
+        ("weak_nested", "(62,43)", &[], &[]),
+        (
+            "annotated_callee",
+            "(57,48)",
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+            &["error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."],
+        ),
+        (
+            "mixed_literals",
+            "(24,47)",
+            &["error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'bigint'.\n  Type 'string' is not assignable to type 'bigint'."],
+            &["error TS2345: Argument of type 'string | number | boolean' is not assignable to parameter of type 'bigint'.\n  Type 'string' is not assignable to type 'bigint'."],
+        ),
+    ];
+    let host = host_with(CALL_REPORT_FORMS);
+    let mut mismatches = Vec::new();
+    for pass in ["cold", "warm"] {
+        for (root, strict) in [(STRICT_ROOT, true), (LOOSE_ROOT, false)] {
+            let mut check = |function: &str, position: &str, expected: Vec<String>| {
+                let expected: Vec<String> = expected
+                    .into_iter()
+                    .map(|message| format!("{position}: {message}"))
+                    .collect();
+                let reported = super::signature_predicate_inference_tests::checker_report(
+                    &host,
+                    root,
+                    function,
+                    CALL_REPORT_FORMS,
+                );
+                if reported != expected {
+                    mismatches.push(format!(
+                        "{pass} `{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                    ));
+                }
+            };
+            for (function, position, strict_rows, loose_rows) in &rows {
+                let expected = if strict { strict_rows } else { loose_rows };
+                check(function, position, expected.clone());
+            }
+            for (function, position, strict_rows, loose_rows) in nullable {
+                let expected = if strict { strict_rows } else { loose_rows };
+                check(
+                    function,
+                    position,
+                    expected.iter().map(|row| (*row).to_owned()).collect(),
+                );
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+const CALL_REPORT_IDENTITY: &str = r#"declare function assertNever(x: never): never;
+export function f2() { return assertNever("a"); }
+declare function f(x?: string, cb?: (n: number) => number): void;
+export function f3() { return f(123, n => n); }
+declare function g(o: { "1": string; other: number }): void;
+declare const s: { 1: string };
+export function f4() { return g(s); }
+"#;
+
+/// A literal keeps its spelling against `never`, an eagerly rejected
+/// argument ahead of a callback is reported against the declared parameter
+/// type without the optionality's `undefined`, and a numeric key and its
+/// string spelling are one property. Measured on TypeScript 7.0.2.
+#[test]
+fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
+    let host = host_with(CALL_REPORT_IDENTITY);
+    let checker_report = super::signature_predicate_inference_tests::checker_report;
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, expected) in [
+            (
+                "f2",
+                "(2,43): error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'never'.",
+            ),
+            (
+                "f3",
+                "(4,33): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+            ),
+            ("f4", "(7,33): error TS2741: Property 'other' is missing in type"),
+        ] {
+            let reported = checker_report(&host, root, function, CALL_REPORT_IDENTITY);
+            // Only the message's leading text is compared: how a numeric key
+            // spells inside a printed object type is a separate printer concern.
+            assert!(
+                reported.len() == 1 && reported[0].starts_with(expected),
+                "`{function}` in {root}: {reported:#?}"
+            );
+        }
+    }
+}
+
+/// A message the printer cannot reproduce is not reported: the checker
+/// abbreviates a type past its truncation length by a running count this
+/// printer does not model, and an explanation chain past the elaboration
+/// budget would be cut where the checker's is not. Each answers without
+/// the diagnostic, never with a wrong one — and a short sibling call in the
+/// same source still reports.
+#[test]
+fn a_message_beyond_the_printers_reach_is_not_reported() {
+    let arms: Vec<String> = (0..40)
+        .map(|ordinal| format!("{{ member{ordinal}: {ordinal} }}"))
+        .collect();
+    let nest = |inner: &str, depth: usize| {
+        let mut ty = inner.to_owned();
+        for _ in 0..depth {
+            ty = format!("{{ a: {ty} }}");
+        }
+        ty
+    };
+    let source = format!(
+        "\ndeclare function one(x: string): number;\n\
+         declare function nested(x: {}): void;\n\
+         declare const wide: {};\n\
+         declare const deep: {};\n\
+         export function wide_union() {{ return one(wide); }}\n\
+         export function deep_chain() {{ return nested(deep); }}\n\
+         export function short() {{ return one(1); }}\n",
+        nest("number", 70),
+        arms.join(" | "),
+        nest("string", 70),
+    );
+    let host = host_with(&source);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for function in ["wide_union", "deep_chain"] {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host, root, function, &source,
+            );
+            assert!(reported.is_empty(), "`{function}` in {root}: {reported:#?}");
+        }
+        let short = super::signature_predicate_inference_tests::checker_report(
+            &host, root, "short", &source,
+        );
+        assert_eq!(short.len(), 1, "`short` in {root}: {short:#?}");
+    }
+}
+
+/// A diagnostic whose position the call's route cannot establish is not
+/// reported, never moved to another position. TypeScript 7.0.2 reports
+/// TS2345 for `un1`'s argument, which the route cannot type, while the
+/// call still answers its lone signature's declared `number`.
+#[test]
+fn a_diagnostic_the_route_cannot_place_is_not_reported() {
+    let host = host_with(CALL_RECOVERY);
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        // The declared return stands, but the call's applicability went
+        // unchecked: the answer is a recorded gap, never a complete one.
+        super::signature_predicate_inference_tests::observe(
+            &host,
+            root,
+            "un1",
+            |dispatch, degradation, node| {
+                assert!(
+                    degradation.is_some(),
+                    "`un1` in {root} answers its declared return as a recorded gap"
+                );
+                assert_eq!(
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node(
+                        dispatch, node, 0
+                    ),
+                    "number"
+                );
+            },
+        );
+        assert_eq!(
+            super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                "un1",
+                CALL_RECOVERY,
+            ),
+            Vec::<String>::new(),
+            "`un1` in {root}"
+        );
+    }
+}
+
+const RECOVERY_AND_PREDICATE_REPORTS: &str = r#"type G<T> = G<[T]>;
+declare function mk(x: number): G<string>;
+export function circular() { return mk(1); }
+export function circular_bad_argument() { return mk("x"); }
+declare const guards: { isStr(x: string): x is "a" };
+export function predicate(x: number | string) { if (guards.isStr(x)) return x; throw 0; }
+"#;
+
+/// A lazy declared return that is the checker's parameterized recovery
+/// (TS2456, naming its alias) is reported with its bound argument at the
+/// alias's authored name, and a lone predicate signature is checked for
+/// applicability before it narrows. Measured on TypeScript 7.0.2.
+#[test]
+fn parameterized_recoveries_and_lone_predicates_report_like_the_checker() {
+    const TS2456: &str = "(1,6): error TS2456: Type alias 'G' circularly references itself.";
+    let host = host_with(RECOVERY_AND_PREDICATE_REPORTS);
+    let checker_report = super::signature_predicate_inference_tests::checker_report;
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for pass in ["cold", "warm"] {
+            let source = RECOVERY_AND_PREDICATE_REPORTS;
+            assert_eq!(
+                checker_report(&host, root, "circular", source),
+                vec![TS2456],
+                "{pass} `circular` in {root}"
+            );
+            assert_eq!(
+                checker_report(&host, root, "circular_bad_argument", source),
+                vec![
+                    TS2456,
+                    "(4,53): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."
+                ],
+                "{pass} `circular_bad_argument` in {root}"
+            );
+            assert_eq!(
+                checker_report(&host, root, "predicate", source),
+                vec![
+                    "(6,66): error TS2345: Argument of type 'string | number' is not assignable to parameter of type 'string'.\n  Type 'number' is not assignable to type 'string'."
+                ],
+                "{pass} `predicate` in {root}"
+            );
         }
     }
 }

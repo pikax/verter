@@ -30820,7 +30820,8 @@ fn build_enclosed_demand_partial_taints_enclosing_frame() {
 /// `Grow<string>` over `source`'s `Grow`, demanded at `Navigate` under a
 /// connected-work budget of `work` (the production caps when `None`)
 /// inside an enclosing taint frame: the demand's outcome, the frame's
-/// partial and suppression rails, and the node its instantiation answers.
+/// partial and suppression rails, the node its instantiation answers, and
+/// the checker's formatted diagnostic that node carries.
 fn grow_string_demand(
     source: &str,
     work: Option<usize>,
@@ -30829,6 +30830,7 @@ fn grow_string_demand(
     bool,
     bool,
     Option<SemanticNodeData>,
+    Option<String>,
 ) {
     let host = host();
     upsert_ts(&host, "/grow.ts", source);
@@ -30874,23 +30876,27 @@ fn grow_string_demand(
         base.decl_name.clone(),
     );
     let context = dispatch.instantiate_context_for(&base.canonical_id, navigate);
-    let instantiated = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
+    let (instantiated, message) = match dispatch.execute_type_node(SemanticQueryKey::Instantiate(
         verter_type_engine::semantic_query::InstantiateKey::new(slot, args, context),
     )) {
         QueryResult::Value(verter_type_engine::semantic_query::SemanticQueryOutput {
             value,
             ..
-        }) => graph
-            .node_data(value)
-            .as_deref()
-            .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
-        _ => None,
+        }) => (
+            graph
+                .node_data(value)
+                .as_deref()
+                .map(verter_type_engine::semantic_query::SemanticNodeData::copy_for_tests),
+            dispatch.checker_recovery_message(value),
+        ),
+        _ => (None, None),
     };
     (
         outcome,
         frame.result_is_partial,
         frame.cache_suppress,
         instantiated,
+        message,
     )
 }
 
@@ -30916,8 +30922,13 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
         )
     };
     for work in [Some(256), None] {
-        let (outcome, partial, suppressed, instantiated) =
+        let (outcome, partial, suppressed, instantiated, message) =
             grow_string_demand("export type Grow<T> = Grow<[T]>;\n", work);
+        assert_eq!(
+            message.as_deref(),
+            Some("TS2456: Type alias 'Grow' circularly references itself."),
+            "the recovery carries the checker's formatted TS2456 (work {work:?})"
+        );
         assert!(
             matches!(outcome, StructuralFactDemandOutcome::Complete(_)),
             "a circular alias is a checker error, never a budget partial (work {work:?})"
@@ -30954,7 +30965,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
     // is `any` under TS2589.
     const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
-    let (outcome, partial, suppressed, _) = grow_string_demand(GROW, Some(256));
+    let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }
         | StructuralFactDemandOutcome::Partial(reasons) => reasons,
@@ -30982,7 +30993,7 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     );
 
     let _budget = super::connected_demand::TailBudgetForTests::install(200);
-    let (_, _, _, instantiated) = grow_string_demand(GROW, None);
+    let (_, _, _, instantiated, _) = grow_string_demand(GROW, None);
     assert!(
         matches!(
             &instantiated,
@@ -31065,9 +31076,9 @@ fn real_query_deep_finite_nested_demand_completes_and_warms() {
 
     assert!(
         graph
-            .peek_selected_value_memo_for_tests(deep_value, context)
+            .peek_mapped_member_value_memo_for_tests(deep_value, context)
             .is_some(),
-        "a complete deep finite evaluation must be eligible for the shared deferred memo"
+        "a complete deep finite evaluation must be eligible for the shared mapped-member memo"
     );
 
     let stats_before_repeat = graph.stats_snapshot();
@@ -32298,6 +32309,11 @@ use verter_type_engine::project_semantic_dispatch::walk::{
     ShallowSurfaceMember,
 };
 
+/// The surface merges run on a bare graph, outside any connected demand.
+const UNMETERED:
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'static> =
+    verter_type_engine::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED;
+
 fn shallow_member_full(
     name: &str,
     value: SemanticNodeId,
@@ -32615,15 +32631,20 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|&i| arms[i].as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         // Plain permutation.
-        let actual = merge_union_surfaces(&graph, &permuted, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual =
+            merge_union_surfaces(&graph, &permuted, UNMETERED, &mut test_canonical_evidence())
+                .expect("non-empty arm vector yields a surface");
         let expected =
             oracle_merge_union_surfaces(&graph, &permuted).expect("oracle yields a surface");
         assert_shallow_surface_eq(&actual, &expected, &format!("common-member perm {perm:?}"));
 
-        let actual_macro =
-            merge_union_surfaces_for_macro(&graph, &permuted, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro = merge_union_surfaces_for_macro(
+            &graph,
+            &permuted,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro = oracle_merge_union_surfaces_for_macro(&graph, &permuted)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32638,8 +32659,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             .map(|arm| arm.as_ref().map(ShallowSurface::copy_for_tests))
             .collect();
         with_none.push(None);
-        let actual_none = merge_union_surfaces(&graph, &with_none, &mut test_canonical_evidence())
-            .expect("non-empty arm vector yields a surface");
+        let actual_none = merge_union_surfaces(
+            &graph,
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_none =
             oracle_merge_union_surfaces(&graph, &with_none).expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32652,9 +32678,13 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
             "a non-Object arm collapses the common-member surface to empty"
         );
 
-        let actual_macro_none =
-            merge_union_surfaces_for_macro(&graph, &with_none, &mut test_canonical_evidence())
-                .expect("non-empty arm vector yields a surface");
+        let actual_macro_none = merge_union_surfaces_for_macro(
+            &graph,
+            &with_none,
+            UNMETERED,
+            &mut test_canonical_evidence(),
+        )
+        .expect("non-empty arm vector yields a surface");
         let expected_macro_none = oracle_merge_union_surfaces_for_macro(&graph, &with_none)
             .expect("oracle yields a surface");
         assert_shallow_surface_eq(
@@ -32669,15 +32699,19 @@ fn union_surface_merges_match_reference_semantics_across_arm_permutations() {
     }
 
     // Degenerate inputs stay pinned.
-    assert!(merge_union_surfaces(&graph, &[], &mut test_canonical_evidence()).is_none());
-    assert!(merge_union_surfaces_for_macro(&graph, &[], &mut test_canonical_evidence()).is_none());
+    assert!(merge_union_surfaces(&graph, &[], UNMETERED, &mut test_canonical_evidence()).is_none());
+    assert!(
+        merge_union_surfaces_for_macro(&graph, &[], UNMETERED, &mut test_canonical_evidence())
+            .is_none()
+    );
     let single = vec![arms[0].as_ref().map(ShallowSurface::copy_for_tests)];
-    let actual_single = merge_union_surfaces(&graph, &single, &mut test_canonical_evidence())
-        .expect("single arm yields");
+    let actual_single =
+        merge_union_surfaces(&graph, &single, UNMETERED, &mut test_canonical_evidence())
+            .expect("single arm yields");
     let expected_single = oracle_merge_union_surfaces(&graph, &single).expect("oracle yields");
     assert_shallow_surface_eq(&actual_single, &expected_single, "single-arm common");
     let actual_single_macro =
-        merge_union_surfaces_for_macro(&graph, &single, &mut test_canonical_evidence())
+        merge_union_surfaces_for_macro(&graph, &single, UNMETERED, &mut test_canonical_evidence())
             .expect("single arm yields");
     let expected_single_macro =
         oracle_merge_union_surfaces_for_macro(&graph, &single).expect("oracle yields");
@@ -32737,8 +32771,8 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
 
     // Common-member rule: order follows ARM 0 (zebra, alpha), not arm 1
     // and not name order.
-    let common =
-        merge_union_surfaces(&graph, &arms, &mut test_canonical_evidence()).expect("surface");
+    let common = merge_union_surfaces(&graph, &arms, UNMETERED, &mut test_canonical_evidence())
+        .expect("surface");
     let common_names: Vec<&str> = common
         .members
         .iter()
@@ -32751,7 +32785,7 @@ fn union_surface_merge_pins_order_accessibility_and_neutrality() {
     );
     // Macro rule: first-seen order across arms in arm order.
     let macro_merged =
-        merge_union_surfaces_for_macro(&graph, &arms, &mut test_canonical_evidence())
+        merge_union_surfaces_for_macro(&graph, &arms, UNMETERED, &mut test_canonical_evidence())
             .expect("surface");
     let macro_names: Vec<&str> = macro_merged
         .members

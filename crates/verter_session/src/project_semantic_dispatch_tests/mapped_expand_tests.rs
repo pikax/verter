@@ -37,9 +37,9 @@ const SCENARIO: &str = "/expand/scenario.ts";
 type Work<const N: usize = 3> = [(&'static str, u64); N];
 
 /// A named demand's wire answer and the work it took.
-struct Answer {
+pub(super) struct Answer {
     wire: Vec<u8>,
-    answer: TypeExpr,
+    pub(super) answer: TypeExpr,
     work: Work,
     flow_obligations: u64,
     name_remaps: u64,
@@ -62,7 +62,7 @@ fn named_answer_in_mode(
     named_answer_with_library(source, probe, mode, false)
 }
 
-fn named_answer_with_library(
+pub(super) fn named_answer_with_library(
     source: &str,
     probe: &str,
     mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
@@ -144,7 +144,7 @@ fn named_answer_with_library(
     }
 }
 
-fn display(expr: &TypeExpr) -> String {
+pub(super) fn display(expr: &TypeExpr) -> String {
     verter_type_expr::render_type_expr_display(expr)
         .expect("the answer renders")
         .text

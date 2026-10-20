@@ -743,6 +743,7 @@ fn a_sealed_refusal_hands_its_delivered_rail_to_a_surviving_read() {
     let profile = BudgetProfile::intern(BudgetProfileSpec {
         work: 1,
         bytes: 1024,
+        construction_byte_refusal: false,
         query_depth: 2,
         instantiation_depth: 2,
         tail_steps: 2,

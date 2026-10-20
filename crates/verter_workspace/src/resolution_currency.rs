@@ -2015,6 +2015,12 @@ impl ResolutionCurrencyTrace {
 pub struct ResolutionOutcome {
     result: Option<ResolveResult>,
     pub(crate) admission: SignatureAdmission,
+    /// The complete witness of an answer the retention account declined to
+    /// keep. Set only beside `NonCacheable(RetentionPressure)`, by
+    /// [`Self::unretained`]: the answer is complete and current, so it is
+    /// delivered as [`ResolutionPublication::Unretained`] rather than
+    /// withheld like an untrustworthy non-admission.
+    unretained_witness: Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     trace: ResolutionCurrencyTrace,
 }
 
@@ -2097,32 +2103,124 @@ impl<T: PartialEq> PartialEq for AdmittedResolution<T> {
 
 impl<T: Eq> Eq for AdmittedResolution<T> {}
 
+/// A complete, current resolution the process declined to retain.
+///
+/// The retention account refused the bytes the answer would hold, which
+/// says nothing about the answer itself: it is the value an admitted
+/// resolution would carry, with the complete witness its transaction
+/// observed. It is delivered to its consumer and never published: there is
+/// deliberately no conversion to [`AdmittedResolution`], so no persistent
+/// or shared sink can root an entry on it. An unretained `None` is a
+/// witnessed miss, as an admitted one is.
+#[must_use = "an unretained resolution is still the answer and must be consumed"]
+#[derive(Debug, Clone)]
+pub struct UnretainedResolution<T = ResolveResult> {
+    result: Option<T>,
+    /// The complete observation signature of the answer. Exposed for a
+    /// consumer to describe what its answer depends on, never to root a
+    /// retained entry on.
+    witness: verter_session_query::facts::fact_cache::ReadSetSignature,
+}
+
+impl<T> UnretainedResolution<T> {
+    #[must_use]
+    pub fn result(&self) -> Option<&T> {
+        self.result.as_ref()
+    }
+
+    #[must_use]
+    pub fn into_result(self) -> Option<T> {
+        self.result
+    }
+
+    /// The complete observation signature the unretained answer was
+    /// computed under.
+    #[must_use]
+    pub fn witness(&self) -> &verter_session_query::facts::fact_cache::ReadSetSignature {
+        &self.witness
+    }
+
+    /// Why the answer was not retained: always retention pressure.
+    #[must_use]
+    pub fn reason(&self) -> verter_audit::NonAdmissionReason {
+        verter_audit::NonAdmissionReason::RetentionPressure
+    }
+
+    /// Replace the projected value. The replacement stays unretained.
+    pub fn replace_result<U>(self, result: Option<U>) -> ResolutionPublication<U> {
+        ResolutionPublication::Unretained(UnretainedResolution {
+            result,
+            witness: self.witness,
+        })
+    }
+}
+
+impl<T: PartialEq> PartialEq for UnretainedResolution<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.result == other.result
+    }
+}
+
+impl<T: Eq> Eq for UnretainedResolution<T> {}
+
 /// Typed outcome at a durable resolution-derived publication boundary.
 ///
 /// This is intentionally not `Result<Option<_>, _>`: generic projections such
 /// as `.ok().flatten()` made a refusal indistinguishable from an admitted miss.
+///
+/// Three states, because there are two reasons a result is not admitted:
+/// an untrustworthy one (torn, partial, superseded, cancelled, budget
+/// exhausted) withholds the value as [`Self::Refused`]; retention pressure
+/// declines only to KEEP a complete, current value, which still reaches its
+/// consumer as [`Self::Unretained`] and never enters a persistent or shared
+/// store.
 #[must_use = "a resolution refusal must be propagated to the final publication boundary"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolutionPublication<T = ResolveResult> {
     Admitted(AdmittedResolution<T>),
+    Unretained(UnretainedResolution<T>),
     Refused(ResolutionPublicationRefusal),
 }
 
 impl<T> ResolutionPublication<T> {
-    /// Whether this is an admitted, witnessed miss.
+    /// Whether this is a witnessed miss, admitted or unretained.
     ///
     /// A refusal is deliberately neither `None` nor `Some`.
     #[must_use]
     pub fn is_none(&self) -> bool {
-        matches!(self, Self::Admitted(admitted) if admitted.result().is_none())
+        matches!(self.delivered(), Some(None))
     }
 
-    /// Whether this is an admitted value.
+    /// Whether this is a delivered value, admitted or unretained.
     ///
     /// A refusal is deliberately neither `None` nor `Some`.
     #[must_use]
     pub fn is_some(&self) -> bool {
-        matches!(self, Self::Admitted(admitted) if admitted.result().is_some())
+        matches!(self.delivered(), Some(Some(_)))
+    }
+
+    /// The complete answer this publication delivers — admitted or
+    /// unretained — or `None` for a refusal, which delivers nothing.
+    ///
+    /// For a consumer that answers from the value and retains nothing.
+    /// A consumer that stores the value matches [`Self::Admitted`] instead.
+    #[must_use]
+    pub fn delivered(&self) -> Option<Option<&T>> {
+        match self {
+            Self::Admitted(admitted) => Some(admitted.result()),
+            Self::Unretained(unretained) => Some(unretained.result()),
+            Self::Refused(_) => None,
+        }
+    }
+
+    /// [`Self::delivered`] by value.
+    #[must_use]
+    pub fn into_delivered(self) -> Option<Option<T>> {
+        match self {
+            Self::Admitted(admitted) => Some(admitted.into_result()),
+            Self::Unretained(unretained) => Some(unretained.into_result()),
+            Self::Refused(_) => None,
+        }
     }
 
     /// Construct a typed refusal for a higher-level resolution-derived batch
@@ -2134,16 +2232,7 @@ impl<T> ResolutionPublication<T> {
     /// Transform an admitted result while preserving admitted misses and
     /// publication refusals as distinct states.
     pub fn map_result<U>(self, map: impl FnOnce(T) -> U) -> ResolutionPublication<U> {
-        match self {
-            Self::Admitted(admitted) => {
-                let signature = admitted.signature.clone();
-                ResolutionPublication::Admitted(AdmittedResolution {
-                    result: admitted.into_result().map(map),
-                    signature,
-                })
-            }
-            Self::Refused(refusal) => ResolutionPublication::Refused(refusal),
-        }
+        self.map_admitted(|result| result.map(map))
     }
 
     /// Transform the complete admitted optional product. Unlike a public
@@ -2153,24 +2242,53 @@ impl<T> ResolutionPublication<T> {
         map: impl FnOnce(Option<T>) -> Option<U>,
     ) -> ResolutionPublication<U> {
         match self {
-            Self::Admitted(admitted) => {
-                let signature = admitted.signature.clone();
-                let result = map(admitted.into_result());
-                ResolutionPublication::Admitted(AdmittedResolution { result, signature })
+            Self::Admitted(AdmittedResolution { result, signature }) => {
+                ResolutionPublication::Admitted(AdmittedResolution {
+                    result: map(result),
+                    signature,
+                })
+            }
+            Self::Unretained(UnretainedResolution { result, witness }) => {
+                ResolutionPublication::Unretained(UnretainedResolution {
+                    result: map(result),
+                    witness,
+                })
             }
             Self::Refused(refusal) => ResolutionPublication::Refused(refusal),
         }
     }
 
-    /// Evaluate an alternate admitted source only after an admitted miss.
-    /// Refusals never fall through.
+    /// Evaluate an alternate source only after a witnessed miss. Refusals
+    /// never fall through. An answer that followed an unretained miss is
+    /// itself unretained: it depends on a resolution the process did not
+    /// keep, so it is delivered and never admitted.
     pub fn or_else_publication(
         self,
         alternate: impl FnOnce() -> ResolutionPublication<T>,
     ) -> ResolutionPublication<T> {
         match self {
             Self::Admitted(admitted) if admitted.result().is_none() => alternate(),
+            Self::Unretained(unretained) if unretained.result().is_none() => {
+                alternate().unretained_with(&Self::Unretained(unretained))
+            }
             other => other,
+        }
+    }
+
+    /// This answer, derived from `dependency`: when the dependency was not
+    /// retained, neither is this answer — an admitted value is delivered
+    /// unretained, under its own witness. Refusals and unretained answers
+    /// are returned as they are.
+    pub fn unretained_with<U>(self, dependency: &ResolutionPublication<U>) -> Self {
+        match (self, dependency) {
+            (
+                Self::Admitted(AdmittedResolution { result, signature }),
+                ResolutionPublication::Unretained(_),
+            ) => Self::Unretained(UnretainedResolution {
+                result,
+                witness: signature,
+            }),
+            (publication, _) => publication,
         }
     }
 }
@@ -2184,6 +2302,12 @@ impl<T: std::ops::Deref> ResolutionPublication<T> {
                 result: admitted.result().map(T::deref),
                 signature: admitted.signature.clone(),
             }),
+            Self::Unretained(unretained) => {
+                ResolutionPublication::Unretained(UnretainedResolution {
+                    result: unretained.result().map(T::deref),
+                    witness: unretained.witness.clone(),
+                })
+            }
             Self::Refused(refusal) => ResolutionPublication::Refused(*refusal),
         }
     }
@@ -2191,7 +2315,7 @@ impl<T: std::ops::Deref> ResolutionPublication<T> {
 
 impl<T: PartialEq> PartialEq<Option<T>> for ResolutionPublication<T> {
     fn eq(&self, other: &Option<T>) -> bool {
-        matches!(self, Self::Admitted(admitted) if admitted.result() == other.as_ref())
+        self.delivered() == Some(other.as_ref())
     }
 }
 
@@ -2240,6 +2364,7 @@ impl ResolutionOutcome {
         Self {
             result,
             admission,
+            unretained_witness: None,
             trace: ResolutionCurrencyTrace {
                 rejected_exact_targets: rejected_exact_targets.into(),
                 recomputed,
@@ -2247,6 +2372,28 @@ impl ResolutionOutcome {
                 reused,
             },
         }
+    }
+
+    /// A complete, current answer whose retention the account refused:
+    /// non-cacheable for retention pressure, and delivered with `witness`
+    /// as [`ResolutionPublication::Unretained`].
+    pub(crate) fn unretained(
+        result: Option<ResolveResult>,
+        witness: verter_session_query::facts::fact_cache::ReadSetSignature,
+        rejected_exact_targets: Vec<Option<String>>,
+        recomputed: bool,
+        reused: bool,
+    ) -> Self {
+        let mut outcome = Self::new(
+            result,
+            SignatureAdmission::NonCacheable(verter_audit::NonAdmissionReason::RetentionPressure),
+            rejected_exact_targets,
+            recomputed,
+            false,
+            reused,
+        );
+        outcome.unretained_witness = Some(witness);
+        outcome
     }
 
     pub fn result(&self) -> Option<&ResolveResult> {
@@ -2266,17 +2413,30 @@ impl ResolutionOutcome {
     /// Consume the transaction outcome at a persistent sink boundary.
     ///
     /// A result is publishable only when the sealed resolution transaction
-    /// admitted its complete fact signature. ReturnOnly results remain useful
-    /// through [`Self::into_transient_result`] but can never leave this method.
+    /// admitted its complete fact signature. A complete answer the retention
+    /// account declined to keep leaves as
+    /// [`ResolutionPublication::Unretained`]: delivered, never admitted.
+    /// Every other ReturnOnly result remains useful through
+    /// [`Self::into_transient_result`] but leaves this method only as a
+    /// refusal.
     pub fn into_publication(self) -> ResolutionPublication {
-        match self.admission {
-            SignatureAdmission::Cacheable(signature) => {
+        match (self.admission, self.unretained_witness) {
+            (SignatureAdmission::Cacheable(signature), _) => {
                 ResolutionPublication::Admitted(AdmittedResolution {
                     result: self.result,
                     signature,
                 })
             }
-            SignatureAdmission::NonCacheable(reason) => {
+            (
+                SignatureAdmission::NonCacheable(
+                    verter_audit::NonAdmissionReason::RetentionPressure,
+                ),
+                Some(witness),
+            ) => ResolutionPublication::Unretained(UnretainedResolution {
+                result: self.result,
+                witness,
+            }),
+            (SignatureAdmission::NonCacheable(reason), _) => {
                 ResolutionPublication::Refused(ResolutionPublicationRefusal { reason })
             }
         }

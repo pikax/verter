@@ -558,16 +558,11 @@ impl VerterLanguageServer {
         for import in ingress.imports.iter() {
             let resolved = match self
                 .resolve_import_specifier_for_publication(&canonical_id, &import.source)
+                .into_delivered()
             {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    let Some(resolved) = admitted.into_result() else {
-                        continue;
-                    };
-                    resolved
-                }
-                verter_workspace::ResolutionPublication::Refused(_) => {
-                    return ImportSyncOutcome::Retry;
-                }
+                Some(Some(resolved)) => resolved,
+                Some(None) => continue,
+                None => return ImportSyncOutcome::Retry,
             };
             if verter_session_query::resolution::path_is_carrier(&resolved) {
                 continue;
@@ -627,18 +622,14 @@ impl VerterLanguageServer {
                     let Some(specifier) = module_ref.literal_specifier.as_deref() else {
                         continue;
                     };
-                    let target =
-                        match self.resolve_import_specifier_for_publication(barrel_id, specifier) {
-                            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                                let Some(target) = admitted.into_result() else {
-                                    continue;
-                                };
-                                target
-                            }
-                            verter_workspace::ResolutionPublication::Refused(_) => {
-                                return ImportSyncOutcome::Retry;
-                            }
-                        };
+                    let target = match self
+                        .resolve_import_specifier_for_publication(barrel_id, specifier)
+                        .into_delivered()
+                    {
+                        Some(Some(target)) => target,
+                        Some(None) => continue,
+                        None => return ImportSyncOutcome::Retry,
+                    };
                     if verter_session_query::resolution::path_is_carrier(&target) {
                         if seen_barrel_carrier.insert(target.clone()) {
                             barrel_carrier_deps.push(target);
