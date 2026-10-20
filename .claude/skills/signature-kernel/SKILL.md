@@ -71,7 +71,20 @@ nullable-only list becomes `null` if it names `null`, else `undefined`. The
 policy is family identity on `ReduceUnion` and is recorded on the canonical
 stamp (`CompositeOriginCategory::Canonical(NullabilityPolicy)`), so the two
 settings never share a memo entry, a node, or the pre-seal skip.
-Intersections run the strict algebra.
+Intersections run the strict algebra under the default
+`IntersectionPurpose::CheckerReduction` (a derived intersection: every
+redundant supertype drops). `IntersectionPurpose::WrittenTypeNode(nullability)`
+is the checker's construction of a WRITTEN intersection type node
+(`getTypeFromIntersectionTypeNode`, `intern_written_intersection_charged`):
+the same reduction, except the written `string & {}` pair (`number`,
+`bigint`, a pattern template literal, either order —
+`is_kept_primitive_over_empty_object`) stays as written, and with
+`strictNullChecks` off a union arm is first erased of `null` / `undefined`.
+The typeinfo materializer (`materialize_through_aliases`) reduces an
+intersection written at an alias root through it, so a named demand answers
+`never` for conflicting discriminants, distributes over a union, and absorbs
+`(A & B) & (A | B)` to `A & B`. The raise fold keeps the `{}` arm of that
+written pair instead of dropping it as `{} & X ≡ X`.
 
 `ProjectSemanticDispatch::intern_normalized_union_or_intersection` is the
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
