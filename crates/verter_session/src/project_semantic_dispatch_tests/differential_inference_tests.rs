@@ -339,6 +339,35 @@ fn no_infer() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`a_local_intrinsic_no_infer_alias_is_no_infer`]: the
+/// module declares `NoInfer` itself, as the lib does.
+const LOCAL_NO_INFER: &str = r##"
+type __BenchInit = 0;
+type NoInfer<T> = intrinsic;
+declare function f<T extends string>(vals: T[], def: NoInfer<T>): T;
+declare function g<T extends string>(vals: T[], def: T): T;
+const r = f(["a", "b"], "a");
+const s = g(["a", "b"], "c");
+"##;
+
+/// A type alias whose body is the `intrinsic` keyword is the intrinsic its
+/// name selects wherever it is declared: a module's own `type NoInfer<T> =
+/// intrinsic` blocks inference through the parameter it wraps, and over an
+/// operand that is not generic it is the operand.
+#[test]
+fn a_local_intrinsic_no_infer_alias_is_no_infer() {
+    let matrix = Matrix::new(LOCAL_NO_INFER);
+    let failures = matrix.types(&[("typeof r", r#""a" | "b""#), ("NoInfer<string>", "string")]);
+    assert!(
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+"
+        )
+    );
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;

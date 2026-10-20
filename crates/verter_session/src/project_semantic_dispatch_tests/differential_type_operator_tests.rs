@@ -35,8 +35,8 @@ type Both = { a: 1 } & { b: 2 };
 /// An indexed access reads a property, a union of keys, every key, a tuple
 /// element or its `length`, an array element and a union's shared property;
 /// `keyof` over an interface keeps its name, and over an intersection, a union,
-/// an index signature, `any`, `never`, `unknown` and `{}` reduces as the
-/// checker reduces it.
+/// an index signature, `any`, `never`, `unknown`, `{}` and `object` reduces
+/// as the checker reduces it.
 #[test]
 fn indexed_access_and_keyof_read_as_the_checker_reads_them() {
     let matrix = Matrix::new(INDEXED);
@@ -60,6 +60,7 @@ fn indexed_access_and_keyof_read_as_the_checker_reads_them() {
         ("keyof never", "string | number | symbol"),
         ("keyof unknown", "never"),
         ("keyof {}", "never"),
+        ("keyof object", "never"),
         ("{ a: 1; b: 2 }[keyof { a: 1 }]", "1"),
         ("User['tags'][number]", "string"),
         (
