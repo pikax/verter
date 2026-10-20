@@ -2746,6 +2746,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             });
             let source = if let Some((own, type_parameters)) = propagation {
+                let (own, type_parameters) = self.unique_propagated_type_parameters(
+                    own,
+                    type_parameters,
+                    &propagated_type_parameters,
+                );
                 propagated_type_parameters.extend(type_parameters);
                 propagated_arguments.push((index, own));
                 own
@@ -3864,6 +3869,101 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         Some((own, type_parameters))
+    }
+
+    /// The type parameters a generic function argument keeps
+    /// ([`Self::generic_function_propagation`]) made distinct from those the
+    /// call's earlier arguments kept, and `own`, its clause-free signature,
+    /// reading them (the checker's `getUniqueTypeParameters`): one whose
+    /// name an earlier kept parameter, or an earlier one of this clause,
+    /// already holds is a fresh binder named past every such name — its
+    /// trailing digits dropped, then the least index appended that none
+    /// holds — so `pair(idf, idf)` declares `<T, T1>`, two binders, not
+    /// one `T` twice. A renamed binder's constraint and default read the
+    /// renames made before it.
+    fn unique_propagated_type_parameters(
+        &self,
+        own: SemanticNodeId,
+        type_parameters: Vec<crate::semantic_query::TypeParamDecl>,
+        kept: &[crate::semantic_query::TypeParamDecl],
+    ) -> (SemanticNodeId, Vec<crate::semantic_query::TypeParamDecl>) {
+        let holds = |declared: &[crate::semantic_query::TypeParamDecl], name: &str| {
+            declared.iter().any(|decl| decl.name.as_ref() == name)
+        };
+        let mut unique: Vec<crate::semantic_query::TypeParamDecl> =
+            Vec::with_capacity(type_parameters.len());
+        let mut renames: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
+        for decl in type_parameters {
+            let name = decl.name.as_ref();
+            if !holds(kept, name) && !holds(&unique, name) {
+                unique.push(decl);
+                continue;
+            }
+            let digits = name.bytes().rev().take_while(u8::is_ascii_digit).count();
+            let base = &name[..(name.len() - digits).max(name.len().min(1))];
+            // bounded-loop: at most one index per name already held.
+            let fresh = (1..=kept.len() + unique.len() + 1)
+                .map(|index| format!("{base}{index}"))
+                .find(|candidate| !holds(kept, candidate) && !holds(&unique, candidate))
+                .expect("fewer held names than candidate indices");
+            let renamed = CanonicalTypeSubstitution::new(self.graph(), renames.clone());
+            let constraint = decl
+                .constraint
+                .map(|constraint| self.substitute_canonical(constraint, &renamed));
+            let default = decl
+                .default
+                .map(|default| self.substitute_canonical(default, &renamed));
+            let Some(param) = self.renamed_type_parameter(decl.param, &fresh, constraint, default)
+            else {
+                unique.push(decl);
+                continue;
+            };
+            renames.push((decl.param, param));
+            unique.push(crate::semantic_query::TypeParamDecl {
+                name: verter_type_expr::OwnedStr::from(fresh.as_str()),
+                param,
+                constraint,
+                default,
+                is_const: decl.is_const,
+            });
+        }
+        if renames.is_empty() {
+            return (own, unique);
+        }
+        let renamed = CanonicalTypeSubstitution::new(self.graph(), renames);
+        (self.substitute_canonical(own, &renamed), unique)
+    }
+
+    /// A binder distinct from the type parameter `param`, named `name`,
+    /// bounded by `constraint` and defaulting to `default`: `param`'s
+    /// declaration identity with `name` joined to its declaration name by a
+    /// separator no identifier holds, so neither an authored binder nor
+    /// another rename of `param` to a different name shares it. `None`
+    /// when `param` is no type parameter.
+    fn renamed_type_parameter(
+        &self,
+        param: SemanticNodeId,
+        name: &str,
+        constraint: Option<SemanticNodeId>,
+        default: Option<SemanticNodeId>,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let data = graph.node_data(param)?;
+        let SemanticNodeData::TypeParam {
+            decl, param_index, ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        let mut decl = decl.clone();
+        decl.decl_name = verter_type_expr::OwnedStr::from(format!("{}\u{1}{name}", decl.decl_name));
+        Some(graph.intern_node(SemanticNodeData::TypeParam {
+            decl,
+            param_index: *param_index,
+            constraint,
+            default,
+            display_name: verter_type_expr::OwnedStr::from(name),
+        }))
     }
 
     /// `returned`, a call's instantiated non-generic return signature,

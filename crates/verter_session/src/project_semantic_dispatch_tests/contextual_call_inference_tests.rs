@@ -129,6 +129,16 @@ const w = wrap(id);
 const a = apply(id);
 "#;
 
+/// Two generic function arguments whose kept type parameters share a name.
+const HIGHER_ORDER_SAME_NAMES: &str = r#"
+declare function idf<T>(x: T): T;
+declare function idt<T1>(x: T1): T1;
+declare function pair<A, B>(f: (a: A) => A, g: (b: B) => B): (a: A, b: B) => [A, B];
+declare function triple<A, B, C>(f: (a: A) => A, g: (b: B) => B, h: (c: C) => C): (a: A, b: B, c: C) => [A, B, C];
+const p = pair(idf, idf);
+const t = triple(idf, idt, idf);
+"#;
+
 /// Inference through an empty generic interface.
 const INJECTION_KEY: &str = r#"
 interface InjectionKey<T> {}
@@ -299,7 +309,8 @@ fn a_method_typed_through_a_constraint_reads_sibling_inferences() {
 /// => void): (p: P) => P` keeps the argument's type parameter, which the
 /// signature `wrap` returns declares, as `wrap(id)` keeps `id`'s; `apply(id)`, whose callee returns no signature, reads
 /// `id` instantiated in its parameter's context, as does `memo(idf)`,
-/// whose parameter types infer nothing from `idf`'s.
+/// whose parameter types infer nothing from `idf`'s. Kept type parameters
+/// of one name are distinct binders: `pair(idf, idf)` declares `<T, T1>`.
 #[test]
 fn a_generic_function_argument_keeps_its_type_parameters() {
     let scenario = "<T extends string>(p: { v: T; }) => { v: T; }";
@@ -315,6 +326,15 @@ fn a_generic_function_argument_keeps_its_type_parameters() {
     let failures = Matrix::new(HIGHER_ORDER_RETURN_ONLY)
         .lib(BENCHMARK_LIBRARY)
         .types(&[("typeof m", "() => string")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // Kept type parameters stay distinct binders, the later ones renamed
+    // past every name the returned signature already declares.
+    let failures = Matrix::new(HIGHER_ORDER_SAME_NAMES)
+        .lib(BENCHMARK_LIBRARY)
+        .types(&[
+            ("typeof p", "<T, T1>(a: T, b: T1) => [T, T1]"),
+            ("typeof t", "<T, T1, T2>(a: T, b: T1, c: T2) => [T, T1, T2]"),
+        ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     let failures = named_mismatches(&[
         (HIGHER_ORDER_SCENARIO, "typeof g", scenario),
