@@ -473,8 +473,9 @@ impl RouteLookup for crate::VerterHost {
         &self,
         consumer_project: ProjectStableKey,
         symbol: &str,
+        space: verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace,
     ) -> Option<AmbientSymbolHit> {
-        crate::VerterHost::program_ambient_symbol(self, consumer_project, symbol)
+        crate::VerterHost::program_ambient_symbol(self, consumer_project, symbol, space)
     }
 
     #[inline]
@@ -1170,9 +1171,10 @@ where
         &self,
         consumer_project: ProjectStableKey,
         symbol: &str,
+        space: verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace,
     ) -> Option<AmbientSymbolHit> {
         verter_type_engine::count_resolver_context_call!("RouteLookup::lookup_ambient_symbol");
-        crate::VerterHost::program_ambient_symbol(self.0.host(), consumer_project, symbol)
+        crate::VerterHost::program_ambient_symbol(self.0.host(), consumer_project, symbol, space)
     }
 
     #[inline]

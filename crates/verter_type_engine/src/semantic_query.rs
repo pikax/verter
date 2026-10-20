@@ -8421,8 +8421,9 @@ pub enum InferenceCandidatePriority {
     Argument,
     /// The whole source of an inference to a union target holding one
     /// naked type variable, when a fixed target member matched every source
-    /// member (the checker's `InferencePriority.NakedTypeVariable`): kept
-    /// only when no direct inference reaches the variable.
+    /// member, or to the sole naked variable of an intersection (the checker's
+    /// `InferencePriority.NakedTypeVariable`): kept only when no direct
+    /// inference reaches the variable.
     MatchedUnionRemainder,
     /// A complete reverse-homomorphic mapped candidate.
     HomomorphicMapped,

@@ -89,6 +89,8 @@ it("type is correctly inferred", () => {
 
 ## Rust Test Patterns
 
+The differential harness's `Matrix::installed_packages()` resolves installed packages but does not implicitly register SDK globals. Use `.installed_typescript_libs()` when a fixture needs the pinned SDK's real declarations. It discovers them through `NativeIntrinsicLibrary`, registers them against each setting's project, and lets the configured target and lib references select the library closure. Missing SDK files fail the fixture; they are never a silent skip.
+
 Unit-test hosts without explicit project authority use a tsconfig-less
 in-memory project context. Do not fabricate a tsconfig path for that context:
 configured program discovery treats its membership as authored roots and can

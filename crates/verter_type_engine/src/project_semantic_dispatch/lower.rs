@@ -523,20 +523,68 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return None,
         };
         let root = prepared.name_resolution.get(alias_name)?;
-        self.ctx
-            .prepared_type_decl_return_only(
+        let head = self.ctx.prepared_type_decl_return_only(
+            root.canonical_id.as_ref(),
+            root.owner,
+            root.symbol_name.as_ref(),
+        )?;
+        if head.unique_symbol_members.iter().any(|name| name == member) {
+            return Some(UniqueSymbolMemberCertification::NamedType(
+                root.canonical_id.clone(),
+                root.owner,
+                root.symbol_name.clone(),
+            ));
+        }
+        let key = verter_type_expr::TypePropertyKey::String(OwnedStr::from(member));
+        if head.member_index.contains_key(&key)
+            || !self.is_global_type_declaration(
+                root.canonical_id.as_ref(),
                 root.canonical_id.as_ref(),
                 root.owner,
                 root.symbol_name.as_ref(),
             )
-            .is_some_and(|ty| ty.unique_symbol_members.iter().any(|name| name == member))
-            .then(|| {
-                UniqueSymbolMemberCertification::NamedType(
-                    root.canonical_id.clone(),
-                    root.owner,
-                    root.symbol_name.clone(),
-                )
-            })
+        {
+            return None;
+        }
+        // A named global interface can declare this member in another file
+        // (SymbolConstructor's well-known symbols do). Certify from the
+        // declaring contributor's facts, retaining its nominal identity and
+        // the ordinary preparation/read-set proof. No interface body is opened.
+        let contributors = self.global_contributors_in(
+            root.canonical_id.as_ref(),
+            root.symbol_name.as_ref(),
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        for entry in contributors.entries.iter() {
+            crate::resolver_core::resolver_context::observe_fan_out(
+                verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                    canonical_id: entry.artifact_key.canonical.to_string(),
+                    hash: entry.artifact_key.content_hash,
+                },
+            );
+            let identity = DeclIdentity {
+                canonical_id: entry.artifact_key.canonical.clone().into(),
+                owner: entry.owner,
+                whole_hash: entry.artifact_key.content_hash,
+                decl_name: root.symbol_name.clone(),
+            };
+            let declaration = self.prepared_type_decl(&identity)?;
+            if declaration
+                .unique_symbol_members
+                .iter()
+                .any(|name| name == member)
+            {
+                return Some(UniqueSymbolMemberCertification::NamedType(
+                    identity.canonical_id,
+                    identity.owner,
+                    identity.decl_name,
+                ));
+            }
+            if declaration.member_index.contains_key(&key) {
+                return None;
+            }
+        }
+        None
     }
 
     /// Whether a value declaration's OWN static surface declares a property

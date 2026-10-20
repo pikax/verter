@@ -5,6 +5,75 @@
 use super::checker_probe_lane_tests::{default_probe_host, with_probe_on_host, PROBE_FILE};
 use verter_type_engine::semantic_query::{SemanticNodeData, SemanticNodeId};
 
+const MERGED_KEYS_BASE: &str =
+    "interface Keys { plain: number }\ndeclare const keys: Keys;\ndeclare const other: Keys;\n";
+const MERGED_KEYS_EXTENSION: &str =
+    "interface Keys { readonly a: unique symbol; readonly b: unique symbol }\n";
+
+#[test]
+fn members_of_a_merged_global_annotation_keep_their_declaring_symbol() {
+    use super::differential_harness_tests::{Matrix, ALL};
+    let files = [
+        ("base.d.ts", MERGED_KEYS_BASE),
+        ("extension.d.ts", MERGED_KEYS_EXTENSION),
+    ];
+    let source = r#"
+interface keys { local: true }
+interface Keys { a: symbol; b: symbol }
+declare const local: Keys;
+export function disjoint() { return null! as (typeof keys.a extends typeof keys.b ? 1 : 2); }
+export function shared() { return null! as (typeof keys.a extends typeof other.a ? 1 : 2); }
+export function shadowed() { return null! as (typeof local.a extends typeof local.b ? 1 : 2); }
+export function keyed() { return null! as ({ [keys.a]: 1; [keys.b]: 2 }[typeof keys.a]); }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).files(&files).returns(&[
+        ("disjoint", "2"),
+        ("shared", "1"),
+        ("shadowed", "1"),
+        ("keyed", "1"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn a_merged_global_member_edit_rejects_its_warm_nominal_certification() {
+    use super::carrier_head_resolution_tests::{host, upsert_ts};
+    let host = host();
+    upsert_ts(&host, "/base.d.ts", MERGED_KEYS_BASE);
+    host.ensure_indexed_ready("/base.d.ts")
+        .expect("base indexed");
+    upsert_ts(
+        &host,
+        "/probe.ts",
+        "type Result = typeof keys.a extends typeof keys.b ? 1 : 2; export {};\n",
+    );
+    for (source, expected) in [
+        (MERGED_KEYS_EXTENSION, 2.0),
+        (
+            "interface Keys { readonly a: symbol; readonly b: symbol }\n",
+            1.0,
+        ),
+        (MERGED_KEYS_EXTENSION, 2.0),
+    ] {
+        upsert_ts(&host, "/extension.d.ts", source);
+        host.ensure_indexed_ready("/extension.d.ts")
+            .expect("extension indexed");
+        for request in ["cold", "warm"] {
+            let result = host
+                .resolve_named_symbol("/probe.ts", "Result", None)
+                .expect("result resolves");
+            let data = host
+                .project_type_store()
+                .semantic_graph()
+                .node_data(result.id());
+            assert!(
+                matches!(data.as_deref(), Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::Number(value))) if *value == expected),
+                "the {request} result follows the current member annotations: {data:?}"
+            );
+        }
+    }
+}
+
 /// The key type `keyof` gives a `unique symbol` property key is a node of
 /// the declaring file's (the nominal `typeof` carrier of the symbol's
 /// declaration, one per declaration): the key union retains it as a child

@@ -142,6 +142,7 @@ pub(super) struct Matrix<'a> {
     /// `node_modules` — or the dependency directory the named chain of
     /// installed packages reaches — so the probe imports real packages.
     installed_packages: Option<&'a [&'a str]>,
+    installed_typescript_libs: bool,
 }
 
 impl<'a> Matrix<'a> {
@@ -155,6 +156,7 @@ impl<'a> Matrix<'a> {
             files: &[],
             file_per_setting: None,
             installed_packages: None,
+            installed_typescript_libs: false,
         }
     }
 
@@ -164,6 +166,15 @@ impl<'a> Matrix<'a> {
     /// augmentations.
     pub(super) fn installed_packages(mut self) -> Self {
         self.installed_packages = Some(&[]);
+        self
+    }
+
+    /// Register the installed SDK's libraries. The project's target and lib
+    /// options select the reference closure; unselected libraries contribute
+    /// nothing, just as with an explicitly registered fixture library.
+    pub(super) fn installed_typescript_libs(mut self) -> Self {
+        assert!(self.installed_packages.is_some());
+        self.installed_typescript_libs = true;
         self
     }
 
@@ -392,6 +403,55 @@ impl<'a> Matrix<'a> {
             workspace,
         ));
         host.configure_projects(configs);
+        if self.installed_typescript_libs {
+            use verter_workspace::IntrinsicLibraryAccess;
+            let sdk = verter_workspace::NativeIntrinsicLibrary::discover(std::path::Path::new(
+                &workspace_root,
+            ));
+            let libraries = sdk.list_intrinsic_libs();
+            assert!(
+                !libraries.is_empty(),
+                "an SDK matrix needs the installed TypeScript libraries (run pnpm install)"
+            );
+            let libraries: Vec<(Arc<str>, Arc<str>)> = libraries
+                .into_iter()
+                .map(|name| {
+                    let source = sdk
+                        .read_intrinsic_lib(&name)
+                        .expect("read the installed SDK library");
+                    (Arc::from(name), Arc::from(source))
+                })
+                .collect();
+            for root in &roots {
+                for (name, source) in &libraries {
+                    crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
+                        &host, &format!("{root}/probe.ts"), name, source,
+                    );
+                }
+                let workspace = host.workspace();
+                let project = host
+                    .resolve_project_for_canonical(&format!("{root}/probe.ts"))
+                    .expect("the probe belongs to its SDK project");
+                let key = workspace
+                    .project_stable_key(project)
+                    .expect("the SDK project has a stable key");
+                for symbol in ["Object", "StringConstructor", "Symbol"] {
+                    assert!(
+                        workspace.lookup_ambient_symbol(key, symbol).is_some(),
+                        "the installed SDK provides {symbol} to {root}"
+                    );
+                    let space = if symbol == "Symbol" {
+                        verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Value
+                    } else {
+                        verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Type
+                    };
+                    assert!(
+                        host.program_ambient_symbol(key, symbol, space).is_some(),
+                        "the program loads SDK symbol {symbol} for {root}"
+                    );
+                }
+            }
+        }
         self.upsert_projects(&host, rows, &roots);
         (host, roots, workspace_dir)
     }
@@ -659,10 +719,7 @@ fn link_dir(target: &std::path::Path, link: &std::path::Path) {
 
 /// `path` slash-separated, without a verbatim prefix.
 fn slash_path(path: &std::path::Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    text.strip_prefix("//?/")
-        .map(str::to_string)
-        .unwrap_or(text)
+    verter_span::path::canonicalize_path(&path.to_string_lossy())
 }
 
 /// One host carrying a tsconfig-backed project per setting.
@@ -1183,6 +1240,9 @@ fn print(
         SemanticNodeData::TypeParam { display_name, .. } => display_name.to_string(),
         SemanticNodeData::DeclRef { identity } => identity.decl_name.to_string(),
         SemanticNodeData::InstantiationRef { base, args } => {
+            if args.is_empty() {
+                return base.decl_name.to_string();
+            }
             let args: Vec<String> = args.iter().map(|arg| at(*arg)).collect();
             format!("{}<{}>", base.decl_name, args.join(", "))
         }

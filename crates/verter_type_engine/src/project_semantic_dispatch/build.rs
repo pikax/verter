@@ -1452,9 +1452,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             visible_value,
             Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
         );
-        let has_type_symbol = shallow
-            .visible_local_type_owner(value_root.scope.owner, value_root.name.as_ref())
-            .is_some();
         // Namespace-qualified root: `Ns.Member` where `Ns` is an import
         // alias (`import * as Ns from './m'`). The shallow state indexes
         // only the top-level alias; the dotted name itself never appears
@@ -1472,7 +1469,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // qualified path (`NS.Inner.f`): the longest prefix of the path that
         // names one reads the rest of the path from it. The namespace a
         // function or class merges with contributes its members this way too.
-        let unbound = !(has_value || has_import_local || has_type_symbol || has_namespace_prefix);
+        let unbound = !(has_value || has_import_local || has_namespace_prefix);
         if let Some((member_root, consumed)) =
             self.qualified_value_member_root(value_root, path, shallow, unbound)
         {
@@ -1530,7 +1527,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
             }
         }
-        // A name no scope declares or imports is read in the program's GLOBAL
+        // A name no value scope declares or imports is read in the program's GLOBAL
         // scope: `globalThis` is the global object, and any other name its
         // global value declaration. The global root replaces the bare-name
         // resolution below; the segments `globalThis` consumed leave `path`.
@@ -1538,11 +1535,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A function declared in several files: every later file's
         // declaration, whose overloads join the first's.
         let mut global_peers: Vec<ResolvedRootIdentity> = Vec::new();
-        let (global_root, path) = if has_value
-            || has_import_local
-            || has_type_symbol
-            || has_namespace_prefix
-        {
+        let (global_root, path) = if has_value || has_import_local || has_namespace_prefix {
             (None, path)
         } else if value_root.name.as_ref() == "globalThis" {
             // Every leading `globalThis` segment is the global object again.
@@ -6439,9 +6432,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Build the single peer-merge carrier: base contributors ∪ augmenter
         // contributions. If the base body is itself a `MergedDecl` (same-file
         // merge), flatten its contributors so the augmenter peers merge AT THE
-        // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
-        // contributor splitter (`collect_merged_contributor_arms` only reads
-        // Object / Intersection / Alias bodies).
+        // SAME LEVEL in declaration order. The shared contributor splitter also
+        // traverses nested groups supplied by other files' same-file merges.
         let base_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
             Some(data) => match data.as_ref() {
                 SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
@@ -8175,6 +8167,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             demand_canonical,
             project,
             name,
+            match space {
+                GlobalSpace::Type => crate::resolver_core::request_ports::AmbientSymbolSpace::Type,
+                GlobalSpace::Value => {
+                    crate::resolver_core::request_ports::AmbientSymbolSpace::Value
+                }
+            },
         )?;
         // A library the view cannot serve is still the declaring file: the
         // read of its declaration that follows fails as that read does.
@@ -8236,14 +8234,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// contribution is not addressed by the identity when the module also
     /// declares a module-scope type of the name, which the identity names
     /// instead.
-    fn is_global_type_declaration(
+    pub(super) fn is_global_type_declaration(
         &self,
         demand_canonical: &str,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> bool {
-        use verter_session_query::inputs::contributors::ContributorOrigin;
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if self
             .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
             .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
@@ -8258,7 +8256,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         population.entries.iter().any(|entry| {
             entry.artifact_key.canonical.as_ref() == canonical
                 && entry.owner == owner
-                && declares_global_type(entry)
+                && (declares_global_type(entry)
+                    || (entry.is_automatic_lib
+                        && entry.module_kind == FileModuleKind::Script
+                        && matches!(
+                            entry.origin,
+                            ContributorOrigin::FileScopeInterface
+                                | ContributorOrigin::FileScopeType
+                        )))
                 && (entry.origin != ContributorOrigin::DeclareGlobal
                     || self
                         .ctx
@@ -8913,7 +8918,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|prepared| !prepared.type_parameters.is_empty())
     }
 
-    fn prepared_type_decl(
+    pub(super) fn prepared_type_decl(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
@@ -15703,7 +15708,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// materialises the substituted node only enough to close the
     /// selected key under the caller's `context`:
     ///
-    /// 1. [`Self::evaluate_deferred_semantic_node_with_context`] walks
+    /// 1. The shared selected-value evaluator walks
     ///    Alias / KeyOf / IndexedAccess / Mapped / Conditional / TypeOf
     ///    / TemplateLiteral / DeclPlaceholder hops. Under
     ///    [`crate::semantic_query::ReductionDemand::StructuralTransit`]
@@ -15711,11 +15716,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///    [`crate::semantic_query::may_reduce_operator`]; `Conditional`
     ///    reduction is gated separately by the relation engine and
     ///    still fires when the post-substitution check is concrete.
-    /// 2. When the evaluator leaves an `InstantiationRef` shell (the
-    ///    deferred-shell evaluator deliberately stops at carrier
-    ///    boundaries — the relation-engine identity-carrier rule),
-    ///    dispatch `SemanticQueryKey::Instantiate` so the substituted
-    ///    args bind into the body. Under the caller's transit demand
+    /// 2. A remaining `InstantiationRef` binds through the shared
+    ///    `Instantiate` query, and selected-value evaluation continues
+    ///    through its returned helper aliases. Under the caller's transit demand
     ///    the body lowering inherits
     ///    `may_reduce_operator(context) == false`, so nested `KeyOf`/
     ///    `Mapped` operators stay carrier-shaped; only `Conditional`
@@ -15753,43 +15756,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        // Object member interiors remain addressable until they are read.
-        // Value unions and templates reduce their now-bound expression arms;
-        // traversing object interiors would record unrequested sibling values.
-        let substituted = if matches!(
-            self.graph().node_data(substituted).as_deref(),
-            Some(SemanticNodeData::Union(_) | SemanticNodeData::TemplateLiteral { .. })
-        ) {
-            self.evaluate_selected_value_with_context(substituted, context)
-        } else {
-            substituted
-        };
-        let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(substituted, context)
+        let resolved = self
+            .evaluate_mapped_member_value_outcome(substituted, context)
             .into_active_query_build_node(self);
-        let resolved = match self.graph().node_data(evaluated).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let slot = self.type_slot_for(
-                    base.canonical_id.clone(),
-                    base.owner,
-                    base.decl_name.clone(),
-                );
-                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args.as_arc());
-                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                ));
-                // Two-signal fold: per-K materialiser returns a bare node, so
-                // fold a genuinely-incomplete nested Instantiate onto the
-                // request's sticky partial flag.
-                crate::request_context::observe_component_meta_read_suppress(&read);
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => evaluated,
-                }
-            }
-            _ => evaluated,
-        };
         if matches!(
             self.graph().node_data(resolved).as_deref(),
             Some(SemanticNodeData::Opaque(_))

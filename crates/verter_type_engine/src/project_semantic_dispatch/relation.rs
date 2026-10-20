@@ -4423,6 +4423,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
+                    if self.subtree_contains_infer(node) =>
+                {
+                    let resolved = self.resolve_carrier_subject_fact(
+                        node,
+                        ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    );
+                    if !resolved.status.is_complete() || resolved.node == node {
+                        return InferInventory::Unsupported;
+                    }
+                    stack.push(resolved.node);
+                }
                 // A template literal infers into the holes that are
                 // declarations themselves.
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
@@ -4993,6 +5007,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         position: InferPosition,
         excess_prepass_completed: bool,
     ) -> RelationResult {
+        // Inference visits every union constituent; a successful constructor
+        // cannot hide a stronger candidate from a callable constituent.
+        let collect_all = excess_prepass_completed && self.relation_session_active();
+        let mut any_assignable = false;
         let mut any_unknown = false;
         for (source, target) in alternatives {
             // Each alternative is relation work of its own, whether or not
@@ -5008,7 +5026,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.relate_member(*source, *target, bindings, position)
             };
             match result {
-                result @ RelationResult::Assignable { .. } => return result,
+                result @ RelationResult::Assignable { .. } => {
+                    if !collect_all {
+                        return result;
+                    }
+                    any_assignable = true;
+                }
                 RelationResult::Unknown => {
                     self.relation_session_rollback(&checkpoint);
                     bindings.truncate(bindings_len);
@@ -5020,7 +5043,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        if any_unknown {
+        if any_assignable {
+            assignable(bindings)
+        } else if any_unknown {
             RelationResult::Unknown
         } else {
             RelationResult::NotAssignable
@@ -9237,6 +9262,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// A naked variable in an intersection is inferred only when it is the
+    /// sole naked variable, at the checker's lower NakedTypeVariable priority.
+    /// Direct candidates elsewhere (for example a callable return) win over it.
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let naked: Vec<_> = {
+            let txn = self.dispatch_txn.borrow();
+            members
+                .iter()
+                .copied()
+                .filter(|member| {
+                    txn.active_session()
+                        .is_some_and(|session| session.infers(*member))
+                })
+                .collect()
+        };
+        let mut result = assignable(bindings);
+        for member in members {
+            if !self.charge_relation_work(1) {
+                return RelationResult::Unknown;
+            }
+            let step = if naked.contains(member) {
+                if naked.len() == 1 {
+                    self.matched_union_inference(source, *member, bindings)
+                } else {
+                    assignable(bindings)
+                }
+            } else {
+                self.relate_intersection_target_arm(source, *member, bindings)
+            };
+            result = result_and(result, step);
+        }
+        result
+    }
+
     /// An intersection source: a member that relates alone, else the one
     /// object the members compose, as the checker relates an intersection
     /// source structurally after its members — against an object target or
@@ -10051,6 +10115,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return IdentityCarrierUnwrap::Unresolvable;
                 };
                 let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+                    SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                        drop(data);
+                        let resolved = self.resolve_carrier_subject_fact(current,
+                            transit.with_mode(crate::semantic_query::ProjectionMode::Navigate));
+                        if !resolved.status.is_complete() {
+                            return IdentityCarrierUnwrap::Unresolvable;
+                        }
+                        if resolved.node == current {
+                            return IdentityCarrierUnwrap::Concrete(current);
+                        }
+                        current = resolved.node;
+                        continue;
+                    }
                     SemanticNodeData::Alias(inner) => {
                         current = *inner;
                         continue;
@@ -13067,6 +13144,12 @@ trait RelationDemandDriver {
         members: &[SemanticNodeId],
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult;
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult;
     fn relate_unknown_source(
         &self,
         target: SemanticNodeId,
@@ -13391,6 +13474,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         ProjectSemanticDispatch::relate_to_union_target(self, source, members, bindings)
+    }
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        ProjectSemanticDispatch::relate_intersection_target(self, source, members, bindings)
     }
     fn relate_unknown_source(
         &self,
@@ -13805,6 +13896,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> RelationResult {
         self.driver
             .relate_to_union_target(source, members, bindings)
+    }
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        self.driver
+            .relate_intersection_target(source, members, bindings)
     }
     fn relate_unknown_source(
         &self,
@@ -15258,6 +15358,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
+            if self.relation_session_active() {
+                results.push(self.relate_intersection_target(source, &members, bindings));
+                return;
+            }
             distribute_and(
                 work,
                 results,

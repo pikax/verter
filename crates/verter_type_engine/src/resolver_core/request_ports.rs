@@ -18,6 +18,13 @@ use verter_session_query::analysis::types::Hash16;
 use verter_session_query::declarations::metadata::ValueDeclIdentity;
 use verter_session_query::facts::reuse::NonCacheableReadReason;
 
+/// The declaration namespace an ambient global read consumes.
+#[derive(Debug, Clone, Copy)]
+pub enum AmbientSymbolSpace {
+    Type,
+    Value,
+}
+
 /// Content-free marker for the published workspace root an epoch retains.
 /// It has no methods and no `Any` supertrait, so a retained root can be
 /// neither read nor downcast through an epoch.
@@ -405,6 +412,7 @@ pub trait RouteLookup {
         &self,
         consumer_project: ProjectStableKey,
         symbol: &str,
+        space: AmbientSymbolSpace,
     ) -> Option<AmbientSymbolHit>;
 
     fn record_ambient_dependency(&self, consumer_canonical: &str, virtual_id: &str);

@@ -16,6 +16,168 @@
 
 use super::differential_harness_tests::{Matrix, Read, Setting, ALL};
 
+#[test]
+fn an_infer_variable_in_a_nested_conditional_check_stays_deferred() {
+    let source = r#"
+interface TextFactory { new (): { boxed: true }; (): string }
+type PC<T> = { new (...args: any[]): T & {} } | { (): T };
+type PCM<T> = PC<T> | (T extends (...args: any[]) => any
+    ? { new (): any; (): T; prototype: any } : never);
+type Wrapped<T> = PC<T> | ([T] extends [((...args: any[]) => any) | undefined]
+    ? { new (): any; (): T; prototype: any } : never);
+export function base() { return null! as (TextFactory extends PC<infer V> ? V : never); }
+export function direct() { return null! as (TextFactory extends PCM<infer V> ? V : never); }
+export function tuple() { return null! as (TextFactory extends Wrapped<infer V> ? V : never); }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("base", "string"),
+        ("direct", "string"),
+        ("tuple", "string"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Equivalent call-result demands over the pinned Vue definitions. The
+/// expected signatures and prop types were measured with TypeScript 7.0.2's
+/// native API in all four strictness settings.
+fn vue_call_result_fixture(emits: bool, strict: bool) {
+    let mut events = String::new();
+    let mut strict_emits = Vec::new();
+    let mut loose_emits = Vec::new();
+    for i in 0..8 {
+        let (option, strict, loose) = if i % 3 == 2 {
+            (
+                "null".to_string(),
+                format!("((event: \"e{i}\", ...args: any[]) => void)"),
+                format!("((event: \"e{i}\", ...args: unknown[]) => void)"),
+            )
+        } else {
+            let ty = if i % 3 == 0 { "number" } else { "string" };
+            (
+                format!("(v: {ty}, flag?: boolean) => true"),
+                format!("((event: \"e{i}\", v: {ty}, flag?: boolean | undefined) => void)"),
+                format!("((event: \"e{i}\", v: {ty}, flag?: boolean) => void)"),
+            )
+        };
+        events.push_str(&format!("e{i}: {option};\n"));
+        strict_emits.push(strict);
+        loose_emits.push(loose);
+    }
+    let mut options = String::new();
+    let mut required = String::new();
+    let mut strict_optional = String::new();
+    let mut loose_optional = String::new();
+    for i in 0..16 {
+        let (option, value) = match i % 8 {
+            0 => ("StringConstructor".to_string(), "string".to_string()),
+            1 => (
+                "{ type: NumberConstructor; required: true }".to_string(),
+                "number".to_string(),
+            ),
+            2 => (
+                "{ type: PropType<string[]>; required: true }".to_string(),
+                "string[]".to_string(),
+            ),
+            3 => ("BooleanConstructor".to_string(), "boolean".to_string()),
+            4 => (
+                "[NumberConstructor, StringConstructor]".to_string(),
+                "string | number".to_string(),
+            ),
+            5 => (
+                format!("{{ type: PropType<{{ x{i}: number }}>; required: true }}"),
+                format!("{{ x{i}: number; }}"),
+            ),
+            6 => (
+                "{ type: StringConstructor; default: \"fallback\" }".to_string(),
+                "string".to_string(),
+            ),
+            _ => (
+                "{ type: DateConstructor; required: true }".to_string(),
+                "Date".to_string(),
+            ),
+        };
+        options.push_str(&format!("p{i}: {option};\n"));
+        if matches!(i % 8, 0 | 4) {
+            strict_optional.push_str(&format!("readonly p{i}?: {value} | undefined; "));
+            loose_optional.push_str(&format!("readonly p{i}?: {value}; "));
+        } else {
+            required.push_str(&format!("readonly p{i}: {value}; "));
+        }
+    }
+    let source = format!(
+        "import type {{ EmitFn, ExtractPropTypes, PropType }} from 'vue';\n\
+         type UR<T> = T extends string ? \"s\" : T;\n\
+         declare function f<T>(): {{ value: UR<T> }};\n\
+         const a = f<number>();\n\
+         type Events = {{ {events} }};\n\
+         declare function emits<T>(): EmitFn<T>;\n\
+         const e = emits<Events>();\n\
+         type Options = {{ {options} }};\n\
+         declare function props<T>(): ExtractPropTypes<T>;\n\
+         const p = props<Options>();\n"
+    );
+    let strict_emits = strict_emits.join(" & ");
+    let loose_emits = loose_emits.join(" & ");
+    let strict_props = format!("{{ {required} {strict_optional} }}");
+    let loose_props = format!("{{ {required} {loose_optional} }}");
+    let settings = if strict {
+        [ALL[0], ALL[2]]
+    } else {
+        [ALL[1], ALL[3]]
+    };
+    let (read, expected) = if emits {
+        (
+            "typeof e",
+            if strict { &strict_emits } else { &loose_emits },
+        )
+    } else {
+        (
+            "{ readonly [K in keyof typeof p]: (typeof p)[K] }",
+            if strict { &strict_props } else { &loose_props },
+        )
+    };
+    let failures: Vec<String> =
+        settings
+            .iter()
+            .flat_map(|setting| {
+                let settings = [*setting];
+                Matrix::new(&source)
+        .installed_packages()
+        .installed_typescript_libs()
+        .settings(&settings)
+        .types(&[
+            (read, expected),
+            ("typeof a.value", "number"),
+            ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
+            ("[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2", "2"),
+            ("[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2", "2"),
+            (
+                "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
+                "2",
+            ),
+        ])
+            })
+            .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_emits_strict() {
+    vue_call_result_fixture(true, true);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_emits_loose() {
+    vue_call_result_fixture(true, false);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_props_strict() {
+    vue_call_result_fixture(false, true);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_props_loose() {
+    vue_call_result_fixture(false, false);
+}
+
 /// Generic functions holding each conditional; overloads choosing between a
 /// parameter a deferred conditional argument may relate to and `unknown`;
 /// and method overloads choosing between a deferred conditional parameter

@@ -1602,6 +1602,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
 /// its `extends`/`implements` HERITAGE reference arms.
 ///
 /// `Object` (and `Alias`-to-`Object`) bodies are pure own-body surfaces.
+/// Nested `MergedDecl` groups contribute every body in declaration order.
 /// `Intersection` bodies (interface/class with heritage) contribute their
 /// object-surface arms as own-body and their remaining reference arms as
 /// heritage (de-duplicated). Any other shape yields nothing.
@@ -1611,30 +1612,32 @@ pub(super) fn collect_merged_contributor_arms(
     own_surfaces: &mut Vec<ShallowSurface>,
     heritage_arms: &mut Vec<SemanticNodeId>,
 ) {
-    let Some(data) = graph.node_data(node) else {
-        return;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
-        SemanticNodeData::Intersection(arms) => {
-            let arms = arms.members_arc();
-            drop(data);
-            for arm in arms.iter() {
-                if arm_is_object_surface(graph, *arm) {
-                    if let Some(view) = object_surface_view(graph, *arm) {
-                        own_surfaces.push(ShallowSurface::from_object(&view));
+    let mut pending: smallvec::SmallVec<[SemanticNodeId; 4]> = smallvec::smallvec![node];
+    while let Some(node) = pending.pop() {
+        let Some(data) = graph.node_data(node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                for arm in arms.iter() {
+                    if arm_is_object_surface(graph, *arm) {
+                        if let Some(view) = object_surface_view(graph, *arm) {
+                            own_surfaces.push(ShallowSurface::from_object(&view));
+                        }
+                    } else if !heritage_arms.contains(arm) {
+                        heritage_arms.push(*arm);
                     }
-                } else if !heritage_arms.contains(arm) {
-                    heritage_arms.push(*arm);
                 }
             }
+            SemanticNodeData::Alias(target) => pending.push(*target),
+            SemanticNodeData::MergedDecl { contributors } => {
+                pending.extend(contributors.iter().rev().copied());
+            }
+            _ => {}
         }
-        SemanticNodeData::Alias(target) => {
-            let target = *target;
-            drop(data);
-            collect_merged_contributor_arms(graph, target, own_surfaces, heritage_arms);
-        }
-        _ => {}
     }
 }
 
@@ -11281,6 +11284,50 @@ mod m1_merge_visibility_tests {
 
     fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
         ShallowSurface::from_entries(vec![super::ShallowSurfaceEntry::Member(m)], None)
+    }
+
+    #[test]
+    fn nested_merged_contributors_keep_every_own_member() {
+        let graph = SemanticGraphStore::new();
+        let _roots = graph.enter_node_root_scope();
+        let object = |name| {
+            let surface = one_member_surface(member(
+                &graph,
+                name,
+                MemberVisibility::Public,
+                MemberMergeRole::Authored,
+                PrimitiveKind::Number,
+            ));
+            graph.intern_node(SemanticNodeData::Object(super::surface_view_from_shallow(
+                &surface,
+            )))
+        };
+        let nested = graph.intern_node(SemanticNodeData::MergedDecl {
+            contributors: crate::semantic_query::PayloadArray::from(vec![
+                object("base"),
+                object("same_file"),
+            ]),
+        });
+        let alias = graph.intern_node(SemanticNodeData::Alias(nested));
+        let peer = object("other_file");
+        for contributors in [[alias, peer], [peer, alias]] {
+            let node = super::reduce_merged_decl_with_graph(&graph, &contributors);
+            let data = graph.node_data(node).expect("merged declaration has data");
+            let SemanticNodeData::Object(view) = data.as_ref() else {
+                panic!("merged own members form an object: {data:?}");
+            };
+            let mut names: Vec<_> = view
+                .positive_members()
+                .iter()
+                .map(|member| member.string_name().expect("named member"))
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["base", "other_file", "same_file"],
+                "a same-file merge contributing to a cross-file merge keeps every member"
+            );
+        }
     }
 
     fn merged_member_visibility(surface: &ShallowSurface, name: &str) -> MemberVisibility {
