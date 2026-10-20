@@ -254,14 +254,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Whether `node` holds an inference site of the active session: an
-    /// `infer` declaration, or a type parameter the session infers (a
-    /// call's own type parameters).
+    /// `infer` declaration, or a type parameter a call's session infers.
+    /// Only a call's session infers type parameters, and only a node that
+    /// may mention a binder is walked for one.
     fn holds_inference_site(&self, node: SemanticNodeId) -> bool {
         if self.subtree_contains_infer(node) {
             return true;
         }
+        if !self.mentions_binder(node) {
+            return false;
+        }
         let txn = self.dispatch_txn.borrow();
-        let Some(session) = txn.active_session() else {
+        let Some(session) = txn.active_session().filter(|session| {
+            session.context_key().pass_kind
+                == crate::semantic_query::InferencePassKind::CallApplicability
+        }) else {
             return false;
         };
         let graph = self.graph();
