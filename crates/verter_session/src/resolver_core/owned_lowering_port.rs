@@ -817,23 +817,10 @@ macro_rules! owned_lowering_from_source_inputs {
                 )>,
             ) {
                 verter_type_engine::count_resolver_context_call!("OwnedLowering::refresh_augmentation_keys");
-                if refreshed.is_empty() {
-                    return;
-                }
-                let mut entries = observed.entries.clone();
-                for (index, artifact_key) in refreshed {
-                    entries[index].artifact_key = artifact_key;
-                }
                 SourceInputProvider::source_host(self)
                     .project_type_store()
                     .indexed()
-                    .populate_augmenter_set(
-                        key.clone(),
-                        Arc::new(verter_session_query::resolution::AugmenterSet {
-                            entries,
-                            fingerprint: observed.fingerprint,
-                        }),
-                    );
+                    .refresh_augmenter_set_keys(key, observed, refreshed);
             }
             #[cfg(any(test, feature = "test-support"))]
             fn augmentation_source_env_forced_unobservable(&self) -> bool {

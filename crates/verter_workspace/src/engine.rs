@@ -117,6 +117,11 @@ enum ResolutionLane {
     /// decision node speaks for it, so a subscriber that adopts it restates
     /// its witness and delivers it unretained.
     Unretained,
+    /// An admitted answer for an importer the world already records as
+    /// gone: valid under its own witness, yet no slot or decision node may
+    /// hold it, so a subscriber that adopts it restates that witness and
+    /// stays admitted — nothing refused to retain it.
+    RetiredImporter,
 }
 
 /// The overlay lane: overlay answers held by the overlay authorities that
@@ -4223,7 +4228,9 @@ impl Engine {
                 let node = ResolutionFactKey::decision(entry.query.clone());
                 if matches!(
                     lane,
-                    ResolutionLane::RequestOverlay(_) | ResolutionLane::Unretained
+                    ResolutionLane::RequestOverlay(_)
+                        | ResolutionLane::Unretained
+                        | ResolutionLane::RetiredImporter
                 ) || captured.world.request_overlay_reaches(&node)
                 {
                     transaction.adopt_witness(&entry.signature);
@@ -4653,15 +4660,18 @@ impl Engine {
                         // as an unretained answer, whose witness each
                         // restates rather than rooting on a node that was
                         // never published.
+                        // A retired importer's answer stays admitted under
+                        // its own witness, and so does every subscriber's.
                         Err(refusal) => {
-                            if let Some(reason) = refusal {
-                                admission = SignatureAdmission::NonCacheable(reason);
-                                unretained_witness = Some(entry.signature.clone());
-                            }
-                            delivery = Some(FlightDelivery {
-                                lane: ResolutionLane::Unretained,
-                                entry,
-                            });
+                            let lane = match refusal {
+                                Some(reason) => {
+                                    admission = SignatureAdmission::NonCacheable(reason);
+                                    unretained_witness = Some(entry.signature.clone());
+                                    ResolutionLane::Unretained
+                                }
+                                None => ResolutionLane::RetiredImporter,
+                            };
+                            delivery = Some(FlightDelivery { lane, entry });
                         }
                     }
                 }

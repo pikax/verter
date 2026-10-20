@@ -77,28 +77,11 @@ fn import_row_mismatches() -> Vec<String> {
         .collect()
 }
 
-/// The account once it holds at most `ceiling` bytes, or as it stands
-/// when a bounded wait for that runs out. A dropped host's retained parse
-/// snapshots are released by its declaration-lowering workers as those
-/// threads wind down, after the host's own drop has returned; with no host
-/// alive the account only shrinks, so the wait ends as soon as they have.
-fn released_to(
-    account: &SemanticRetentionAccount,
-    ceiling: usize,
-) -> verter_session_query::retention::RetentionAccountSnapshot {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let snapshot = account.snapshot();
-        if snapshot.total_bytes() <= ceiling || std::time::Instant::now() >= deadline {
-            return snapshot;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-}
-
 /// A direct import answers the same with no headroom as with it, and the
 /// pressure leaves nothing behind: every byte the pressured requests charged
-/// is released once their hosts and the pin are gone.
+/// is released once their hosts and the pin are gone. A dropped host's
+/// declaration-lowering workers are joined before its drop returns, so each
+/// snapshot reads the account exactly as those hosts left it.
 #[test]
 fn an_import_answers_as_with_headroom_and_retains_nothing_under_pressure() {
     in_a_fresh_process(test_path!(), || {
@@ -127,9 +110,10 @@ fn an_import_answers_as_with_headroom_and_retains_nothing_under_pressure() {
             "a pressured request retains nothing: {during:?}"
         );
         drop(held);
-        let after = released_to(&account, baseline.total_bytes());
-        assert!(
-            after.total_bytes() <= baseline.total_bytes(),
+        let after = account.snapshot();
+        assert_eq!(
+            after.total_bytes(),
+            baseline.total_bytes(),
             "the account returns to its baseline once the pin drops: \
              {after:?}, baseline {baseline:?}"
         );

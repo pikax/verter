@@ -3380,6 +3380,42 @@ impl FileArtifactStore {
         prev
     }
 
+    /// Re-key the entries of the set `key` holds: `observed`, with each
+    /// `(index, artifact_key)` of `refreshed` healed to its current exact
+    /// key, under the same fingerprint. Returns whether it was written.
+    ///
+    /// A refresh re-keys a set the index holds; it never installs one. A set
+    /// the index does not hold under `observed`'s fingerprint was served to
+    /// its request only (its scan consumed a resolution the process did not
+    /// keep) or has since been superseded, and healing its keys makes it
+    /// neither retainable nor current.
+    pub fn refresh_augmenter_set_keys(
+        &self,
+        key: &AugmentationTargetKey,
+        observed: &AugmenterSet,
+        refreshed: Vec<(usize, FileArtifactKey)>,
+    ) -> bool {
+        if refreshed.is_empty()
+            || self
+                .get_augmenter_set(key)
+                .is_none_or(|held| held.fingerprint != observed.fingerprint)
+        {
+            return false;
+        }
+        let mut entries = observed.entries.clone();
+        for (index, artifact_key) in refreshed {
+            entries[index].artifact_key = artifact_key;
+        }
+        self.populate_augmenter_set(
+            key.clone(),
+            Arc::new(AugmenterSet {
+                entries,
+                fingerprint: observed.fingerprint,
+            }),
+        );
+        true
+    }
+
     /// Snapshot the base-artifact augmenter rows into an owned `Vec`,
     /// then drop the `self.artifacts` shard guards.
     ///

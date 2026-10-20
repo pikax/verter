@@ -213,6 +213,72 @@ fn a_refused_retention_still_serves_the_flight_subscribers() {
     assert_eq!(workspace.resource_snapshot().resolution_flights, 0);
 }
 
+/// A flight for an importer the workspace has already retired delivers an
+/// answer no slot holds, yet nothing refused to retain it: the leader and
+/// every subscriber that adopts it answer admitted under its own witness,
+/// never as retention pressure.
+///
+/// Mutation recipe: deliver the retired importer's answer on the lane a
+/// refused retention uses. The subscribers then publish unretained, with a
+/// pressure non-admission no account reported.
+#[test]
+fn a_retired_importers_flight_subscribers_stay_admitted() {
+    let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
+    workspace.remove_file(MAIN);
+    let outcomes: Arc<Mutex<Vec<ResolutionOutcome>>> = Arc::default();
+    let followers = Arc::new(Mutex::new(Vec::new()));
+    let hook_workspace = Arc::clone(&workspace);
+    let hook_outcomes = Arc::clone(&outcomes);
+    let hook_followers = Arc::clone(&followers);
+    let leader = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            for _ in 0..2 {
+                let workspace = Arc::clone(&hook_workspace);
+                let outcomes = Arc::clone(&hook_outcomes);
+                hook_followers
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::spawn(move || {
+                        let outcome = workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT);
+                        outcomes.lock().unwrap().push(outcome);
+                    }));
+            }
+            await_subscribers(&hook_workspace, false, 2);
+        },
+        || workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT),
+    );
+    for follower in followers.lock().unwrap().drain(..) {
+        follower.join().unwrap();
+    }
+    let assert_admitted = |outcome: ResolutionOutcome, who: &str| {
+        assert_eq!(outcome.non_admission_reason(), None, "{who}");
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Admitted(admitted) => assert_eq!(
+                admitted.result().map(|result| result.source_id.as_str()),
+                Some("/p/dep.ts"),
+                "{who} delivers the complete answer"
+            ),
+            other => panic!("{who} answers admitted, got {other:?}"),
+        }
+    };
+    assert_admitted(leader, "the leader");
+    for outcome in outcomes.lock().unwrap().drain(..) {
+        assert!(
+            outcome.trace().reused(),
+            "the subscriber adopted the delivery"
+        );
+        assert_admitted(outcome, "a subscriber");
+    }
+    assert_eq!(
+        producer_runs(&workspace),
+        1,
+        "one producer run for three demands"
+    );
+    assert_eq!(workspace.resource_snapshot().resolution.slots, 0);
+    assert_eq!(workspace.resource_snapshot().resolution_flights, 0);
+}
+
 #[test]
 fn a_subscriber_never_adopts_an_answer_that_is_not_valid_for_its_overlay() {
     let workspace = workspace(&[]);
