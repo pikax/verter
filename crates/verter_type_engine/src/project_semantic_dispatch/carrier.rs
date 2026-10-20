@@ -50,6 +50,13 @@ use crate::semantic_query::{
 /// Read-only, value-side resolution context for resolving a graph carrier
 /// (`BareRef` / `ImportType`) at demand time. See the module docs for the
 /// no-query-key contract.
+/// The binder-environment key marking `name` as an `infer` declaration of
+/// an enclosing conditional the position is outside the scope of, bound to
+/// the checker's TS2304 recovery.
+pub(crate) fn out_of_scope_infer_env_key(name: &str) -> String {
+    format!("\0verter:infer-out-of-scope:{name}")
+}
+
 pub struct CarrierResolverContext<'a> {
     /// Type-parameter binder environment (`param_name → arg node`). A bare
     /// reference that names a bound parameter substitutes to its argument.
@@ -1025,6 +1032,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name.as_ref(),
                 ) {
                     return CarrierResolutionPlan::complete(member_type);
+                }
+            }
+            // A conditional's `infer` declaration read outside its scope,
+            // with nothing else binding the name, is the checker's TS2304.
+            if arg_count == 0 {
+                if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
+                    return CarrierResolutionPlan::complete(*recovery);
                 }
             }
             // Currently-unresolved authored reference. Under the carrier

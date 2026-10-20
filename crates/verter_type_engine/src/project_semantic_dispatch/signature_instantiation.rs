@@ -147,7 +147,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let session_id = self
             .dispatch_txn
             .borrow_mut()
-            .push_collecting_session(setup, None);
+            .push_collecting_session(setup);
         let settled = pairs
             .iter()
             .all(|&(from, into)| settled_relation(self.relate_collecting(from, into)).is_some());

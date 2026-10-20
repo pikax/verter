@@ -932,6 +932,75 @@ fn homomorphic_arrays_and_tuples() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`reverse_mapped_and_alias_inference`].
+const REVERSE_MAPPED_INFERENCE: &str = r##"
+type Box<T> = { v: T };
+type Boxed<T> = { [K in keyof T]: Box<T[K]> };
+type Getters<T> = { [K in keyof T as `get${Capitalize<K & string>}`]: () => T[K] };
+type Pre<T> = { [K in keyof T as `p_${K & string}`]: T[K] };
+type Mut<T> = { -readonly [K in keyof T]: T[K] };
+type Opt<T> = { [K in keyof T]?: T[K] };
+type Wrap<T> = { [K in keyof T]: [T[K]] };
+declare function ungetter<T>(x: Getters<T>): T;
+declare function unpre<T>(x: Pre<T>): T;
+declare function unbox<T>(x: Boxed<T>): T;
+declare function unmut<T>(x: Mut<T>): T;
+declare function unopt<T>(x: Opt<T>): T;
+declare function unwrapAll<T extends unknown[]>(x: Wrap<T>): T;
+declare const g: Getters<{ name: string }>;
+declare const bx: Boxed<{ n: number }>;
+export function m1() { return ungetter({ getName: () => "x" }); }
+export function m2() { return ungetter(g); }
+export function m3() { return unbox(bx); }
+export function m4() { return unmut({ a: 1 }); }
+export function m5() { return unopt({ a: 1 }); }
+export function m6() { return unwrapAll([[1], ["s"]]); }
+export function m7() { return unpre({ p_a: 1 }); }
+"##;
+
+/// A homomorphic mapped type over a parameter the inference infers
+/// reverse-maps, in a call as in a conditional's `infer` pattern and nested
+/// inside one; two applications of one alias infer from the alias
+/// arguments; and a key-remapped mapped type infers nothing, its parameter
+/// fixing to `unknown`.
+#[test]
+fn reverse_mapped_and_alias_inference() {
+    let failures = Matrix::new(REVERSE_MAPPED_INFERENCE).same(&[
+        (Read::Return(r#"m1"#), r#"unknown"#),
+        (Read::Return(r#"m2"#), r#"{ name: string; }"#),
+        (Read::Return(r#"m3"#), r#"{ n: number; }"#),
+        (Read::Return(r#"m4"#), r#"{ a: number; }"#),
+        (Read::Return(r#"m5"#), r#"{ a: number; }"#),
+        (Read::Return(r#"m6"#), r#"[number, string]"#),
+        (Read::Return(r#"m7"#), r#"unknown"#),
+        (
+            Read::Type(r#"{ a: Box<1> } extends Boxed<infer T> ? T : never"#),
+            r#"{ a: 1; }"#,
+        ),
+        (
+            Read::Type(r#"[{ a: Box<1> }] extends [Boxed<infer T>] ? T : never"#),
+            r#"{ a: 1; }"#,
+        ),
+        (
+            Read::Type(r#"{ a: [1]; b: ["s"] } extends Wrap<infer T> ? T : never"#),
+            r#"{ a: 1; b: "s"; }"#,
+        ),
+        (
+            Read::Type(r#"{ getName: () => string } extends Getters<infer T> ? T : never"#),
+            r#"unknown"#,
+        ),
+        (
+            Read::Type(r#"Getters<{ name: string }> extends Getters<infer T> ? T : never"#),
+            r#"{ name: string; }"#,
+        ),
+        (
+            Read::Type(r#"{ p_a: 1 } extends Pre<infer T> ? T : never"#),
+            r#"unknown"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The fixture of [`awaited_and_promises`].
 const AWAITED_AND_PROMISES: &str = r##"
 declare function pr<T>(x: T): Promise<T>;

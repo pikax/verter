@@ -8392,8 +8392,6 @@ pub enum InferencePassKind {
     Ordinary,
     /// Candidate-local inference while deciding call applicability.
     CallApplicability,
-    /// Exact `{ [P in keyof infer T]: X }` reverse projection.
-    ReverseHomomorphicMapped,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an

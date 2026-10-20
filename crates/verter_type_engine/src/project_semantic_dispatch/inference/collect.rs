@@ -165,6 +165,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         candidate: SemanticNodeId,
         priority: InferenceCandidatePriority,
     ) -> bool {
+        // A call argument's literals widen as the argument's own members
+        // would under the inferring parameter's const policy: the mapped
+        // template gives them no literal context.
+        let policy = {
+            let txn = self.dispatch_txn.borrow();
+            txn.active_session()
+                .and_then(|session| session.call_const_policy(param_node))
+                .filter(|_| {
+                    txn.call_argument_literal_mode()
+                        == Some(crate::semantic_query::ArgumentLiteralMode::Widened)
+                })
+        };
+        // A homomorphic mapped type is a tuple context: a tuple's reverse
+        // mapping stays a tuple, its elements widened.
+        let candidate = match policy {
+            Some(policy) => match self.graph().node_data(candidate).as_deref() {
+                Some(SemanticNodeData::Tuple { .. }) => self.widened_slice(candidate, policy),
+                _ => self.call_inference_candidate(candidate, policy),
+            },
+            None => candidate,
+        };
         let mut txn = self.dispatch_txn.borrow_mut();
         let active_id = txn.active_session().map(|session| session.id);
         let accepted = txn.active_session_mut().is_some_and(|session| {
@@ -222,6 +243,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         txn.relation.accepted_inference_deposits += 1;
         txn.note_candidate_write(active_id);
         true
+    }
+
+    /// Whether `node` is a type parameter the active call session infers
+    /// (a call's applicability rechecks what such an inference fixes).
+    pub(in crate::project_semantic_dispatch) fn call_session_infers_bare(
+        &self,
+        node: SemanticNodeId,
+    ) -> bool {
+        matches!(
+            self.graph().node_data(node).as_deref(),
+            Some(SemanticNodeData::TypeParam { .. })
+        ) && self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.call_const_policy(node).is_some())
     }
 
     /// Whether an inference session is currently active.

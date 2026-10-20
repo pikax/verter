@@ -96,6 +96,7 @@ mod index_signature_access_tests;
 mod indexed_access_name_tests;
 mod indexed_access_relation_tests;
 mod infer_inventory_tests;
+mod infer_scope_tests;
 mod inference_census_tests;
 mod inference_fixation_tests;
 mod intersection_complexity_tests;

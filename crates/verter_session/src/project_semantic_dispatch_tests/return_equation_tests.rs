@@ -476,14 +476,14 @@ fn refused_call_commit_leaves_the_relation_ledger_undrained() {
         // A relation member whose session already committed and whose
         // deferred admission entry is intact: draining it is the last step
         // of the publication tail.
-        let relation_session = txn.push_collecting_session(empty_session_setup(), None);
+        let relation_session = txn.push_collecting_session(empty_session_setup());
         commit_session(&mut txn, relation_session);
         txn.relation
             .session_admission
             .defer(relation_session, relate_key.clone());
         // A call member staged on a session that never reached
         // `StagedDeterministic`: the commit gate refuses it.
-        let call_session = txn.push_collecting_session(empty_session_setup(), None);
+        let call_session = txn.push_collecting_session(empty_session_setup());
         let idx = txn.reentry_mut().push_flow_return(flow_key.clone(), 0);
         txn.obligations.pending_mut().deposit(PendingObligation {
             identity: ObligationIdentity::Relate {

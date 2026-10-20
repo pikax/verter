@@ -88,7 +88,7 @@ use super::dispatch_txn::{
 };
 use super::inference::session::{
     InferenceInfoSetup, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint,
+    ReverseRecoveredEntry, SessionCheckpoint,
 };
 #[cfg(feature = "semantic-observe")]
 use super::relation_explanation::RelationExplanation;
@@ -269,20 +269,13 @@ pub(super) struct InferParamSite {
 #[derive(Debug, Clone)]
 pub(crate) struct InferPatternInfo {
     setup: InferenceSessionSetup,
-    reverse_homomorphic: Option<ReverseHomomorphicSpec>,
 }
 
 impl InferPatternInfo {
     fn new(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         sites: Vec<InferParamSite>,
-        reverse_homomorphic: Option<ReverseHomomorphicSpec>,
     ) -> Self {
-        let pass_kind = if reverse_homomorphic.is_some() {
-            InferencePassKind::ReverseHomomorphicMapped
-        } else {
-            InferencePassKind::Ordinary
-        };
         let candidate_priority = sites
             .iter()
             .map(|site| site.priority)
@@ -300,13 +293,12 @@ impl InferPatternInfo {
                 graph,
                 infos,
                 VariancePhase::Covariant,
-                pass_kind,
+                InferencePassKind::Ordinary,
                 candidate_priority,
                 NoInferMask::empty(),
                 ConstParamPolicy::NonConst,
                 ContextualInferenceMode::None,
             ),
-            reverse_homomorphic,
         }
     }
 }
@@ -2722,10 +2714,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if wants_session {
             if let Some(pattern) = pattern {
-                let session_id = txn.push_collecting_session(
-                    pattern.setup,
-                    pattern.reverse_homomorphic.map(ReverseProjectionState::new),
-                );
+                let session_id = txn.push_collecting_session(pattern.setup);
                 // Both identities come from the same immutable setup value;
                 // candidate collection cannot make them diverge.
                 verter_debug_assert_eq!(
@@ -4447,7 +4436,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         let graph = self.graph();
-        if let Some(spec) = self.reverse_homomorphic_spec(target) {
+        let is_infer = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+        };
+        if let Some(spec) = self.reverse_homomorphic_spec(target, is_infer) {
             let name = match graph.node_data(spec.base_infer).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Arc::<str>::from(name),
                 _ => return None,
@@ -4459,7 +4454,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name,
                     priority: InferenceCandidatePriority::HomomorphicMapped,
                 }],
-                Some(spec),
             ));
         }
         if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
@@ -4470,7 +4464,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
-                None,
             ));
         }
         let InferInventory::Sites(nodes) = self.infer_inventory(target) else {
@@ -4487,13 +4480,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => None,
             })
             .collect();
-        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites, None))
+        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites))
     }
 
-    /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
+    /// Recognize only the exact `{ [P in keyof T]: X }` descriptor over an
+    /// inferable `T` — an `infer` declaration, or a parameter the active
+    /// session infers. A key-remapped mapped type (`as` clause) infers
+    /// nothing (`inferToMappedType` skips a mapped type with a name type).
     fn reverse_homomorphic_spec(
         &self,
         mapped_node: SemanticNodeId,
+        inferable: impl Fn(SemanticNodeId) -> bool,
     ) -> Option<ReverseHomomorphicSpec> {
         let graph = self.graph();
         let mapped = graph.node_data(mapped_node)?;
@@ -4512,10 +4509,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return None,
         };
         if source != key_base
-            || !matches!(
-                graph.node_data(key_base).as_deref(),
-                Some(SemanticNodeData::Infer { .. })
-            )
+            || !inferable(key_base)
             || !matches!(
                 graph.node_data(mapper.parameter_node).as_deref(),
                 Some(SemanticNodeData::TypeParam { .. })
@@ -5179,6 +5173,114 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
     }
 
+    /// The reverse mapping a relation into `target` makes: `target` is a
+    /// homomorphic mapped type over a parameter the active session infers,
+    /// a conditional's `infer` declaration and a call's type parameter
+    /// alike, with no reverse mapping of it already in flight.
+    fn reverse_mapping_target(&self, target: SemanticNodeId) -> Option<ReverseHomomorphicSpec> {
+        if !self.relation_session_active()
+            || !matches!(
+                self.graph().node_data(target).as_deref(),
+                Some(SemanticNodeData::Mapped { .. })
+            )
+        {
+            return None;
+        }
+        let graph = self.graph();
+        let spec = self.reverse_homomorphic_spec(target, |node| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
+            ) && self
+                .dispatch_txn
+                .borrow()
+                .active_session()
+                .is_some_and(|session| session.infers(node))
+        })?;
+        let in_flight = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.reverse_in_flight(target));
+        (!in_flight).then_some(spec)
+    }
+
+    /// `target`, a key-remapped mapped type (`as` clause) over `keyof T`
+    /// for a parameter `T` the active session infers, with `T` replaced by
+    /// what an uninferred parameter fixes to — its constraint, else
+    /// `unknown`: the checker infers nothing through a mapped type with a
+    /// name type (`inferToMappedType` is skipped, and its generic keys name
+    /// no member), so the relation is the one to that instantiation. `None`
+    /// for any other target.
+    fn remapped_mapping_without_inference(&self, target: SemanticNodeId) -> Option<SemanticNodeId> {
+        if !self.relation_session_active() {
+            return None;
+        }
+        let graph = self.graph();
+        let mapper = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Mapped { mapper, .. }) if mapper.name_remap.is_some() => {
+                mapper.clone()
+            }
+            _ => return None,
+        };
+        let key_space = self.peel_relation_alias(mapper.key_space)?;
+        let base = match graph.node_data(key_space).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => self.peel_relation_alias(*base)?,
+            _ => return None,
+        };
+        let constraint = match graph.node_data(base).as_deref() {
+            Some(
+                SemanticNodeData::Infer { constraint, .. }
+                | SemanticNodeData::TypeParam { constraint, .. },
+            ) => *constraint,
+            _ => return None,
+        };
+        let constraint = {
+            let txn = self.dispatch_txn.borrow();
+            let session = txn.active_session()?;
+            if !session.infers(base) {
+                return None;
+            }
+            constraint.or_else(|| session.declared_constraint(base))
+        };
+        let fixed = constraint.unwrap_or_else(|| {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        });
+        let instantiated = self.substitute_semantic_type_param(target, base, fixed);
+        Some(
+            self.evaluate_deferred_semantic_node_with_context(
+                instantiated,
+                ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .into_active_query_build_node(self),
+        )
+    }
+
+    /// Run one reverse mapping inside its own session journals
+    /// ([`Self::relate_reverse_homomorphic`]).
+    fn relate_reverse_mapping(
+        &self,
+        source: SemanticNodeId,
+        spec: ReverseHomomorphicSpec,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let opened = self
+            .dispatch_txn
+            .borrow_mut()
+            .active_session_mut()
+            .is_some_and(|session| session.open_reverse_frame(spec.clone()));
+        if !opened {
+            return RelationResult::Unknown;
+        }
+        let result = self.relate_reverse_homomorphic(source, &spec, bindings);
+        if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
+            session.close_reverse_frame();
+        }
+        result
+    }
+
     /// Recover the input of an exact homomorphic mapped target. The only
     /// externally visible output is the normal relation verdict; recovered
     /// values and the aggregate candidate stay in the active session.
@@ -5642,16 +5744,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expected_index: &IndexKey,
     ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
-        let Some(SemanticNodeData::Infer {
-            name: base_name,
-            binder: base_binder,
-            ..
-        }) = graph
-            .node_data(base_infer)
-            .as_deref()
-            .map(crate::semantic_query::SemanticNodeData::clone)
-        else {
-            return Vec::new();
+        // An `infer` declaration is read through its binder as well; a type
+        // parameter only as itself.
+        let (base_name, base_binder) = match graph.node_data(base_infer).as_deref() {
+            Some(SemanticNodeData::Infer { name, binder, .. }) => {
+                (name.clone(), Some(binder.clone()))
+            }
+            Some(SemanticNodeData::TypeParam { display_name, .. }) => (display_name.clone(), None),
+            _ => return Vec::new(),
         };
         let mut targets = Vec::new();
         let mut visited: FxHashSet<(SemanticNodeId, bool)> = FxHashSet::default();
@@ -5836,7 +5936,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         object: SemanticNodeId,
         base_infer: SemanticNodeId,
-        base_binder: crate::semantic_query::InferBinderId,
+        base_binder: Option<crate::semantic_query::InferBinderId>,
     ) -> bool {
         let Some(object) = self.peel_relation_alias(object) else {
             return false;
@@ -5848,7 +5948,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return false;
         };
         match data.as_ref() {
-            SemanticNodeData::InferRef { binder, .. } => *binder == base_binder,
+            SemanticNodeData::InferRef { binder, .. } => base_binder.as_ref() == Some(binder),
             _ => false,
         }
     }
@@ -5868,10 +5968,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let txn = self.dispatch_txn.borrow();
         match txn.reentry().nearest_relate() {
             Some((top, _)) => {
-                let inference_context = top.inference_context.as_ref().and_then(|context| {
-                    (context.pass_kind == InferencePassKind::ReverseHomomorphicMapped)
-                        .then(|| context.clone())
-                });
+                let inference_context = txn
+                    .active_session()
+                    .filter(|session| session.reverse_active())
+                    .map(|session| session.context_key().clone());
                 RelateMemoKey {
                     source,
                     target,
@@ -6892,15 +6992,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return result;
         }
-        let reverse_spec = self
-            .dispatch_txn
-            .borrow()
-            .active_session()
-            .and_then(InferenceSession::reverse_spec)
-            .cloned()
-            .filter(|spec| spec.mapped_node == key.target);
-        if let Some(spec) = reverse_spec {
-            return self.relate_reverse_homomorphic(key.source, &spec, bindings);
+        if let Some(spec) = self.reverse_mapping_target(key.target) {
+            return self.relate_reverse_mapping(key.source, spec, bindings);
         }
         // An unfinished or aborted conditional reading on either side
         // leaves the relation undecided; only complete readings relate.
@@ -8364,6 +8457,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
+        // A declaration naming a homomorphic mapped type over a parameter
+        // the session infers reverse-maps where it is unwrapped.
+        if let Some(spec) = self.reverse_mapping_target(target) {
+            return self.relate_reverse_mapping(source, spec, bindings);
+        }
+        // A key-remapped one infers nothing to its parameter, which then
+        // stands for what it fixes to.
+        if let Some(instantiated) = self.remapped_mapping_without_inference(target) {
+            return self.relate_member(source, instantiated, bindings, InferPosition::Covariant);
+        }
         // Function-inference demand point (the pre-relation function-infer
         // case, now inside the authority): with an active session and a
         // Function pattern, a check still riding a deferred /
@@ -15671,7 +15774,7 @@ pub mod reverse_ownership_tests {
             &crate::semantic_query_memo::SemanticGraphStore::default(),
             Arc::from(vec![InferenceInfoSetup::new(param, Arc::from("T"))].into_boxed_slice()),
             VariancePhase::Covariant,
-            InferencePassKind::ReverseHomomorphicMapped,
+            InferencePassKind::Ordinary,
             InferenceCandidatePriority::HomomorphicMapped,
             NoInferMask::empty(),
             ConstParamPolicy::NonConst,
@@ -15679,8 +15782,8 @@ pub mod reverse_ownership_tests {
         )
     }
 
-    fn reverse_state(param: SemanticNodeId) -> ReverseProjectionState {
-        ReverseProjectionState::new(ReverseHomomorphicSpec {
+    fn reverse_spec(param: SemanticNodeId) -> ReverseHomomorphicSpec {
+        ReverseHomomorphicSpec {
             mapped_node: SemanticNodeId(301),
             base_infer: param,
             mapper_parameter: SemanticNodeId(302),
@@ -15689,7 +15792,7 @@ pub mod reverse_ownership_tests {
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
             },
-        })
+        }
     }
 
     /// Compile-time witness over every capability family: this private
@@ -15725,11 +15828,12 @@ pub mod reverse_ownership_tests {
         let aggregate = SemanticNodeId(305);
         let fallback = SemanticNodeId(306);
 
-        let mut inactive = InferenceSession::new(
-            SessionId(1),
-            reverse_setup(active_param),
-            Some(reverse_state(active_param)),
+        let mut inactive = InferenceSession::new(SessionId(1), reverse_setup(active_param));
+        assert!(
+            !inactive.open_reverse_frame(reverse_spec(SemanticNodeId(999))),
+            "a reverse mapping opens only over a parameter of the frozen session setup"
         );
+        assert!(inactive.open_reverse_frame(reverse_spec(active_param)));
         assert!(
             !inactive.deposit_reverse_aggregate(
                 SemanticNodeId(999),
@@ -15746,11 +15850,16 @@ pub mod reverse_ownership_tests {
             "a refused deposit must leave no independently publishable reverse result"
         );
 
-        let mut active = InferenceSession::new(
-            SessionId(2),
-            reverse_setup(active_param),
-            Some(reverse_state(active_param)),
+        let mut active = InferenceSession::new(SessionId(2), reverse_setup(active_param));
+        assert!(
+            !active.deposit_reverse_aggregate(
+                active_param,
+                aggregate,
+                InferenceCandidatePriority::HomomorphicMapped,
+            ),
+            "a reverse aggregate binds only while its reverse mapping is in flight"
         );
+        assert!(active.open_reverse_frame(reverse_spec(active_param)));
         assert!(active.deposit_reverse_aggregate(
             active_param,
             aggregate,

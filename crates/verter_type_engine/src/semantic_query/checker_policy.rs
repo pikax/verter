@@ -195,6 +195,25 @@ pub(crate) const fn circular_type_alias() -> CheckerDiagnostic {
     }
 }
 
+/// The checker's TS2304 for a type reference to a conditional type's
+/// `infer` declaration outside the scope its `extends` clause gives it: the
+/// false branch, or another declaration's constraint in the same pattern
+/// (read where the conditional is written). A name an outer declaration
+/// also binds reads that declaration instead. A checker error: the
+/// reference is `any`.
+///
+/// Measured on TypeScript 7.0.2, all four `strictNullChecks` ×
+/// `noImplicitAny` settings: `type I<T> = T extends [infer U] ? 1 : U` and
+/// `type C<T> = T extends [infer A, infer B extends A] ? B : 0` report
+/// TS2304 for `U` and for `A`; `I<2>` is the error type and `C<[1, 2]>` is
+/// `2`.
+pub(crate) const fn unresolved_type_name() -> CheckerDiagnostic {
+    CheckerDiagnostic {
+        code: CheckerDiagnosticCode::CannotFindName,
+        operation: CheckerDiagnosticOperation::TypeReference,
+    }
+}
+
 /// The checker's error type after `diagnostic`, a diagnostic the types
 /// themselves decide (never a resource limit): the typed recovery carrier,
 /// a complete answer.

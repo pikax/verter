@@ -2376,7 +2376,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None => (
                 self.dispatch_txn
                     .borrow_mut()
-                    .push_collecting_session(setup, None),
+                    .push_collecting_session(setup),
                 None,
                 None,
             ),

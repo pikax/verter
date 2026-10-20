@@ -169,7 +169,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             || source_args.len() != target_args.len()
             || !target_args
                 .iter()
-                .any(|arg| self.subtree_contains_infer(*arg))
+                .any(|arg| self.subtree_contains_infer(*arg) || self.call_session_infers_bare(*arg))
             || self.variance_measurement(source).is_some()
             || self.variance_measurement(target).is_some()
         {
@@ -195,9 +195,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
             })
         };
+        // A call's distinct bare type parameters recover the source's
+        // arguments the same way (`inferFromTypes` over two applications of
+        // one alias infers from their alias arguments before expanding
+        // either): the call's applicability check relates the instantiated
+        // signature afterwards, so the identity needs no ownership of the
+        // whole pattern.
         let mut binders = rustc_hash::FxHashSet::default();
-        let identity_inference = owns_whole_pattern && target_args.iter().all(|arg| matches!(self.graph().node_data(*arg).as_deref(),
-            Some(SemanticNodeData::Infer { binder, constraint: None, .. }) if binders.insert(binder.clone())));
+        let mut params = rustc_hash::FxHashSet::default();
+        let identity_inference =
+            target_args
+                .iter()
+                .all(|arg| match self.graph().node_data(*arg).as_deref() {
+                    Some(SemanticNodeData::Infer {
+                        binder,
+                        constraint: None,
+                        ..
+                    }) => owns_whole_pattern && binders.insert(binder.clone()),
+                    Some(SemanticNodeData::TypeParam { .. }) => {
+                        self.call_session_infers_bare(*arg) && params.insert(*arg)
+                    }
+                    _ => false,
+                });
         let variances = if identity_inference {
             vec![Variance::exact(Variance::COVARIANT); source_args.len()]
         } else {

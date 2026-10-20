@@ -161,7 +161,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.relation_deposit_candidate(param_node, bound, occurrence)
     }
 
-    fn widened_slice(&self, slice: SemanticNodeId, policy: ConstParamPolicy) -> SemanticNodeId {
+    /// `slice` with each element widened under `policy`, its tuple or array
+    /// shape kept.
+    pub(in crate::project_semantic_dispatch) fn widened_slice(
+        &self,
+        slice: SemanticNodeId,
+        policy: ConstParamPolicy,
+    ) -> SemanticNodeId {
         let graph = self.graph();
         let data = graph.node_data(slice);
         match data.as_deref() {
