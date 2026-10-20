@@ -1066,6 +1066,14 @@ fn resolve_script_facts_inner<T: FrameworkScriptFactPayload>(
                                         verter_workspace::ResolutionPublication::Admitted(
                                             admitted,
                                         ) => admitted.into_result(),
+                                        // The complete target, served; the
+                                        // facts built on it stay cold.
+                                        verter_workspace::ResolutionPublication::Unretained(
+                                            unretained,
+                                        ) => {
+                                            refused = true;
+                                            unretained.into_result()
+                                        }
                                         verter_workspace::ResolutionPublication::Refused(_) => {
                                             refused = true;
                                             None

@@ -17,15 +17,15 @@ use rustc_hash::FxHashSet;
 use super::{ConditionalBranchSelection, ProjectSemanticDispatch};
 use crate::semantic_query::surface_resolution::NonEmptyReasons;
 use crate::semantic_query::{
-    BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, OriginEdgeKind,
-    OriginMeta, PartialReason, QueryError, QueryResult, SemanticNodeData, SemanticNodeId,
-    SemanticQueryKey,
+    BranchSelection, ConditionalPendingSubstitution, ExecutionAbort, FactResult, LiteralValue,
+    OriginEdgeKind, OriginMeta, PartialReason, PrimitiveKind, QueryError, QueryResult,
+    SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
 /// The free type variables below one semantic node, binder-aware: the type
 /// parameters written below it that no generic signature within declares
 /// over the position they are written in, and whether an `infer` reference
-/// sits below it. A node's summary is a function of its immutable payload
+/// or declaration sits below it. A node's summary is a function of its immutable payload
 /// and its children's summaries, so it holds for as long as the node id
 /// does.
 #[derive(Clone, Default)]
@@ -36,6 +36,9 @@ pub(super) struct FreeTypeVariables {
     /// Whether an `InferRef` sits below, the constraints and defaults of the
     /// type parameters written there included.
     infer_ref: bool,
+    /// Infer declaration presence, used only where an operand reads the
+    /// declaration as a still-unbound variable rather than a pattern site.
+    infer_declaration: bool,
 }
 
 /// The dispatcher's summaries of [`FreeTypeVariables`] by node, kept for
@@ -433,11 +436,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         /// using the shared relation engine and returns one of:
         ///
         /// - **Distributive union check** — when `distributive == true` AND
-        ///   `check` resolves to a [`SemanticNodeData::Union`], the builder
+        ///   `check` resolves to a union or `boolean`, the builder
         ///   distributes per-member by re-entering the dispatcher with
         ///   `SemanticQueryApi::execute(SemanticQueryKey::Conditional {
         ///   check: member, extends, true_branch, false_branch,
-        ///   distributive: false })` for every member, then combines the
+        ///   distributive: false })` for every member (`boolean` contributes
+        ///   `true` and `false`), then combines the
         ///   per-member results through
         ///   `SemanticQueryApi::execute(SemanticQueryKey::ReduceUnion {
         ///   members: per_member_results, nullability: Strict })`. Termination is guaranteed by
@@ -574,7 +578,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             && operand_read.value().0 == authored_check
             && !self.decision_waits()
         {
-            if let Some(arm) = self.true_through_written_arm(authored_check, extends) {
+            if let Some(arm) = self.true_through_written_arm(authored_check, extends, distributive)
+            {
                 // An arm relation that waits on a read proves nothing yet:
                 // the frame runs the decision again once it is delivered.
                 if self.decision_waits() {
@@ -667,11 +672,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // them answered instead of evaluating them in place. What the
         // demand observed is the relation's to observe, so it is dropped.
         if self.deciding_on_the_runtime() {
-            let demanded = self.observe_read(|| {
-                for operand in [check, extends] {
-                    let _ = self.unwrap_identity_carrier_for_relation(operand);
-                }
-            });
+            let demanded = self.observe_read(|| self.demand_relation_operands([check, extends]));
             let _ = demanded.discard();
             if self.decision_waits() {
                 return self.waiting_decision_output();
@@ -806,6 +807,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         check: SemanticNodeId,
         extends: SemanticNodeId,
+        distributive: bool,
     ) -> Option<super::flow_return_fact::ObservedRead<super::dispatch_txn::RelationStep>> {
         let arms = match self.graph().node_data(extends).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc(),
@@ -820,7 +822,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         // Whether the check absorbs or distributes is read off the type it
         // names; that read is evidence of the decision only when complete.
-        let plain = self.observe_read(|| self.check_neither_absorbs_nor_distributes(check));
+        let plain =
+            self.observe_read(|| self.check_neither_absorbs_nor_distributes(check, distributive));
         if !plain.observations_are_complete() || !*plain.value() {
             let _ = plain.discard();
             return None;
@@ -850,8 +853,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// reference to an interface or a class names an object type. Every
     /// other check — a union, an intersection (`1 & Id<any>` is `any`), an
     /// indexed access, a `keyof`, a conditional, a template, a tuple, or a
-    /// name the lane cannot read completely — is not proven plain.
-    fn check_neither_absorbs_nor_distributes(&self, check: SemanticNodeId) -> bool {
+    /// name the lane cannot read completely — is not proven plain. Boolean
+    /// is plain only when the conditional is non-distributive.
+    fn check_neither_absorbs_nor_distributes(
+        &self,
+        check: SemanticNodeId,
+        distributive: bool,
+    ) -> bool {
         let named = match self.graph().node_data(check).as_deref() {
             Some(
                 SemanticNodeData::DeclRef { identity }
@@ -881,17 +889,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => check,
         };
         self.peek_special(named).is_none()
-            && matches!(
-                self.graph().node_data(named).as_deref(),
+            && match self.graph().node_data(named).as_deref() {
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => !distributive,
                 Some(
                     SemanticNodeData::Primitive(_)
-                        | SemanticNodeData::Literal(_)
-                        | SemanticNodeData::EnumLiteral(_)
-                        | SemanticNodeData::Object(_)
-                        | SemanticNodeData::Array { .. }
-                        | SemanticNodeData::Signature { .. }
-                )
-            )
+                    | SemanticNodeData::Literal(_)
+                    | SemanticNodeData::EnumLiteral(_)
+                    | SemanticNodeData::Object(_)
+                    | SemanticNodeData::Array { .. }
+                    | SemanticNodeData::Signature { .. },
+                ) => true,
+                _ => false,
+            }
     }
 
     /// What a decision that waits on a read returns: a typed gap its frame
@@ -1432,7 +1441,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// CARRIER of a union (the defaulted-union type argument
     /// `T extends SingleOrMultiple = SingleOrMultiple` of reka-ui's
     /// `AccordionRootEmits`) distributes exactly like a raw `Union`
-    /// binding. The raw-`Union` fast path stays allocation-free; the
+    /// binding. `boolean` contributes its two literals, even inside a union;
+    /// unions without `boolean` retain their member slice without allocation. The
     /// carrier shapes resolve through the shared structural-fact demand
     /// primitive ([`Self::normalize_node_for_structural_fact_demand`] —
     /// the same `ResolveDecl` / `Instantiate` delegation the relation
@@ -1442,7 +1452,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///
     /// Fail-closed on BOTH rails: a `Partial` demand (budget / cycle /
     /// fault — the primitive folds the reasons into the active build
-    /// taint frame) and a resolved non-`Union` surface return `None`,
+    /// taint frame) and a resolved surface other than a union or `boolean` return `None`,
     /// deferring to the tri-state oracle path. `TypeParam` / `Infer`
     /// shells are STABLE STOPS of the deferred evaluator, so an OPEN
     /// generic check never distributes over its constraint or default —
@@ -1451,9 +1461,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         check: SemanticNodeId,
     ) -> Option<(SemanticNodeId, Arc<[SemanticNodeId]>)> {
+        let is_boolean = |node: SemanticNodeId| {
+            matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean))
+            )
+        };
+        let boolean_members = || {
+            [true, false].map(|value| {
+                self.graph()
+                    .intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value)))
+            })
+        };
         let union_members_of = |node: SemanticNodeId| {
             self.graph().node_data(node).and_then(|data| match &*data {
-                SemanticNodeData::Union(members) => Some((node, members.members_arc())),
+                SemanticNodeData::Primitive(PrimitiveKind::Boolean) => {
+                    Some((node, Arc::from(boolean_members())))
+                }
+                SemanticNodeData::Union(members) => {
+                    let Some(first_boolean) = members.iter().position(|&member| is_boolean(member))
+                    else {
+                        return Some((node, members.members_arc()));
+                    };
+                    let mut split = Vec::with_capacity(members.len() + 1);
+                    split.extend(members.iter().take(first_boolean).copied());
+                    for &member in members.iter().skip(first_boolean) {
+                        if is_boolean(member) {
+                            split.extend(boolean_members());
+                        } else {
+                            split.push(member);
+                        }
+                    }
+                    Some((node, Arc::from(split)))
+                }
                 _ => None,
             })
         };
@@ -2030,9 +2070,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
-    fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
+    fn mentions_generic_operand_variable(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
         let summary = self.free_type_variables(node);
-        summary.params.is_some() || summary.infer_ref
+        summary.params.is_some()
+            || summary.infer_ref
+            || (infer_operand && summary.infer_declaration)
     }
 
     /// The free type parameters `roots` hold anywhere below them — not
@@ -2069,6 +2111,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
                         .then(|| Arc::from([root])),
                     infer_ref: matches!(data.as_ref(), SemanticNodeData::InferRef { .. }),
+                    infer_declaration: matches!(data.as_ref(), SemanticNodeData::Infer { .. }),
                 };
                 self.free_type_variables
                     .borrow_mut()
@@ -2111,10 +2154,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     children.clear();
                     let _ = data.for_each_child(|child| children.push(child));
                     let mut infer_ref = matches!(data.as_ref(), SemanticNodeData::InferRef { .. });
+                    let mut infer_declaration =
+                        matches!(data.as_ref(), SemanticNodeData::Infer { .. });
                     let mut params = ParamUnion::default();
                     for child in &children {
                         if let Some(below) = computed.get(child) {
                             infer_ref |= below.infer_ref;
+                            infer_declaration |= below.infer_declaration;
                             params.add(&below.params);
                         }
                     }
@@ -2129,7 +2175,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .finish_without(type_parameters.iter().map(|declared| declared.param)),
                         _ => params.finish(),
                     };
-                    FreeTypeVariables { params, infer_ref }
+                    FreeTypeVariables {
+                        params,
+                        infer_ref,
+                        infer_declaration,
+                    }
                 }
             };
             computed.insert(node, summary);
@@ -2155,7 +2205,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         check: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> bool {
-        if self.type_is_generic(check) || self.type_is_generic(extends) {
+        if self.type_is_generic_operand(check, true) || self.type_is_generic(extends) {
             return true;
         }
         let graph = self.graph();
@@ -2175,10 +2225,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => None,
         };
         match (simple_tuple(check), simple_tuple(extends)) {
-            (Some(check), Some(extends)) if check.len() == extends.len() => check
-                .into_iter()
-                .chain(extends)
-                .any(|element| self.type_is_generic(element)),
+            (Some(check), Some(extends)) if check.len() == extends.len() => {
+                check
+                    .into_iter()
+                    .any(|element| self.type_is_generic_operand(element, true))
+                    || extends
+                        .into_iter()
+                        .any(|element| self.type_is_generic(element))
+            }
             _ => false,
         }
     }
@@ -2195,11 +2249,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// in (`NonNullable<T[K]>` is, `Pick<T, "a">` is not). Read from an
     /// explicit stack.
     pub(super) fn type_is_generic(&self, node: SemanticNodeId) -> bool {
+        self.type_is_generic_operand(node, false)
+    }
+
+    /// An infer declaration substituted into a conditional's check acts as
+    /// an unbound type variable. At its declaration site in `extends` it is
+    /// instead a pattern to infer, so genericness must retain that position.
+    fn type_is_generic_operand(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
         let graph = self.graph();
-        let mut pending = vec![node];
-        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
+        let mut pending = vec![(node, infer_operand)];
+        // One visited set per operand position: a node met as an infer
+        // operand and as an ordinary operand is visited once in each.
+        let mut seen = [
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+        ];
+        while let Some((node, infer_operand)) = pending.pop() {
+            if !seen[usize::from(infer_operand)].insert(node) {
                 continue;
             }
             let Some(data) = graph.node_data(node) else {
@@ -2211,7 +2277,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 if !args
                     .iter()
-                    .any(|arg| self.mentions_free_type_variable(*arg))
+                    .any(|arg| self.mentions_generic_operand_variable(*arg, infer_operand))
                 {
                     continue;
                 }
@@ -2228,20 +2294,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         _ => &[],
                     };
                     if generic_in.is_empty() {
-                        pending.extend(args.iter().copied());
+                        pending.extend(args.iter().map(|arg| (*arg, infer_operand)));
                     } else {
-                        pending.extend(generic_in.iter().filter_map(|index| args.get(*index)));
+                        pending.extend(
+                            generic_in
+                                .iter()
+                                .filter_map(|index| args.get(*index))
+                                .map(|arg| (*arg, infer_operand)),
+                        );
                     }
                     continue;
                 }
                 match self.alias_application_instantiated(&base, &args) {
                     Some(named) if named == node => return true,
-                    Some(named) => pending.push(named),
+                    Some(named) => pending.push((named, infer_operand)),
                     None => {}
                 }
                 continue;
             }
             match &*data {
+                SemanticNodeData::Infer { .. } if infer_operand => return true,
                 SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. } => {
                     return true;
                 }
@@ -2249,26 +2321,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // `keyof O`) is generic only over a generic operand; the
                 // checker resolved it.
                 SemanticNodeData::IndexedAccess { object, index } => {
-                    pending.push(*object);
+                    pending.push((*object, infer_operand));
                     if let crate::semantic_query::IndexKey::Computed(index) = index {
-                        pending.push(*index);
+                        pending.push((*index, infer_operand));
                     }
                 }
-                SemanticNodeData::KeyOf { base } => pending.push(*base),
+                SemanticNodeData::KeyOf { base } => pending.push((*base, infer_operand)),
                 SemanticNodeData::Conditional { check, extends, .. } => {
-                    pending.extend([*check, *extends]);
+                    pending.extend([(*check, true), (*extends, false)]);
                 }
                 SemanticNodeData::IntrinsicApplication { args, .. } => {
-                    pending.extend(args.iter());
+                    pending.extend(args.iter().map(|arg| (*arg, infer_operand)));
                 }
-                SemanticNodeData::Alias(inner) => pending.push(*inner),
-                SemanticNodeData::Mapped { source, .. } => pending.push(*source),
-                SemanticNodeData::Union(members) => pending.extend(members.members_arc().iter()),
+                SemanticNodeData::Alias(inner) => pending.push((*inner, infer_operand)),
+                SemanticNodeData::Mapped { source, .. } => pending.push((*source, infer_operand)),
+                SemanticNodeData::Union(members) => pending.extend(
+                    members
+                        .members_arc()
+                        .iter()
+                        .map(|member| (*member, infer_operand)),
+                ),
                 SemanticNodeData::Intersection(members) => {
-                    pending.extend(members.members_arc().iter());
+                    pending.extend(
+                        members
+                            .members_arc()
+                            .iter()
+                            .map(|member| (*member, infer_operand)),
+                    );
                 }
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                    pending.extend(expressions.iter());
+                    pending.extend(
+                        expressions
+                            .iter()
+                            .map(|expression| (*expression, infer_operand)),
+                    );
                 }
                 SemanticNodeData::Tuple { elements, .. } => pending.extend(
                     elements
@@ -2280,7 +2366,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 graph.node_data(*value).as_deref(),
                                 Some(SemanticNodeData::TypeParam { .. })
                             )
-                        }),
+                        })
+                        .map(|value| (value, infer_operand)),
                 ),
                 _ => {}
             }

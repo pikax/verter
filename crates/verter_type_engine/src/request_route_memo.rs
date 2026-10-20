@@ -4,10 +4,12 @@
 use verter_session_query::facts::fact_cache::FactVersionRef;
 
 /// What resolving one owner's specifier set observed: whether a resolution
-/// was refused, and every observation the admitted ones recorded, in order.
+/// was refused, whether one was delivered unretained, and every observation
+/// the admitted ones recorded, in order.
 #[derive(Debug)]
 pub struct ImportRouteObservation {
     pub refused: bool,
+    pub unretained: bool,
     pub observed: Vec<FactVersionRef>,
 }
 
@@ -42,11 +44,14 @@ pub struct ImportRouteObservationMemo(
 
 /// One analysis-canonical normalization a request made: the canonical it
 /// normalized to (`None`: to itself), whether a resolution it drove was
-/// refused, and every observation those resolutions recorded.
+/// refused, whether one was delivered unretained (the normalization stands,
+/// but nothing derived from it may be retained), and every observation
+/// those resolutions recorded.
 #[derive(Debug)]
 pub struct NormalizedCanonical {
     pub normalized: Option<std::sync::Arc<str>>,
     pub refused: bool,
+    pub unretained: bool,
     pub observed: Vec<FactVersionRef>,
 }
 

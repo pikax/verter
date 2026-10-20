@@ -30,7 +30,7 @@ use std::cell::{Cell, RefCell};
 
 use smallvec::SmallVec;
 
-use verter_session_query::facts::fact_read_set::NonCacheablePropagation;
+use verter_session_query::facts::fact_read_set::{NonCacheableBasis, NonCacheablePropagation};
 use verter_session_query::facts::{fact_cache::FactVersionRef, fact_read_set::FactReadSetCell};
 
 thread_local! {
@@ -403,6 +403,16 @@ fn observe_signature_consumers(sig: &[FactVersionRef], observe: impl Fn(&FactRea
 /// discipline as [`observe_fan_out`].
 #[inline]
 pub(super) fn apply_non_cacheable_propagation(propagation: NonCacheablePropagation) {
+    apply_non_cacheable_mark(propagation, NonCacheableBasis::Untrusted);
+}
+
+/// [`apply_non_cacheable_propagation`], stating what the mark says about
+/// the value it taints (see [`NonCacheableBasis`]).
+#[inline]
+pub(super) fn apply_non_cacheable_mark(
+    propagation: NonCacheablePropagation,
+    basis: NonCacheableBasis,
+) {
     // A recorder notes EVERY mark, local-only included: a recording that
     // saw one is never replayed, so the conservative read costs only reuse.
     for recorder in active_recorders() {
@@ -417,7 +427,7 @@ pub(super) fn apply_non_cacheable_propagation(propagation: NonCacheablePropagati
     for ptr in ptrs.into_iter().skip(first) {
         if !ptr.is_null() {
             // SAFETY: see module-level SAFETY contract.
-            unsafe { &*ptr }.note_non_cacheable_read(propagation);
+            unsafe { &*ptr }.note_non_cacheable_read_with_basis(propagation, basis);
         }
     }
 }
