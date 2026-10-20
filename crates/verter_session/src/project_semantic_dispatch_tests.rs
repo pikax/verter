@@ -114,6 +114,7 @@ mod module_value_surface_tests;
 mod named_arm_reduction_tests;
 mod namespace_member_value_tests;
 mod namespace_value_tests;
+mod narrowing_chain_growth_tests;
 mod narrowing_ledger_tests;
 mod nested_reference_reduction_tests;
 mod never_callee_tests;

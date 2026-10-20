@@ -7102,6 +7102,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             resolving_functions: std::rc::Rc::default(),
             this_free_values: std::rc::Rc::default(),
             declared_type_reads: std::rc::Rc::default(),
+            carrier_unwraps: std::rc::Rc::default(),
+            discriminant_members: std::rc::Rc::default(),
+            guard_relations: std::rc::Rc::default(),
             canonical,
             owner,
             nullability: key.context.policy.nullability,
@@ -12298,6 +12301,36 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// structure entering the flow again is walked once.
     declared_type_reads:
         std::rc::Rc<std::cell::RefCell<rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>>>,
+    /// Every identity-carrier unwrap this evaluation's guards read
+    /// ([`FlowEvaluator::carrier_unwrap`]), by node, shared by every nested
+    /// evaluator of one root evaluation and dropped with it. A chain of
+    /// guards over one subject reads each of the subject's remaining arms
+    /// at every guard; this keeps each arm's unwrap to one read per
+    /// evaluation rather than one per guard. Request-scoped: it holds only
+    /// nodes this evaluation read.
+    carrier_unwraps: std::rc::Rc<
+        std::cell::RefCell<
+            rustc_hash::FxHashMap<SemanticNodeId, super::relation::IdentityCarrierUnwrap>,
+        >,
+    >,
+    /// Every union arm's member a discriminant test has read
+    /// ([`FlowEvaluator::discriminant_member`]), by arm and member name,
+    /// shared by every nested evaluator of one root evaluation and dropped
+    /// with it: a chain of discriminant tests reads the tested member of
+    /// every remaining arm at every test. Request-scoped: it holds only
+    /// members this evaluation read.
+    discriminant_members: std::rc::Rc<
+        std::cell::RefCell<
+            rustc_hash::FxHashMap<(SemanticNodeId, Arc<str>), Option<SemanticNodeId>>,
+        >,
+    >,
+    /// Every assignability a guard's narrow asked
+    /// ([`FlowEvaluator::narrowing_assignable`]), by source and target,
+    /// shared by every nested evaluator of one root evaluation and dropped
+    /// with it. Request-scoped: it holds only pairs this evaluation related.
+    guard_relations: std::rc::Rc<
+        std::cell::RefCell<rustc_hash::FxHashMap<(SemanticNodeId, SemanticNodeId), Option<bool>>>,
+    >,
     canonical: &'d str,
     owner: verter_type_expr::TopLevelOwnerId,
     /// The `null` / `undefined` algebra of the function's own project
@@ -19085,7 +19118,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             }
             return;
         }
-        match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+        match self.carrier_unwrap(node) {
             super::relation::IdentityCarrierUnwrap::Concrete(concrete)
                 if concrete != node
                     && matches!(
@@ -19107,6 +19140,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 *gapped = true;
             }
         }
+    }
+
+    /// The shared identity-carrier unwrap of `node`
+    /// ([`ProjectSemanticDispatch::unwrap_identity_carrier_for_relation`]),
+    /// read once per evaluation: every guard of a chain over one subject
+    /// asks it again for each arm it passes over.
+    fn carrier_unwrap(&self, node: SemanticNodeId) -> super::relation::IdentityCarrierUnwrap {
+        if let Some(unwrap) = self.carrier_unwraps.borrow().get(&node) {
+            return *unwrap;
+        }
+        let unwrap = self.dispatch.unwrap_identity_carrier_for_relation(node);
+        self.carrier_unwraps.borrow_mut().insert(node, unwrap);
+        unwrap
     }
 
     /// The CURRENT node of a narrowable reference: the binding's reaching
@@ -21324,8 +21370,9 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             )
         };
         let mut undecided = false;
+        let b_arms = self.enumerated_union_arms_or_self(b);
         for a_arm in self.enumerated_union_arms_or_self(a) {
-            for b_arm in self.enumerated_union_arms_or_self(b) {
+            for &b_arm in &b_arms {
                 let verdict = match self.dispatch.nodes_comparable(a_arm, b_arm) {
                     ComparabilityVerdict::Disjoint(_) => Some(false),
                     ComparabilityVerdict::Undecided => None,
@@ -22151,7 +22198,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let arms = self.enumerated_union_arms_or_self(current);
         let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in &arms {
-            match self.project_segments_navigate(*arm, &last) {
+            match self.discriminant_member(*arm, &last) {
                 Some(member) => projected.push(member),
                 None => return GuardNarrowing::Unchanged,
             }
@@ -22175,10 +22222,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if narrowed == never {
             return GuardNarrowing::Narrowed(parent_subject, never);
         }
+        // A literal is comparable to itself, so an arm whose member IS one
+        // of the narrowed member's literal arms survives without a relation
+        // read. Enumerating the narrowed member once per guard, not once
+        // per arm, keeps a chain of discriminant tests linear in the arms
+        // each test passes over: past `x.kind !== "a"` the narrowed member
+        // is every remaining tag.
+        let graph = self.dispatch.graph();
+        let narrowed_literals: rustc_hash::FxHashSet<SemanticNodeId> = self
+            .enumerated_union_arms_or_self(narrowed)
+            .into_iter()
+            .filter(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            })
+            .collect();
         let mut undecided = false;
         let mut survivors = Vec::with_capacity(arms.len());
         for (arm, member) in arms.iter().zip(projected) {
             if member == never {
+                continue;
+            }
+            if narrowed_literals.contains(&member) {
+                survivors.push(*arm);
                 continue;
             }
             match self.comparable_either_way(narrowed, member) {
@@ -22408,12 +22476,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         let mut projected: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for arm in arms {
-            match self.project_segments_navigate(arm, member) {
+            match self.discriminant_member(arm, member) {
                 Some(node) => projected.push(node),
                 None => return false,
             }
         }
         self.members_discriminate(&projected)
+    }
+
+    /// The tested member of one union arm a discriminant test reads
+    /// ([`Self::project_segments_navigate`]), read once per evaluation.
+    fn discriminant_member(
+        &mut self,
+        arm: SemanticNodeId,
+        member: &[Arc<str>],
+    ) -> Option<SemanticNodeId> {
+        let [name] = member else {
+            return self.project_segments_navigate(arm, member);
+        };
+        let key = (arm, Arc::clone(name));
+        if let Some(read) = self.discriminant_members.borrow().get(&key) {
+            return *read;
+        }
+        let read = self.project_segments_navigate(arm, member);
+        self.discriminant_members.borrow_mut().insert(key, read);
+        read
     }
 
     /// Bake a narrow verdict into a state SNAPSHOT's reaching-definition
@@ -22994,14 +23081,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let mut survivors: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut remainder: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         let mut changed = false;
-        // The checker's union-level fallback clauses, accumulated from
-        // the SAME per-arm relation reads the unrelated arms already
-        // pay for: a source relates to a union target when it relates to
-        // SOME arm, and a union source relates to a target when EVERY
-        // arm does.
-        let mut instance_into_some_arm = false;
-        let mut every_arm_into_instance = true;
-        let mut structurally_undecided = false;
+        // The arms heritage proved unrelated to the tested class. Their
+        // relation reads feed only the union-level fallback, which the
+        // checker consults only when no arm survives by derivation, so
+        // they are taken after the scan and only then: a chain of
+        // `instanceof` tests over one union finds its survivor at every
+        // guard and pays no relation for the arms it passes over.
+        let mut unrelated: Vec<SemanticNodeId> = Vec::new();
         for arm in &arms {
             if self.instanceof_arm_is_unclassifiable(*arm) {
                 self.record_degradation(FlowReturnDegradation::FlowGap(
@@ -23045,16 +23131,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     changed = true;
                 }
                 InstanceofHeritage::Unrelated => {
-                    match self.assignable(instance, *arm) {
-                        Some(true) => instance_into_some_arm = true,
-                        Some(false) => {}
-                        None => structurally_undecided = true,
-                    }
-                    match self.assignable(*arm, instance) {
-                        Some(true) => {}
-                        Some(false) => every_arm_into_instance = false,
-                        None => structurally_undecided = true,
-                    }
+                    unrelated.push(*arm);
                     remainder.push(*arm);
                 }
                 InstanceofHeritage::Undecidable => {
@@ -23080,8 +23157,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
         // No survivor: the checker's per-arm derivation map is empty, so
         // its UNION-LEVEL fallback decides the whole remaining subject.
-        // A relation the authority could not decide is no fact at all —
-        // the fallback is not entered on a guess.
+        // Its clauses come from per-arm relation reads: a source relates
+        // to a union target when it relates to SOME arm, and a union
+        // source relates to a target when EVERY arm does. A relation the
+        // authority could not decide is no fact at all — the fallback is
+        // not entered on a guess.
+        let mut instance_into_some_arm = false;
+        let mut every_arm_into_instance = true;
+        let mut structurally_undecided = false;
+        for arm in &unrelated {
+            match self.assignable(instance, *arm) {
+                Some(true) => instance_into_some_arm = true,
+                Some(false) => {}
+                None => structurally_undecided = true,
+            }
+            match self.assignable(*arm, instance) {
+                Some(true) => {}
+                Some(false) => every_arm_into_instance = false,
+                None => structurally_undecided = true,
+            }
+        }
         if structurally_undecided {
             self.record_degradation(FlowReturnDegradation::FlowGap(
                 verter_session_query::flow::policy::FlowGap::GuardNarrowing,
@@ -23433,7 +23528,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 continue;
             }
             seen.push(node);
-            let concrete = match self.dispatch.unwrap_identity_carrier_for_relation(node) {
+            let concrete = match self.carrier_unwrap(node) {
                 super::relation::IdentityCarrierUnwrap::Concrete(concrete) => concrete,
                 super::relation::IdentityCarrierUnwrap::Unresolvable => {
                     any_unknown = true;
@@ -23607,7 +23702,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return None;
             }
         }
-        self.assignable(source, target)
+        // A predicate guard asks this of every remaining arm on both of
+        // its edges, and a chain of guards asks it again for the arms each
+        // guard passes over: the pair is related once per evaluation.
+        let pair = (source, target);
+        if let Some(known) = self.guard_relations.borrow().get(&pair) {
+            return *known;
+        }
+        let related = self.assignable(source, target);
+        self.guard_relations.borrow_mut().insert(pair, related);
+        related
     }
 
     /// Whether `node` is the global `Object` or `Function` interface.
