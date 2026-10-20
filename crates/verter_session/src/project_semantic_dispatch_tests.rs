@@ -100,6 +100,7 @@ mod inference_census_tests;
 mod inference_fixation_tests;
 mod intersection_complexity_tests;
 mod intersection_distribution_tests;
+mod intersection_reduction_tests;
 mod keyof_application_tests;
 mod lib_generic_relation_tests;
 mod lib_global_tests;
