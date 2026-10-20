@@ -845,6 +845,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// be a stable cycle/carrier stop, so it remains a `TypeNode` instead of
     /// recursively re-entering the evaluator.
     fn normalized_index_key_from_evaluated_node(&self, resolved: SemanticNodeId) -> IndexKey {
+        // An enum member's literal type indexes the property its value
+        // names (`Record<E, X>[E.A]` reads key `0`), by the rule a mapped
+        // type's enum domain keys its members with.
+        let enum_value = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(member)) => {
+                self.enum_member_key(resolved, member).map(|_| member.base)
+            }
+            _ => None,
+        };
+        if let Some(value) = enum_value {
+            return self.normalized_index_key_from_evaluated_node(value);
+        }
         match self.graph().node_data(resolved).as_deref() {
             Some(data @ SemanticNodeData::TypeOfNominal(_)) => IndexKey::UniqueSymbol(
                 data.typeof_nominal_identity()

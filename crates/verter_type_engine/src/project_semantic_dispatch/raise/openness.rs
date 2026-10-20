@@ -3057,8 +3057,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
 /// `name_resolution`/registry gate, consulted by the enumeration-domain
 /// walk at a `ValueSensitive` operand with all-closed arguments: an
 /// unresolvable base is an undecidable surface, not a concrete one.
-/// `__builtin__` bases resolve through the `BuiltinUtility` registry or as a
-/// global nominal (`RuntimeNominal`, whose carrier is the resolved type);
+/// `__builtin__` bases resolve through the `BuiltinUtility` registry or as the
+/// global `Function` nominal, the one terminal carrier the relation engine
+/// decides operands against by tag;
 /// file bases through the prepared-decl cache, with ONE barrel
 /// re-export hop (deeper re-export chains stay conservatively
 /// unresolvable ⇒ OPEN, the safe direction). The consult is rooted on
@@ -3070,13 +3071,16 @@ fn instantiation_base_is_resolvable<C: crate::resolver_core::ResolverCapabilitie
     charge: &mut dyn FnMut() -> bool,
 ) -> bool {
     if base.canonical_id.as_ref() == "__builtin__" {
-        // A registry utility, or a global nominal (`Function`, `Date`, …)
-        // whose carrier is the resolved type itself.
+        // A registry utility, or the global `Function` nominal. Another
+        // global nominal (`Date`, `Map`, `Promise`, …) is a terminal carrier
+        // with no body to relate against, so an operand tested against it
+        // stays undecided: its surface is not a decidable one.
         return verter_session_query::type_solver::builtin::BuiltinUtility::from_name(
             base.decl_name.as_ref(),
         )
         .is_some()
-            || crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base).is_some();
+            || crate::intrinsic_registry::RuntimeNominal::of_builtin_identity(base)
+                == Some(crate::intrinsic_registry::RuntimeNominal::Function);
     }
     if !charge() {
         return false;

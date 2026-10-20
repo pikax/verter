@@ -453,6 +453,10 @@ pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
 /// this many instantiations of its recursion identity are on its stack.
 const CHECKER_DEEPLY_NESTED_DEPTH: usize = 3;
 
+/// Methods the lib `Function` interface requires: a source with no call or
+/// construct signature is a `Function` only if it declares all three.
+const FUNCTION_REQUIRED_METHODS: [&str; 3] = ["apply", "call", "bind"];
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How many relations this thread reduced structurally; test-only.
@@ -10005,7 +10009,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   construct signature;
     /// * no string, number, boolean, bigint or symbol (nor a literal of
     ///   one) does: its wrapper lacks `Function`'s `apply` / `call` /
-    ///   `bind`.
+    ///   `bind`;
+    /// * neither does an object surface with no signature and no index
+    ///   signature that lacks one of those three (`{ x: 1 }`).
     ///
     /// `None` for every other pair, which then takes the ordinary arms:
     /// the deferred gate's `Unknown` is the honest answer for a carrier
@@ -10031,9 +10037,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if target_is_function {
             return match source_data {
                 SemanticNodeData::Signature { .. } => Some(assignable(bindings)),
-                SemanticNodeData::Object(surface) => (!surface.call_signatures.is_empty()
-                    || !surface.construct_signatures.is_empty())
-                .then(|| assignable(bindings)),
+                SemanticNodeData::Object(surface) => {
+                    if !surface.call_signatures.is_empty()
+                        || !surface.construct_signatures.is_empty()
+                    {
+                        Some(assignable(bindings))
+                    } else if surface.index_signatures.is_empty()
+                        && !surface.closed().has_index_signature()
+                        && FUNCTION_REQUIRED_METHODS.iter().any(|name| {
+                            !surface
+                                .positive_members()
+                                .iter()
+                                .any(|member| member.string_name() == Some(*name))
+                        })
+                    {
+                        // A surface's members are its complete domain: one
+                        // with no signature that lacks a required member of
+                        // `Function` is no `Function` (`{ x: 1 }`).
+                        Some(RelationResult::NotAssignable)
+                    } else {
+                        None
+                    }
+                }
                 // A primitive reads through its wrapper (`Number`, `String`,
                 // …), which declares none of `Function`'s `apply` / `call` /
                 // `bind`: `1 extends Function` is false.

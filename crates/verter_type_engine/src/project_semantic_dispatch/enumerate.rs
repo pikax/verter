@@ -1107,7 +1107,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// property its value names (`E.A = 0` keys `0`), the binder the
     /// member itself (`{ [K in E]: K }` is `{ 0: E.A; … }`). `None` for a
     /// member whose value is no string or number literal.
-    fn enum_member_key(
+    pub(super) fn enum_member_key(
         &self,
         node: SemanticNodeId,
         member: &crate::semantic_query::EnumLiteralType,

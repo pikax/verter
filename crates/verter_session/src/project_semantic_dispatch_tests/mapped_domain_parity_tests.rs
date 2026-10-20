@@ -11,7 +11,10 @@
 //! expected type with `(<T>() => T extends A ? 1 : 2) extends (<T>() => T
 //! extends B ? 1 : 2)`.
 
-use super::checker_probe_lane_tests::{evaluated_mismatches, mismatches};
+use super::checker_probe_lane_tests::{evaluated_mismatches, mismatches, with_probe};
+use verter_type_engine::semantic_query::{
+    ProjectionMode, ProjectionReductionContext, SemanticNodeData,
+};
 
 const MAPPED: &str = "\
 type W0 = 5;
@@ -28,6 +31,8 @@ type Tup = [1, 'a'];
 type TupleKeys = { [K in keyof Tup as K extends `${number}` ? K : never]: Tup[K] };
 type NoFns<T> = { [K in keyof T as T[K] extends Function ? never : K]: T[K] };
 type Mp<T> = { [K in keyof T]: T[K] };
+type NoDates<T> = { [K in keyof T as T[K] extends Date ? never : K]: T[K] };
+enum S { A = 'a', B = 'b' }
 ";
 
 /// `RO<RO<Big>>['p5']` reads `Big['p5']` through two mappings — the outer
@@ -106,6 +111,65 @@ fn an_as_filter_on_function_valued_members_drops_them() {
         &[
             ("NoFns<{ a: 1; g: () => void }>", "{ a: 1; }"),
             ("1 extends Function ? 'y' : 'n'", "\"n\""),
+            ("NoFns<{ a: { x: 1 }; g: () => void }>", "{ a: { x: 1; }; }"),
+            ("{ x: 1 } extends Function ? 'y' : 'n'", "\"n\""),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An `as` filter whose relation the lane cannot decide (a member value
+/// against a global nominal with no body, `Date extends Function`, or any
+/// operand against `Date`) keeps the deferred mapped carrier, and an index
+/// into it stays a deferred indexed access: never a failure node.
+#[test]
+fn an_undecided_as_filter_keeps_the_deferred_mapped_carrier() {
+    let failures: Vec<String> = [
+        ("NoFns<{ a: Date; g: () => void }>", false),
+        ("NoFns<{ a: Map<1, 2>; g: () => void }>", false),
+        ("NoDates<{ a: 1; d: Date }>", false),
+        ("NoDates<{ a: 1; p: Promise<1> }>", false),
+        (
+            "{ [K in keyof { a: 1; d: Date } as { a: 1; d: Date }[K] extends Date ? never : K]: 1 }",
+            false,
+        ),
+        ("NoDates<{ a: 1; d: Date }>['a']", true),
+    ]
+    .into_iter()
+    .filter_map(|(probe, indexed)| {
+        with_probe(MAPPED, probe, |dispatch, node| {
+            let value = dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_usable_node()
+                .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+            let data = dispatch.graph().node_data(value);
+            let deferred = match data.as_deref() {
+                Some(SemanticNodeData::IndexedAccess { .. }) => indexed,
+                Some(SemanticNodeData::Mapped { .. }) => !indexed,
+                _ => false,
+            };
+            (!deferred).then(|| format!("`{probe}` evaluated to {data:?}"))
+        })
+    })
+    .collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An enum-keyed record read by an enum member reads the property the
+/// member's value names, for a numeric and a string enum alike.
+#[test]
+fn an_enum_keyed_mapping_indexed_by_an_enum_member_reads_its_property() {
+    let failures = mismatches(
+        MAPPED,
+        &[
+            ("ByEnum[E.A]", "E.A"),
+            ("Record<E, string>[E.B]", "string"),
+            ("Record<S, 1>[S.A]", "1"),
+            ("Mp<Record<E, 2>>[E.C]", "2"),
+            ("ByEnum[0]", "E.A"),
         ],
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
