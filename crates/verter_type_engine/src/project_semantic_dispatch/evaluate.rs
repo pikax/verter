@@ -388,18 +388,32 @@ pub(crate) enum DeferredEvaluationDemand {
     /// A mapped member consumes helpers and declared signature slots while
     /// retaining container interiors for their own later demands.
     MappedMemberValue,
+    /// Declared signature slots reduce finite helpers while retaining
+    /// recursive back-edges and container interiors for later demands.
+    MappedSignatureSlot,
 }
 
 impl DeferredEvaluationDemand {
     fn follows_mapped_helpers(self) -> bool {
+        matches!(
+            self,
+            Self::MappedIndexValue | Self::MappedMemberValue | Self::MappedSignatureSlot
+        )
+    }
+
+    fn follows_recursive_helpers(self) -> bool {
         matches!(self, Self::MappedIndexValue | Self::MappedMemberValue)
+    }
+
+    fn retains_container_interiors(self) -> bool {
+        matches!(self, Self::MappedMemberValue | Self::MappedSignatureSlot)
     }
 
     fn value_source_context(
         self,
         context: ProjectionReductionContext,
     ) -> ProjectionReductionContext {
-        if self == Self::MappedMemberValue {
+        if self.retains_container_interiors() {
             context.with_mode(ProjectionMode::Navigate)
         } else {
             context
@@ -2890,7 +2904,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     base.owner,
                                     base.decl_name.clone(),
                                 );
-                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                let mut read = self.execute_read(SemanticQueryKey::Instantiate(
                                     crate::semantic_query::InstantiateKey::new(
                                         slot,
                                         Arc::clone(args.as_arc()),
@@ -2900,11 +2914,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         ),
                                     ),
                                 ));
+                                // A named callable in a declared slot stays addressable;
+                                // its signature children belong to a later demand.
+                                if demand == DeferredEvaluationDemand::MappedSignatureSlot
+                                    && matches!(
+                                        &read.value,
+                                        QueryResult::Value(body) if matches!(
+                                            self.graph().node_data(*body).as_deref(),
+                                            Some(SemanticNodeData::Signature { .. })
+                                        )
+                                    )
+                                {
+                                    read.value = QueryResult::Value(current);
+                                }
                                 let frame = frames.last_mut().expect("active evaluator frame");
                                 self.deferred_read_action(frame, read, || current)
                             }
                             SemanticNodeData::Opaque(QueryError::RecursiveRef { .. })
-                                if demand.follows_mapped_helpers() =>
+                                if demand.follows_recursive_helpers() =>
                             {
                                 let carrier = self.self_reference_declaration(current).unwrap_or(current);
                                 frames.last_mut().expect("active evaluator frame").advance_or_finish(carrier)
@@ -2977,11 +3004,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let parent = frames.last().expect("a child has a parent demand");
                     // Key enumeration consumes the source's domain,
                     // without demanding all of its member values.
-                    let demand = if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase)
-                    {
-                        DeferredEvaluationDemand::Shell
-                    } else {
-                        parent.demand
+                    let demand = match &parent.stage {
+                        DeferredEvaluationStage::AwaitKeyOfBase => DeferredEvaluationDemand::Shell,
+                        DeferredEvaluationStage::AwaitValueChildren { data, .. }
+                            if parent.demand == DeferredEvaluationDemand::MappedMemberValue
+                                && matches!(data.as_ref(), SemanticNodeData::Signature { .. }) =>
+                        {
+                            DeferredEvaluationDemand::MappedSignatureSlot
+                        }
+                        _ => parent.demand,
                     };
                     if self.evaluates_to_itself(node, context, demand) {
                         // The operand's one step is paid to this frame, as
@@ -3133,7 +3164,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // The mapped-index-value arm reads the declaration's kind.
             SemanticNodeData::InstantiationRef { .. } => demand.follows_mapped_helpers(),
             SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }) => {
-                demand.follows_mapped_helpers()
+                demand.follows_recursive_helpers()
             }
             data => {
                 demand != DeferredEvaluationDemand::Shell
@@ -3153,7 +3184,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<Vec<SemanticNodeId>> {
         let whole = crate::semantic_query::may_reduce_operator(context)
             && context.mode == ProjectionMode::Expanded;
-        let whole_container = whole && demand != DeferredEvaluationDemand::MappedMemberValue;
+        let whole_container = whole && !demand.retains_container_interiors();
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole_container => Some(vec![*element]),

@@ -5,6 +5,150 @@ use super::support::*;
 use std::collections::BTreeSet;
 use verter_session_oracle_macro::oracle_row;
 
+#[test]
+fn mapped_member_signatures_keep_recursive_aliases_addressable() {
+    let host = make_host_with_footprint();
+    let path = "/recursive-callables.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type Loop<T> = (x: T) => Loop<T>;
+type Sink<T> = (x: Sink<T>) => T;
+type Grow<T> = (x: T) => Grow<T[]>;
+type Left<T> = (x: T) => Right<T>;
+type Right<T> = (x: T) => Left<T>;
+type Identity<T> = T;
+type Finite<T extends { a: number }> = (x: Identity<T['a']>) => () => Identity<T['a']>;
+export type RecursiveReturn = { [K in 'a']: Loop<number> };
+export type RecursiveParameter = { [K in 'a']: Sink<number> };
+export type GrowingReturn = { [K in 'a']: Grow<number> };
+export type MutualReturn = { [K in 'a']: Left<number> };
+export type FiniteSlots = { [K in 'a']: Finite<{ a: 1 }> };
+"#,
+    );
+    let number = TypeExpr::Primitive(PrimitiveName::Number);
+    let array = TypeExpr::Array {
+        element: Arc::new(number.clone()),
+        readonly: false,
+    };
+    let nested_array = TypeExpr::Array {
+        element: Arc::new(array.clone()),
+        readonly: false,
+    };
+    let assert_callable = |expr: &TypeExpr,
+                           name: &str,
+                           recursive_return: bool,
+                           expected_scalar: &TypeExpr,
+                           expected_argument: &TypeExpr| {
+        let signature = function_type(expr);
+        assert_eq!(signature.parameters.len(), 1);
+        let returned = signature.return_type.as_deref().expect("declared return");
+        let (recursive, scalar) = if recursive_return {
+            (returned, &signature.parameters[0].ty)
+        } else {
+            (&signature.parameters[0].ty, returned)
+        };
+        assert_eq!(scalar, expected_scalar);
+        assert_ref(recursive, name);
+        let arguments = match recursive {
+            TypeExpr::Ref { type_arguments, .. }
+            | TypeExpr::RecursiveRef { type_arguments, .. } => type_arguments,
+            _ => unreachable!("assert_ref checked the carrier"),
+        };
+        assert_eq!(arguments.as_ref(), std::slice::from_ref(expected_argument));
+    };
+    for _ in 0..2 {
+        eprintln!("publishing finite helper slots");
+        let (finite, _) = resolve_expr(&host, path, "FiniteSlots", &[], ProjectionMode::Expanded);
+        let props = object_props(&finite);
+        let signature = function_type(&props["a"].ty);
+        assert_number_literal(&signature.parameters[0].ty, 1.0);
+        let nested = function_type(signature.return_type.as_deref().expect("nested callable"));
+        assert_number_literal(nested.return_type.as_deref().expect("indexed return"), 1.0);
+
+        for (
+            name,
+            recursive_name,
+            followed_name,
+            recursive_return,
+            expected_argument,
+            followed_argument,
+        ) in [
+            (
+                "RecursiveReturn",
+                "Loop",
+                "Loop",
+                true,
+                number.clone(),
+                number.clone(),
+            ),
+            (
+                "RecursiveParameter",
+                "Sink",
+                "Sink",
+                false,
+                number.clone(),
+                number.clone(),
+            ),
+            (
+                "GrowingReturn",
+                "Grow",
+                "Grow",
+                true,
+                array.clone(),
+                nested_array.clone(),
+            ),
+        ] {
+            eprintln!("publishing mapped callable {name}");
+            let (expr, _) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            let props = object_props(&expr);
+            assert_eq!(prop_names(&props), vec!["a"]);
+            assert_callable(
+                &props["a"].ty,
+                recursive_name,
+                recursive_return,
+                &number,
+                &expected_argument,
+            );
+            let (followed, _) = resolve_expr(
+                &host,
+                path,
+                recursive_name,
+                &[Arc::new(expected_argument.clone())],
+                ProjectionMode::Expanded,
+            );
+            assert_callable(
+                &followed,
+                followed_name,
+                recursive_return,
+                &expected_argument,
+                &followed_argument,
+            );
+        }
+        let (mutual, _) = resolve_expr(&host, path, "MutualReturn", &[], ProjectionMode::Expanded);
+        let props = object_props(&mutual);
+        assert_callable(&props["a"].ty, "Right", true, &number, &number);
+        let (followed, _) = resolve_expr(
+            &host,
+            path,
+            "Right",
+            &[Arc::new(number.clone())],
+            ProjectionMode::Expanded,
+        );
+        let right = function_type(&followed);
+        assert_eq!(right.parameters.len(), 1);
+        assert_primitive(&right.parameters[0].ty, PrimitiveName::Number);
+        assert_callable(
+            right.return_type.as_deref().expect("left callable"),
+            "Right",
+            true,
+            &number,
+            &number,
+        );
+    }
+}
+
 fn mapped_index_wire_answer(
     host: &crate::VerterHost,
     name: &str,
