@@ -103,6 +103,7 @@ fn counted_sealed_refusal_owns_nonempty_key_value_and_diagnostic_operands() {
         let profile = BudgetProfile::intern(BudgetProfileSpec {
             work: 1,
             bytes: 1024,
+            construction_byte_refusal: false,
             query_depth: 2,
             instantiation_depth: 2,
             tail_steps: 2,
