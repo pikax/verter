@@ -1543,6 +1543,46 @@ fn call_diagnostics_follow_the_checkers_optionality_union_order_and_nullability(
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+const CALL_REPORT_IDENTITY: &str = r#"declare function assertNever(x: never): never;
+export function f2() { return assertNever("a"); }
+declare function f(x?: string, cb?: (n: number) => number): void;
+export function f3() { return f(123, n => n); }
+declare function g(o: { "1": string; other: number }): void;
+declare const s: { 1: string };
+export function f4() { return g(s); }
+"#;
+
+/// A literal keeps its spelling against `never`, an eagerly rejected
+/// argument ahead of a callback is reported against the declared parameter
+/// type without the optionality's `undefined`, and a numeric key and its
+/// string spelling are one property. Measured on TypeScript 7.0.2.
+#[test]
+fn call_reports_keep_never_literals_optional_targets_and_numeric_keys() {
+    let host = host_with(CALL_REPORT_IDENTITY);
+    let checker_report = super::signature_predicate_inference_tests::checker_report;
+    for root in [STRICT_ROOT, LOOSE_ROOT] {
+        for (function, expected) in [
+            (
+                "f2",
+                "(2,43): error TS2345: Argument of type '\"a\"' is not assignable to parameter of type 'never'.",
+            ),
+            (
+                "f3",
+                "(4,33): error TS2345: Argument of type 'number' is not assignable to parameter of type 'string'.",
+            ),
+            ("f4", "(7,33): error TS2741: Property 'other' is missing in type"),
+        ] {
+            let reported = checker_report(&host, root, function, CALL_REPORT_IDENTITY);
+            // Only the message's leading text is compared: how a numeric key
+            // spells inside a printed object type is a separate printer concern.
+            assert!(
+                reported.len() == 1 && reported[0].starts_with(expected),
+                "`{function}` in {root}: {reported:#?}"
+            );
+        }
+    }
+}
+
 /// A message the printer cannot reproduce is not reported: the checker
 /// abbreviates a type past its truncation length by a running count this
 /// printer does not model, and an explanation chain past the elaboration

@@ -1564,7 +1564,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<(String, String)> {
-        let generalized = if self.could_hold_top_level_singleton(target, SINGLETON_SCAN_DEPTH) {
+        // The checker keeps the literal against `never` so an exhaustiveness
+        // check (`assertNever(k)`) names the value that escaped.
+        let target_is_never = matches!(
+            self.graph().node_data(target).as_deref(),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Never))
+        );
+        let generalized = if target_is_never
+            || self.could_hold_top_level_singleton(target, SINGLETON_SCAN_DEPTH)
+        {
             None
         } else {
             self.literal_base_spelling(source)
@@ -1750,7 +1758,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 || source
                     .positive_members()
                     .iter()
-                    .any(|present| present.key == member.key)
+                    .any(|present| same_property_key(&present.key, &member.key))
             {
                 continue;
             }
@@ -1907,4 +1915,14 @@ enum PositionShape {
     Tuple(Vec<crate::semantic_query::TupleElement>, bool),
     Array(SemanticNodeId, bool),
     Union(Vec<SemanticNodeId>),
+}
+
+/// Whether two authored keys address the same JavaScript property: equal, or
+/// a numeric key and the string spelling of its canonical index (`1` and
+/// `"1"`).
+pub(super) fn same_property_key(a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
+    a == b
+        || a.as_known()
+            .zip(b.as_known())
+            .is_some_and(|(a, b)| a.element_access_collides(&b))
 }

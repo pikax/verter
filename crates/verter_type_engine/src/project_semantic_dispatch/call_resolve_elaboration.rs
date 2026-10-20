@@ -842,9 +842,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             for target_member in target_view.positive_members() {
                 let Some(source_member) = source_view.as_ref().and_then(|view| {
-                    view.positive_members()
-                        .iter()
-                        .find(|member| member.key == target_member.key)
+                    view.positive_members().iter().find(|member| {
+                        super::context::same_property_key(&member.key, &target_member.key)
+                    })
                 }) else {
                     continue;
                 };
@@ -1170,9 +1170,11 @@ fn member_named<'v>(
     view: &'v SurfaceView,
     name: &str,
 ) -> Option<&'v crate::semantic_query::SurfaceMember> {
-    view.positive_members()
-        .iter()
-        .find(|member| matches!(&member.key, AuthoredPropertyKey::String(key) if **key == *name))
+    view.positive_members().iter().find(|member| {
+        member.key.as_known().is_some_and(|known| {
+            known.element_access_collides(&verter_type_expr::PropertyKey::from(name))
+        })
+    })
 }
 
 /// The message of a run of incompatible properties and returns

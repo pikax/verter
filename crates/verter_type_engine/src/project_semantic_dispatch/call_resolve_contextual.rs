@@ -832,7 +832,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         };
                     }
                     if let Some(signature) = self.generic_function_against(argument.node, target) {
-                        generic_arguments.push((argument, signature, target));
+                        generic_arguments.push((argument, signature, target, position));
                         continue;
                     }
                     if !self
@@ -843,6 +843,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             &mut progress,
                             argument.authored,
                             argument.node,
+                            self.declared_report_target(ordinary, position, target),
                             target,
                             last_visible,
                         ) {
@@ -852,7 +853,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
                 if !progress.eager_mismatch {
-                    for (mut argument, signature, target) in generic_arguments {
+                    for (mut argument, signature, target, position) in generic_arguments {
                         argument.node = self
                             .generic_function_in_context(
                                 session_id,
@@ -872,6 +873,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 &mut progress,
                                 argument.authored,
                                 argument.node,
+                                self.declared_report_target(ordinary, position, target),
                                 target,
                                 last_visible,
                             ) {
@@ -996,6 +998,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         progress: &mut ContextualCandidate,
         authored: u32,
         node: SemanticNodeId,
+        report_target: SemanticNodeId,
         target: SemanticNodeId,
         last_visible: bool,
     ) -> bool {
@@ -1010,7 +1013,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if deferred_before && (inference_order || !last_visible) {
             return false;
         }
-        *diagnostic = Some(super::argument_not_assignable(authored, node, target));
+        *diagnostic = Some(super::argument_not_assignable(
+            authored,
+            node,
+            report_target,
+        ));
         if !deferred_before {
             return false;
         }
