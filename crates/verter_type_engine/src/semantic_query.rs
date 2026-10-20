@@ -4611,19 +4611,19 @@ impl<'a> ClosedSurfaceView<'a> {
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
-    /// How many members this thread's key lookups compared by scanning a
-    /// surface; test-only.
+    /// Key lookup work on this thread: scanned members and canonical-index
+    /// hashing/equality operations; test-only.
     static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Count one member a key lookup compared by scanning a surface.
+/// Count one scanned member or canonical-index hashing/equality operation.
 pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
-/// How many members this thread's key lookups compared by scanning a
-/// surface; test-only.
+/// Key lookup work on this thread: scanned members and canonical-index
+/// hashing/equality operations; test-only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn key_scan_comparisons_for_tests() -> usize {
     KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)

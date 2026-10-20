@@ -503,9 +503,7 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
         TSLiteral::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         TSLiteral::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         TSLiteral::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
-        TSLiteral::BigIntLiteral(b) => {
-            TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
-        }
+        TSLiteral::BigIntLiteral(b) => TypeExpr::bigint_literal(false, &b.value),
         TSLiteral::UnaryExpression(unary) => match &unary.argument {
             // `-1` / `+1` — a signed numeric literal type. The sign is the
             // wrapping `UnaryExpression`'s operator, NOT a property of the inner
@@ -526,19 +524,16 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             // is the base-10 magnitude with NO sign (the sign lives on this
             // wrapping `UnaryExpression`), so the signed form is reconstructed
             // here operator-aware, mirroring the positive `TSLiteral::BigIntLiteral`
-            // arm. A `UnaryNegation` prepends `-`; a `UnaryPlus` keeps the bare
+            // arm. A `UnaryNegation` negates (a negated zero stays `0n`, see
+            // `TypeExpr::bigint_literal`); a `UnaryPlus` keeps the bare
             // magnitude (prepending `-` unconditionally would turn `+1n` into the
             // wrong literal `-1n`). Lowering it to a `BigInt` literal (rather than
             // the `Unknown` fallback) keeps it a first-class bigint literal so the
             // Vue runtime-constructor reducer maps it to `Number` exactly like a
             // positive bigint literal.
             Expression::BigIntLiteral(b) => match unary.operator {
-                UnaryOperator::UnaryNegation => TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
-                ),
-                UnaryOperator::UnaryPlus => {
-                    TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
-                }
+                UnaryOperator::UnaryNegation => TypeExpr::bigint_literal(true, &b.value),
+                UnaryOperator::UnaryPlus => TypeExpr::bigint_literal(false, &b.value),
                 _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
                     source,
                     unary.span(),

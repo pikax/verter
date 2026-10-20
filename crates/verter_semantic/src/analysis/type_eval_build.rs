@@ -7209,9 +7209,7 @@ fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
         Expression::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         Expression::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
-        Expression::BigIntLiteral(b) => {
-            TypeExpr::Literal(LiteralValue::BigInt(b.value.to_string()))
-        }
+        Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(false, &b.value),
         Expression::TemplateLiteral(tpl) if tpl.expressions.is_empty() => TypeExpr::string_literal(
             tpl.quasis
                 .iter()
@@ -7223,9 +7221,7 @@ fn scalar_literal_type(expr: &Expression<'_>) -> Option<TypeExpr> {
                 TypeExpr::number_literal(-n.value)
             }
             Expression::NumericLiteral(n) => TypeExpr::number_literal(n.value),
-            Expression::BigIntLiteral(b) => {
-                TypeExpr::Literal(LiteralValue::BigInt(format!("-{}", b.value)))
-            }
+            Expression::BigIntLiteral(b) => TypeExpr::bigint_literal(true, &b.value),
             _ => return None,
         },
         _ => return None,
