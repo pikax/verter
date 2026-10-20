@@ -273,7 +273,7 @@ fn measure(node: &dyn Node, block_shared: bool) -> (usize, Box<[Arc<dyn Node>]>)
     let mut aliases = AliasSet::for_cell();
     let heap = node.value_heap_bytes(&mut aliases);
     let block = if block_shared { 0 } else { node.block_bytes() };
-    let children = aliases.take_children();
+    let children = aliases.take_children().into_boxed_slice();
     (block + heap + registration_bytes(children.len()), children)
 }
 
@@ -326,12 +326,12 @@ pub(crate) fn hold_nodes(
         RetentionAdmission::Admitted(charge) => charge,
         RetentionAdmission::Refused(refusal) => return Err(refusal),
     };
-    let holds = children
-        .iter()
-        .map(|child| hold_node(Arc::clone(child), ctx))
-        .collect::<Result<Box<[OwnedHold]>, RetentionRefusal>>()?;
+    let mut holds = Vec::with_capacity(children.len());
+    for child in children {
+        holds.push(hold_node(Arc::clone(child), ctx)?);
+    }
     Ok(HeldHandles {
-        holds,
+        holds: holds.into_boxed_slice(),
         backing: Some(backing),
     })
 }
@@ -385,7 +385,7 @@ pub(crate) fn hold_node(
 /// holds, so each is charged by its own cell.
 #[must_use = "an owned allocation an owner reaches must be pinned or held"]
 #[derive(Default)]
-pub struct OwnedHandles(Box<[Arc<dyn Node>]>);
+pub struct OwnedHandles(crate::allocation::Children);
 
 impl OwnedHandles {
     /// These handles and `other`'s, each allocation once.
@@ -396,23 +396,22 @@ impl OwnedHandles {
         if self.0.is_empty() {
             return other;
         }
+        let mut merged = crate::allocation::Children::with_capacity(self.0.len() + other.0.len());
         let mut seen = rustc_hash::FxHashSet::default();
-        Self(
-            self.0
-                .into_vec()
-                .into_iter()
-                .chain(other.0.into_vec())
-                .filter(|node| seen.insert(Arc::as_ptr(node).cast::<()>() as usize))
-                .collect(),
-        )
+        for node in self.0.into_iter().chain(other.0) {
+            if seen.insert(Arc::as_ptr(&node).cast::<()>() as usize) {
+                merged.push(node);
+            }
+        }
+        Self(merged)
     }
 
-    pub(crate) fn from_children(children: Box<[Arc<dyn Node>]>) -> Self {
+    pub(crate) fn from_children(children: crate::allocation::Children) -> Self {
         Self(children)
     }
 
     pub(crate) fn into_children(self) -> Box<[Arc<dyn Node>]> {
-        self.0
+        self.0.into_boxed_slice()
     }
 
     /// The handles a carrier `measure` reaches. The carrier is delivered

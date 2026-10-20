@@ -1776,7 +1776,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// infers `1` and takes it too. A pattern that reaches each of its
     /// unconstrained `infer` declarations once infers each from the one
     /// position it occupies, where the inferring relation already related it:
-    /// that relation is the check.
+    /// that relation is the check. So it is when every inference its
+    /// constraint admits stays as inferred: an implied constraint (a
+    /// template literal hole's `string`) fixes nothing a capture already
+    /// satisfies, and the pattern instantiated with the inferences is the
+    /// pattern the inferring relation related. Only a pattern that repeats
+    /// an `infer`, or an inference its constraint replaced, is related
+    /// again.
     fn select_with_inferences(
         &self,
         check: SemanticNodeId,
@@ -1787,16 +1793,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Option<super::relation::RelationInferBindings>,
     ) {
         let constraints = self.infer_constraints_in(extends);
-        let constrained = !constraints.is_empty();
-        let bindings = if constrained {
+        let (bindings, fixed_to_constraint) = if constraints.is_empty() {
+            (bindings, false)
+        } else {
             match self.infer_bindings_within_constraints(&bindings, &constraints) {
-                Some(bindings) => bindings,
+                Some(fixed) => fixed,
                 None => return (ConditionalBranchSelection::Undecided, None),
             }
-        } else {
-            bindings
         };
-        if !constrained && !self.pattern_repeats_an_infer(extends) {
+        if !fixed_to_constraint && !self.pattern_repeats_an_infer(extends) {
             return (
                 ConditionalBranchSelection::True,
                 Some(super::relation::RelationInferBindings { bindings }),
