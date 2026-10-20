@@ -10440,246 +10440,258 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &self,
             id: SemanticNodeId,
         ) -> IdentityCarrierUnwrap {
-            let graph = self.graph();
-            let transit = ProjectionReductionContext::structural_transit();
-            let mut current = id;
-            let mut seen = FxHashSet::default();
-            while seen.insert(current) {
-                let Some(data) = graph.node_data(current) else {
-                    return IdentityCarrierUnwrap::Unresolvable;
-                };
-                let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
-                    SemanticNodeData::Alias(inner) => {
-                        current = *inner;
-                        continue;
-                    }
-                    // A class expression's instance relates through its surface.
-                    SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                        let surface = *surface;
-                        drop(data);
-                        current = self
-                            .class_expression_read_surface(current)
-                            .unwrap_or(surface);
-                        continue;
-                    }
-                    SemanticNodeData::MergedDecl { contributors } => {
-                        let contributors = Arc::clone(contributors.as_arc());
-                        drop(data);
-                        current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-                        continue;
-                    }
-                    SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+            self.unwrap_identity_carrier_walk(id, &mut |_| {})
+        }
+    }
+
+    /// [`Self::unwrap_identity_carrier_for_relation`], reporting each node
+    /// the walk reaches to `on_step` before it reads anything for that node:
+    /// a reached node is where a walk that stopped there resumes.
+    pub(super) fn unwrap_identity_carrier_walk(
+        &self,
+        id: SemanticNodeId,
+        on_step: &mut dyn FnMut(SemanticNodeId),
+    ) -> IdentityCarrierUnwrap {
+        let graph = self.graph();
+        let transit = ProjectionReductionContext::structural_transit();
+        let mut current = id;
+        let mut seen = FxHashSet::default();
+        while seen.insert(current) {
+            on_step(current);
+            let Some(data) = graph.node_data(current) else {
+                return IdentityCarrierUnwrap::Unresolvable;
+            };
+            let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+                SemanticNodeData::Alias(inner) => {
+                    current = *inner;
+                    continue;
+                }
+                // A class expression's instance relates through its surface.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    let surface = *surface;
+                    drop(data);
+                    current = self
+                        .class_expression_read_surface(current)
+                        .unwrap_or(surface);
+                    continue;
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    let contributors = Arc::clone(contributors.as_arc());
+                    drop(data);
+                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                    continue;
+                }
+                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    whole_hash,
+                }) => (
+                    DeclIdentity {
+                        canonical_id: canonical_id.clone(),
+                        owner: *owner,
+                        whole_hash: *whole_hash,
+                        decl_name: name.clone(),
+                    },
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                // A lowering-time self-reference sentinel (`interface Num {
+                // compareTo(other: Num): number }` — the `Num` inside its
+                // own body) names its declaration but not its file; the
+                // node's origin scope, recorded at intern time, supplies
+                // it. Resolving through the shared `Instantiate` dispatch
+                // makes the sentinel relate exactly like the `DeclRef` the
+                // same reference lowers to from any OTHER file position; a
+                // genuinely in-flight cycle re-enters the relation whose
+                // identity is already open and closes coinductively. A
+                // scope-less sentinel stays concrete (fail-closed Unknown
+                // downstream, never a fabricated verdict).
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
+                    let Some(crate::semantic_query::NodeScopeId::File {
                         canonical_id,
                         owner,
-                        name,
                         whole_hash,
-                    }) => (
+                        ..
+                    }) = graph.node_scope(current)
+                    else {
+                        return IdentityCarrierUnwrap::Concrete(current);
+                    };
+                    (
                         DeclIdentity {
-                            canonical_id: canonical_id.clone(),
-                            owner: *owner,
-                            whole_hash: *whole_hash,
-                            decl_name: name.clone(),
-                        },
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    ),
-                    // A lowering-time self-reference sentinel (`interface Num {
-                    // compareTo(other: Num): number }` — the `Num` inside its
-                    // own body) names its declaration but not its file; the
-                    // node's origin scope, recorded at intern time, supplies
-                    // it. Resolving through the shared `Instantiate` dispatch
-                    // makes the sentinel relate exactly like the `DeclRef` the
-                    // same reference lowers to from any OTHER file position; a
-                    // genuinely in-flight cycle re-enters the relation whose
-                    // identity is already open and closes coinductively. A
-                    // scope-less sentinel stays concrete (fail-closed Unknown
-                    // downstream, never a fabricated verdict).
-                    SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
-                        let Some(crate::semantic_query::NodeScopeId::File {
                             canonical_id,
                             owner,
                             whole_hash,
-                            ..
-                        }) = graph.node_scope(current)
-                        else {
-                            return IdentityCarrierUnwrap::Concrete(current);
-                        };
-                        (
-                            DeclIdentity {
-                                canonical_id,
-                                owner,
-                                whole_hash,
-                                decl_name: name.clone(),
-                            },
-                            Arc::from(args.operands()),
+                            decl_name: name.clone(),
+                        },
+                        Arc::from(args.operands()),
+                    )
+                }
+                SemanticNodeData::DeclRef { identity } => (
+                    identity.clone(),
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    (base.clone(), Arc::clone(args.as_arc()))
+                }
+                // An indexed access over a type that is not generic is the
+                // property type it reads (`Box['lit']` IS `2`, and an
+                // optional `opt?: 3` reads `3 | undefined`): the checker
+                // resolves it where it is written, so a relation compares
+                // that type — read at `Navigate`, which keeps the member's
+                // type, never at `Shallow`, whose one-level surface of a
+                // union member (`Local | { $: number }`) is the empty object
+                // its arms share. One the deferred evaluator cannot read
+                // further (`T['k']` over an open `T`) stays the operand it
+                // is, and so does an access of a type parameter it reads as
+                // a miss: the checker keeps that access generic, and a
+                // relation reads it through the parameter's constraint.
+                SemanticNodeData::DeferredCallable(_) => {
+                    drop(data);
+                    let materialized = self.materialize_returned_callable(current);
+                    if materialized == current {
+                        return IdentityCarrierUnwrap::Unresolvable;
+                    }
+                    current = materialized;
+                    continue;
+                }
+                SemanticNodeData::IndexedAccess { object, .. } => {
+                    let mut root = *object;
+                    while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+                        graph.node_data(root).as_deref()
+                    {
+                        root = *object;
+                    }
+                    let of_type_param = matches!(
+                        graph.node_data(root).as_deref(),
+                        Some(SemanticNodeData::TypeParam { .. })
+                    );
+                    drop(data);
+                    let read = self
+                        .evaluate_deferred_semantic_node_with_context(
+                            current,
+                            ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
                         )
-                    }
-                    SemanticNodeData::DeclRef { identity } => (
-                        identity.clone(),
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    ),
-                    SemanticNodeData::InstantiationRef { base, args } => {
-                        (base.clone(), Arc::clone(args.as_arc()))
-                    }
-                    // An indexed access over a type that is not generic is the
-                    // property type it reads (`Box['lit']` IS `2`, and an
-                    // optional `opt?: 3` reads `3 | undefined`): the checker
-                    // resolves it where it is written, so a relation compares
-                    // that type — read at `Navigate`, which keeps the member's
-                    // type, never at `Shallow`, whose one-level surface of a
-                    // union member (`Local | { $: number }`) is the empty object
-                    // its arms share. One the deferred evaluator cannot read
-                    // further (`T['k']` over an open `T`) stays the operand it
-                    // is, and so does an access of a type parameter it reads as
-                    // a miss: the checker keeps that access generic, and a
-                    // relation reads it through the parameter's constraint.
-                    SemanticNodeData::DeferredCallable(_) => {
-                        drop(data);
-                        let materialized = self.materialize_returned_callable(current);
-                        if materialized == current {
-                            return IdentityCarrierUnwrap::Unresolvable;
-                        }
-                        current = materialized;
-                        continue;
-                    }
-                    SemanticNodeData::IndexedAccess { object, .. } => {
-                        let mut root = *object;
-                        while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
-                            graph.node_data(root).as_deref()
-                        {
-                            root = *object;
-                        }
-                        let of_type_param = matches!(
-                            graph.node_data(root).as_deref(),
-                            Some(SemanticNodeData::TypeParam { .. })
+                        .into_active_query_build_node(self);
+                    let missed = of_type_param
+                        && matches!(
+                            graph.node_data(read).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::Miss))
                         );
-                        drop(data);
-                        let read = self
-                            .evaluate_deferred_semantic_node_with_context(
-                                current,
-                                ProjectionReductionContext::structural_transit_with_mode(
-                                    crate::semantic_query::ProjectionMode::Navigate,
-                                ),
-                            )
-                            .into_active_query_build_node(self);
-                        let missed = of_type_param
-                            && matches!(
-                                graph.node_data(read).as_deref(),
-                                Some(SemanticNodeData::Opaque(QueryError::Miss))
-                            );
-                        if read == current || missed {
-                            return IdentityCarrierUnwrap::Concrete(current);
-                        }
-                        current = read;
-                        continue;
+                    if read == current || missed {
+                        return IdentityCarrierUnwrap::Concrete(current);
                     }
-                    // `keyof` over a type whose keys settle is that key set
-                    // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
-                    SemanticNodeData::KeyOf { base } => {
-                        let base = *base;
-                        drop(data);
-                        match self.key_set_of(base) {
-                            Some(keys) if keys != current => {
-                                current = keys;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    // A written intersection is the type the checker constructs
-                    // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
-                    SemanticNodeData::Intersection(_) => {
-                        drop(data);
-                        match self.reduced_authored_relation_pair(current, current) {
-                            Some((reduced, _)) if reduced != current => {
-                                current = reduced;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    // A homomorphic mapped type over a closed object is the
-                    // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
-                    // the checker resolves its members, so a relation compares
-                    // them. Any other mapped type stays the operand it is.
-                    SemanticNodeData::Mapped { source, mapper } => {
-                        let (source, mapper) = (*source, mapper.clone());
-                        drop(data);
-                        match self
-                            .identity_mapped_object_for_relation(source, &mapper)
-                            .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                        {
-                            Some(object) if object != current => {
-                                current = object;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    _ => return IdentityCarrierUnwrap::Concrete(current),
-                };
-                drop(data);
-                // The lib `Function` global's carrier is its own terminal
-                // identity for relations: the `__builtin__` base names no
-                // declaration the Instantiate dispatch can serve, so the
-                // dispatch would MISS non-cacheably and taint every
-                // enclosing build's warm admission for a carrier the
-                // checker publishes as an ordinary type (`typeof x ===
-                // "function"` over `object` narrows to `Function`). Relations
-                // decide it by identity / tag, never by a body it does not
-                // have. Every OTHER non-file base (the remaining runtime
-                // nominals, the global sentinel) keeps dispatching — its
-                // Unresolvable verdict is the measured relation behavior
-                // those carriers' consumers pin.
-                if self.runtime_nominal_identity(&identity)
-                    == Some(crate::intrinsic_registry::RuntimeNominal::Function)
-                {
-                    return IdentityCarrierUnwrap::Concrete(current);
+                    current = read;
+                    continue;
                 }
-                // A string mapping the reducer keeps (`Uppercase<string>`) is
-                // the checker's string mapping type itself: relations decide it
-                // by the mapping ([`Self::string_mapping_relation`]), never by a
-                // body it does not have.
-                if self.string_mapping_of(current).is_some() {
-                    return IdentityCarrierUnwrap::Concrete(current);
-                }
-                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                    self.type_slot_for(
-                        identity.canonical_id.clone(),
-                        identity.owner,
-                        identity.decl_name.clone(),
-                    ),
-                    args,
-                    self.instantiate_context_for(&identity.canonical_id, transit),
-                ));
-                // `execute_type_node` IS the shared read boundary (dispatch
-                // counters + the universal build-local taint fold); a bespoke
-                // re-fold here would double-count the same read.
-                let unwrapped = match self.execute_type_node(key) {
-                    QueryResult::Value(SemanticQueryOutput {
-                        value: unwrapped, ..
-                    }) => {
-                        // A nominal `typeof` carrier IS the type it denotes, so
-                        // the deferred evaluator must not be handed it: that
-                        // evaluator's job is to resolve a shell to its content,
-                        // and this carrier's content is the widened `symbol`
-                        // primitive, which is exactly the declaring identity the
-                        // relation is about to read.
-                        if self.node_is_nominal_typeof(unwrapped) {
-                            unwrapped
-                        } else {
-                            self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                                .into_active_query_build_node(self)
+                // `keyof` over a type whose keys settle is that key set
+                // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
+                SemanticNodeData::KeyOf { base } => {
+                    let base = *base;
+                    drop(data);
+                    match self.key_set_of(base) {
+                        Some(keys) if keys != current => {
+                            current = keys;
+                            continue;
                         }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
                     }
-                    _ => return IdentityCarrierUnwrap::Unresolvable,
-                };
-                if unwrapped == current {
-                    return IdentityCarrierUnwrap::Unresolvable;
                 }
-                current = unwrapped;
+                // A written intersection is the type the checker constructs
+                // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
+                SemanticNodeData::Intersection(_) => {
+                    drop(data);
+                    match self.reduced_authored_relation_pair(current, current) {
+                        Some((reduced, _)) if reduced != current => {
+                            current = reduced;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                // A homomorphic mapped type over a closed object is the
+                // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
+                // the checker resolves its members, so a relation compares
+                // them. Any other mapped type stays the operand it is.
+                SemanticNodeData::Mapped { source, mapper } => {
+                    let (source, mapper) = (*source, mapper.clone());
+                    drop(data);
+                    match self
+                        .identity_mapped_object_for_relation(source, &mapper)
+                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
+                    {
+                        Some(object) if object != current => {
+                            current = object;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                _ => return IdentityCarrierUnwrap::Concrete(current),
+            };
+            drop(data);
+            // The lib `Function` global's carrier is its own terminal
+            // identity for relations: the `__builtin__` base names no
+            // declaration the Instantiate dispatch can serve, so the
+            // dispatch would MISS non-cacheably and taint every
+            // enclosing build's warm admission for a carrier the
+            // checker publishes as an ordinary type (`typeof x ===
+            // "function"` over `object` narrows to `Function`). Relations
+            // decide it by identity / tag, never by a body it does not
+            // have. Every OTHER non-file base (the remaining runtime
+            // nominals, the global sentinel) keeps dispatching — its
+            // Unresolvable verdict is the measured relation behavior
+            // those carriers' consumers pin.
+            if self.runtime_nominal_identity(&identity)
+                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+            {
+                return IdentityCarrierUnwrap::Concrete(current);
             }
-            IdentityCarrierUnwrap::Unresolvable
+            // A string mapping the reducer keeps (`Uppercase<string>`) is
+            // the checker's string mapping type itself: relations decide it
+            // by the mapping ([`Self::string_mapping_relation`]), never by a
+            // body it does not have.
+            if self.string_mapping_of(current).is_some() {
+                return IdentityCarrierUnwrap::Concrete(current);
+            }
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    identity.canonical_id.clone(),
+                    identity.owner,
+                    identity.decl_name.clone(),
+                ),
+                args,
+                self.instantiate_context_for(&identity.canonical_id, transit),
+            ));
+            // `execute_type_node` IS the shared read boundary (dispatch
+            // counters + the universal build-local taint fold); a bespoke
+            // re-fold here would double-count the same read.
+            let unwrapped = match self.execute_type_node(key) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: unwrapped, ..
+                }) => {
+                    // A nominal `typeof` carrier IS the type it denotes, so
+                    // the deferred evaluator must not be handed it: that
+                    // evaluator's job is to resolve a shell to its content,
+                    // and this carrier's content is the widened `symbol`
+                    // primitive, which is exactly the declaring identity the
+                    // relation is about to read.
+                    if self.node_is_nominal_typeof(unwrapped) {
+                        unwrapped
+                    } else {
+                        self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                            .into_active_query_build_node(self)
+                    }
+                }
+                _ => return IdentityCarrierUnwrap::Unresolvable,
+            };
+            if unwrapped == current {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            current = unwrapped;
         }
+        IdentityCarrierUnwrap::Unresolvable
     }
 
     /// The object an identity mapped type over a closed object surface
