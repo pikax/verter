@@ -185,10 +185,12 @@ verter_semantic/src/analysis/type_eval_build.rs initializer_literal_freshness
 verter_semantic/src/analysis/type_eval_build.rs walk_hoisted_vars
 verter_semantic_source/src/flow_slice_content.rs annotation_provably_not_never
 verter_semantic_source/src/flow_slice_content.rs argument_may_match_a_reference
+verter_semantic_source/src/flow_slice_content.rs asserted_condition_claim # bounded: an assertion entered while an asserted condition classifies never classifies its own
 verter_semantic_source/src/flow_slice_content.rs begin_lower_loop
 verter_semantic_source/src/flow_slice_content.rs chain_element_root_identifier
 verter_semantic_source/src/flow_slice_content.rs chain_root_identifier
 verter_semantic_source/src/flow_slice_content.rs class_static_side_provably_plain
+verter_semantic_source/src/flow_slice_content.rs classify_asserted_condition # bounded: an assertion entered while an asserted condition classifies never classifies its own
 verter_semantic_source/src/flow_slice_content.rs classify_call_predicate
 verter_semantic_source/src/flow_slice_content.rs classify_guard
 verter_semantic_source/src/flow_slice_content.rs classify_guard_step
@@ -197,6 +199,7 @@ verter_semantic_source/src/flow_slice_content.rs collect_maybe_default_write_tar
 verter_semantic_source/src/flow_slice_content.rs collect_pattern_identifier_spans
 verter_semantic_source/src/flow_slice_content.rs collect_write_targets
 verter_semantic_source/src/flow_slice_content.rs discarded_value_holds_write
+verter_semantic_source/src/flow_slice_content.rs entered_assertion # bounded: an assertion entered while an asserted condition classifies never classifies its own
 verter_semantic_source/src/flow_slice_content.rs expression_freshness
 verter_semantic_source/src/flow_slice_content.rs expression_root_identifier
 verter_semantic_source/src/flow_slice_content.rs free_rooted_value
