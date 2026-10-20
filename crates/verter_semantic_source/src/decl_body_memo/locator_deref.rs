@@ -354,6 +354,36 @@ impl DeclBodyMemo {
                         ) {
                             return Err(LocatorBodyDerefError::TypeParamBoundStepMisplaced);
                         }
+                        // An overload-group member re-borrows only the
+                        // statement declaring it: a group's members are
+                        // each dereferenced, so lowering the whole group per
+                        // member would be quadratic in the group.
+                        if let Some(TypeBodyPathStep::ValueSignature { ordinal }) =
+                            slot.path.first()
+                        {
+                            if let Some(selected) = self.transient_value_signature_in(
+                                slot.anchor.owner,
+                                slot.anchor.symbol.as_ref(),
+                                *ordinal,
+                            ) {
+                                let selected = transient_outcome(selected)?;
+                                let (expr, lexical_root) = navigate_signature_parts(
+                                    &selected.signature,
+                                    &slot.path[1..],
+                                    &slot.anchor,
+                                    Some(selected.kind),
+                                    *ordinal,
+                                )?;
+                                // The selection serves no dual-space name, so
+                                // there are no header type parameters to bind.
+                                return Ok(DerefedAuthoredBody {
+                                    shape: DerefedBodyShape::Single(expr),
+                                    lexical_root,
+                                    type_parameters: Vec::new(),
+                                    visibility: TypeParamVisibility::Body,
+                                });
+                            }
+                        }
                         // The transient value-part service carries the SAME
                         // lease-miss / genuine-miss discrimination the demand
                         // cells carry (header presence is checked inside). A
