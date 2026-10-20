@@ -19330,23 +19330,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     construction_ordinal_seam! {
         /// The type the checker constructs from a WRITTEN union or
         /// intersection (`getUnionType` / `getIntersectionType` over its
-        /// arms), when it differs from the composite as written: `"a" |
-        /// string` is `string`, `1 | number | "x"` is `number | "x"`, `"a1" |
-        /// `a${number}` | "ab"` is `"ab" | `a${number}``, and `string & "a"` is
-        /// `"a"`. `None` for any other node and for a composite the reduction
-        /// keeps as written (`"a" | "b"`, `{ a: 1 } & { b: 2 }`), which stays
-        /// the authored display form in its written order.
+        /// arms) when that construction absorbs a literal: `"a" | string` is
+        /// `string`, `1 | number | "x"` is `number | "x"`, `"a1" | `a${number}`
+        /// | "ab"` is `"ab" | `a${number}``, and `string & "a"` is `"a"`.
         ///
-        /// A written composite is an authored shell or an order-preserving
-        /// rebuild (a declaration body's projected view is one). A rebuild
-        /// keeps no record of its original's category, so an intersection
-        /// with an arm that may contribute call signatures (an
-        /// overload-ordered list) stays as written, and so does the written
-        /// `string & {}` pair the checker keeps. The arms are read as they
-        /// stand (a named arm is not resolved) and reduced by the shared
-        /// `ReduceUnion` / `ReduceIntersection` queries, unions under the
-        /// strict `null` / `undefined` algebra.
-        fn reduced_written_composite(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        /// `None` for any other node, for a written union with no literal
+        /// beside a primitive or pattern template that could absorb it, and
+        /// for a written intersection not made of literals and primitives
+        /// alone: such a composite is not re-decided here and stays the
+        /// authored display form in its written order (`"a" | "b" | never`,
+        /// `(1 | 2) & (2 | 3)`, `{ a: 1 } & { b: 2 }`).
+        ///
+        /// Otherwise the shared `ReduceUnion` / `ReduceIntersection` query
+        /// decides the arms as they stand (a named arm is not resolved), unions
+        /// under the strict `null` / `undefined` algebra, and the outcome is
+        /// returned typed: the reduced type when it absorbed a literal, the
+        /// written node itself when it absorbed none, and the reducer's error,
+        /// recursive back-edge or opaque result verbatim, for the caller to
+        /// classify as a fault or a miss.
+        fn reduced_written_composite(
+            &self,
+            node: SemanticNodeId,
+        ) -> Option<QueryResult<SemanticNodeId>> {
             use crate::semantic_query::composite::CompositeOriginCategory as Category;
             let graph = self.graph();
             let written = |category: Category| {
@@ -19361,12 +19366,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 _ => return None,
             };
-            if !is_union
-                && (super::canonical_algebra::is_written_primitive_over_empty_object(graph, &arms)
-                    || arms
-                        .iter()
-                        .any(|arm| super::walk::value_may_contribute_call_signatures(graph, *arm)))
-            {
+            // The written arms, nested composites of the same kind flattened
+            // as the reducer reads them.
+            let mut flat = Vec::with_capacity(arms.len());
+            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
+            while let Some(arm) = pending.pop() {
+                match graph.node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Union(inner)) if is_union => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    Some(SemanticNodeData::Intersection(inner)) if !is_union => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    _ => flat.push(arm),
+                }
+            }
+            let is_literal = |arm: &SemanticNodeId| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_) | SemanticNodeData::TemplateLiteral { .. })
+                )
+            };
+            let is_primitive = |arm: &SemanticNodeId| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Primitive(_))
+                )
+            };
+            let reducible = if is_union {
+                // A supertype a literal arm may be absorbed into: its
+                // primitive, a pattern template, `any` or `unknown`.
+                let may_absorb = |arm: &SemanticNodeId| {
+                    matches!(
+                        graph.node_data(*arm).as_deref(),
+                        Some(
+                            SemanticNodeData::Primitive(
+                                PrimitiveKind::String
+                                    | PrimitiveKind::Number
+                                    | PrimitiveKind::BigInt
+                                    | PrimitiveKind::Boolean
+                                    | PrimitiveKind::Any
+                                    | PrimitiveKind::Unknown
+                            ) | SemanticNodeData::TemplateLiteral { .. }
+                        )
+                    )
+                };
+                flat.iter().any(|literal| {
+                    is_literal(literal)
+                        && flat.iter().any(|arm| arm != literal && may_absorb(arm))
+                })
+            } else {
+                flat.iter().all(|arm| is_literal(arm) || is_primitive(arm))
+                    && flat.iter().any(is_literal)
+                    && flat.iter().any(is_primitive)
+            };
+            if !reducible {
                 return None;
             }
             let key = if is_union {
@@ -19378,19 +19432,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticQueryKey::reduce_intersection_operands(graph, Arc::clone(&arms))
             };
             let reduced = match self.execute_read(key).value {
-                QueryResult::Value(reduced) | QueryResult::Recursive(reduced) => reduced,
-                QueryResult::Error(_) => return None,
+                QueryResult::Value(reduced) => reduced,
+                other => return Some(other),
             };
-            let kept_as_written = match graph.node_data(reduced).as_deref() {
-                Some(SemanticNodeData::Union(kept)) if is_union => {
-                    kept.len() == arms.len() && arms.iter().all(|arm| kept.contains(arm))
-                }
-                Some(SemanticNodeData::Intersection(kept)) if !is_union => {
-                    kept.iter().eq(arms.iter())
-                }
-                _ => false,
+            let absorbed = match graph.node_data(reduced).as_deref() {
+                // An opaque reduction is the caller's to classify.
+                Some(SemanticNodeData::Opaque(_)) => true,
+                Some(SemanticNodeData::Union(kept)) if is_union => flat
+                    .iter()
+                    .any(|arm| is_literal(arm) && !kept.contains(arm)),
+                Some(_) if is_union => flat.iter().any(|arm| is_literal(arm) && *arm != reduced),
+                Some(_) => is_literal(&reduced) && flat.contains(&reduced),
+                None => false,
             };
-            (!kept_as_written).then_some(reduced)
+            Some(QueryResult::Value(if absorbed { reduced } else { node }))
         }
     }
 

@@ -103,11 +103,16 @@ A written union or intersection stays as written through lowering — its
 view. Where a named type is PUBLISHED (the typeinfo materializer
 `materialize_through_aliases`, both the named-resolve and evaluate entries),
 `ProjectSemanticDispatch::reduced_written_composite` asks the same two queries
-for the type the checker constructs from it: `"a" | string` is `string`, a
-pattern template absorbs the literals it matches, `string & "a"` is `"a"`. A
-composite the reduction keeps stays as written in its written order; an
-intersection with a possibly-callable arm and the written `string & {}` pair
-are never re-decided there.
+for the type the checker constructs from it when that construction absorbs a
+literal: `"a" | string` is `string`, a pattern template absorbs the literals
+it matches, `string & "a"` is `"a"`. Only a union holding a literal beside a
+primitive or pattern template, or an intersection of literals and primitives
+alone, is offered; every other written composite (and one whose reduction
+absorbs nothing) stays as written in its written order. The reducer's outcome
+returns typed, so a fault fails the publication through the materializer's
+fault/miss split while a miss keeps the written composite. Only the published
+alias body is reduced; a composite nested in a member or element stays shallow
+until the consumer walks to it.
 
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,

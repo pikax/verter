@@ -616,7 +616,7 @@ pub(crate) fn deliver_resolved_root(
 /// [`compute_effective_mode`] before view acquisition, so the request body's
 /// early-miss returns and this path report the SAME mode).
 #[allow(clippy::type_complexity)]
-fn resolve_named_symbol_in_current_view(
+pub(crate) fn resolve_named_symbol_in_current_view(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
@@ -1062,27 +1062,32 @@ pub(crate) fn materialize_through_aliases(
             // Composite-bodied alias reduction. Lowering keeps a written
             // union or intersection as written (its authored shell, or the
             // declaration body's order-preserving view of it); under the
-            // publication modes the alias publishes the type the checker
-            // constructs from it (`type X = "a" | string` is `string`, `type
-            // Y = string & "a"` is `"a"`), reduced by the shared canonical
-            // algebra. A composite that reduction keeps as written stays as
-            // written. `Skeleton` / `Identity` keep it.
+            // publication modes an alias whose written composite absorbs a
+            // literal publishes the type the checker constructs from it
+            // (`type X = "a" | string` is `string`, `type Y = string & "a"`
+            // is `"a"`), reduced by the shared canonical algebra. Any other
+            // written composite stays as written, and so does one the reducer
+            // misses; a reducer fault propagates through the same fault/miss
+            // split as the operator bridge. `Skeleton` / `Identity` keep it.
             Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
                 if matches!(
                     mode,
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                match dispatch
+                let Some(step_result) = dispatch
                     .owning()
                     .reduced_written_composite(current)
                     .into_value_in(&scope)
-                {
-                    Some(reduced) => {
-                        current = reduced;
+                else {
+                    return Ok(current);
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
                         continue;
                     }
-                    None => return Ok(current),
+                    MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
             _ => return Ok(current),

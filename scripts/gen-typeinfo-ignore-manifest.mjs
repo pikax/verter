@@ -3377,7 +3377,6 @@ const LIFTED_ROW_OVERRIDES = new Map([
         "ResolveDecl",
         "Instantiate",
         "IndexedAccess",
-        "ReduceUnion",
         "LowerLocator",
         "SignaturesOfType",
       ],

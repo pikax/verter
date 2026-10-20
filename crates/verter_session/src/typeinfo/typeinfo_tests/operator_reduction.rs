@@ -363,33 +363,34 @@ fn constituents(answer: &TypeExpr) -> Vec<String> {
         TypeExpr::Union(arms) => arms.iter().collect(),
         other => vec![other],
     };
-    let mut texts: Vec<String> = arms
-        .into_iter()
-        .map(|arm| {
-            verter_type_expr::render_type_expr_display(arm)
-                .expect("the answer renders")
-                .text
-        })
-        .collect();
+    let mut texts: Vec<String> = arms.into_iter().map(render).collect();
     texts.sort_unstable();
     texts
 }
 
+/// `answer` as rendered text.
+fn render(answer: &TypeExpr) -> String {
+    verter_type_expr::render_type_expr_display(answer)
+        .expect("the answer renders")
+        .text
+}
+
 /// A written union absorbs the literals its primitives and pattern
 /// templates already hold, and a written intersection of a literal and its
-/// primitive is the literal; a written composite the checker keeps stays as
-/// written.
+/// primitive is the literal; every other written composite publishes exactly
+/// as written, in its written order. A written composite nested in a
+/// published member or element stays shallow there, and walking to it
+/// publishes the absorbed type.
 ///
 /// Measured on TypeScript 7.0.2 with `declare const p: <probe>; const s:
 /// never = p;` read off the TS2322 message (all four `strictNullChecks` ×
 /// `noImplicitAny` settings agree): `"a1" | `a${number}` | "ab"` is `"ab" |
 /// `a${number}``, `"a" | string` is `string`, `1 | number | "x"` is `number
-/// | "x"`, `string & "a"` is `"a"`; `"a" | "b"` and `{ a: 1 } & { b: 2 }`
-/// print as written.
+/// | "x"`, `string & "a"` is `"a"`.
 #[test]
 fn a_written_composite_publishes_the_type_the_checker_constructs() {
     let host = make_host_with_footprint();
-    let rows: [(&str, &str, &[&str]); 6] = [
+    let absorbed: [(&str, &str, &[&str]); 4] = [
         (
             BENCH_LIB_PRELUDE,
             "\"a1\" | `a${number}` | \"ab\"",
@@ -398,11 +399,47 @@ fn a_written_composite_publishes_the_type_the_checker_constructs() {
         ("", "\"a\" | string", &["string"]),
         ("", "1 | number | \"x\"", &["'x'", "number"]),
         ("", "string & \"a\"", &["'a'"]),
-        ("", "\"a\" | \"b\"", &["'a'", "'b'"]),
-        ("", "{ a: 1 } & { b: 2 }", &["{ a: 1 } & { b: 2 }"]),
+    ];
+    // Composites with no literal to absorb, or not made of literals and
+    // primitives alone: the written probe and its published text.
+    let kept = [
+        ("\"a\" | \"b\"", "'a' | 'b'"),
+        ("\"a\" | (\"b\" | \"c\")", "'a' | 'b' | 'c'"),
+        ("\"a\" | \"b\" | never", "'a' | 'b' | never"),
+        ("\"a\" | null | undefined", "'a' | null | undefined"),
+        ("{ a: 1 } & { b: 2 }", "{ a: 1 } & { b: 2 }"),
+        ("(1 | 2) & (2 | 3)", "(1 | 2) & (2 | 3)"),
+        ("number & string", "number & string"),
     ];
     let mut failures = Vec::new();
-    for (index, (prelude, probe, expected)) in rows.iter().enumerate() {
+    for (index, (probe, expected)) in kept.iter().enumerate() {
+        let canonical = format!("/probes/kept{index}.ts");
+        upsert_ts(&host, &canonical, &format!("type __Probe = {probe};\n"));
+        let published = render(&published_probe(&host, &canonical));
+        if published != *expected {
+            failures.push(format!(
+                "`{probe}`: kept as {expected}, published {published}"
+            ));
+        }
+    }
+    for (index, (container, walk)) in [
+        ("{ x: \"a\" | string }", "__Probe[\"x\"]"),
+        ("(\"a\" | string)[]", "__Probe[number]"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let canonical = format!("/probes/nested{index}.ts");
+        upsert_ts(&host, &canonical, &format!("type __Probe = {container};\n"));
+        let (walked, _r) = evaluate_expr(&host, &canonical, walk, ProjectionMode::Navigate);
+        if constituents(&walked) != ["string"] {
+            failures.push(format!(
+                "`{walk}` of `{container}`: the checker answers string, published {}",
+                render(&walked)
+            ));
+        }
+    }
+    for (index, (prelude, probe, expected)) in absorbed.iter().enumerate() {
         let canonical = format!("/probes/p{index}.ts");
         upsert_ts(
             &host,
@@ -436,4 +473,58 @@ fn a_written_composite_publishes_the_type_the_checker_constructs() {
         ProjectionMode::Skeleton,
     );
     assert_eq!(constituents(&skeleton), ["'a'", "string"]);
+}
+
+/// A reducer fault while a written composite is published fails the request,
+/// never delivering the unreduced composite as a success: a cancellation that
+/// lands on the reduction fails the publication, and the same publication
+/// uncancelled absorbs the literal.
+#[test]
+fn a_reducer_fault_during_composite_publication_fails_the_request() {
+    use crate::host_resolve_type_audit::TypeResolutionRequestError;
+    use crate::typeinfo::resolve_named_symbol::{
+        materialize_through_aliases, resolve_named_symbol_in_current_view,
+    };
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    const FILE: &str = "/probes/fault.ts";
+    let host = make_host_with_footprint();
+    upsert_ts(&host, FILE, "type __Probe = \"a\" | string;\n");
+    let view = crate::typeinfo::current_store_view_for_query(&host).expect("a current view");
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _scope = dispatch.enter_construction_scope();
+    // `Skeleton` delivers the written composite unreduced.
+    let (written, _mode) = resolve_named_symbol_in_current_view(
+        &host,
+        &dispatch,
+        FILE,
+        "__Probe",
+        &[],
+        ProjectionMode::Skeleton,
+    );
+    let written = written
+        .expect("the skeleton demand completes")
+        .expect("the probe exists");
+
+    let cancelled = RequestContext::new(7101, Arc::from(FILE), false, None);
+    cancelled.cancel();
+    let outcome = {
+        let _guard = RequestContextGuard::install(cancelled);
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded)
+    };
+    assert!(
+        matches!(outcome, Err(TypeResolutionRequestError::Cancelled)),
+        "a cancelled reduction fails the publication; got {outcome:?}"
+    );
+
+    let published =
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded)
+            .expect("the uncancelled publication completes");
+    assert_ne!(
+        published, written,
+        "the uncancelled publication absorbs the literal"
+    );
 }
