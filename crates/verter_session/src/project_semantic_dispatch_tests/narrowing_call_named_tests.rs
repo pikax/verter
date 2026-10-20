@@ -151,7 +151,8 @@ fn an_asserted_condition_narrows_the_code_after_the_call() {
 /// The condition narrows as an `if` over it would: through a predicate
 /// call, a negation and a disjunction; a condition naming no reference
 /// narrows nothing; an assertion inside one branch narrows that branch
-/// only, so the join keeps the other's type.
+/// only, so the join keeps the other's type. An assertion function held by
+/// an annotated `const` narrows by its condition too.
 #[test]
 fn an_asserted_condition_narrows_as_its_test_would() {
     let assertion = "declare function assert(c: unknown): asserts c;\ndeclare function isStr(c: unknown): c is string;\n";
@@ -175,6 +176,10 @@ fn an_asserted_condition_narrows_as_its_test_would() {
         (
             "function g(z: string | number) { if (z) { assert(typeof z === \"string\"); } return z; }",
             "number | string",
+        ),
+        (
+            "declare const assertConst: (c: unknown) => asserts c;\nfunction g(z: string | number) { assertConst(typeof z === \"string\"); return z; }",
+            "string",
         ),
     ];
     let programs: Vec<(String, &str)> = rows

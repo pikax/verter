@@ -19836,13 +19836,15 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Apply one entered `asserts` call: the call is a throw point first
     /// (if it throws, the narrow never happened), then its predicate
     /// narrows the subject for the rest of the path — to the target, or by
-    /// truthiness for a targetless `asserts v`.
+    /// truthiness for a targetless `asserts v` — or, for a targetless
+    /// assertion passed a condition, the condition holds.
     fn apply_assertion(
         &mut self,
         claim: &verter_session_query::flow::slice::SliceAssertionClaim,
         call: verter_span::Span,
     ) {
         use verter_session_query::flow::slice::SliceAssertionClaim;
+        self.capture_throw_point();
         let (subject, target) = match claim {
             SliceAssertionClaim::Reference { subject, target } => (subject, target.as_ref()),
             SliceAssertionClaim::Condition(guard) => {
@@ -19850,7 +19852,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // holds past the call (`narrowType(…, assumeTrue)`), its
                 // positive reading landing for the rest of the region as a
                 // reference assertion's narrow does.
-                self.capture_throw_point();
                 self.call_evidence.push(FlowCallEvidence {
                     span: call,
                     relations_decided: true,
@@ -19859,7 +19860,6 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 return;
             }
         };
-        self.capture_throw_point();
         // The assertion call's evidence, with the same discipline a
         // predicate call's narrowing takes: the call was evaluated, and
         // its relation decided (or not) the narrow it established. A
@@ -26087,6 +26087,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
                     arguments,
+                    conditions,
                     site,
                 } => {
                     // The call throws before any effect it asserts.
@@ -26109,6 +26110,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 };
                                 if let GuardNarrowing::Narrowed(subject, node) = fact {
                                     self.push_narrowing(&subject, node);
+                                }
+                            } else if target.is_none() {
+                                // A targetless assertion over a condition:
+                                // the condition holds past the call.
+                                match conditions.get(parameter) {
+                                    Some(Some(
+                                        verter_session_query::flow::slice::SliceAssertionCondition::Guard(
+                                            guard,
+                                        ),
+                                    )) => self.apply_guard_scoped(guard, true),
+                                    Some(Some(
+                                        verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
+                                    )) => self.record_degradation(
+                                        crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                            verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                                        ),
+                                    ),
+                                    _ => {}
                                 }
                             }
                         }

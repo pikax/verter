@@ -25,6 +25,7 @@ export function tNotStr(x: string | number | boolean) { if (typeof x !== "string
 export function tObj(x: string | { a: 1 } | null) { if (typeof x === "object") return x; throw 0; }
 export function tObjElse(x: string | { a: 1 } | null) { if (typeof x === "object") throw 0; return x; }
 export function tFn(x: (() => void) | string) { if (typeof x === "function") return x; throw 0; }
+export function tFnCall(x: (() => 1) | string) { if (typeof x === "function") return x(); throw 0; }
 export function tUndef(x: string | undefined) { if (typeof x === "undefined") return x; throw 0; }
 export function tNotUndef(x: string | undefined) { if (typeof x !== "undefined") return x; throw 0; }
 export function tUnkNum(x: unknown) { if (typeof x === "number") return x; throw 0; }
@@ -62,7 +63,8 @@ export function tUndefOfNever(x: never) { if (typeof x === "undefined") return x
 /// A `typeof` guard keeps the union members of the tested kind in its true
 /// branch and the rest in its false branch, in either operand order, negated,
 /// combined with `&&` / `||`, over a member reference, and from `unknown` or
-/// `any` to the tested primitive (`object | null` for `"object"`).
+/// `any` to the tested primitive (`object | null` for `"object"`); a call of
+/// a reference narrowed to its callable arm calls that arm.
 #[test]
 fn typeof_guards_narrow_as_the_checker_narrows() {
     let matrix = Matrix::new(TYPEOF);
@@ -72,6 +74,7 @@ fn typeof_guards_narrow_as_the_checker_narrows() {
         ("tNotStr", "number | boolean"),
         ("tObjElse", "string"),
         ("tFn", "() => void"),
+        ("tFnCall", "1"),
         ("tNotUndef", "string"),
         ("tUnkNum", "number"),
         ("tUnkStr", "string"),
@@ -583,6 +586,7 @@ declare function isFish(p: Fish | Bird): p is Fish;
 declare function isString(x: unknown): x is string;
 declare function assertString(x: unknown): asserts x is string;
 declare function assertTruthy(x: unknown): asserts x;
+declare const assertConst: (c: unknown) => asserts c;
 declare function isDefined<T>(x: T | undefined | null): x is T;
 declare function isKey<K extends string>(k: K, x: string): x is K;
 declare function isArr<T>(v: T | T[]): v is T[];
@@ -598,6 +602,8 @@ export function pNarrowLiteral(x: "a" | 1) { if (isString(x)) return x; throw 0;
 export function pAssert(x: unknown) { assertString(x); return x; }
 export function pAssertUnion(x: string | number) { assertString(x); return x; }
 export function pAssertTruthy(x: string | undefined) { assertTruthy(x); return x; }
+export function pAssertCondition(x: string | number) { assertTruthy(typeof x === "string"); return x; }
+export function pAssertConstCondition(x: string | number) { assertConst(typeof x === "string"); return x; }
 export function pGenericDefined(x: string | undefined) { if (isDefined(x)) return x; throw 0; }
 export function pGenericElse(x: string | undefined) { if (isDefined(x)) throw 0; return x; }
 export function pGenericArr(x: number | number[]) { if (isArr(x)) return x; throw 0; }
@@ -616,8 +622,9 @@ export function pMemberArg(o: { p: Fish | Bird }) { if (isFish(o.p)) return o.p;
 
 /// A call to a type predicate narrows its argument (a member reference too) in
 /// the true branch and filters it out in the false branch; an assertion narrows
-/// what follows it; a `this is` predicate narrows the receiver; an inferred
-/// predicate of a function or arrow narrows like a declared one.
+/// what follows it, by the condition it is passed for a targetless `asserts
+/// x`; a `this is` predicate narrows the receiver; an inferred predicate of a
+/// function or arrow narrows like a declared one.
 #[test]
 fn predicates_and_assertions_narrow_as_the_checker_narrows() {
     let matrix = Matrix::new(PREDICATES);
@@ -631,6 +638,8 @@ fn predicates_and_assertions_narrow_as_the_checker_narrows() {
         ("pAssert", "string"),
         ("pAssertUnion", "string"),
         ("pAssertTruthy", "string"),
+        ("pAssertCondition", "string"),
+        ("pAssertConstCondition", "string"),
         ("pGenericKey", "\"k\""),
         ("pThis", "Box2 & { v: string; }"),
         ("pThisMember", "string"),

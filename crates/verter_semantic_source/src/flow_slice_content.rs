@@ -63,15 +63,15 @@ use verter_session_query::flow::slice::{
     CaptureScope, DefiningFrameDiscovery, DefiningFrameGate, EmptyCompletion, FlowSliceSelection,
     FrameAnswer, GatedLeaf, GatedType, LeafRootOccurrence, NameBinding, NestedFlowContext,
     ParameterDeclaration, ReturnPredicateTest, SignatureParameters, SignatureScope,
-    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceAssertionClaim, SliceBindingKind,
-    SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
-    SliceCaptureAuthorityLocator, SliceContent, SliceDestructuredElement, SliceEffectCallee,
-    SliceElementKey, SliceEqOperand, SliceEqOther, SliceEvolvingOperation,
-    SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
-    SliceLogical, SliceLoop, SliceLoopBinding, SliceLoopDependency, SliceLoopElement,
-    SliceLoopTest, SliceLoopWrite, SliceMemberWrite, SliceMutationArgument, SliceNarrowRoot,
-    SliceNarrowSubject, SliceObjectEntry, SliceObjectKey, SliceObjectMember, SliceParam,
-    SlicePattern, SlicePatternElement, SlicePatternKey, SliceRegion, SliceStatement,
+    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceAssertionClaim,
+    SliceAssertionCondition, SliceBindingKind, SliceCall, SliceCallArgument, SliceCallArguments,
+    SliceCallSite, SliceCaptureAuthority, SliceCaptureAuthorityLocator, SliceContent,
+    SliceDestructuredElement, SliceEffectCallee, SliceElementKey, SliceEqOperand, SliceEqOther,
+    SliceEvolvingOperation, SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard,
+    SliceGuardLiteral, SliceLogical, SliceLoop, SliceLoopBinding, SliceLoopDependency,
+    SliceLoopElement, SliceLoopTest, SliceLoopWrite, SliceMemberWrite, SliceMutationArgument,
+    SliceNarrowRoot, SliceNarrowSubject, SliceObjectEntry, SliceObjectKey, SliceObjectMember,
+    SliceParam, SlicePattern, SlicePatternElement, SlicePatternKey, SliceRegion, SliceStatement,
     SliceSwitchCase, SliceThis, SliceTypeParam, SliceTypeofKind, SliceUnsupported, SliceWriteKey,
 };
 
@@ -8792,11 +8792,40 @@ impl<'a> Lowerer<'a> {
         match self.lower_callee_signature_guard(call, callee) {
             SliceGuard::CalleePredicate {
                 callee, arguments, ..
-            } => Some(SliceStatement::CalleeEffect {
-                callee,
-                arguments,
-                site: call_site(call),
-            }),
+            } => {
+                let conditions = call
+                    .arguments
+                    .iter()
+                    .zip(arguments.iter())
+                    .map(|(argument, subject)| {
+                        if subject.is_some() {
+                            return None;
+                        }
+                        let argument = argument.as_expression()?;
+                        // A call in the condition is a guard whose evidence
+                        // only its application deposits, and the effects
+                        // signature is not known to assert yet.
+                        if verter_semantic::analysis::flow::expression_contains_call(argument) {
+                            return Some(SliceAssertionCondition::Unexpressible);
+                        }
+                        match self.classify_guard(argument) {
+                            GuardDisposition::Modeled(guard) => {
+                                Some(SliceAssertionCondition::Guard(*guard))
+                            }
+                            GuardDisposition::NoNarrowing => None,
+                            GuardDisposition::Unexpressible => {
+                                Some(SliceAssertionCondition::Unexpressible)
+                            }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                Some(SliceStatement::CalleeEffect {
+                    callee,
+                    arguments,
+                    conditions: Arc::from(conditions.into_boxed_slice()),
+                    site: call_site(call),
+                })
+            }
             _ => None,
         }
     }

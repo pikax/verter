@@ -369,6 +369,11 @@ pub enum SliceStatement {
         callee: GatedType,
         /// Each argument's narrowable reference, positionally.
         arguments: Arc<[Option<SliceNarrowSubject>]>,
+        /// Each argument that is no reference, positionally, as the
+        /// condition a targetless `asserts x` effects signature narrows by
+        /// (`None` for a reference argument or a condition that narrows
+        /// nothing).
+        conditions: Arc<[Option<SliceAssertionCondition>]>,
         /// The call expression, whose arguments resolve an overloaded or
         /// generic effects signature.
         site: SliceCallSite,
@@ -1075,6 +1080,19 @@ pub enum SliceAssertionClaim {
     /// positive reading holds past the call, exactly as an `if` over it
     /// whose false branch throws.
     Condition(SliceGuard),
+}
+
+/// A non-reference argument of a [`SliceStatement::CalleeEffect`] call, as
+/// the condition its callee narrows by when the callee's effects signature
+/// turns out to be a targetless `asserts x`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceAssertionCondition {
+    /// The condition's guard.
+    Guard(SliceGuard),
+    /// A condition the guard vocabulary does not express here (one holding
+    /// a call, whose evidence only an applied guard deposits): a targetless
+    /// assertion over it takes the typed guard-narrowing gap.
+    Unexpressible,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
