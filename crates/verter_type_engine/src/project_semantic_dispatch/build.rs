@@ -584,11 +584,58 @@ pub(super) struct InferScan {
 /// building was a complete function of its state: nothing it read was a
 /// partial (a refused child, a recursion carrier, a missing input) or a
 /// result its memo would not keep, and the request was not cancelled. Only
-/// [`ProjectSemanticDispatch::exact_steps`] mints one, and a divergence is
-/// certified only with it
-/// ([`CertifiedDivergence::exact_recurrence`](crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence)).
+/// [`ProjectSemanticDispatch::exact_steps`] and
+/// [`ProjectSemanticDispatch::exact_steps_since`] mint one, and a divergence
+/// is certified only with it
+/// ([`CertifiedDivergence`](crate::semantic_query::checker_policy::CertifiedDivergence)).
 pub(crate) struct ExactSteps {
     _proof: (),
+}
+
+/// The dispatcher's witness that a conditional tail run grows without end:
+/// one argument is wrapped in the same structural constructor at every
+/// step, the others pass through unchanged, and the conditional selects the
+/// recursive branch for EVERY argument that constructor can hold — decided
+/// by the checker's own definitely-true / definitely-false tests over the
+/// wrapped type parameter, not by the steps taken so far. Only
+/// [`ProjectSemanticDispatch::uniform_growth`] mints one
+/// ([`CertifiedDivergence::uniform_growth`](crate::semantic_query::checker_policy::CertifiedDivergence::uniform_growth)).
+pub(crate) struct UniformGrowth {
+    _proof: (),
+}
+
+/// A declaration that grows one of its type parameters uniformly
+/// ([`ProjectSemanticDispatch::read_growth_shape`]): its recursive branch
+/// passes `wrapper` — a structural constructor over `parameter`, the type
+/// parameter at clause position `index` — and the conditional selects
+/// that branch for every instantiation of the wrapper.
+#[derive(Debug, Clone, Copy)]
+struct GrowthShape {
+    index: usize,
+    parameter: SemanticNodeId,
+    wrapper: SemanticNodeId,
+}
+
+/// Whether a build frame's steps so far are exact: it holds no partial and
+/// nothing its memo would refuse to keep.
+fn frame_is_exact(frame: &super::BuildLocalTaint) -> bool {
+    !frame.result_is_partial && !frame.cache_suppress
+}
+
+/// Whether the frame on `frames` producing the instantiation `identity`
+/// and every frame built on top of it are exact. `false` when no frame on
+/// the stack produces it: frames below the producer belong to its callers
+/// and are not consulted.
+fn exact_since_producer(frames: &[super::BuildLocalTaint], identity: u64) -> bool {
+    for frame in frames.iter().rev() {
+        if !frame_is_exact(frame) {
+            return false;
+        }
+        if frame.produces == Some(identity) {
+            return true;
+        }
+    }
+    false
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -5837,6 +5884,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
             tail_arguments: std::iter::once(Arc::clone(args)).collect(),
+            tail_current: Arc::clone(args),
+            growth: None,
             conditional_body: None,
             generic,
             suspend,
@@ -5866,7 +5915,197 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let frames = self.build_local_taint.borrow();
         let frame = frames.last()?;
-        (!frame.result_is_partial && !frame.cache_suppress).then_some(ExactSteps { _proof: () })
+        frame_is_exact(frame).then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`ExactSteps`] for every step since the instantiation `claimed` began
+    /// on this path: the frame producing it is on this thread's build stack
+    /// ([`super::BuildLocalTaint::produces`]) and neither it nor any frame
+    /// built on top of it holds a partial or a result its memo would not
+    /// keep, and the request is live. `None` — the producer's frame is not
+    /// on the stack (a suspended continuation's), or a step read a partial —
+    /// is no proof.
+    fn exact_steps_since(&self, claimed: &SemanticQueryKey) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let identity = super::instantiation_frame_identity(claimed)?;
+        exact_since_producer(&self.build_local_taint.borrow(), identity)
+            .then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`UniformGrowth`] for the tail run of `build` stepping from its
+    /// current arguments to `next`: exactly one argument changed, the
+    /// declaration grows that parameter uniformly ([`GrowthShape`]), the
+    /// current argument holds no type parameter (so neither does any later
+    /// one, and no later step defers), and `next`'s argument IS the wrapper
+    /// over the current one — this step took the recursive branch. Every
+    /// later step is then that branch again over a wrapped argument, with
+    /// no end. `None` is no proof.
+    fn uniform_growth(
+        &self,
+        build: &mut InstantiateBuild,
+        next: &[SemanticNodeId],
+    ) -> Option<UniformGrowth> {
+        let current = Arc::clone(&build.tail_current);
+        if current.len() != next.len() {
+            return None;
+        }
+        let mut changed = (0..next.len()).filter(|&position| current[position] != next[position]);
+        let index = changed.next()?;
+        if changed.next().is_some() {
+            return None;
+        }
+        let shape = self.growth_shape(build)?;
+        if shape.index != index || !self.type_params_within(&[current[index]]).is_empty() {
+            return None;
+        }
+        (self.substitute_semantic_type_param(shape.wrapper, shape.parameter, current[index])
+            == next[index])
+            .then_some(UniformGrowth { _proof: () })
+    }
+
+    /// The declaration's [`GrowthShape`], read once per build.
+    fn growth_shape(&self, build: &mut InstantiateBuild) -> Option<GrowthShape> {
+        if let Some(known) = build.growth {
+            return known;
+        }
+        let shape = self.read_growth_shape(build);
+        build.growth = Some(shape);
+        shape
+    }
+
+    /// The uniform growth `build`'s declaration declares, when its body is
+    /// a conditional `P extends E ? X : Y` over one of its own type
+    /// parameters `P`, written bare, where:
+    ///
+    /// - `E` is closed: no type parameter, no `infer`;
+    /// - exactly one branch applies the declaration again, passing every
+    ///   other parameter through unchanged and `P` wrapped in one structural
+    ///   constructor — a tuple without rest elements, an array or an object
+    ///   type, never a union, a spread or `never` whatever it holds — that
+    ///   mentions no other type variable;
+    /// - the checker's own generic test selects that branch for EVERY
+    ///   instantiation of the wrapper: definitely true when the wrapper over
+    ///   the parameter without its constraint relates to `E`
+    ///   (`getRestrictiveInstantiation`), definitely false when the wrapper
+    ///   over the wildcard does not (`getPermissiveInstantiation`).
+    ///
+    /// The decision reads the declaration and `E` only, never the run's
+    /// arguments, and its reads are this build's dependencies. Anything
+    /// else — a check that is not the bare parameter (`Acc["length"]`), an
+    /// open `E`, a branch the test leaves undecided — is no shape.
+    fn read_growth_shape(&self, build: &InstantiateBuild) -> Option<GrowthShape> {
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: build.decl_canonical.clone(),
+            owner: build.decl_owner,
+            whole_hash: build.decl_whole_hash,
+            decl_name: build.decl_name.clone(),
+        };
+        let body = self.declared_alias_body(&identity)??;
+        let graph = self.graph();
+        let (check, extends, true_branch, false_branch) = match graph.node_data(body).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                pending: None,
+                ..
+            }) => (*check, *extends, *true_branch_ref, *false_branch_ref),
+            _ => return None,
+        };
+        let own_parameter = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                decl, param_index, ..
+            }) if decl.canonical_id == build.decl_canonical
+                && decl.owner == build.decl_owner
+                && decl.decl_name == build.decl_name =>
+            {
+                Some(usize::from(*param_index))
+            }
+            _ => None,
+        };
+        let index = own_parameter(check)?;
+        let applies = |branch: SemanticNodeId| {
+            self.conditional_tail_arguments(
+                branch,
+                &build.decl_canonical,
+                build.decl_owner,
+                &build.decl_name,
+            )
+        };
+        let (recurs_when_true, arguments) = match (applies(true_branch), applies(false_branch)) {
+            (Some(arguments), None) => (true, arguments),
+            (None, Some(arguments)) => (false, arguments),
+            _ => return None,
+        };
+        let passes_through = arguments.iter().enumerate().all(|(position, argument)| {
+            position == index || own_parameter(*argument) == Some(position)
+        });
+        let wrapper = *arguments.get(index)?;
+        if !passes_through
+            || !self.is_growth_constructor(wrapper)
+            || self.type_params_within(&[wrapper]) != [check]
+            || !self.type_params_within(&[extends]).is_empty()
+            || self.declares_or_reads_infer(wrapper)
+            || self.declares_or_reads_infer(extends)
+        {
+            return None;
+        }
+        let decided = if recurs_when_true {
+            matches!(
+                self.restrictive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            )
+        } else {
+            matches!(
+                self.permissive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::NotAssignable
+            )
+        };
+        decided.then_some(GrowthShape {
+            index,
+            parameter: check,
+            wrapper,
+        })
+    }
+
+    /// Whether `node` is a structural constructor whose instantiation is
+    /// never a union, a spread or `never`, whatever it holds: a tuple
+    /// without rest elements, an array or an object type.
+    fn is_growth_constructor(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                elements.iter().all(|element| !element.rest)
+            }
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Object(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `node` declares or reads an `infer` type variable anywhere
+    /// below it.
+    fn declares_or_reads_infer(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. }
+            ) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
     }
 
     /// Carry an instantiation's build on as far as it can go. `delivery` is
@@ -5951,22 +6190,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // same declaration, context and phase, this build's — is in
                 // the state it was in then, and when each step was a complete
                 // function of that state it repeats forever: a certified
-                // divergence. Arguments that came round after a step read a
-                // partial prove nothing, and the run goes on under its budget.
-                let recurrence = build
-                    .tail_arguments
-                    .contains(&next)
-                    .then(|| self.exact_steps())
-                    .flatten();
-                if let Some(exact) = recurrence {
-                    result = checker_policy::divergence_recovery(
-                        self.graph(),
-                        checker_policy::CertifiedDivergence::exact_recurrence(
-                            CheckerDiagnosticOperation::ConditionalTail,
-                            exact,
-                        ),
-                        None,
-                    );
+                // divergence. So is a run that wraps one argument in the
+                // same constructor at every step when the conditional takes
+                // its recursive branch for whatever the constructor holds
+                // (`Self::uniform_growth`). Arguments that came round, or
+                // grew, after a step read a partial prove nothing, and the
+                // run goes on under its budget.
+                let operation = CheckerDiagnosticOperation::ConditionalTail;
+                let certificate = if build.tail_arguments.contains(&next) {
+                    self.exact_steps().map(|exact| {
+                        checker_policy::CertifiedDivergence::exact_recurrence(operation, exact)
+                    })
+                } else {
+                    self.uniform_growth(build, &next).and_then(|growth| {
+                        self.exact_steps().map(|exact| {
+                            checker_policy::CertifiedDivergence::uniform_growth(
+                                operation, exact, growth,
+                            )
+                        })
+                    })
+                };
+                if let Some(certificate) = certificate {
+                    result = checker_policy::divergence_recovery(self.graph(), certificate, None);
                 } else if let Err(refusal) = self
                     .connected_demand
                     .tail_step(&mut build.tail, CheckerDiagnosticOperation::ConditionalTail)
@@ -5981,6 +6226,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.fold_local_partial_completeness(reasons);
                 } else {
                     build.tail_arguments.insert(Arc::clone(&next));
+                    build.tail_current = Arc::clone(&next);
                     build.substitutions.clear();
                     let (next_env, _) = self.bind_instantiate_arguments(build, &next);
                     build.env = next_env;
@@ -17919,11 +18165,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// certified divergence: the checker reports TS2589 and continues with
     /// its error type, which dominates each union and branch on the way.
     /// That recovery is the answer, a complete one
-    /// ([`Self::lib_awaited_recurs`]).
+    /// ([`Self::lib_awaited_recurs`]). The steps are every step since that
+    /// application began, in its own frame and each frame built on top of
+    /// it ([`Self::exact_steps_since`]), so a partial read anywhere on the
+    /// cycle proves nothing.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self.graph().is_same_path_claim(&application) {
-            return match self.lib_awaited_recurs() {
+            return match self.lib_awaited_recurs(self.exact_steps_since(&application)) {
                 LibAwaited::Reduced(recovery) => Some(Some(recovery)),
                 _ => None,
             };
@@ -17990,12 +18239,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The lib conditional re-entering itself with an argument it is still
     /// evaluating on this path: the same application under the same
-    /// context. Through exact steps that is a certified divergence, its
-    /// TS2589 recovery a complete answer, kept. After a step that read a
-    /// partial it proves nothing: the application stops as a same-path
-    /// partial, never kept.
-    fn lib_awaited_recurs(&self) -> LibAwaited {
-        let Some(exact) = self.exact_steps() else {
+    /// context. Through `exact` steps that is a certified divergence, its
+    /// TS2589 recovery a complete answer, kept. Without that witness — a
+    /// step on the cycle read a partial, or the frame that began the
+    /// application is not on this stack — it proves nothing: the
+    /// application stops as a same-path partial, never kept.
+    fn lib_awaited_recurs(&self, exact: Option<ExactSteps>) -> LibAwaited {
+        let Some(exact) = exact else {
             self.fold_local_partial_completeness(
                 crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
             );
@@ -18118,7 +18368,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(self.lib_awaited_recurs());
+            return LibStep::Done(self.lib_awaited_recurs(self.exact_steps()));
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);
@@ -20186,6 +20436,11 @@ pub(super) struct InstantiateBuild {
     /// Every argument list the tail run has taken, for the recurrence that
     /// never reaches a value.
     tail_arguments: rustc_hash::FxHashSet<Arc<[SemanticNodeId]>>,
+    /// The arguments of the tail run's current step.
+    tail_current: Arc<[SemanticNodeId]>,
+    /// The declaration's uniform growth ([`GrowthShape`]), once read
+    /// (`Some(None)` when its body has none).
+    growth: Option<Option<GrowthShape>>,
     /// Whether the declaration's body is a conditional type, once read
     /// (`Some(None)` when it could not be recovered).
     conditional_body: Option<Option<bool>>,
@@ -20494,6 +20749,60 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
         crate::semantic_query::ReadonlyMod::Add => true,
         crate::semantic_query::ReadonlyMod::Remove => false,
         crate::semantic_query::ReadonlyMod::Keep => readonly,
+    }
+}
+
+#[cfg(test)]
+mod same_path_witness_tests {
+    use super::exact_since_producer;
+    use crate::project_semantic_dispatch::BuildLocalTaint;
+
+    const CLAIMED: u64 = 7;
+
+    fn frame(produces: Option<u64>, partial: bool) -> BuildLocalTaint {
+        BuildLocalTaint {
+            produces,
+            result_is_partial: partial,
+            ..BuildLocalTaint::default()
+        }
+    }
+
+    /// A same-path claim on an application an enclosing build produces is
+    /// proved only through every frame from that build's to the top: a
+    /// partial in the producer's frame or in any frame between refuses the
+    /// proof even when the innermost frame is clean, a partial below the
+    /// producer (its callers') does not, and a producer that is not on the
+    /// stack (a suspended continuation's) proves nothing.
+    #[test]
+    fn a_same_path_claim_is_exact_only_through_every_frame_since_its_producer() {
+        let cases = [
+            (vec![frame(Some(CLAIMED), false), frame(None, false)], true),
+            (vec![frame(Some(CLAIMED), true), frame(None, false)], false),
+            (
+                vec![
+                    frame(Some(CLAIMED), false),
+                    frame(Some(3), true),
+                    frame(None, false),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    frame(None, true),
+                    frame(Some(CLAIMED), false),
+                    frame(None, false),
+                ],
+                true,
+            ),
+            (vec![frame(Some(3), false), frame(None, false)], false),
+        ];
+        for (index, (frames, exact)) in cases.iter().enumerate() {
+            assert_eq!(
+                exact_since_producer(frames, CLAIMED),
+                *exact,
+                "case {index}"
+            );
+        }
     }
 }
 

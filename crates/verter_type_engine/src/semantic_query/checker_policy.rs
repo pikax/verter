@@ -135,6 +135,22 @@ impl CertifiedDivergence {
         Self { operation }
     }
 
+    /// The operation's tail run wraps one argument in the same structural
+    /// constructor at every step while the others stay fixed, and the
+    /// checker's own generic test selects the recursive branch for
+    /// whatever that constructor holds: no step can ever take the other
+    /// branch, so the run grows forever. Only a conditional tail run may
+    /// claim it, with `growth`, the dispatcher's witness of that uniform
+    /// decision, and `exact`, its witness that no step read a partial.
+    pub(crate) fn uniform_growth(
+        operation: CheckerDiagnosticOperation,
+        exact: crate::project_semantic_dispatch::build::ExactSteps,
+        growth: crate::project_semantic_dispatch::build::UniformGrowth,
+    ) -> Self {
+        let _ = (exact, growth);
+        Self { operation }
+    }
+
     /// The diagnostic the checker reports for the divergence (TS2589).
     pub(crate) const fn diagnostic(self) -> CheckerDiagnostic {
         CheckerDiagnostic {

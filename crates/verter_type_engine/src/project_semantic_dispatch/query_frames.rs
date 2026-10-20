@@ -735,7 +735,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             key: key.clone(),
             producer: Some(producer),
             tracer: None,
-            taint: BuildLocalTaint::default(),
+            taint: BuildLocalTaint {
+                produces: super::instantiation_frame_identity(key),
+                ..BuildLocalTaint::default()
+            },
             build: None,
             active: None,
             depth: self.child_depth,

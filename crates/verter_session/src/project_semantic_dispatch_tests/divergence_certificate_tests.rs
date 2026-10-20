@@ -3,10 +3,12 @@
 //! - a DECLARATION ERROR — the checker's TS2456 for an alias whose declared
 //!   type requires itself — decided by the declarations alone;
 //! - a CERTIFIED DIVERGENCE — TS2589 at once, a complete answer kept like
-//!   any semantic answer — minted only from a sound proof that the
-//!   operation re-enters an exact state (same declaration, arguments,
-//!   context and phase) through steps that are each a deterministic,
-//!   complete function of that state;
+//!   any semantic answer — minted only from a sound proof, through steps
+//!   that are each a deterministic, complete function of their state, that
+//!   the operation either re-enters an exact state (same declaration,
+//!   arguments, context and phase) or grows one argument by the same
+//!   structural wrapper at every step while the checker's own generic test
+//!   selects the recursive branch for whatever the wrapper holds;
 //! - a BUDGET REFUSAL — TS2589 at Verter's own allowance, a resource
 //!   partial that is never kept.
 //!
@@ -14,15 +16,17 @@
 //! that read a partial (a refused child, a missing input) proves nothing on
 //! its own: without the proof the run falls back to work-budgeted
 //! evaluation, and a same-path partial is never retained as a refusal
-//! either (`classify_final_component_retention`). A certificate's dependencies are its reads, so editing a
-//! helper the loop runs through retires it.
+//! either (`classify_final_component_retention`). A certificate's
+//! dependencies are its reads, so editing a helper the loop runs through
+//! retires it.
 //!
 //! Every checker answer below is TypeScript 7.0.2's (`tsc --noEmit
-//! --strict`): `Same<0>`, `Pair<0, 0>`, `Outer<0>`, `C<0>` over `H<T> = T`
-//! and `G<string>` report TS2589; `Cyc` reports TS2456; `Alt<0>` is
-//! `"end"`, `G<never>` is `never`, `K<0>` is `1`, `C<0>` over `H<T> = 1` is
-//! `1`, `Rep<3>["length"]` is `3` and `D<string>["a"]["a"]` is
-//! `D<[[string]]>`, each with no diagnostic.
+//! --strict`): `Same<0>`, `Pair<0, 0>`, `Outer<0>`, `C<0>` over `H<T> = T`,
+//! `G<string>`, `O<{}>`, `W<number>` and `GL<[]>` report TS2589; `Cyc`
+//! reports TS2456; `Alt<0>` is `"end"`, `G<never>` is `never`, `K<0>` is
+//! `1`, `C<0>` over `H<T> = 1` is `1`, `Rep<3>["length"]` is `3`,
+//! `Stop<string>` is `"deep"` and `D<string>["a"]["a"]` is `D<[[string]]>`,
+//! each with no diagnostic.
 
 use super::checker_probe_lane_tests::{
     default_probe_host, mismatches_in_one_host, upsert_probe_files, with_probe_outcome_on_host,
@@ -41,6 +45,10 @@ type Pair<A, B> = A extends 0 ? Pair<B, A> : 1;
 type Outer<T> = Inner<T>;
 type Inner<T> = T extends 0 ? Inner<T> : 1;
 type G<T> = T extends never ? never : G<[T]>;
+type O<T> = T extends object ? O<[T]> : 1;
+type W<T> = T extends string ? "s" : W<{ v: T }>;
+type GL<T extends unknown[]> = T["length"] extends -1 ? 1 : GL<[...T, 0]>;
+type Stop<T> = T extends [[[unknown]]] ? "deep" : Stop<[T]>;
 type Alt<T> = T extends 0 ? Alt<1> : T extends 1 ? Alt<2> : "end";
 type D<T> = { a: D<[T]> };
 type Rep<N extends number, Acc extends unknown[] = []> = Acc["length"] extends N ? Acc : Rep<N, [...Acc, 0]>;
@@ -62,6 +70,8 @@ enum Ending {
         basis: RecoveryBasis,
         partial: Option<PartialReasonSet>,
     },
+    /// A partial that is not a checker recovery, with its reasons.
+    Partial(PartialReasonSet),
 }
 
 /// Read `probe` over `source` on `host`.
@@ -75,7 +85,7 @@ fn ending_on(host: &std::sync::Arc<crate::VerterHost>, source: &str, probe: &str
             let (node, partial) = match outcome {
                 StructuralFactDemandOutcome::Complete(node) => (node, None),
                 StructuralFactDemandOutcome::Recovered { node, reasons } => (node, Some(reasons)),
-                other => panic!("`{probe}` must answer or recover, got {other:?}"),
+                StructuralFactDemandOutcome::Partial(reasons) => return Ending::Partial(reasons),
             };
             match dispatch.graph().node_data(node).as_deref() {
                 Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
@@ -87,10 +97,7 @@ fn ending_on(host: &std::sync::Arc<crate::VerterHost>, source: &str, probe: &str
                     basis: *basis,
                     partial,
                 },
-                _ => {
-                    assert_eq!(partial, None, "`{probe}` answered as a partial");
-                    Ending::Value
-                }
+                _ => partial.map_or(Ending::Value, Ending::Partial),
             }
         },
     )
@@ -122,12 +129,32 @@ fn exact_loops_and_eager_wrappers_are_certified_divergences() {
     }
 }
 
-/// Growth repeats no state: `G<string>` stops only at the tail budget, a
-/// resource partial.
+/// A run that wraps its argument in the same tuple or object type at every
+/// step while the conditional is decided for whatever the wrapper holds —
+/// definitely false over the wildcard (`G`, `W`), definitely true over the
+/// bare parameter (`O`) — can never take its other branch: a certified
+/// divergence, the same complete TS2589 under any tail allowance.
 #[test]
-fn growth_is_a_budget_refusal_never_a_certificate() {
+fn uniform_growth_is_certified_under_any_allowance() {
+    for allowance in [Some(50), Some(5), None] {
+        let _budget = allowance.map(TailBudgetForTests::install);
+        for probe in ["G<string>", "O<{}>", "W<number>"] {
+            assert_eq!(
+                ending(probe),
+                CERTIFIED_TS2589,
+                "`{probe}` under the tail allowance {allowance:?}"
+            );
+        }
+    }
+}
+
+/// Growth the checker's generic test does not decide proves nothing:
+/// `GL<[]>` checks `T["length"]`, not the growing parameter itself, and
+/// spreads it, so it stops only at the tail budget, a resource partial.
+#[test]
+fn growth_without_a_uniform_decision_is_a_budget_refusal() {
     let _budget = TailBudgetForTests::install(50);
-    assert_eq!(ending("G<string>"), BUDGET_TS2589);
+    assert_eq!(ending("GL<[]>"), BUDGET_TS2589);
 }
 
 /// A run whose step reads a budget-refused child is not an exact state:
@@ -164,18 +191,46 @@ fn controls_reach_their_values_without_a_certificate() {
         ("G<never>", "never"),
         ("Alt<0>", r#""end""#),
         ("K<0>", "1"),
+        ("Stop<string>", r#""deep""#),
         (r#"D<string>["a"]["a"]"#, "D<[[string]]>"),
     ];
     let failures = mismatches_in_one_host(FIXTURE, &rows);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A certificate depends on the declarations its loop runs through: once a
-/// helper in another module changes so the arguments stop coming round, the
-/// same host answers the new value instead of the kept recovery.
+/// Removes the producer hook a test installed.
+struct UnhookOnDrop<'s>(&'s verter_type_engine::semantic_query_memo::SemanticGraphStore);
+
+impl Drop for UnhookOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.set_produce_hook_for_tests(None);
+    }
+}
+
+/// A certificate is kept, and depends on the declarations its loop runs
+/// through: a second read builds no instantiation of `C`, and once a helper
+/// in another module changes so the arguments stop coming round, the same
+/// host builds `C` again and answers the new value instead of the kept
+/// recovery.
 #[test]
 fn a_helper_edit_retires_a_certificate() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let host = default_probe_host();
+    let store = host.project_type_store();
+    let graph = store.semantic_graph();
+    let builds = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&builds);
+    graph.set_produce_hook_for_tests(Some(std::sync::Arc::new(move |key, _| {
+        if let verter_type_engine::semantic_query::SemanticQueryKey::Instantiate(instantiate) = key
+        {
+            if instantiate.base().merged_symbol_name.as_ref() == "C" {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    })));
+    let _unhook = UnhookOnDrop(graph);
+    let builds_of_c = || builds.swap(0, Ordering::SeqCst);
+
     let source = "import type { H } from \"./helper\";\n\
                   type C<T> = T extends 0 ? C<H<T>> : 1;\n";
     upsert_probe_files(&host, &[("helper.ts", "export type H<T> = T;\n")]);
@@ -184,10 +239,16 @@ fn a_helper_edit_retires_a_certificate() {
         CERTIFIED_TS2589,
         "the loop through `H<T> = T`"
     );
+    assert!(builds_of_c() > 0, "the first read builds `C<0>`");
     assert_eq!(
         ending_on(&host, source, "C<0>"),
         CERTIFIED_TS2589,
         "warm, the kept certificate"
+    );
+    assert_eq!(
+        builds_of_c(),
+        0,
+        "the kept certificate answers without a build"
     );
 
     upsert_probe_files(&host, &[("helper.ts", "export type H<T> = 1;\n")]);
@@ -207,4 +268,5 @@ fn a_helper_edit_retires_a_certificate() {
         },
     );
     assert_eq!(answered, Ok(()), "`C<0>` over the edited helper is `1`");
+    assert!(builds_of_c() > 0, "the edit retires the kept certificate");
 }
