@@ -756,8 +756,9 @@ fn a_script_artifact_key_reuses_the_snapshot_parse_identity() {
 /// signature that reaches it: a second signature sharing a chain's
 /// receipt reads only its own fact. What the answer depends on stays in
 /// the key: strict self-roots the receipt reaches, and a completion that
-/// moves the overlay, walk the receipt again; a refused walk is never
-/// remembered; a new request starts empty.
+/// moves the overlay, walk the receipt again; a receipt that reaches a
+/// fact that will not validate is settled too, and is not read again; a
+/// new request starts empty.
 #[test]
 fn a_request_validates_a_shared_receipt_once() {
     use crate::resolver_core::RequestStoreView;
@@ -818,14 +819,13 @@ fn a_request_validates_a_shared_receipt_once() {
         }
     }]);
     let stale = vec![FactVersionRef::Receipt(stale)];
-    for _ in 0..2 {
+    let stale_reads = |view: &RequestStoreView<'_>| {
         let before = view.leaf_validations_for_tests();
         assert!(view.validate_fact_signature(&stale, &[]).is_err());
-        assert!(
-            view.leaf_validations_for_tests() > before,
-            "a refused receipt is read again"
-        );
-    }
+        view.leaf_validations_for_tests() - before
+    };
+    assert_eq!(stale_reads(&view), 1, "only the stale receipt's own fact");
+    assert_eq!(stale_reads(&view), 0, "a stale receipt is not read again");
 
     let fresh = RequestStoreView::new(&base, overlay);
     let before = fresh.leaf_validations_for_tests();

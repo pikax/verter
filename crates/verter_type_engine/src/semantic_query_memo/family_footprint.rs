@@ -789,11 +789,13 @@ fn call_argument_heap_bytes(argument: &CallArgKey, aliases: &mut AliasSet) -> us
             ty,
             spread,
             literal_mode,
+            literal_provenance,
             context_sensitive,
             const_view,
             first_pass,
         } => {
             inline(ty)
+                + literal_provenance_heap_bytes(literal_provenance.as_ref(), aliases)
                 + inline(spread)
                 + inline(literal_mode)
                 + inline(context_sensitive)
@@ -812,6 +814,39 @@ fn call_argument_heap_bytes(argument: &CallArgKey, aliases: &mut AliasSet) -> us
                 + inline(context_sensitive)
         }
     }
+}
+
+/// A call argument's literal provenance: its shared record, the record's
+/// position slice, and each position's path and literal slices.
+fn literal_provenance_heap_bytes(
+    provenance: Option<&Arc<crate::semantic_query::ArgumentLiteralProvenance>>,
+    aliases: &mut AliasSet,
+) -> usize {
+    let Some(provenance) = provenance else {
+        return 0;
+    };
+    if !aliases.first(provenance) {
+        return 0;
+    }
+    let record = verter_session_query::retention::allocation::arc_block_bytes(std::mem::size_of::<
+        crate::semantic_query::ArgumentLiteralProvenance,
+    >());
+    let crate::semantic_query::ArgumentLiteralProvenance { positions } = &**provenance;
+    record
+        + arc_slice_block_bytes(positions, aliases).map_or(0, |block| {
+            block
+                + positions
+                    .iter()
+                    .map(|position| {
+                        let crate::semantic_query::ArgumentRegularPosition { path, literals } =
+                            position;
+                        copy_slice_bytes(path, aliases)
+                            + literals
+                                .as_ref()
+                                .map_or(0, |literals| copy_slice_bytes(literals, aliases))
+                    })
+                    .sum::<usize>()
+        })
 }
 
 /// A flow-return identity: its function slot, argument and contextual
