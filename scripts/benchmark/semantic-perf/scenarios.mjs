@@ -77,6 +77,39 @@ export function allScenarios() {
     ),
   );
 
+  // Finite member paths and imported value annotations past native query depth.
+  for (const depth of [22, 23, 200]) {
+    out.push(
+      scenario(
+        `scale-path-depth-${depth}`,
+        "path-depth",
+        `project an indexed path ${depth} members deep`,
+        range(depth)
+          .map((i) => `interface L${i} { k0: ${i + 1 === depth ? "'leaf'" : `L${i + 1}`} }\n`)
+          .join(""),
+        `L0${"['k0']".repeat(depth)}`,
+      ),
+    );
+  }
+  out.push(
+    scenario(
+      "scale-typeof-import-chain-50",
+      "typeof-import-chain",
+      "read a value through 50 imported typeof annotations",
+      "",
+      'typeof import("./m50").value',
+      {
+        files: Object.fromEntries([
+          ["m0.ts", "export declare const value: { deep: 1 };\n"],
+          ...range(50).map((i) => [
+            `m${i + 1}.ts`,
+            `export declare const value: typeof import("./m${i}").value;\n`,
+          ]),
+        ]),
+      },
+    ),
+  );
+
   // Conditional mapped values over a large, concrete source key domain.
   for (const count of [1000, 3000, 10000]) {
     out.push(
@@ -816,6 +849,10 @@ export const UNCOVERED = [
  * Tiers nest: standard includes quick, stress includes both.
  */
 export const SCENARIO_TIERS = {
+  "scale-path-depth-22": "standard",
+  "scale-path-depth-23": "quick",
+  "scale-path-depth-200": "standard",
+  "scale-typeof-import-chain-50": "quick",
   "vue-setup-store-remap-5": "quick",
   "vue-setup-store-remap-10": "standard",
   "vue-setup-store-remap-20": "standard",
