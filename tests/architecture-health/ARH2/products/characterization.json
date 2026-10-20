@@ -647,6 +647,7 @@
           "crates/verter_session/src/project_semantic_dispatch_tests/tuple_splice_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unique_symbol_key_tests.rs",
           "crates/verter_session/src/project_semantic_dispatch_tests/unread_marker_relation_tests.rs",
+          "crates/verter_session/src/project_semantic_dispatch_tests/wide_union_relation_tests.rs",
           "crates/verter_session/src/project_type_store.rs",
           "crates/verter_session/src/query_db_self_root_tests.rs",
           "crates/verter_session/src/resolver_core/component_meta/native_props.rs",
