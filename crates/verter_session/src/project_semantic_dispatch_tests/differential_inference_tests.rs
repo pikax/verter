@@ -3031,3 +3031,25 @@ fn pinned_recursive_template_length() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The fixture of [`intersection_with_a_mapped_type_over_the_inferred_parameter`].
+const VALIDATED_INTERSECTION: &str = r##"
+declare function validated<C>(reducers: C & { [K in keyof C]: C[K] extends { prepare: any } ? { reducer: unknown } : {} }): C;
+export const plain = validated({ a: 1 });
+export const annotated = validated({ a: (s: number) => {} });
+export const method = validated({ a(s: number) { return s; } });
+"##;
+
+/// A parameter typed as the inferred parameter intersected with a mapped
+/// type over its keys infers from the naked arm, eager and context
+/// sensitive arguments alike, and the argument relates to the mapped arm
+/// once the mapped type is instantiated over the inferred object.
+#[test]
+fn intersection_with_a_mapped_type_over_the_inferred_parameter() {
+    let failures = Matrix::new(VALIDATED_INTERSECTION).types(&[
+        ("typeof plain", "{ a: number; }"),
+        ("typeof annotated", "{ a: (s: number) => void; }"),
+        ("typeof method", "{ a(s: number): number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

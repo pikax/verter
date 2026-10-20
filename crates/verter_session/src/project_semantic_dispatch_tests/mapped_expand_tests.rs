@@ -8,7 +8,9 @@
 //! - over an interface's keys remapped by a recursive template conditional,
 //!   every key renamed;
 //! - over a generic interface heritage chain, every level's member at the
-//!   type argument it inherits.
+//!   type argument it inherits;
+//! - over a Redux Toolkit slice's case reducers, every reducer's action
+//!   creator, whose action is the reducer's payload action.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer, the
@@ -733,4 +735,93 @@ fn a_deferred_recursive_conditional_names_its_binders_and_arguments() {
         printed,
         "<S extends string>(s: S) => S extends `${infer A}_${infer B}` ? `${A}-${Kebab<B>}` : S"
     );
+}
+
+/// Redux Toolkit's `createSlice` declarations (2.x), trimmed to the members
+/// its action creators read, and a slice of `count` case reducers whose
+/// payloads alternate a literal and `number`; `arrow` writes each reducer
+/// as an arrow-valued property instead of a method. Neither form annotates
+/// the reducer's `state`, which the slice's own state types.
+fn rtk_slice(count: usize, arrow: bool) -> String {
+    let mut source = String::from(include_str!("fixtures/rtk_slice.ts"));
+    source.push_str("const slice = createSlice({ name: 's', initialState: { n: 0 }, reducers: {\n");
+    for i in 0..count {
+        let payload = if i % 2 == 0 {
+            format!("{{ v{i}: 'l{i}' }}")
+        } else {
+            format!("{{ v{i}: number }}")
+        };
+        if arrow {
+            source.push_str(&format!(
+                "r{i}: (state, action: PayloadAction<{payload}>) => {{}},\n"
+            ));
+        } else {
+            source.push_str(&format!(
+                "r{i}(state, action: PayloadAction<{payload}>) {{}},\n"
+            ));
+        }
+    }
+    source.push_str("} });\ntype Actions = typeof slice.actions;\n");
+    source
+}
+
+/// The actions of [`rtk_slice`]'s action creators, as the checker prints
+/// each member of their union: `PayloadAction<payload, "s/r{i}">` resolved.
+fn rtk_actions(count: usize) -> std::collections::BTreeSet<String> {
+    (0..count)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                format!("'l{i}'")
+            } else {
+                "number".to_string()
+            };
+            format!("{{ payload: {{ v{i}: {payload} }}; type: 's/r{i}' }}")
+        })
+        .collect()
+}
+
+/// The action every action creator of a Redux Toolkit slice returns is the
+/// complete union of each reducer's payload action, and the work it takes
+/// grows with the reducer count, not faster.
+fn assert_rtk_slice_actions_grow_linearly(arrow: bool) {
+    let label = if arrow {
+        "arrow reducers"
+    } else {
+        "method reducers"
+    };
+    let work = [3, 6, 12].map(|count| {
+        let answer = named_answer_with_library(
+            &rtk_slice(count, arrow),
+            "ReturnType<Actions[keyof Actions]>",
+            None,
+            true,
+        );
+        let TypeExpr::Union(members) = &answer.answer else {
+            panic!(
+                "{label} {count}: `{}` is not a union",
+                short(&answer.answer)
+            );
+        };
+        let got: std::collections::BTreeSet<String> = members.iter().map(display).collect();
+        assert_eq!(got, rtk_actions(count), "{label} {count}");
+        let work = [
+            answer.work[0],
+            answer.work[1],
+            answer.work[2],
+            ("flow obligations", answer.flow_obligations),
+        ];
+        (count, work)
+    });
+    assert_linear_growth(label, work[0], work[1]);
+    assert_linear_growth(label, work[1], work[2]);
+}
+
+#[test]
+fn rtk_slice_method_reducer_actions_answer_completely_and_grow_linearly() {
+    assert_rtk_slice_actions_grow_linearly(false);
+}
+
+#[test]
+fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
+    assert_rtk_slice_actions_grow_linearly(true);
 }

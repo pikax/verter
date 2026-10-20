@@ -165,3 +165,5 @@ resolved type surfaces.
 - A second `fn shallow_lower_type_expr` — FORBIDDEN (besides `project_semantic_dispatch::lower`).
 - A second struct owning a `RelationMemo` field — FORBIDDEN (besides `SemanticGraphStore`).
 - A second struct owning the semantic node map — FORBIDDEN (besides `SemanticGraphStore`).
+
+**Closed mapped operands reduce relation-locally.** The identity-carrier unwrap reduces a `Mapped` operand whose source, key domain and template are closed, such as a signature's mapped parameter after substitution. It handles identity templates, index-key domains and enumerable keys alike: each key reads the template with the binder bound to it, and `Keep` modifiers come from the modifiers type (the source of a homomorphic mapping). The object is interned for the relation alone, without member edges, matching the identity and index-key reducers. Open sources, name remaps, distributing homomorphic sources (unions, arrays, tuples), unique-symbol keys and templates that read as `Opaque` keep the carrier, so the relation stays undecided. The mapped build still carrier-stops under structural transit.

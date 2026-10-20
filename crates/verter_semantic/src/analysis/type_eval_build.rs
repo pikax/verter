@@ -4748,7 +4748,9 @@ fn lower_identifier_variable_parts(
         }
 
         if type_annotation.is_none()
-            && (value_type_derives_from_a_call(init, source) || contextual_object_initializer(init))
+            && (value_type_derives_from_a_call(init, source)
+                || contextual_object_initializer(init)
+                || literal_holds_block_bodied_function(init))
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -7488,6 +7490,74 @@ fn indexed_read_path(expr: &Expression<'_>) -> Option<(Vec<String>, verter_span:
             _ => return None,
         }
     }
+}
+
+/// Whether an object or array literal holds, as a property value or an
+/// element at any depth of literal nesting, a function value whose return
+/// derives from a statement block: an arrow function with a block body or a
+/// function expression, without a return annotation. The value inference
+/// types an expression body directly, but a block body's return is the flow
+/// evaluator's, so such a literal is typed where it is written by the flow
+/// evaluator. Facts and function discovery use this same classification.
+pub(super) fn literal_holds_block_bodied_function(mut expression: &Expression<'_>) -> bool {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+            Expression::TSSatisfiesExpression(satisfies) => &satisfies.expression,
+            Expression::TSNonNullExpression(non_null) => &non_null.expression,
+            Expression::TSAsExpression(assertion)
+                if verter_type_expr_oxc::is_const_assertion_type(&assertion.type_annotation) =>
+            {
+                &assertion.expression
+            }
+            Expression::ObjectExpression(_) | Expression::ArrayExpression(_) => break,
+            _ => return false,
+        };
+    }
+    let mut pending = vec![expression];
+    while let Some(expression) = pending.pop() {
+        match expression {
+            Expression::ParenthesizedExpression(parenthesized) => {
+                pending.push(&parenthesized.expression);
+            }
+            Expression::ObjectExpression(object) => {
+                pending.extend(
+                    object
+                        .properties
+                        .iter()
+                        .filter_map(|property| match property {
+                            ObjectPropertyKind::ObjectProperty(property)
+                                if matches!(property.kind, PropertyKind::Init)
+                                    && !property.method =>
+                            {
+                                Some(&property.value)
+                            }
+                            _ => None,
+                        }),
+                );
+            }
+            Expression::ArrayExpression(array) => {
+                pending.extend(
+                    array
+                        .elements
+                        .iter()
+                        .filter_map(|element| element.as_expression()),
+                );
+            }
+            Expression::ArrowFunctionExpression(arrow)
+                if arrow.get_expression().is_none() && arrow.return_type.is_none() =>
+            {
+                return true;
+            }
+            Expression::FunctionExpression(function)
+                if function.body.is_some() && function.return_type.is_none() =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// A contextual declarator whose method bodies need the initializer's flow

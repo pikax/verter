@@ -8921,6 +8921,44 @@ fn slice_expr_reads_frame(expr: &verter_session_query::flow::slice::SliceExpr) -
     }
 }
 
+/// Whether an object or array literal argument's indexed value holds, in
+/// it or in a literal nested in it, a function whose return the value
+/// inference left to its body: a block body without a declared return,
+/// which only the flow evaluator reads.
+fn indexed_literal_holds_body_return(
+    expression: &verter_type_expr::IndexedValueExpression,
+) -> bool {
+    use verter_type_expr::{ObjectMember, TypeExpr};
+    let verter_type_expr::IndexedValueExpression::Value(value) = expression else {
+        return false;
+    };
+    let mut pending = match value {
+        TypeExpr::Object(_) | TypeExpr::Array { .. } | TypeExpr::Tuple { .. } => vec![value],
+        _ => return false,
+    };
+    while let Some(value) = pending.pop() {
+        match value {
+            TypeExpr::Function(function) => {
+                if function.return_type.is_none() && function.flow_return.is_none() {
+                    return true;
+                }
+            }
+            TypeExpr::Object(object) => {
+                pending.extend(object.properties.iter().filter_map(|member| match member {
+                    ObjectMember::Property(property) => Some(&property.ty),
+                    _ => None,
+                }));
+            }
+            TypeExpr::Array { element, .. } => pending.push(element),
+            TypeExpr::Tuple { elements, .. } => {
+                pending.extend(elements.iter().map(|element| &element.ty));
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Every expression-position write in an expression tree, in tree order —
 /// the pre-scan's work list: the whole-binding writes and the empty-array
 /// resets of an EVOLVING array.
@@ -28378,6 +28416,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
         authored_literal: bool,
+        body_return: bool,
     ) -> Option<SemanticNodeId> {
         // An argument that reads nothing of this frame is the indexed
         // program's own value, typed where the parameter's context (a
@@ -28388,12 +28427,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // A join of bare literal arms (`authored_literal`) stays the indexed
         // program's: each call candidate widens its literals itself, keeping
         // those its parameter's contextual type is a literal context for.
+        // A literal the indexed program left a function's body-derived
+        // return in is this frame's too: only the flow evaluator reads that
+        // body (`{ r: () => { … } }`).
         let branch_join = !authored_literal
             && matches!(
                 expr,
                 verter_session_query::flow::slice::SliceExpr::Union { .. }
             );
-        if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
+        if !expression_write_tree(expr).is_empty()
+            || !(branch_join || body_return || slice_expr_reads_frame(expr))
         {
             return None;
         }

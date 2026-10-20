@@ -548,3 +548,40 @@ fn a_call_inside_a_literal_types_as_its_return() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Object and array literals holding block-bodied function values, as
+/// module values and as call arguments, beside an expression-bodied one.
+const BLOCK_BODIES_IN_LITERALS: &str = r##"
+declare function keep<T>(value: T): T;
+export const property = { run: () => {} };
+export const returned = keep({ run: () => { return; } });
+export const beside = keep({ run: () => {}, size: 2 });
+export const element = keep([() => {}]);
+export const nested = { a: 1, b: [function () { return "s"; }] };
+export const expression = keep({ run: () => 1 });
+export function inBody() { return keep({ run: () => {} }); }
+"##;
+
+/// A block-bodied function value inside an object or array literal types
+/// its return from its body, where the literal is a module value and where
+/// it is a call argument; an expression body keeps the literal return its
+/// call infers.
+#[test]
+fn a_block_bodied_function_inside_a_literal_types_its_body_return() {
+    let failures = Matrix::new(BLOCK_BODIES_IN_LITERALS).same(&[
+        (Read::Type("typeof property"), "{ run: () => void; }"),
+        (Read::Type("typeof returned"), "{ run: () => void; }"),
+        (
+            Read::Type("typeof beside"),
+            "{ run: () => void; size: number; }",
+        ),
+        (Read::Type("typeof element"), "(() => void)[]"),
+        (
+            Read::Type("typeof nested"),
+            "{ a: number; b: (() => string)[]; }",
+        ),
+        (Read::Type("typeof expression"), "{ run: () => 1; }"),
+        (Read::Return("inBody"), "{ run: () => void; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

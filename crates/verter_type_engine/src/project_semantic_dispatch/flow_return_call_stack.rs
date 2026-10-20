@@ -755,9 +755,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     ) => frame_arguments.get(ordinal).and_then(|frame_argument| {
                                         let authored_literal = argument.literal_mode
                                             == verter_type_expr::IndexedValueLiteralMode::Widened;
+                                        let body_return =
+                                            indexed_literal_holds_body_return(&argument.expression);
                                         let value = self.eval_frame_call_argument(
                                             &frame_argument.value,
                                             authored_literal,
+                                            body_return,
                                         )?;
                                         const_view = frame_argument
                                             .const_context
@@ -766,6 +769,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                                 self.eval_frame_call_argument(
                                                     expr,
                                                     authored_literal,
+                                                    body_return,
                                                 )
                                             });
                                         Some(value)
