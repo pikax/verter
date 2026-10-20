@@ -2100,9 +2100,13 @@ pub enum CallKind {
 /// subject to the inferring parameter's widening rule) or in a form that
 /// already pins its own type.
 ///
-/// It governs the inference DEPOSIT only. Applicability always relates the
-/// argument's actual type — TypeScript widens inference results, never the
-/// assignability check.
+/// It governs the inference DEPOSIT, and the per-position contextual
+/// widening of a bare literal's nested literals: applicability relates the
+/// argument's checked type — a nested authored literal whose contextual
+/// type is known to be no literal context for it is its widened primitive
+/// (`checkExpressionForMutableLocation`), every other literal as
+/// authored. TypeScript widens a naked inference result, never the
+/// argument's own top-level literal in the assignability check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArgumentLiteralMode {
     /// A bare literal argument expression: the inference candidate widens
@@ -2117,9 +2121,61 @@ pub enum ArgumentLiteralMode {
     Literal,
 }
 
+/// One step from a call argument into one of its authored nested
+/// positions: an object member, by the literal type of its key (`"v"`,
+/// `1`), or a tuple element, by its index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArgumentPathStep {
+    /// An object literal's member whose key is this literal type.
+    Member(SemanticNodeId),
+    /// An array literal's element at this index.
+    Element(u32),
+    /// The one element type an array literal's elements join into when a
+    /// spread or an elision makes it no tuple.
+    Elements,
+}
+
+/// One authored nested position of a call argument a regular contributor
+/// writes, with the literals there that are regular.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgumentRegularPosition {
+    /// The steps from the argument to the position.
+    pub path: Arc<[ArgumentPathStep]>,
+    /// The position's regular literals: `None` when every literal at the
+    /// position and nested in it is regular; otherwise exactly these
+    /// literals at the position are, and the others it holds are fresh.
+    pub literals: Option<Arc<[SemanticNodeId]>>,
+}
+
+/// The authored literal provenance of a call argument's nested positions
+/// (`IndexedLiteralProvenance`, resolved in the argument's scope): each
+/// position whose literals are regular — an asserted value, a const
+/// asserted literal, a read of a binding that keeps no widening literal.
+/// A mutable location keeps a regular literal as written where it widens
+/// a fresh one (`getWidenedLiteralType`), so a candidate's contextual
+/// typing of the argument widens only the fresh literals of a position.
+/// A position not listed holds only fresh literals.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ArgumentLiteralProvenance {
+    pub positions: Arc<[ArgumentRegularPosition]>,
+}
+
+impl ArgumentLiteralProvenance {
+    /// The regular-literal record of the position at `path`, if listed.
+    #[must_use]
+    pub fn position(&self, path: &[ArgumentPathStep]) -> Option<&ArgumentRegularPosition> {
+        self.positions
+            .iter()
+            .find(|position| &*position.path == path)
+    }
+}
+
 /// One call argument's key identity. NO freshness field — freshness is
 /// derived at relation time from canonical excess-origin facts, never
-/// carried on the key.
+/// carried on the key. `literal_provenance` is no excess freshness: like
+/// `literal_mode`, it is a fact of the argument's authored form (which
+/// nested literals are written as regular ones) that its type cannot
+/// express and that changes the call's result.
 ///
 /// `context_sensitive` is the same class of authored-form fact as
 /// `literal_mode`: a structural property of the argument SYNTAX that the
@@ -2135,6 +2191,9 @@ pub enum CallArgKey {
         spread: bool,
         /// The authored literal shape of the argument.
         literal_mode: ArgumentLiteralMode,
+        /// The regular literals the argument nests at its authored
+        /// positions; `None` when it nests none.
+        literal_provenance: Option<Arc<ArgumentLiteralProvenance>>,
         /// Whether the argument is a function value at least one of whose
         /// parameters carries no authored type annotation.
         context_sensitive: bool,
@@ -4543,19 +4602,19 @@ impl<'a> ClosedSurfaceView<'a> {
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
-    /// How many members this thread's key lookups compared by scanning a
-    /// surface; test-only.
+    /// Key lookup work on this thread: scanned members and canonical-index
+    /// hashing/equality operations; test-only.
     static KEY_SCAN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Count one member a key lookup compared by scanning a surface.
+/// Count one scanned member or canonical-index hashing/equality operation.
 pub(crate) fn note_key_scan_comparison() {
     #[cfg(any(test, feature = "test-support"))]
     KEY_SCAN_COMPARISONS.with(|count| count.set(count.get() + 1));
 }
 
-/// How many members this thread's key lookups compared by scanning a
-/// surface; test-only.
+/// Key lookup work on this thread: scanned members and canonical-index
+/// hashing/equality operations; test-only.
 #[cfg(any(test, feature = "test-support"))]
 pub fn key_scan_comparisons_for_tests() -> usize {
     KEY_SCAN_COMPARISONS.with(std::cell::Cell::get)
@@ -10453,6 +10512,28 @@ impl ObjectSpreadProgram {
 }
 
 impl ObjectConstructionEffect {
+    /// This effect's child in its slot `slot` (`0` or `1`), in
+    /// [`Self::for_each_child_node`] order: a computed or index key first,
+    /// then the value. A one-child effect holds it in slot `1`.
+    fn child_in_slot(&self, slot: usize) -> Option<SemanticNodeId> {
+        match (self, slot) {
+            (Self::DirectProperty(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectProperty(effect), _) => Some(effect.value),
+            (Self::DirectMethod(effect), 0) => authored_property_key_child(&effect.key),
+            (Self::DirectMethod(effect), _) => Some(effect.signature),
+            (Self::DirectGet(effect) | Self::DirectSet(effect), 0) => {
+                authored_property_key_child(&effect.key)
+            }
+            (Self::DirectGet(effect) | Self::DirectSet(effect), _) => Some(effect.signature),
+            (Self::DirectIndex(effect), 0) => Some(effect.key_type),
+            (Self::DirectIndex(effect), _) => Some(effect.value_type),
+            (Self::DirectCall(_) | Self::DirectConstruct(_) | Self::Spread(_), 0) => None,
+            (Self::DirectCall(node) | Self::DirectConstruct(node) | Self::Spread(node), _) => {
+                Some(*node)
+            }
+        }
+    }
+
     fn for_each_child_node(&self, visit: &mut impl FnMut(SemanticNodeId)) {
         match self {
             Self::DirectProperty(effect) => {
@@ -10502,6 +10583,22 @@ impl ObjectSpreadProgram {
     pub fn for_each_child_node(&self, mut visit: impl FnMut(SemanticNodeId)) {
         for effect in self.effects.iter() {
             effect.for_each_child_node(&mut visit);
+        }
+    }
+
+    /// The first child at or after cursor slot `slot`, with the slot it
+    /// occupies; `None` past the last child. Effect `e` owns two slots,
+    /// `2e` and `2e + 1`, holding its children in [`Self::child_nodes`]
+    /// order and vacant where it has fewer, so a child is found without
+    /// counting the children of the effects before it.
+    pub fn child_at_slot(&self, slot: usize) -> Option<(usize, SemanticNodeId)> {
+        let mut slot = slot;
+        loop {
+            let effect = self.effects.get(slot / 2)?;
+            if let Some(child) = effect.child_in_slot(slot % 2) {
+                return Some((slot, child));
+            }
+            slot += 1;
         }
     }
 

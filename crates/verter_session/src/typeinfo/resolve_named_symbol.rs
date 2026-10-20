@@ -1184,6 +1184,11 @@ pub(crate) fn classify_base_surfacing(
 /// `Opaque(err)` case is partitioned through the SAME
 /// [`classify_dispatch_error`] fault/miss split the rest of the resolver
 /// uses: a fault surfaces as `Err`, a non-fault preserves the carrier.
+///
+/// The one `Opaque` that is neither: a `QueryError::CheckerRecovery` is the
+/// checker's recovered error type (a TS2590 cross product, say) and so the
+/// operator's own answer — it stops the loop at the recovery node itself,
+/// not at the carrier.
 pub(crate) fn classify_operator_reduction_step(
     store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
     result: QueryResult<SemanticNodeId>,
@@ -1204,6 +1209,15 @@ pub(crate) fn classify_operator_reduction_step(
             // non-fault miss preserves the carrier (never degrades to a
             // `semanticMiss` terminal).
             if let Some(SemanticNodeData::Opaque(err)) = store.read_in_scope(next).as_deref() {
+                // The checker's recovered error type (a TS2590 cross product,
+                // say) is the operator's answer, never a miss: deliver it
+                // rather than the unevaluated operator shell.
+                if matches!(
+                    err,
+                    verter_type_engine::semantic_query::QueryError::CheckerRecovery { .. }
+                ) {
+                    return Ok(MaterializationStep::Stop(next));
+                }
                 return match classify_dispatch_error(err, Some(carrier)) {
                     Ok(_) => Ok(MaterializationStep::Stop(carrier)),
                     Err(fault) => Err(fault),
