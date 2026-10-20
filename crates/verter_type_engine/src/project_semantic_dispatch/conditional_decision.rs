@@ -22,6 +22,18 @@ use crate::semantic_query::{
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static OPERAND_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Count one node a conditional's operand classification read
+/// ([`ProjectSemanticDispatch::type_is_generic`], the `infer` inventory).
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn note_operand_walk_visit() {
+    OPERAND_WALK_VISITS.with(|count| count.set(count.get() + 1));
+}
+
 /// The free type variables below one semantic node, binder-aware: the type
 /// parameters written below it that no generic signature within declares
 /// over the position they are written in, and whether an `infer` reference
@@ -427,6 +439,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Nodes this thread's conditional decisions read to classify their
+    /// operands (generic, `infer` sites); test-only. A distributed member
+    /// that re-reads its wide `extends` operand shows here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conditional_operand_walk_visits_for_tests() -> usize {
+        OPERAND_WALK_VISITS.with(std::cell::Cell::get)
+    }
+
     construction_ordinal_seam! {
         /// Conditional type (lazy-block evaluation +
         /// distributive-conditional authority), read from the materialized
@@ -2256,6 +2276,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// an unbound type variable. At its declaration site in `extends` it is
     /// instead a pattern to infer, so genericness must retain that position.
     fn type_is_generic_operand(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
+        // The walk below answers generic only at a type parameter, an `infer`
+        // reference, or an `infer` declaration read in check position (a
+        // nested conditional's check is, whatever `infer_operand` is here),
+        // and it reaches each of them only as a structural descendant: it
+        // never descends into a signature, and it leaves the structure for an
+        // instantiated alias body only when an argument mentions one of
+        // them. A node whose kept free-variable summary holds none of the
+        // three is therefore not generic in either position. A summary is
+        // kept only when complete: the walk composing one keeps nothing
+        // across a cycle.
+        if !self.mentions_generic_operand_variable(node, true)
+            && self.free_type_variables.borrow().contains_key(&node)
+        {
+            return false;
+        }
         let graph = self.graph();
         let mut pending = vec![(node, infer_operand)];
         // One visited set per operand position: a node met as an infer
@@ -2268,6 +2303,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             if !seen[usize::from(infer_operand)].insert(node) {
                 continue;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            note_operand_walk_visit();
             let Some(data) = graph.node_data(node) else {
                 continue;
             };

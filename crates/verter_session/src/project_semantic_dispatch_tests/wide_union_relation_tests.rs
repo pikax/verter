@@ -71,44 +71,89 @@ fn literal_union_membership_work_grows_with_input() {
 
 /// The module declares its own `Exclude` (a distributive conditional, not
 /// the native utility) and derives `Most` with it. Every distributed
-/// member relates to the one `Most`, so reading what `Most` names and
-/// reducing that union happen once for the distribution, not once per
-/// member. Omit over the declared utilities distributes the same way.
+/// member relates to the one `Most`, so reading what `Most` names, reducing
+/// that union and classifying it as an `extends` operand (generic, `infer`
+/// sites) happen once for the distribution, not once per member, whether
+/// the probe is a value's declared type or a named alias the host
+/// resolves. Omit over the declared utilities distributes the same way.
+///
+/// Oracle: TypeScript 7.0.2 answers `"m3" | "m5"` for both probes at every
+/// width (`--strict`).
 #[test]
 fn a_declared_exclude_reads_a_derived_union_once_per_distribution() {
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
     type Dispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
-    const DECLARED: &str = "type Exclude<T, U> = T extends U ? never : T;
-        type Pick<T, K extends keyof T> = { [P in K]: T[P] };
-        type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
-";
+    const DECLARED: &str = "type Exclude<T, U> = T extends U ? never : T;\n\
+        type Pick<T, K extends keyof T> = { [P in K]: T[P] };\n\
+        type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;\n";
     let reads = || {
-        Dispatch::composite_arm_reads_for_tests() + Dispatch::relation_union_arm_visits_for_tests()
+        Dispatch::composite_arm_reads_for_tests()
+            + Dispatch::relation_union_arm_visits_for_tests()
+            + Dispatch::conditional_operand_walk_visits_for_tests()
     };
-    for probe in ["Exclude<W, Most>", "keyof Omit<{ [K in W]: K }, Most>"] {
-        let visits = [32, 64, 128].map(|width| {
-            let source = format!(
-                "{DECLARED}{}type Most = Exclude<W, \"m3\" | \"m5\">;
-",
-                wide_union(width)
-            );
-            let before = reads();
-            with_probe(&source, probe, |dispatch, node| {
-                let expected =
-                    checker_syntax::parse("\"m3\" | \"m5\"").expect("valid expected type");
-                assert!(
-                    checker_syntax::matches_node(dispatch, node, &expected, 0),
-                    "{probe} over {width} members"
+    // The string literals of the alias `__Probe` the host resolves, in order.
+    let named_answer = |source: &str| {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some("/scenario.ts".to_owned()),
+                input_id: "/scenario.ts".to_owned(),
+                source: Arc::from(source),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert the scenario");
+        let node = host
+            .resolve_named_symbol("/scenario.ts", "__Probe", None)
+            .expect("the probe answers");
+        let graph = host.project_type_store().semantic_graph();
+        let mut pending = vec![node.id()];
+        let mut values = Vec::new();
+        while let Some(node) = pending.pop() {
+            match graph.node_data(node).as_deref().expect("live answer") {
+                SemanticNodeData::Union(members) => pending.extend(members.iter().rev().copied()),
+                SemanticNodeData::Alias(inner) => pending.push(*inner),
+                SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                    values.push(value.to_string());
+                }
+                other => panic!("unexpected answer {other:?}"),
+            }
+        }
+        values
+    };
+    for named in [false, true] {
+        for probe in ["Exclude<W, Most>", "keyof Omit<{ [K in W]: K }, Most>"] {
+            let visits = [32, 64, 128].map(|width| {
+                let source = format!(
+                    "{DECLARED}{}type Most = Exclude<W, \"m3\" | \"m5\">;\n",
+                    wide_union(width)
                 );
+                let before = reads();
+                if named {
+                    let source = format!("{source}type __Probe = {probe};\nexport {{}};\n");
+                    assert_eq!(named_answer(&source), ["m3", "m5"], "{probe} over {width}");
+                } else {
+                    with_probe(&source, probe, |dispatch, node| {
+                        let expected =
+                            checker_syntax::parse("\"m3\" | \"m5\"").expect("valid expected type");
+                        assert!(
+                            checker_syntax::matches_node(dispatch, node, &expected, 0),
+                            "{probe} over {width} members"
+                        );
+                    });
+                }
+                reads() - before
             });
-            reads() - before
-        });
-        println!("declared {probe}: union reads {visits:?}");
-        for step in 0..2 {
-            assert!(
-                visits[step + 1] * 10 <= visits[step] * 22,
-                "doubling the input at most doubles union reads: {probe}: {visits:?}"
-            );
+            println!("declared {probe} (named: {named}): union reads {visits:?}");
+            for step in 0..2 {
+                assert!(
+                    visits[step + 1] * 10 <= visits[step] * 22,
+                    "doubling the input at most doubles union reads: {probe} (named: \
+                     {named}): {visits:?}"
+                );
+            }
         }
     }
 }
@@ -219,6 +264,54 @@ fn literal_union_membership_preserves_values_order_and_general_members() {
         ("[boolean] extends [true | false] ? 1 : 2", "1"),
         ("['1'] extends [1 | 2] ? 1 : 2", "2"),
         ("[1n] extends [1 | 2] ? 1 : 2", "2"),
+    ];
+    for options in [
+        r#"{"strictNullChecks":true,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":true,"noImplicitAny":false}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":false}"#,
+    ] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                compiler_options: Some(options),
+                ..Default::default()
+            },
+            source,
+            &probes,
+        );
+        assert!(failures.is_empty(), "{options}: {}", failures.join("\n"));
+    }
+}
+
+/// A literal union source related member by member to a literal union
+/// target, and distributions through a declared `Exclude` / `Extract`
+/// over literal unions, a derived one among them, answer as the checker
+/// does. Measured on TypeScript 7.0.2 under each of `strictNullChecks` and
+/// `noImplicitAny` on and off (the four settings agree on every probe).
+#[test]
+fn literal_union_sources_and_declared_distributions_answer_as_the_checker() {
+    let source = r#"
+        type W = "a" | "b" | "c" | 1 | 2 | true | false | 1n | 2n;
+        enum E { A = "a", B = 1 }
+        type MyExclude<T, U> = T extends U ? never : T;
+        type MyExtract<T, U> = T extends U ? T : never;
+        type Most = MyExclude<W, "c" | 2>;
+    "#;
+    let probes = [
+        ("['a' | 1 | true | 2n] extends [W] ? 1 : 2", "1"),
+        ("['a' | 'zz'] extends [W] ? 1 : 2", "2"),
+        ("['1' | 2] extends [1 | 2] ? 1 : 2", "2"),
+        ("[1 | 2] extends [1 | 2 | 3] ? 1 : 2", "1"),
+        ("[1n | 3n] extends [W] ? 1 : 2", "2"),
+        ("['a' | 'b'] extends [E.A | E.B] ? 1 : 2", "2"),
+        ("MyExclude<'a' | 'b' | 1, 'a' | 1>", "\"b\""),
+        ("MyExtract<'a' | 'b' | 1, 'a' | 1 | 3>", "\"a\" | 1"),
+        ("MyExclude<W, Most>", "\"c\" | 2"),
+        ("[Most] extends [W] ? 1 : 2", "1"),
+        ("[W] extends [Most] ? 1 : 2", "2"),
+        ("[true | 'a'] extends [boolean | 'a'] ? 1 : 2", "1"),
+        ("[1 | 'b'] extends [MyExclude<W, 'a'>] ? 1 : 2", "1"),
+        ("MyExclude<1 | 2 | 'b', MyExclude<W, 'a'>>", "never"),
     ];
     for options in [
         r#"{"strictNullChecks":true,"noImplicitAny":true}"#,

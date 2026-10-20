@@ -16,7 +16,25 @@ proof, so it does not flatten that target again for each source literal.
 Membership never changes the union's stored sequence or `VerterStableV1` order.
 Mixed, deferred, template and enum members, and active inference sessions,
 retain the ordinary ordered relation path. `Exclude` and subset relations use
-this index. Native `Omit` already enumerates canonical `PropertyKey` values into
+this index. A pair question (`execute_relate_pair`) of a literal against a
+literal-only union answers from the index before any relation frame or memo
+entry, as a literal pair does: a distributive conditional asks one per member,
+and the lookup's roots and the index receipt go to the asking build. Inside a
+relation, a literal-only union source against a union target reads its members
+through the index in member order and stops at the first one the target lacks
+(`eachTypeRelatedToSomeType` over `containsType`), depositing the same roots in
+the same first-inspection order as one arm per member, without a work item per
+member. An undecided preparation (a refused connected demand) takes the
+ordinary path.
+
+The structural-fact demand's composite reduction reduces a resolved union
+once per operation: a union it proves it leaves as written — no arm a name or a
+template, and the canonical union over the arms keeping every one — is recorded
+with the file roots that canonicalization inspected, and a later demand on it
+replays those roots instead of reducing it again. A distributive conditional's
+members each read their named `extends` operand through that demand. The
+outermost dispatch operation releases the record with the membership indexes.
+Member-set comparisons in the reduction use a hashed index for wide unions. Native `Omit` already enumerates canonical `PropertyKey` values into
 an `FxHashSet` and filters by membership; it retains that typed property-key
 owner, including its numeric/string key normalization, without relation scans.
 
