@@ -63,8 +63,8 @@ use verter_session_query::flow::slice::{
     CaptureScope, DefiningFrameDiscovery, DefiningFrameGate, EmptyCompletion, FlowSliceSelection,
     FrameAnswer, GatedLeaf, GatedType, LeafRootOccurrence, NameBinding, NestedFlowContext,
     ParameterDeclaration, ReturnPredicateTest, SignatureParameters, SignatureScope,
-    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceBindingKind, SliceCall,
-    SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
+    SliceArithmetic, SliceArrayElement, SliceAssertion, SliceAssertionClaim, SliceBindingKind,
+    SliceCall, SliceCallArgument, SliceCallArguments, SliceCallSite, SliceCaptureAuthority,
     SliceCaptureAuthorityLocator, SliceContent, SliceDestructuredElement, SliceEffectCallee,
     SliceElementKey, SliceEqOperand, SliceEqOther, SliceEvolvingOperation,
     SliceEvolvingOperationKind, SliceExpr, SliceFreshness, SliceGuard, SliceGuardLiteral,
@@ -2002,7 +2002,7 @@ fn member_target_chain<'a>(
 }
 
 /// Whether a member access's object is a flow VALUE with no reference
-/// behind it: a `new` expression, an object literal, a primitive literal
+/// behind it: a `new` expression, an object or array literal, a primitive literal
 /// (read through its apparent type), a call's result, or a static member
 /// chain rooted at one.
 fn value_rooted_member_object(object: &Expression<'_>) -> bool {
@@ -2011,6 +2011,7 @@ fn value_rooted_member_object(object: &Expression<'_>) -> bool {
         match unwrap_parenthesized(object) {
             Expression::NewExpression(_)
             | Expression::ObjectExpression(_)
+            | Expression::ArrayExpression(_)
             | Expression::StringLiteral(_)
             | Expression::NumericLiteral(_)
             | Expression::BooleanLiteral(_)
@@ -2324,18 +2325,8 @@ fn narrowing_spine_calls<'e, 'a>(
 }
 
 /// The statement one applied `asserts` call lowers to.
-fn assertion_statement(
-    SliceAssertion {
-        subject,
-        target,
-        call,
-    }: SliceAssertion,
-) -> SliceStatement {
-    SliceStatement::Assertion {
-        subject,
-        target,
-        call,
-    }
+fn assertion_statement(SliceAssertion { claim, call }: SliceAssertion) -> SliceStatement {
+    SliceStatement::Assertion { claim, call }
 }
 
 /// A region of entered effects: assertions and joins, which always
@@ -9857,15 +9848,7 @@ impl<'a> Lowerer<'a> {
                 let nested =
                     self.collecting_entered_assertions(|this| this.scan_call_operands(call));
                 let own = match assertion {
-                    Some(SliceAssertion {
-                        subject,
-                        target,
-                        call,
-                    }) => SliceStatement::Assertion {
-                        subject,
-                        target,
-                        call,
-                    },
+                    Some(assertion) => assertion_statement(assertion),
                     // The statement's OWN call takes the same
                     // prove-or-degrade discipline every other
                     // result-independent position takes, PLUS the
@@ -10138,10 +10121,12 @@ impl<'a> Lowerer<'a> {
 
     /// The `asserts` predicate an ENTERED call applies — a free callee
     /// naming a closed same-file assertion declaration, over an argument
-    /// this half narrows. A closed same-file assertion whose target the
-    /// predicate channel refuses (`asserts x is T` on `assertSame<T>`, or
-    /// over a `T` this frame rebinds) narrows in the checker but cannot be
-    /// applied here: it flags the typed gap.
+    /// this half narrows: a reference, or for a targetless `asserts x` any
+    /// condition the guard vocabulary expresses (the checker narrows by
+    /// the argument as a test that holds). A closed same-file assertion
+    /// whose target the predicate channel refuses (`asserts x is T` on
+    /// `assertSame<T>`, or over a `T` this frame rebinds) narrows in the
+    /// checker but cannot be applied here: it flags the typed gap.
     fn entered_assertion(
         &mut self,
         call: &oxc_ast::ast::CallExpression<'_>,
@@ -10154,19 +10139,38 @@ impl<'a> Lowerer<'a> {
             }
             _ => None,
         };
-        let assertion = free_callee.and_then(|name| {
-            let (ordinal, target) = self.same_file_predicate(name, true, call.span)?;
-            let argument = call
-                .arguments
-                .get(ordinal)
-                .and_then(|argument| argument.as_expression())?;
-            let subject = self.narrow_subject_of(argument)?;
-            Some(SliceAssertion {
-                subject,
-                target,
-                call: verter_span::Span::new(call.span.start, call.span.end),
+        let assertion = free_callee
+            .and_then(|name| self.same_file_predicate(name, true, call.span))
+            .and_then(|(ordinal, target)| {
+                let argument = call
+                    .arguments
+                    .get(ordinal)
+                    .and_then(|argument| argument.as_expression())?;
+                Some((argument, target))
             })
-        });
+            .and_then(|(argument, target)| {
+                let claim = match (self.narrow_subject_of(argument), target) {
+                    (Some(subject), target) => SliceAssertionClaim::Reference { subject, target },
+                    (None, None) => match self.classify_guard(argument) {
+                        GuardDisposition::Modeled(guard) => SliceAssertionClaim::Condition(*guard),
+                        GuardDisposition::NoNarrowing => {
+                            SliceAssertionClaim::Condition(SliceGuard::None)
+                        }
+                        // The checker narrows by a test this vocabulary
+                        // cannot express: the typed gap, never a clean
+                        // unnarrowed answer.
+                        GuardDisposition::Unexpressible => {
+                            self.control_test_gap = true;
+                            return None;
+                        }
+                    },
+                    (None, Some(_)) => return None,
+                };
+                Some(SliceAssertion {
+                    claim,
+                    call: verter_span::Span::new(call.span.start, call.span.end),
+                })
+            });
         if assertion.is_none()
             && free_callee.is_some_and(|name| self.assertion_target_is_refused(name, call.span))
         {

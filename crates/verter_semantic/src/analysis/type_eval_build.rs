@@ -117,8 +117,10 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
 
 /// The object and name of a static member read whose object is a value the
 /// indexed domain evaluates: a direct call, construct or tagged template,
+/// an object, array or primitive literal (`[1, "a"].filter`, `"ab".concat`),
 /// or a member read off one (`f().a.b`). Its value is the object's member
-/// ([`IndexedValueExpression::Member`]).
+/// ([`IndexedValueExpression::Member`]), read through the object's
+/// apparent type as the checker reads it.
 fn member_of_evaluated_value<'a>(
     expr: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
@@ -134,7 +136,14 @@ fn member_of_evaluated_value<'a>(
             Expression::CallExpression(call) if !call.optional => {
                 return Some((&member.object, member.property.name.as_str()));
             }
-            Expression::NewExpression(_) | Expression::TaggedTemplateExpression(_) => {
+            Expression::NewExpression(_)
+            | Expression::TaggedTemplateExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::BigIntLiteral(_) => {
                 return Some((&member.object, member.property.name.as_str()));
             }
             Expression::StaticMemberExpression(inner) if !inner.optional => root = &inner.object,
@@ -6836,12 +6845,16 @@ fn indexed_record_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Express
 fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedValueExpression {
     enum Task<'a> {
         Value(&'a Expression<'a>, MemberLiteralPolicy),
+        /// A member read's object: an array literal there is the
+        /// checker's array literal expression, whose fresh elements widen
+        /// (`[1, "a"].filter` reads `(string | number)[]`'s `filter`).
+        Object(&'a Expression<'a>),
         Build(IndexedCallNode<'a>),
         BuildMember(&'a str),
     }
     fn push_member<'a>(object: &'a Expression<'a>, name: &'a str, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::BuildMember(name));
-        tasks.push(Task::Value(object, MemberLiteralPolicy::Widen));
+        tasks.push(Task::Object(object));
     }
     fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::Build(node));
@@ -6884,15 +6897,29 @@ fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedVa
         IndexedNode::Member(object, name) => push_member(object, name, &mut tasks),
     }
     while let Some(task) = tasks.pop() {
-        match task {
-            Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
-                IndexedValueStep::Lowered(lowered) => values.push(lowered),
-                IndexedValueStep::Call(node) => push_node(node, &mut tasks),
-                IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
-            },
+        let (expr, policy) = match task {
+            Task::Value(expr, policy) => (expr, policy),
+            Task::Object(expr) => {
+                if matches!(
+                    unwrap_expression_wrappers(expr),
+                    Expression::ArrayExpression(_)
+                ) {
+                    values.push(lowered_or_unsupported(
+                        infer_declaration_expression_type(
+                            expr,
+                            source,
+                            TopLevelLiteralPolicy::Preserve,
+                        ),
+                        expr,
+                    ));
+                    continue;
+                }
+                (expr, MemberLiteralPolicy::Widen)
+            }
             Task::Build(node) => {
                 let call = build_indexed_call(node, &mut values, source);
                 values.push(IndexedValueExpression::Call(call));
+                continue;
             }
             Task::BuildMember(name) => {
                 let object = values.pop().expect("the member's object");
@@ -6900,7 +6927,13 @@ fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedVa
                     object: Box::new(object),
                     name: Arc::from(name),
                 });
+                continue;
             }
+        };
+        match indexed_value_step(expr, source, policy, None) {
+            IndexedValueStep::Lowered(lowered) => values.push(lowered),
+            IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+            IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
         }
     }
     values

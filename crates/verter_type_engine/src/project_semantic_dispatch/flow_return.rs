@@ -19839,10 +19839,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// truthiness for a targetless `asserts v`.
     fn apply_assertion(
         &mut self,
-        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
-        target: Option<&verter_session_query::flow::slice::GatedType>,
+        claim: &verter_session_query::flow::slice::SliceAssertionClaim,
         call: verter_span::Span,
     ) {
+        use verter_session_query::flow::slice::SliceAssertionClaim;
+        let (subject, target) = match claim {
+            SliceAssertionClaim::Reference { subject, target } => (subject, target.as_ref()),
+            SliceAssertionClaim::Condition(guard) => {
+                // A targetless assertion over a condition: the condition
+                // holds past the call (`narrowType(…, assumeTrue)`), its
+                // positive reading landing for the rest of the region as a
+                // reference assertion's narrow does.
+                self.capture_throw_point();
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.apply_guard_scoped(guard, true);
+                return;
+            }
+        };
         self.capture_throw_point();
         // The assertion call's evidence, with the same discipline a
         // predicate call's narrowing takes: the call was evaluated, and
@@ -19913,12 +19929,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &verter_session_query::flow::slice::SliceStatement) {
         match effect {
-            verter_session_query::flow::slice::SliceStatement::Assertion {
-                subject,
-                target,
-                call,
-            } => {
-                self.apply_assertion(subject, target.as_ref(), *call);
+            verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
+                self.apply_assertion(claim, *call);
             }
             verter_session_query::flow::slice::SliceStatement::If {
                 guard,
@@ -26060,11 +26072,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                verter_session_query::flow::slice::SliceStatement::Assertion {
-                    subject,
-                    target,
-                    call,
-                } => {
+                verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -26074,7 +26082,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref(), *call);
+                    self.apply_assertion(claim, *call);
                 }
                 verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
@@ -27441,11 +27449,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(
-                                &assertion.subject,
-                                assertion.target.as_ref(),
-                                assertion.call,
-                            );
+                            self.apply_assertion(&assertion.claim, assertion.call);
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -28093,11 +28097,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(
-                        &assertion.subject,
-                        assertion.target.as_ref(),
-                        assertion.call,
-                    );
+                    self.apply_assertion(&assertion.claim, assertion.call);
                 }
                 outcome
             }
@@ -29319,10 +29319,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // The binding's own reaching definition wins; the
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
-                // runs (mirrors the `Local` read).
-                let node = self.read_local(binding).or_else(|| {
-                    param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                });
+                // runs (mirrors the `Local` read). A narrowing standing on
+                // the binding is what the callee reads, as any read of it
+                // does: `typeof f === "function"` leaves `f()` calling the
+                // callable arms alone.
+                let node = self
+                    .frame_binding_read(binding)
+                    .or_else(|| self.read_local(binding))
+                    .or_else(|| {
+                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                    });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
                     // has no honest value: the POSITION carries the marker

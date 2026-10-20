@@ -334,14 +334,8 @@ pub enum SliceStatement {
     /// narrowing fact lives entirely in the callee's signature, which the
     /// content half reads from the same parse snapshot.
     Assertion {
-        /// The argument the predicate talks about.
-        subject: SliceNarrowSubject,
-        /// The predicate's target type, lowered through the frame gate
-        /// exactly like a declarator annotation. `None` for a TARGETLESS
-        /// `asserts x`: the assertion then excludes the subject's
-        /// definitely-falsy arms (the checker's truthiness narrowing for
-        /// an assertion signature with no type predicate).
-        target: Option<GatedType>,
+        /// What the call asserts about its argument.
+        claim: SliceAssertionClaim,
         /// The authored assertion call's span (absolute): the evaluator
         /// records its call evidence against exactly this call.
         call: verter_span::Span,
@@ -1055,12 +1049,32 @@ impl std::hash::Hash for SliceNarrowRoot {
 /// expression position).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SliceAssertion {
-    /// The argument the predicate talks about.
-    pub subject: SliceNarrowSubject,
-    /// The predicate's target type; `None` for a targetless `asserts x`.
-    pub target: Option<GatedType>,
+    /// What the call asserts about its argument.
+    pub claim: SliceAssertionClaim,
     /// The authored assertion call's span (absolute).
     pub call: verter_span::Span,
+}
+
+/// What one applied `asserts` call establishes for the rest of its region
+/// (the checker's `narrowTypeByAssertion`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SliceAssertionClaim {
+    /// The argument is a narrowable reference.
+    Reference {
+        /// The argument the predicate talks about.
+        subject: SliceNarrowSubject,
+        /// The predicate's target type, lowered through the frame gate
+        /// exactly like a declarator annotation. `None` for a TARGETLESS
+        /// `asserts x`: the assertion then excludes the subject's
+        /// definitely-falsy arms (the checker's truthiness narrowing for
+        /// an assertion signature with no type predicate).
+        target: Option<GatedType>,
+    },
+    /// A TARGETLESS `asserts x` whose argument is a condition rather than a
+    /// reference (`assert(typeof z === "string")`): the condition's
+    /// positive reading holds past the call, exactly as an `if` over it
+    /// whose false branch throws.
+    Condition(SliceGuard),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
