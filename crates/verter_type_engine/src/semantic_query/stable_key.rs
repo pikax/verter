@@ -1301,6 +1301,11 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
                     enc.child(remap);
                 }
             }
+            // Absent, the mapping's key is the one it has always had.
+            if let Some(modifiers_type) = mapper.modifiers_type {
+                enc.u8(1);
+                enc.child(modifiers_type);
+            }
         }
         SemanticNodeData::TypeParam {
             decl,
