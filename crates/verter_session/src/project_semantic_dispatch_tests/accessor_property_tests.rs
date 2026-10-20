@@ -17,6 +17,10 @@ const FIXTURE: &str = "\
 interface R<T, S = T> { get value(): T; set value(_: S); }
 declare const r: R<number, string>;
 interface G { get r(): \"s\" }
+interface H2 extends G { r: \"s\" }
+interface H5 extends G { r: \"s\"; q: 1 }
+interface B3 { r: \"s\" }
+interface H3 extends B3 { get r(): \"s\" }
 type Id<T> = { [K in keyof T]: T[K] };
 type Mut<T> = { -readonly [K in keyof T]: T[K] };
 type Req<T> = { [K in keyof T]-?: T[K] };
@@ -28,6 +32,7 @@ class Box<T> { constructor(private v: T) {} get value(): T { return this.v; } se
 declare const b: Box<string>;
 declare const c: C;
 interface N { get 1(): \"s\"; set \"1\"(v: \"s\"); }
+interface N2 { set \"1\"(v: \"s\"); get 1(): \"s\"; }
 declare function id<T>(v: T): T;
 class Pt { x = 1; }
 class E { a = 1; accessor generic = id(1); accessor fieldThis = this.a; accessor p = new Pt(); accessor f = () => 1; static accessor sp = new Pt(); plain = id(1); }
@@ -88,20 +93,60 @@ fn a_mapping_maps_an_accessor_as_its_property() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// A property redeclared over an inherited accessor is the property its
+/// declaration says, not the accessor it shadows: an own plain property
+/// over a base getter maps mutable, and an own getter over a base property
+/// maps `readonly`.
+///
+/// Measured on TypeScript 7.0.2:
+///
+/// | probe | checker |
+/// | --- | --- |
+/// | `Id<H2>`, `{ [K in keyof H2]: H2[K] }`, `Pick<H2, "r">` | `{ r: "s"; }` |
+/// | `Partial<H2>` | `{ r?: "s"; }` |
+/// | `Id<H5>` | `{ r: "s"; q: 1; }` |
+/// | `Omit<H5, "q">` | `{ r: "s"; }` |
+/// | `Id<H3>` | `{ readonly r: "s"; }` |
+#[test]
+fn an_own_member_over_an_inherited_accessor_maps_as_declared() {
+    let mut failures = mismatches(FIXTURE, &[("{ [K in keyof H2]: H2[K] }", "{ r: \"s\"; }")]);
+    failures.extend(evaluated_mismatches(
+        FIXTURE,
+        &[
+            ("Id<H2>", "{ r: \"s\"; }"),
+            ("Pick<H2, \"r\">", "{ r: \"s\"; }"),
+            ("Partial<H2>", "{ r?: \"s\"; }"),
+            ("Id<H5>", "{ r: \"s\"; q: 1; }"),
+            ("Omit<H5, \"q\">", "{ r: \"s\"; }"),
+            ("Id<H3>", "{ readonly r: \"s\"; }"),
+        ],
+    ));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// A getter and a setter whose keys spell one property (`1` and `"1"`)
 /// are one accessor: a mapping over them publishes ONE property, mutable
 /// because it has a setter.
 ///
-/// Measured on TypeScript 7.0.2: `Id<N>` is `{ 1: "s"; }`, and
-/// `declare const n: Id<N>; n[1] = "s";` compiles.
+/// The pair is selected by its property's `keyof` key, the key of its
+/// first declaration: `keyof N` is `1`, `keyof N2` is `"1"`.
+///
+/// Measured on TypeScript 7.0.2: `Id<N>`, `Pick<N, 1>`, `Pick<N2, "1">` and
+/// `Omit<N, "1">` are `{ 1: "s"; }` and `declare const n: Id<N>; n[1] =
+/// "s";` compiles; `Omit<N, 1>` and `Omit<N2, "1">` are `{}`.
 #[test]
 fn equivalent_accessor_key_spellings_map_as_one_mutable_property() {
-    let members = evaluated_member_modifiers(FIXTURE, "Id<N>", "\"s\"");
-    assert_eq!(
-        members,
-        vec![(false, true)],
-        "`get 1` / `set \"1\"` map as one mutable `\"s\"` property, (readonly, value matches) per member"
-    );
+    for probe in ["Id<N>", "Pick<N, 1>", "Pick<N2, \"1\">", "Omit<N, \"1\">"] {
+        let members = evaluated_member_modifiers(FIXTURE, probe, "\"s\"");
+        assert_eq!(
+            members,
+            vec![(false, true)],
+            "`{probe}`: `get 1` / `set \"1\"` map as one mutable `\"s\"` property, (readonly, value matches) per member"
+        );
+    }
+    let failures =
+        evaluated_mismatches(FIXTURE, &[("Omit<N, 1>", "{}"), ("Omit<N2, \"1\">", "{}")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// A read of an accessor reads its property type, through the

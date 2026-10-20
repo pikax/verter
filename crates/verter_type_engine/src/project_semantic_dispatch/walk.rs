@@ -10296,6 +10296,12 @@ struct MergedMemberAccum {
     optional: bool,
     readonly: bool,
     method_kind: Option<verter_type_expr::ObjectMethodKind>,
+    /// The `method_kind` fold over the `OwnBody` contributors alone: the
+    /// form of the member that shadows heritage, so an own property over an
+    /// inherited accessor is a property and an own accessor over an
+    /// inherited property is an accessor. `None` until the first own-body
+    /// contributor is absorbed.
+    own_body_method_kind: Option<Option<verter_type_expr::ObjectMethodKind>>,
     has_implementation_body: bool,
     declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp,
     /// Spans of the first `OwnBody` contributor — the winning member when the
@@ -10341,6 +10347,7 @@ impl MergedMemberAccum {
             optional: true,
             readonly: false,
             method_kind: None,
+            own_body_method_kind: None,
             has_implementation_body: false,
             declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
             own_body_spans: None,
@@ -10357,7 +10364,10 @@ impl MergedMemberAccum {
         use crate::semantic_query::MemberMergeRole;
         self.optional = self.optional && member.optional;
         self.readonly = self.readonly || member.readonly;
-        self.method_kind = match (self.method_kind, member.method_kind) {
+        let fold_kind = |current: Option<verter_type_expr::ObjectMethodKind>| match (
+            current,
+            member.method_kind,
+        ) {
             (None, incoming) => incoming,
             (current, None) => current,
             (Some(current), Some(incoming)) if current == incoming => Some(current),
@@ -10365,6 +10375,13 @@ impl MergedMemberAccum {
             // surface; their distinct authored facts remain source-ordered.
             _ => None,
         };
+        self.method_kind = fold_kind(self.method_kind);
+        if member.merge_role.role() == MemberMergeRole::OwnBody {
+            self.own_body_method_kind = Some(match self.own_body_method_kind {
+                Some(current) => fold_kind(current),
+                None => member.method_kind,
+            });
+        }
         self.has_implementation_body |= member.has_implementation_body;
         // Single-contributor verbatim carry; any second contributor demotes
         // to `NonLiteral` (merge synthesis is never a literal origin).
@@ -10442,6 +10459,12 @@ impl MergedMemberAccum {
         // intersect branch and keeps `number & string`.
         let saw_own_body = self.own_body_role.is_some();
         let saw_heritage = self.heritage_role.is_some();
+        // The shadowing own-body member keeps its own form: an own property
+        // over an inherited `get` is a property, not the accessor.
+        let method_kind = match self.own_body_method_kind {
+            Some(own) if saw_heritage => own,
+            _ => self.method_kind,
+        };
         let (values, role): (Vec<SemanticNodeId>, crate::semantic_query::MergeRoleStamp) =
             match (self.own_body_role, self.heritage_role) {
                 (Some(own_role), Some(_)) => (self.own_body_values, own_role),
@@ -10515,8 +10538,8 @@ impl MergedMemberAccum {
             value,
             optional: self.optional,
             readonly: self.readonly,
-            method_kind: self.method_kind,
-            has_implementation_body: self.method_kind.is_some() && self.has_implementation_body,
+            method_kind,
+            has_implementation_body: method_kind.is_some() && self.has_implementation_body,
             visibility,
             excess_origin: self
                 .excess_origin

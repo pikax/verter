@@ -11034,13 +11034,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `build_key_of` apply. The full member set (incl. non-public)
                 // stays recorded on the source surface for the keep-all
                 // `native_props` carrier; only this DERIVATION is gated.
+                // An accessor is selected by its property's `keyof` key, so
+                // `get 1` / `set "1"` are picked together as one property.
+                let selection =
+                    crate::semantic_query::AccessorSelectionKeys::of(surface.positive_members());
                 let picked: Vec<SurfaceMember> = surface
                     .positive_members()
                     .iter()
                     .filter(|m| m.visibility.is_public())
                     .filter(|m| {
-                        m.key
-                            .cloned_known()
+                        selection
+                            .selection_key(m)
                             .is_some_and(|key| pick_set.contains(&key))
                     })
                     .map(crate::semantic_query::SurfaceMember::clone)
@@ -11142,13 +11146,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &surface.construct_signatures,
                     &omitted_event_names,
                 );
+                // An accessor is omitted by its property's `keyof` key, so
+                // `get 1` / `set "1"` are omitted together as one property.
+                let omit_selection = crate::semantic_query::AccessorSelectionKeys::of(
+                    surface.entries.iter().filter_map(|entry| match entry {
+                        SurfaceEntry::Member(member) => Some(member),
+                        _ => None,
+                    }),
+                );
                 let entries: Vec<SurfaceEntry> = surface
                     .entries
                     .iter()
                     .filter_map(|entry| match entry {
                         SurfaceEntry::Member(member)
                             if member.visibility.is_public()
-                                && member.key.cloned_known().is_none_or(|key| {
+                                && omit_selection.selection_key(member).is_none_or(|key| {
                                     #[cfg(any(test, feature = "test-support"))]
                                     OMIT_KEY_FILTER_STEPS.with(|count| count.set(count.get() + 1));
                                     !omit_set.contains(&key)
@@ -11172,13 +11184,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect();
                 // `Omit` is a mapping over the source's kept properties: an
                 // accessor maps as the property it is.
-                let kept_members: Vec<SurfaceMember> = entries
-                    .iter()
-                    .filter_map(|entry| match entry {
-                        SurfaceEntry::Member(member) => Some(member.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let has_accessor = entries.iter().any(|entry| {
+                    matches!(entry, SurfaceEntry::Member(member)
+                        if crate::semantic_query::is_public_accessor(member))
+                });
+                let kept_members: Vec<SurfaceMember> = if has_accessor {
+                    entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            SurfaceEntry::Member(member) => Some(member.clone()),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
                 let entries = match crate::semantic_query::accessor_property_slots(
                     &kept_members,
                     self.graph(),

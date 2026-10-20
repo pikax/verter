@@ -4688,6 +4688,9 @@ pub(crate) struct AccessorReadonlyByProperty(std::collections::HashMap<PropertyK
 
 impl AccessorReadonlyByProperty {
     pub(crate) fn of(members: &[SurfaceMember]) -> Self {
+        if !members.iter().any(is_public_accessor) {
+            return Self::default();
+        }
         let mut groups: std::collections::HashMap<PropertyKey, Option<bool>> =
             std::collections::HashMap::new();
         for member in members
@@ -4748,16 +4751,7 @@ pub(crate) fn accessor_property_slots(
     graph: &impl NodeRead,
     materialize: impl Fn(SemanticNodeId) -> SemanticNodeId,
 ) -> Option<Vec<Option<SurfaceMember>>> {
-    let is_accessor = |member: &SurfaceMember| {
-        member.visibility.is_public()
-            && matches!(
-                member.method_kind,
-                Some(
-                    verter_type_expr::ObjectMethodKind::Get
-                        | verter_type_expr::ObjectMethodKind::Set
-                )
-            )
-    };
+    let is_accessor = is_public_accessor;
     if !members.iter().any(is_accessor) {
         return None;
     }
@@ -4795,6 +4789,54 @@ pub(crate) fn accessor_property_slots(
         })
         .collect();
     Some(slots)
+}
+
+/// The `keyof` key that selects each accessor of a source's members: the
+/// key of the property's first `get` / `set`, so the members of one
+/// accessor whose keys spell one property ([`property_spelling`]:
+/// `get 1` and `set "1"`) are selected or omitted together, by the key the
+/// checker names that property with. Empty, and allocation-free, when no
+/// member is an accessor.
+#[derive(Default)]
+pub(crate) struct AccessorSelectionKeys(std::collections::HashMap<PropertyKey, PropertyKey>);
+
+impl AccessorSelectionKeys {
+    pub(crate) fn of<'m>(members: impl IntoIterator<Item = &'m SurfaceMember>) -> Self {
+        let mut keys = std::collections::HashMap::new();
+        for member in members
+            .into_iter()
+            .filter(|member| is_public_accessor(member))
+        {
+            if let Some(key) = member.key.cloned_known() {
+                keys.entry(property_spelling(key.clone())).or_insert(key);
+            }
+        }
+        Self(keys)
+    }
+
+    /// The key `member` is selected by: its accessor's `keyof` key, else
+    /// its own known key.
+    pub(crate) fn selection_key(&self, member: &SurfaceMember) -> Option<PropertyKey> {
+        let key = member.key.cloned_known()?;
+        if self.0.is_empty() || !is_public_accessor(member) {
+            return Some(key);
+        }
+        Some(
+            self.0
+                .get(&property_spelling(key.clone()))
+                .cloned()
+                .unwrap_or(key),
+        )
+    }
+}
+
+/// Whether `member` is a public `get` / `set` accessor.
+pub(crate) fn is_public_accessor(member: &SurfaceMember) -> bool {
+    member.visibility.is_public()
+        && matches!(
+            member.method_kind,
+            Some(verter_type_expr::ObjectMethodKind::Get | verter_type_expr::ObjectMethodKind::Set)
+        )
 }
 
 /// The one spelling of the JS property `key` addresses: a string that is
