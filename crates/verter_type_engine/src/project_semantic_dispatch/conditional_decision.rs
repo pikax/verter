@@ -739,9 +739,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return self.cancelled_build_output();
         }
         match selection {
-            ConditionalBranchSelection::True | ConditionalBranchSelection::False => {
-                let take_true = selection == ConditionalBranchSelection::True;
+            ConditionalBranchSelection::True
+            | ConditionalBranchSelection::False
+            | ConditionalBranchSelection::Both => {
+                let both = selection == ConditionalBranchSelection::Both;
+                let take_true = selection != ConditionalBranchSelection::False;
                 let winner = branches.branch(self, take_true);
+                let winner = if both {
+                    self.intern_normalized_union(
+                        &[winner, branches.branch(self, false)],
+                        verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                            self.relation_strict_config().strict_null_checks,
+                        ),
+                    )
+                } else {
+                    winner
+                };
                 let winner = if authored_check != demanded_check {
                     self.substitute_semantic_type_param(winner, authored_check, demanded_check)
                 } else {
@@ -756,6 +769,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     operands.checker_recovery,
                 );
                 branches.committed(self, take_true, &mut output);
+                if both {
+                    branches.committed(self, false, &mut output);
+                }
                 output
             }
             ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
@@ -1124,7 +1140,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return Some(recovery);
             }
         }
-        let mut found: [Option<SemanticNodeId>; 4] = [None; 4];
+        let mut found: [Option<SemanticNodeId>; 5] = [None; 5];
         for arm in arms.iter() {
             let arm_type = match graph.node_data(*arm).as_deref() {
                 Some(
@@ -1150,15 +1166,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Some((SpecialKind::Error, _)) => 1,
                 Some((SpecialKind::Any, _)) => 2,
                 Some((SpecialKind::Unknown, _)) => 3,
+                Some((SpecialKind::Wildcard, _)) => 4,
                 None => continue,
             };
             found[slot].get_or_insert(arm_type);
         }
-        let [never, error, any, unknown] = found;
+        let [never, error, any, unknown, wildcard] = found;
         if is_union {
-            error.or(any).or(unknown)
+            error.or(wildcard).or(any).or(unknown)
         } else {
-            never.or(error).or(any)
+            never.or(error).or(wildcard).or(any)
         }
     }
 
@@ -1366,23 +1383,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let branch = match selection {
                 ConditionalBranchSelection::True => {
                     graph.record_branch_selection_true();
-                    BranchSelection::True
+                    Some(BranchSelection::True)
                 }
                 ConditionalBranchSelection::False => {
                     graph.record_branch_selection_false();
-                    BranchSelection::False
+                    Some(BranchSelection::False)
                 }
+                ConditionalBranchSelection::Both => None,
                 ConditionalBranchSelection::Deferred | ConditionalBranchSelection::Undecided => {
                     unreachable!("only decided winners are committed")
                 }
             };
-            graph.record_origin_edge(
-                result,
-                OriginEdgeKind::ConditionalSelect,
-                Arc::from([check, extends]),
-                OriginMeta::Branch(branch),
-                fence.clone(),
-            );
+            if let Some(branch) = branch {
+                graph.record_origin_edge(
+                    result,
+                    OriginEdgeKind::ConditionalSelect,
+                    Arc::from([check, extends]),
+                    OriginMeta::Branch(branch),
+                    fence.clone(),
+                );
+            }
             graph.record_conditional_decided();
         }
         let mut output = selected_output
@@ -1580,10 +1600,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///    the `any` guard; an out-of-scope deep infer pattern is decided
     ///    only when its permissive instantiation fails
     ///    ([`Self::permissive_conditional_selection`]);
-    /// 4. an `any` check against an infer pattern, which the checker reads
+    /// 4. an `any` check against a tuple infer pattern, which the checker reads
     ///    as the union of both branches with the pattern inferred from
-    ///    `any` ⇒ `Undecided` (every other `any` check is absorbed in
-    ///    build before this oracle);
+    ///    `any` ⇒ `Both`; other structured infer patterns remain `Undecided`
+    ///    (a non-inferring `any` check is absorbed before this oracle);
     /// 5. the SOLE relation authority (`execute(SemanticQueryKey::Relate)`
     ///    via [`Self::execute_relate_pair`]): an in-scope infer pattern
     ///    binds THROUGH the relation (object property, tuple head/tail,
@@ -1637,7 +1657,27 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.peek_special(check),
             Some((super::absorb::SpecialKind::Any, _))
         ) {
-            return (ConditionalBranchSelection::Undecided, None);
+            // Tuple structure gives `any` no element inference candidates;
+            // the relation fixes each site to its default/constraint. Other
+            // patterns can expose naked inference sites (for example a
+            // union) and retain their existing unavailable outcome here.
+            if !matches!(
+                self.graph().node_data(extends).as_deref(),
+                Some(SemanticNodeData::Tuple { .. })
+            ) {
+                return (ConditionalBranchSelection::Undecided, None);
+            }
+            return match self.execute_relate_pair(check, extends) {
+                super::dispatch_txn::RelationStep::Assignable { bindings } => {
+                    let (selection, infer) = self.select_with_inferences(check, extends, bindings);
+                    if selection == ConditionalBranchSelection::True {
+                        (ConditionalBranchSelection::Both, infer)
+                    } else {
+                        (selection, infer)
+                    }
+                }
+                _ => (ConditionalBranchSelection::Undecided, None),
+            };
         }
         // The full relation authority — the SAME `execute(Relate)` path
         // every consumer rides. A binding-producing judgement's returned
@@ -2376,13 +2416,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // whole before it reads anything else (`getConditionalType` defers
         // it first; no operand construction, absorbing row or distribution
         // applies to a type parameter), unless its `extends` type is the
-        // error type.
+        // error type or permissive wildcard.
         let kept = matches!(
             self.graph().node_data(*check).as_deref(),
             Some(SemanticNodeData::TypeParam { .. })
         ) && !matches!(
             self.peek_special(*extends),
-            Some((super::absorb::SpecialKind::Error, _))
+            Some((
+                super::absorb::SpecialKind::Error | super::absorb::SpecialKind::Wildcard,
+                _
+            ))
         );
         let key = SemanticQueryKey::Conditional {
             check: *check,

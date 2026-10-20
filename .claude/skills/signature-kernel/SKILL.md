@@ -31,7 +31,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
-| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. |
+| `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. Exact identity compares binders positionally with constraint/default identity. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
 | `result.rs` | Demand-driven results: `ResultDemand`, `ReadSignatureResultKey`, `SignatureSetValue`, `SignatureResultValue`, `SignatureCandidateNodes`. |
 
 Ordering and composite reduction live beside the kernel, in the dispatch crate:
@@ -77,7 +77,9 @@ Intersections run the strict algebra.
 dispatch-level funnel every flow/meta-resolve/locator producer reaches these
 through; its unions run the strict algebra. The flow-return evaluator, which
 answers under its function's own project policy, constructs through
-`intern_normalized_union` with the frame's policy instead. Published Expanded
+`intern_normalized_union` with the frame's policy instead. Conditional branch
+unions use that same builder with the request project's nullability policy.
+Published Expanded
 locator projections also use this explicit-policy builder with the declaring
 file's `strictNullChecks`; structural-transit and shallow carrier projections
 keep the strict carrier algebra. An unchanged authored arm list containing

@@ -649,6 +649,7 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
         name_remap,
         kind,
         over_type_variable,
+        modifiers_type,
     } = mapper;
     inline(parameter_node)
         + inline(key_space)
@@ -658,6 +659,7 @@ fn mapper_heap_bytes(mapper: &crate::semantic_query::MapperKey) -> usize {
         + inline(name_remap)
         + inline(kind)
         + inline(over_type_variable)
+        + inline(modifiers_type)
 }
 
 /// A conditional's shared pending-substitution record and its frames.

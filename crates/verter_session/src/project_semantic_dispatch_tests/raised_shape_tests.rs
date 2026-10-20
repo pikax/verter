@@ -1207,6 +1207,7 @@ fn parity_deferred_operator_shells() {
         source: tp,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: tp,
             key_space: keyspace,
             value_expr: value_tp,
@@ -2557,6 +2558,7 @@ fn mapped_fixture(
         source,
         mapper: MapperKey {
             over_type_variable: false,
+            modifiers_type: None,
             parameter_node: source,
             key_space,
             value_expr,
