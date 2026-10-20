@@ -1140,6 +1140,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut substitutions,
                             context,
                         );
+                        let node = self.normalize_inferred_signature_parameters(
+                            node,
+                            job.prepared.root_identity.canonical_id.as_ref(),
+                        );
                         signatures.record(node);
                     }
                 }
@@ -1211,6 +1215,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
                     ));
                 };
+                let node = self.normalize_inferred_value_type(&build.prepared, node);
                 let output = self.typeof_output(
                     node,
                     false,
@@ -1260,7 +1265,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 BodyPoll::Done(node, _) => node,
             };
             let (node, roots, unobservable) = match &mut build.then {
-                TypeofThen::Value => (node, Vec::new(), false),
+                TypeofThen::Value => (
+                    self.normalize_inferred_value_type(&build.prepared, node),
+                    Vec::new(),
+                    false,
+                ),
                 TypeofThen::Member(member) => {
                     let facts = member
                         .current
@@ -1290,6 +1299,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )));
                 }
                 TypeofThen::Signatures(signatures) => {
+                    let node = self.normalize_inferred_signature_parameters(
+                        node,
+                        build.prepared.root_identity.canonical_id.as_ref(),
+                    );
                     signatures.record(node);
                     match self.next_value_signature(signatures) {
                         Some(Some(job)) => {
@@ -2214,6 +2227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        let node_id = self.normalize_inferred_value_type(&prepared, node_id);
         let output = self.typeof_output(
             node_id,
             composed_partial,
@@ -2223,6 +2237,81 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             observed_hash,
         );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// Inferred declarations widen their object literals in the same context
+    /// as return and yield joins. Authored annotations keep their own types.
+    fn normalize_inferred_value_type(
+        &self,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        if matches!(
+            prepared.type_annotation.annotation,
+            Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
+        ) {
+            return node;
+        }
+        let nullability = self.nullability_for(prepared.root_identity.canonical_id.as_ref());
+        let normalized = self.normalize_widened_object_literals(node, nullability);
+        self.regularized_source_node_with_policy(normalized, nullability)
+    }
+
+    /// Defaulted parameters carry inferred initializer types in the located
+    /// signature. Normalize those fresh literals before publishing the header;
+    /// authored parameter types have no literal origins and keep their shape.
+    fn normalize_inferred_signature_parameters(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return node;
+        };
+        let SemanticNodeData::Signature {
+            kind,
+            params,
+            return_type,
+            type_parameters,
+            occurrence,
+            return_carrier,
+            signature_span,
+            return_type_span,
+            predicate,
+            is_abstract,
+        } = data.as_ref()
+        else {
+            return node;
+        };
+        let nullability = self.nullability_for(canonical);
+        let normalized: Vec<_> = params
+            .iter()
+            .map(|param| {
+                let mut normalized = param.copy();
+                let widened = self.normalize_widened_object_literals(param.ty, nullability);
+                normalized.ty = self.regularized_source_node_with_policy(widened, nullability);
+                normalized
+            })
+            .collect();
+        if params.iter().eq(normalized.iter()) {
+            return node;
+        }
+        graph.intern_preserving_scope(
+            node,
+            SemanticNodeData::Signature {
+                kind: *kind,
+                params: normalized.into(),
+                return_type: *return_type,
+                type_parameters: type_parameters.share(),
+                occurrence: occurrence.clone(),
+                return_carrier: return_carrier.clone(),
+                signature_span: *signature_span,
+                return_type_span: *return_type_span,
+                predicate: *predicate,
+                is_abstract: *is_abstract,
+            },
+        )
     }
 
     /// The type of a value whose declared type is its initializer's
@@ -10073,17 +10162,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 positions,
                 class_type_params,
                 context,
+                is_class,
                 own,
             },
         ))
     }
 
     /// The member surface of the values `members` lowered.
-    fn finish_value_members(&self, members: ValueMembers, scope: NodeScopeId) -> SemanticNodeId {
-        self.graph().intern_node_with_scope(
+    fn finish_value_members(
+        &self,
+        mut members: ValueMembers,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        let nullability = self.nullability_for(members.canonical.as_ref());
+        for entry in &mut members.own {
+            let SurfaceEntry::Member(member) = entry else {
+                continue;
+            };
+            // An object's direct array/union properties widen as whole values;
+            // a nested object keeps its context. Class fields are independent
+            // initializers, so their complete inferred value widens instead.
+            if members.is_class
+                || matches!(
+                    self.graph().node_data(member.value).as_deref(),
+                    Some(SemanticNodeData::Array { .. } | SemanticNodeData::Union(_))
+                )
+            {
+                member.value = self.normalize_widened_object_literals(member.value, nullability);
+            }
+        }
+        let node = self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(members.own, None, false)),
             scope,
-        )
+        );
+        self.regularized_source_node_with_policy(node, nullability)
     }
 
     construction_ordinal_seam! {
@@ -20173,6 +20285,7 @@ pub(super) struct ValueMembers {
     positions: std::collections::VecDeque<(u32, ValueMemberFacts)>,
     class_type_params: Vec<verter_type_expr::facts::NarrowTypeParam>,
     context: crate::semantic_query::ProjectionReductionContext,
+    is_class: bool,
     own: Vec<SurfaceEntry>,
 }
 

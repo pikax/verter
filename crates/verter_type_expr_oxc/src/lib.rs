@@ -273,6 +273,7 @@ fn build_ts_type<'b, 'a>(
                     .filter_map(|m| lower_ts_signature(m, source, lower)),
             );
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: members,
             }))
         }
@@ -1441,6 +1442,7 @@ fn rebuild_normalized<'e>(
             readonly: *readonly,
         },
         TypeExpr::Object(obj) => TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: obj.empty_literal,
             properties: obj
                 .properties
                 .iter()
@@ -1779,6 +1781,7 @@ mod synthetic_carrier_tests {
             type_arguments: Arc::from(Vec::new()),
         };
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::with_key_visibility(
                     "prot".into(),
@@ -1886,6 +1889,7 @@ mod synthetic_carrier_tests {
             ObjectMember::Method(method)
         };
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 accessor(
                     FunctionExpr::synthetic(Vec::new(), Some(Arc::new(t_ref.clone())), Vec::new()),

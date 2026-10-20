@@ -7985,8 +7985,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// flag: a fresh object literal source is excess-checked, so a
     /// property the target neither lists nor admits through an index
     /// signature refuses the pair; an object literal target admits no
-    /// source property it does not list. Either side must be a plain
-    /// object surface for the rules to apply.
+    /// source property it does not list. Both operands must expose a
+    /// known object member surface for the rules to apply.
     fn literal_arm_lists_an_unknown_property(
         &self,
         (source, source_literal): (SemanticNodeId, bool),
@@ -8001,8 +8001,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return false;
         };
-        let SemanticNodeData::Object(target_surface) = &*target_data else {
-            return false;
+        let target_surface = match &*target_data {
+            SemanticNodeData::Object(surface) => surface.clone(),
+            SemanticNodeData::ObjectSpreadProgram(program)
+                if target_literal && program.is_literal && program.effects.is_empty() =>
+            {
+                // The empty literal has an exact empty key domain, just as
+                // a plain literal surface does, and must not absorb a sibling
+                // before their missing properties can be normalized.
+                crate::semantic_query::SurfaceView::from_entries(Vec::new(), None, false)
+            }
+            _ => return false,
         };
         // A spread-built source lists the members its construction
         // program surfaces (`{ ...s, a: 2 }` over `s: { z: number }` lists
@@ -14942,12 +14951,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
         self.receiver = enclosing_receiver;
-        if spread_seen {
+        if spread_seen || entries.is_empty() {
             if late_bound.any() {
                 return Positional::Unmodeled;
             }
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
                 self.binder_env.scope.clone(),
@@ -19913,6 +19923,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn empty_object_node(&mut self) -> SemanticNodeId {
         self.lower_body_type(&verter_type_expr::TypeExpr::Object(Arc::new(
             verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: Vec::new(),
             },
         )))

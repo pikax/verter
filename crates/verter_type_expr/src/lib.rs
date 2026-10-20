@@ -681,7 +681,6 @@ pub struct TupleElement {
     Clone,
     PartialEq,
     Eq,
-    Hash,
     serde::Serialize,
     serde::Deserialize,
     verter_retention::heap_size::HeapSize,
@@ -689,7 +688,24 @@ pub struct TupleElement {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectExpr {
+    /// An empty source object literal. Nonempty literals carry their origin on
+    /// their members; this preserves the same distinction when there are none.
+    #[serde(default, skip_serializing_if = "bool_is_false")]
+    pub empty_literal: bool,
     pub properties: Vec<ObjectMember>,
+}
+
+fn bool_is_false(value: &bool) -> bool {
+    !value
+}
+
+impl std::hash::Hash for ObjectExpr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.properties, state);
+        if self.empty_literal {
+            std::hash::Hash::hash(&true, state);
+        }
+    }
 }
 
 /// A member of an object type.

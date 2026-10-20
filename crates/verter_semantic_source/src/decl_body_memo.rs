@@ -2733,6 +2733,7 @@ impl DeclBodyMemo {
                 .iter()
                 .map(|member| {
                     let single = TypeExpr::Object(Arc::new(ObjectExpr {
+                        empty_literal: false,
                         properties: vec![member.clone()],
                     }));
                     compute_semantic_hash(&single, space, &lens)

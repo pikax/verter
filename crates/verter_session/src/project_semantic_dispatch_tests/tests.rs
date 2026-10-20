@@ -28517,6 +28517,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28569,7 +28570,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let (infer, _parameter) = reverse_test_binders(&graph, "U", 0);
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            verter_type_engine::semantic_query::ObjectSpreadProgram {
+            verter_type_engine::semantic_query::ObjectSpreadProgram { is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28639,6 +28640,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28727,6 +28729,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28839,6 +28842,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -28929,6 +28933,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29070,6 +29075,7 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -29170,6 +29176,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29246,6 +29253,7 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),

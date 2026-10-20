@@ -561,6 +561,7 @@ impl DeclBodyMemo {
             return Err(LocatorBodyDerefError::ValueAnnotationAbsent);
         };
         let object_expr = verter_type_expr::ObjectExpr {
+            empty_literal: false,
             properties: members
                 .members
                 .iter()

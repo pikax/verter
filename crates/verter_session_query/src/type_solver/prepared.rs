@@ -1494,6 +1494,7 @@ mod tests {
     #[test]
     fn prepared_type_decl_member_index_from_object_body() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
@@ -1565,6 +1566,7 @@ mod tests {
         // the member carries an authored annotation, on BOTH producer paths.
         let annotated_span = verter_span::Span::new(10, 30);
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "annotated".into(),
@@ -1636,6 +1638,7 @@ mod tests {
     #[test]
     fn prepared_member_index_mints_authored_reference_heads_per_member() {
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::with_key_spans_public(
                     "variant".into(),
@@ -1738,6 +1741,7 @@ mod tests {
     fn prepared_member_head_locator_carries_the_intersection_arm_prefix() {
         let arm = |name: &str| {
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![ObjectMember::Property(
                     ObjectProperty::with_key_spans_public(
                         name.into(),
@@ -1808,6 +1812,7 @@ mod tests {
         // (the method is never indexed), so both the `is_some` and the
         // `is_method` assertions below FAIL.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
@@ -1871,6 +1876,7 @@ mod tests {
         // `Authored` origins for an anchor-less body FAILS the `Synthetic`
         // equality at the end.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::Property(ObjectProperty::synthetic_public_key(
                     "label".into(),
@@ -2125,6 +2131,7 @@ mod tests {
 
     fn make_object(props: &[(&str, TypeExpr, bool)]) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: props
                 .iter()
                 .map(|(name, ty, optional)| {
@@ -2370,6 +2377,7 @@ mod tests {
         // NAME-ordinal would store `Member { ordinal: 0 }` for `p` and
         // mis-address the call signature.
         let body = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 ObjectMember::CallSignature(verter_type_expr::FunctionExpr::synthetic(
                     vec![],
@@ -3169,6 +3177,7 @@ mod key_domain_closedness_producer_tests {
 
     fn object_body() -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     "label".into(),
@@ -3182,6 +3191,7 @@ mod key_domain_closedness_producer_tests {
 
     fn object_with_index_key(key: TypeExpr) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::IndexSignature(IndexSignature::synthetic(
                 "k".into(),
                 key,

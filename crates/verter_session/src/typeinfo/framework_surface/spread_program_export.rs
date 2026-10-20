@@ -216,6 +216,7 @@ mod spread_program_wire_tests {
     #[test]
     fn spread_bearing_object_encodes_as_ordered_construction_program() {
         let obj = ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 string_property("a"),
                 ObjectMember::Method({
@@ -292,6 +293,7 @@ mod spread_program_wire_tests {
     #[test]
     fn spread_free_structural_object_still_degrades_to_opaque() {
         let obj = ObjectExpr {
+            empty_literal: false,
             properties: vec![string_property("a")],
         };
         let (arena, id) = encode_value(&TypeExpr::Object(Arc::new(obj)));
@@ -320,6 +322,7 @@ mod spread_program_wire_tests {
             ))
         };
         let obj = ObjectExpr {
+            empty_literal: false,
             properties: vec![
                 property(AuthoredPropertyKey::Number(
                     CanonicalIndexInt::from_canonical_i64(7).unwrap(),

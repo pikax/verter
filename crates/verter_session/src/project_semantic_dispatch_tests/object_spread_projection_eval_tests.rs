@@ -107,6 +107,7 @@ fn program(
     effects: impl IntoIterator<Item = ObjectConstructionEffect>,
 ) -> SemanticNodeId {
     graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+        is_literal: true,
         effects: verter_type_engine::semantic_query::PayloadArray::from(
             effects.into_iter().collect::<Vec<_>>(),
         ),
@@ -740,6 +741,7 @@ fn lowering_and_navigation_use_the_program_without_eager_surface_collapse() {
     let _builder = dispatch.enter_construction_scope();
     let graph = host.project_type_store().semantic_graph();
     let expr = verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: vec![
             verter_type_expr::ObjectMember::Spread(verter_type_expr::SpreadMember::new(
                 verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Object),

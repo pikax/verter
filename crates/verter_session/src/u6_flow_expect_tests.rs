@@ -2191,6 +2191,17 @@ pub(crate) mod checker_syntax {
             (CheckerType::Ref(name), SemanticNodeData::DeclRef { identity }) => {
                 &*identity.decl_name == name.as_str()
             }
+            // A resolved declaration can remain unmaterialized at this
+            // observation altitude. Its identity still denotes the bare name.
+            (
+                CheckerType::Ref(name),
+                SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                        name: declared,
+                        ..
+                    },
+                ),
+            ) => declared.as_ref() == name.as_str(),
             // A declaration body's reference to the declaration itself
             // lowers to the self-reference sentinel, which stands for that
             // declaration (`R[]` inside `type R = R[] | 1`): it matches the
@@ -4689,6 +4700,22 @@ mod expectation_controls {
              ...base(), m() { return 1 } } }",
             "makeProps",
             |dispatch, node| {
+                let _construction = dispatch.enter_construction_scope();
+                let declaration = dispatch.graph().intern_node(SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::DeclPlaceholder {
+                        canonical_id: "/checker/decl.ts".into(),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        name: "Face".into(),
+                        whole_hash: [0; 16],
+                    },
+                ));
+                assert!(accepts(dispatch, declaration, "Face"));
+                assert!(!accepts(dispatch, declaration, "Other"));
+                let missing = dispatch.graph().intern_node(SemanticNodeData::Opaque(
+                    verter_type_engine::semantic_query::QueryError::Miss,
+                ));
+                assert!(!accepts(dispatch, missing, "Face"));
+
                 assert!(
                     accepts(dispatch, node, "{ label: string; m(): number; }"),
                     "precondition: the composed spread surface accepts its own checker print \

@@ -261,6 +261,7 @@ mod object_spread_program_contract_tests {
         let spread = SemanticNodeId(22);
         let construct = SemanticNodeId(33);
         let program = ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectCall(call),
                 ObjectConstructionEffect::Spread(spread),
@@ -269,6 +270,7 @@ mod object_spread_program_contract_tests {
         };
         let node = SemanticNodeData::ObjectSpreadProgram(program.share());
         let reordered = SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::Spread(spread),
                 ObjectConstructionEffect::DirectCall(call),
@@ -278,6 +280,11 @@ mod object_spread_program_contract_tests {
 
         assert_ne!(node, reordered);
         assert_ne!(hash_of(&node), hash_of(&reordered));
+        let mut regular = program.share();
+        regular.is_literal = false;
+        let regular = SemanticNodeData::ObjectSpreadProgram(regular);
+        assert_ne!(node, regular);
+        assert_ne!(hash_of(&node), hash_of(&regular));
         assert_eq!(
             program.child_nodes().collect::<Vec<_>>(),
             vec![call, spread, construct],
@@ -342,6 +349,7 @@ mod object_spread_program_contract_tests {
             member_path: verter_type_expr::OwnedSlice::from([]),
         };
         let program = ObjectSpreadProgram {
+            is_literal: true,
             effects: crate::semantic_query::PayloadArray::from([
                 ObjectConstructionEffect::DirectProperty(property),
                 ObjectConstructionEffect::DirectMethod(method),
@@ -371,6 +379,7 @@ mod object_spread_program_contract_tests {
             (1..=10).map(SemanticNodeId).collect::<Vec<_>>()
         );
         let mapped = program.map_child_nodes(|node| SemanticNodeId(node.0 + 100));
+        assert!(mapped.is_literal);
         assert_eq!(
             mapped.child_nodes().collect::<Vec<_>>(),
             (101..=110).map(SemanticNodeId).collect::<Vec<_>>()
@@ -10447,6 +10456,7 @@ impl ObjectSpreadProgram {
     /// Share the program's effects with a payload the engine is building.
     pub(crate) fn share(&self) -> Self {
         Self {
+            is_literal: self.is_literal,
             effects: self.effects.share(),
         }
     }
@@ -10484,9 +10494,12 @@ impl ObjectConstructionEffect {
     }
 }
 
-/// Immutable source-ordered authority for a spread-bearing object.
+/// Immutable source-ordered authority for an object construction.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ObjectSpreadProgram {
+    /// Whether this construction still carries expression-site literal
+    /// freshness, consumed when its declaration type is published.
+    pub is_literal: bool,
     pub effects: PayloadArray<ObjectConstructionEffect>,
 }
 
@@ -10561,6 +10574,7 @@ impl ObjectSpreadProgram {
             })
             .collect::<Vec<_>>();
         Self {
+            is_literal: self.is_literal,
             effects: effects.into(),
         }
     }

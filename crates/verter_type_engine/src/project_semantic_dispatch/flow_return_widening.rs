@@ -308,7 +308,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // }` gives the spread arm `q?: undefined`): each is one more
             // direct write after its construction program. As a whole value
             // it is kept as it is.
-            Some(SemanticNodeData::ObjectSpreadProgram(program)) => {
+            Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
                 let program = program.share();
                 drop(data);
                 values.push(match siblings {
@@ -384,6 +384,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph()
             .intern_node(SemanticNodeData::ObjectSpreadProgram(
                 crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))

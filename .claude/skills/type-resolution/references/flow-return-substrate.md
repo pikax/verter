@@ -188,6 +188,28 @@ absorbing it would delete the `n` member the checker publishes. The gate is scop
 to surfaces whose key domain is the member list — a call, construct or index
 signature on either side goes to the relation.
 
+Inferred value declarations also run the shared
+`normalize_widened_object_literals` owner before publishing their `typeof`
+answer, on both the located-body and expression-source paths. Array element
+unions and conditional results therefore receive the same optional `undefined`
+properties as return/yield joins, including nested literal siblings. Authored
+annotations and non-literal object types keep their own shapes. Nonempty
+literals carry provenance on their members; the transient `ObjectExpr` carries
+`empty_literal` for an empty source literal, which lowers to a zero-effect
+object construction program. An authored empty object type has no such marker.
+Rebuilt unions continue through `ReduceUnion` and canonical kernel ordering.
+Locator lowering preserves expression-origin facts until that normalization
+finishes. The existing source regularizer then consumes freshness across object,
+array, tuple and union nodes with a memoized postorder walk. Spread construction
+programs record whether they still denote a literal expression; regularization
+clears that bit and their direct-member origins without expanding spread operands.
+Thus separately declared object values do not normalize against later siblings.
+Member-granular `typeof` publication applies the same rule to direct array/union
+properties while preserving the nested-object cutoff. Class fields and inferred
+default-parameter types normalize as independent initializers; authored parameter
+types keep their own shapes. Signature normalization runs after located-body
+lowering, preserving the callable header's occurrence, carrier and scope.
+
 The call value carries a matching reduction on the intersection side: a callee's
 INSTANTIATED return that pairs the empty object type `{}` with a definitely
 non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at

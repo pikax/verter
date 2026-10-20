@@ -1050,6 +1050,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> LocatorStep<'e, 'r> {
         let ctx = entry.with_binders(binders.frames());
         let scope = ctx.scope;
+        if object.empty_literal && object.properties.is_empty() {
+            return LocatorStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             let member_ordinal = u32::try_from(next).unwrap_or(u32::MAX);
             match member {
@@ -1088,9 +1099,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         method_kind: Some(method.method_kind),
                         has_implementation_body: method.has_implementation_body,
                         visibility: method.visibility,
-                        // Declaration materialization is never a
-                        // literal origin (see the property's resume).
-                        excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                        excess_origin: method.excess_origin,
                         spans: method.spans,
                         declaration_origin: scope.canonical_file(),
                         declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
@@ -1387,13 +1396,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             method_kind: None,
                             has_implementation_body: false,
                             visibility: prop.visibility,
-                            // The locator path materializes DECLARATION
-                            // bodies: a member reached through a
-                            // variable/declaration deref is `NonLiteral`
-                            // regardless of the origin the producer recorded
-                            // on the authored literal — freshness never
-                            // survives declaration materialization.
-                            excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                            // Inferred literal unions normalize before the
+                            // completed declaration type becomes regular.
+                            excess_origin: prop.excess_origin,
                             spans: prop.spans,
                             declaration_origin: scope.canonical_file(),
                             // ROLE-FREE shape identity: the locator shape
@@ -2020,6 +2025,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             return;
                         }
                         let run_obj = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                            empty_literal: false,
                             properties: run.iter().map(|member| (*member).clone()).collect(),
                         }));
                         if let TypeExpr::Object(alias_object) = &run_obj {
@@ -2066,6 +2072,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return graph.intern_node_with_scope(
                         SemanticNodeData::ObjectSpreadProgram(
                             crate::semantic_query::ObjectSpreadProgram {
+                                is_literal: true,
                                 effects: crate::semantic_query::PayloadArray::from(effects),
                             },
                         ),
