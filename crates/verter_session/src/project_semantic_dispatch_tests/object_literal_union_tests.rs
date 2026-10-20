@@ -62,6 +62,7 @@ const spreadHolder = { ...{}, arr: [{ a: 1 }, { b: "x" }], conditional: c ? { a:
 const spreadNested = { ...{}, deep: { arr: [{ a: 1 }, { b: "x" }], conditional: c ? { a: 1 } : { b: "x" } } };
 const spreadArray = [{ ...{}, arr: [{ a: 1 }, { b: "x" }] }];
 const spreadOperand = { ...{ arr: [{ a: 1 }, { b: "x" }] } };
+const conditionalSpread = { ...(c ? { a: 1 } : { b: "x" }) };
 const nestedConditional = { deep: { conditional: c ? { a: 1 } : { b: "x" } } };
 const nestedWithNull = { deep: { conditional: c ? { a: 1 } : { b: "x" }, n: null as null } };
 const nestedWithNumbers = { deep: { conditional: c ? { a: 1 } : { b: "x" }, arr: [1] } };
@@ -80,6 +81,7 @@ type SpreadConditional = typeof spreadHolder.conditional;
 type SpreadNestedConditional = typeof spreadNested.deep.conditional;
 type ArraySpreadInitializer = (typeof spreadArray)[number]["arr"];
 type SpreadOperand = typeof spreadOperand.arr;
+type ConditionalSpread = typeof conditionalSpread;
 type NestedConditional = typeof nestedConditional.deep.conditional;
 type NestedWithNull = typeof nestedWithNull.deep.conditional;
 type NestedWithNumbers = typeof nestedWithNumbers.deep.conditional;
@@ -199,6 +201,7 @@ fn inferred_object_literal_unions_normalize_only_fresh_members() {
                 ("SpreadNestedConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
                 ("ArraySpreadInitializer", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
                 ("SpreadOperand", "({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]"),
+                ("ConditionalSpread", "{ a: number; } | { b: string; }"),
                 ("NestedConditional", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
                 ("NestedWithNull", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),
                 ("NestedWithNumbers", "{ a: number; b?: undefined; } | { a?: undefined; b: string; }"),

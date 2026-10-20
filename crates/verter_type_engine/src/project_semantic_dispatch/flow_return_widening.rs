@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    AuthoredPropertyKey, ObjectSpreadProgram, PrimitiveKind, SemanticNodeData, SemanticNodeId,
-    SurfaceMember, SurfaceView,
+    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PrimitiveKind,
+    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
 };
 use verter_session_query::flow::policy::NullabilityPolicy;
 
@@ -38,6 +38,10 @@ enum Widening {
         node: SemanticNodeId,
         siblings: Option<Arc<[SemanticNodeId]>>,
     },
+    /// A spread operand contributes construction alternatives, not an
+    /// independently widened value union. Its own property initializers
+    /// still enter ordinary widening contexts.
+    SpreadOperand { node: SemanticNodeId },
     /// A union rebuilt from its members' widened values.
     Union {
         node: SemanticNodeId,
@@ -101,6 +105,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             match task {
                 Widening::Visit { node, siblings } => {
                     self.widening_visit(node, siblings, &mut tasks, &mut values);
+                }
+                Widening::SpreadOperand { node } => {
+                    let data = self.graph().node_data(node);
+                    if let Some(SemanticNodeData::Union(members)) = data.as_deref() {
+                        let members = members.iter().copied().collect::<Vec<_>>();
+                        drop(data);
+                        let visits = members
+                            .iter()
+                            .rev()
+                            .map(|node| Widening::SpreadOperand { node: *node })
+                            .collect::<Vec<_>>();
+                        tasks.push(Widening::Union { node, members });
+                        tasks.extend(visits);
+                    } else {
+                        drop(data);
+                        self.widening_visit(node, None, &mut tasks, &mut values);
+                    }
                 }
                 Widening::Union { node, members } => {
                     let widened = values.split_off(values.len() - members.len());
@@ -460,16 +481,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let program = program.share();
                 drop(data);
                 let mut children = Vec::new();
-                program.for_each_child_node(|child| children.push(child));
+                let mut cursor = 0;
+                while let Some((slot, child)) = program.child_at_slot(cursor) {
+                    let spread_operand = match program
+                        .effects
+                        .get(slot / 2)
+                        .expect("the construction child's effect")
+                    {
+                        ObjectConstructionEffect::Spread(_) => true,
+                        ObjectConstructionEffect::DirectProperty(_)
+                        | ObjectConstructionEffect::DirectMethod(_)
+                        | ObjectConstructionEffect::DirectGet(_)
+                        | ObjectConstructionEffect::DirectSet(_)
+                        | ObjectConstructionEffect::DirectIndex(_)
+                        | ObjectConstructionEffect::DirectCall(_)
+                        | ObjectConstructionEffect::DirectConstruct(_) => false,
+                    };
+                    children.push((child, spread_operand));
+                    cursor = slot + 1;
+                }
                 tasks.push(Widening::SpreadLiteral {
                     node,
                     program,
                     siblings,
                     count: children.len(),
                 });
-                tasks.extend(children.into_iter().rev().map(|node| Widening::Visit {
-                    node,
-                    siblings: None,
+                tasks.extend(children.into_iter().rev().map(|(node, spread_operand)| {
+                    if spread_operand {
+                        Widening::SpreadOperand { node }
+                    } else {
+                        Widening::Visit {
+                            node,
+                            siblings: None,
+                        }
+                    }
                 }));
             }
             _ => {

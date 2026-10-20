@@ -860,29 +860,43 @@ pub fn run(
     let host = VerterHost::new_standalone(build_host_config());
     install_project_workspace(&host, &config.root_dir, tsconfig_path);
     let mut admission = CarrierAdmission::default();
+    let mut requests = Vec::with_capacity(config.vue_files.len());
+    let mut read_error = None;
     for vue_path in &config.vue_files {
-        let source = fs::read_to_string(vue_path).map_err(|error| {
+        let source = match fs::read_to_string(vue_path) {
+            Ok(source) => source,
+            Err(error) => {
+                read_error = Some(api_check::TypecheckError::new(format!(
+                    "verter-tsc: failed to read carrier source {}: {error}",
+                    vue_path.display()
+                )));
+                break;
+            }
+        };
+        admission.admit(vue_path, &source);
+        let canonical_id = canonical_path_id(vue_path);
+        requests.push(UpsertRequest {
+            canonical_id: Some(canonical_id.clone()),
+            input_id: canonical_id,
+            source: std::sync::Arc::<str>::from(source),
+            file_language: carrier_language(vue_path),
+            aliases: Vec::new(),
+        });
+    }
+    // Publish the complete carrier population once; per-file upserts repeat
+    // configured-program discovery before any typecheck can consume it.
+    for (vue_path, update) in config.vue_files.iter().zip(host.upsert_many(requests)) {
+        let _update = update.map_err(|error| {
             api_check::TypecheckError::new(format!(
-                "verter-tsc: failed to read carrier source {}: {error}",
+                "verter-tsc: failed to ingest carrier source {}: {error}",
                 vue_path.display()
             ))
         })?;
-        admission.admit(vue_path, &source);
-        let canonical_id = canonical_path_id(vue_path);
-        let _update = host
-            .upsert(UpsertRequest {
-                canonical_id: Some(canonical_id.clone()),
-                input_id: canonical_id,
-                source: std::sync::Arc::<str>::from(source),
-                file_language: carrier_language(vue_path),
-                aliases: Vec::new(),
-            })
-            .map_err(|error| {
-                api_check::TypecheckError::new(format!(
-                    "verter-tsc: failed to ingest carrier source {}: {error}",
-                    vue_path.display()
-                ))
-            })?;
+    }
+    // Preserve the first failure in input order, including an ingestion
+    // failure in the successfully read prefix before a later read failure.
+    if let Some(error) = read_error {
+        return Err(error);
     }
 
     // ── Typecheck stage: in-memory tsgo `--api` (the `--noEmit` diagnostic set). ──

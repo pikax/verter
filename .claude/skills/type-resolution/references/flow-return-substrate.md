@@ -233,7 +233,10 @@ Tuple elements enter independent widening contexts before publication consumes
 their initializer freshness; tuple labels, optional/rest markers and readonly
 modifiers survive rebuilding. Literal spread programs likewise normalize their
 initializer children before receiving missing sibling properties, without
-flattening the construction or changing write order. Constructor headers use
+flattening the construction or changing write order. A spread operand union
+retains its construction alternatives: it does not introduce a sibling-widening
+context of its own. Property initializers inside an inline spread source still
+normalize independently, including arrays of object literals. Constructor headers use
 the same parameter normalization as function headers; authored parameter types
 remain unchanged. For nested literals, TypeScript 7.0.2 diagnostic messages can
 omit inferred optional properties that its native API and `keyof` expose. Use

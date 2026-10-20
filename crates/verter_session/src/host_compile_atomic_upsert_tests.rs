@@ -54,6 +54,56 @@ fn upsert_req(canonical_id: &str, source: &str) -> UpsertRequest {
     }
 }
 
+#[test]
+fn public_source_batch_is_atomic_and_preserves_input_order() {
+    let host = new_host();
+    let ids = [
+        "/batch-c.vue",
+        "/batch-a.vue",
+        "/batch-d.vue",
+        "/batch-b.vue",
+    ];
+    let requests = ids
+        .iter()
+        .map(|id| upsert_req(id, &good_template(id)))
+        .collect();
+    host.scheduler.test_install_batch_admit_epoch_trace();
+
+    let updates = host.upsert_many(requests);
+    let actual = updates
+        .into_iter()
+        .map(|update| update.expect("the source is ingested").canonical_id)
+        .collect::<Vec<_>>();
+    assert_eq!(actual, ids.map(String::from).to_vec());
+    let epochs = host.scheduler.test_take_batch_admit_epochs();
+    assert_eq!(epochs.len(), ids.len(), "every source is admitted");
+    assert!(
+        epochs.iter().all(|epoch| *epoch == epochs[0]),
+        "all sources must share one admission epoch: {epochs:?}"
+    );
+}
+
+#[test]
+fn public_source_batch_rejects_duplicates_before_admission() {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let host = new_host();
+    let canonical = "/duplicate-source.vue";
+    host.scheduler.test_install_batch_admit_epoch_trace();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        host.upsert_many(vec![
+            upsert_req(canonical, &good_template("first")),
+            upsert_req(canonical, &good_template("second")),
+        ])
+    }));
+    assert!(
+        result.is_err(),
+        "a source batch requires distinct canonicals"
+    );
+    assert!(host.scheduler.test_take_batch_admit_epochs().is_empty());
+    assert!(host.scheduler.try_get_source(canonical).is_none());
+}
+
 // ---------------------------------------------------------------------------
 // 1. Stage B issues ONE atomic batch carrying N requests (P0)
 // ---------------------------------------------------------------------------

@@ -24,7 +24,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use super::ProjectSemanticDispatch;
-use crate::types::HostConfig;
+use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
 use verter_type_engine::semantic_query::{
     LiteralValue, ProjectionMode, ProjectionReductionContext, ReturnProjectionDemand,
@@ -305,16 +305,23 @@ impl<'a> Matrix<'a> {
     /// project, the i-th setting's rooted at `roots[i]`.
     fn upsert_projects(&self, host: &VerterHost, rows: &[(Read<'_>, Vec<&str>)], roots: &[String]) {
         let module = self.module(rows);
+        let mut requests = Vec::with_capacity(roots.len() * (self.files.len() + 2));
+        let request = |path: String, source: &str, file_language| UpsertRequest {
+            canonical_id: Some(path.clone()),
+            input_id: path,
+            source: Arc::from(source),
+            file_language,
+            aliases: Vec::new(),
+        };
         for (index, root) in roots.iter().enumerate() {
             let canonical = format!("{root}/probe.ts");
             if let Some((name, sources)) = self.file_per_setting {
                 let path = format!("{root}/{name}");
-                crate::u6_flow_shape_corpus_tests::upsert(
-                    host,
-                    &path,
+                requests.push(request(
+                    path,
                     sources[index],
                     crate::FileLanguage::script_ts(),
-                );
+                ));
             }
             if let Some(lib) = self.lib {
                 crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::register_lib_environment(
@@ -331,14 +338,20 @@ impl<'a> Matrix<'a> {
                 let language = crate::LanguageRegistry::global()
                     .classify_static(&path)
                     .static_resolution();
-                crate::u6_flow_shape_corpus_tests::upsert(host, &path, source, language);
+                requests.push(request(path, source, language));
             }
-            crate::u6_flow_shape_corpus_tests::upsert(
-                host,
-                &canonical,
+            requests.push(request(
+                canonical,
                 &module,
                 crate::FileLanguage::script_ts(),
-            );
+            ));
+        }
+        let ids = requests
+            .iter()
+            .map(|request| request.input_id.clone())
+            .collect::<Vec<_>>();
+        for (id, update) in ids.iter().zip(host.upsert_many(requests)) {
+            let _ = update.unwrap_or_else(|error| panic!("upsert `{id}`: {error:?}"));
         }
     }
 

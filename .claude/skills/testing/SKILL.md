@@ -98,6 +98,11 @@ Tests of authored membership, import/reference closure or compiler options use
 through the shared tsconfig loader. Cold-flight, footprint and parse-count
 assertions remain applicable to tsconfig-less fixtures.
 
+For native fixtures whose reads begin after all sources are registered, use
+`VerterHost::upsert_many` to admit their distinct canonical files in one batch.
+Keep language classification and ambient-lib registration intact. Tests that
+observe successive edits or invalidations retain individual `upsert` calls.
+
 ### Test File Organization
 
 When a Rust source file's inline `#[cfg(test)] mod tests` block exceeds ~400 lines, extract tests to a separate sibling file. Two patterns:

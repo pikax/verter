@@ -15,9 +15,9 @@ pub struct MetaProvenance {
     pub component_meta_resolved_state_recomputes: std::sync::atomic::AtomicU64,
     pub get_analysis_calls: std::sync::atomic::AtomicU64,
     pub evaluate_types_calls: std::sync::atomic::AtomicU64,
-    /// Bumped on every `VerterHost::upsert(...)` call. Used by
-    /// `tests/cases/g_session/session_view_isolation.rs` to assert the R17
-    /// invariant that session query paths do NOT mutate the host.
+    /// Bumped on every public source-ingestion call (`upsert` or native
+    /// `upsert_many`). Used by session-view isolation tests to assert that
+    /// query paths do not enter host mutation.
     pub host_upsert_calls: std::sync::atomic::AtomicU64,
     /// Bumped on every cache-key derivation that consulted a
     /// [`crate::session_view::SessionView`] via
