@@ -968,6 +968,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stack.push(mapper.key_space);
                     stack.push(mapper.value_expr);
                     stack.extend(mapper.name_remap);
+                    stack.extend(mapper.modifiers_type);
                 }
                 SemanticNodeData::Conditional {
                     check,

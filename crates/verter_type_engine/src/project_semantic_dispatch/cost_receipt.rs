@@ -209,14 +209,16 @@ fn digest_of(bytes: &[u8]) -> u64 {
     xxhash_rust::xxh3::xxh3_64(bytes)
 }
 
-/// The logical cost of work: its work units, its construction bytes, the
-/// request operations (the per-request projection fuse) it spent, and the
-/// structured comparisons its relation checks recorded (the checker's
-/// relation-complexity count).
+/// The logical cost of work: its work units, its construction bytes (and
+/// the part of them that is advisory construction footprint, accounted but
+/// never enforced), the request operations (the per-request projection
+/// fuse) it spent, and the structured comparisons its relation checks
+/// recorded (the checker's relation-complexity count).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LogicalUsage {
     pub work: u64,
     pub bytes: u64,
+    pub advisory_bytes: u64,
     pub operations: u64,
     pub comparisons: u64,
 }
@@ -227,6 +229,7 @@ impl LogicalUsage {
         Some(Self {
             work: self.work.checked_add(other.work)?,
             bytes: self.bytes.checked_add(other.bytes)?,
+            advisory_bytes: self.advisory_bytes.checked_add(other.advisory_bytes)?,
             operations: self.operations.checked_add(other.operations)?,
             comparisons: self.comparisons.checked_add(other.comparisons)?,
         })
@@ -237,6 +240,7 @@ impl LogicalUsage {
         Self {
             work: self.work.saturating_add(other.work),
             bytes: self.bytes.saturating_add(other.bytes),
+            advisory_bytes: self.advisory_bytes.saturating_add(other.advisory_bytes),
             operations: self.operations.saturating_add(other.operations),
             comparisons: self.comparisons.saturating_add(other.comparisons),
         }
@@ -719,6 +723,9 @@ pub struct BudgetProfileSpec {
     pub work: usize,
     /// The connected demand's construction-byte allowance.
     pub bytes: u64,
+    /// Whether the advisory construction-byte rail refuses a canonical
+    /// construction at `bytes` (off by default).
+    pub construction_byte_refusal: bool,
     /// The connected demand's nested query-depth allowance.
     pub query_depth: u16,
     /// The continuation runtime's instantiation-depth allowance.
@@ -741,6 +748,7 @@ impl BudgetProfileSpec {
         Self {
             work: 0,
             bytes: 0,
+            construction_byte_refusal: false,
             query_depth: 0,
             instantiation_depth: 0,
             tail_steps: 0,
