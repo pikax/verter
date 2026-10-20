@@ -942,11 +942,13 @@ async fn managed_cold_replay_rechecks_membership_and_preserves_open_overlay() {
         wrong_project.admission_refusal,
         Some(verter_type_runtime::provider_hub::AdmissionRefusal::WrongProject)
     );
-    composite
+    // Recorded on the hub itself: a composite without a shared route would
+    // establish the engine on its first admitted write.
+    managed
         .open_file(companion, "export const unsaved = 2")
         .await
         .unwrap();
-    composite
+    managed
         .load_file_background(companion, "export const disk = 1")
         .await
         .unwrap();
@@ -975,6 +977,77 @@ async fn managed_cold_replay_rechecks_membership_and_preserves_open_overlay() {
         verter_type_runtime::traits::AppliedContent::Applied(bytes)
             if bytes.as_ref() == "export const unsaved = 2"
     ));
+    managed.shutdown().await.unwrap();
+}
+
+/// Without a shared route the managed engine is the only one, so the first
+/// admitted carrier write establishes it: the write is replayed into the new
+/// engine once and certified, rather than held until a query that an
+/// uncommitted surface never issues. Later writes reuse that engine.
+#[tokio::test]
+async fn managed_only_route_establishes_once_on_its_first_admitted_write() {
+    let source = "d:/ws/src/Foo.vue";
+    let companion = "d:/ws/src/Foo.vue.tsx";
+    let (overlay, _workspace) = overlay_over(
+        &[(source, "<template/>")],
+        fixture_snapshot(r#"{"include":["src"]}"#),
+    );
+    let engine = Arc::new(RecordingAttach::new());
+    let establishments = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let managed = Arc::new(crate::type_provider::lazy_managed::new_lazy_managed({
+        let engine = Arc::clone(&engine);
+        let establishments = Arc::clone(&establishments);
+        move || {
+            establishments.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let engine = Arc::clone(&engine);
+            async move { Ok(engine as Arc<dyn TypeProvider>) }
+        }
+    }));
+    let composite = super::TsgoCompositeProvider::new(
+        Arc::clone(&managed),
+        Arc::clone(&overlay.inner.host),
+        None,
+    );
+    let applied = |content: &str| {
+        matches!(
+            composite.applied_content(companion),
+            verter_type_runtime::traits::AppliedContent::Applied(bytes)
+                if bytes.as_ref() == content
+        )
+    };
+
+    let first = composite
+        .open_file_with_disposition(
+            companion,
+            "export const first = 1",
+            verter_type_runtime::provider_hub::OverlayPriority::Foreground,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        first,
+        verter_type_runtime::traits::FileLoadDisposition::Forwarded,
+        "the first admitted write is certified, not held"
+    );
+    assert!(managed.is_serving());
+    assert!(applied("export const first = 1"));
+    assert_eq!(
+        engine.count("write:"),
+        1,
+        "the write is replayed exactly once"
+    );
+
+    composite
+        .update_file(companion, "export const second = 2")
+        .await
+        .unwrap();
+    assert!(applied("export const second = 2"));
+    assert_eq!(engine.count("write:"), 2);
+    assert_eq!(
+        establishments.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the managed engine is created exactly once"
+    );
     managed.shutdown().await.unwrap();
 }
 

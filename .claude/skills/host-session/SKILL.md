@@ -284,6 +284,16 @@ between first query and first delivered surface. ProjectSync then certifies the
 matching bytes without rewriting its captured snapshot; concurrent edits remain
 protected. A lazy managed fallback staying `Held` cannot mask an applied shared
 receipt.
+Without a shared route (no editor rendezvous: headless clients, Neovim, Helix,
+Zed, Lapce) the managed engine is the only one. The composite then treats a
+`Held` managed write as that engine's demand: `ProviderHub::synchronize_pending_file`
+establishes an on-demand hub (singleflight, retry cooldown), the install replays
+the recorded state, and the write returns certified. Holding instead would
+deadlock: an uncommitted IDE surface never issues the query that would start the
+engine. A hub that establishes only explicitly treats the call as a no-op while
+no engine serves. The coordinator logs an uncertified refusal while the revision
+is still current as `TSX_SYNC_UNCERTIFIED`; `TSX_SYNC_SKIPPED` means the
+revision moved.
 Overlay close removes desired content immediately but retains an epoch-bound
 withdrawal from a committed injection receipt until transport close succeeds.
 A never-injected or shadow-vetoed carrier owns no transport document and creates

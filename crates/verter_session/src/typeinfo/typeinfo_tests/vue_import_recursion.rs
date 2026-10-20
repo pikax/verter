@@ -1092,3 +1092,63 @@ fn instance_type_self_cycle_resolves_shallow_instance() {
          Ref(\"default\") carrier, got {inner_self:?}"
     );
 }
+
+/// The member named `name` of an object type.
+fn object_member<'a>(object: &'a TypeExpr, name: &str) -> &'a TypeExpr {
+    let TypeExpr::Object(object) = object else {
+        panic!("expected an object holding `{name}`, got {object:?}");
+    };
+    object
+        .properties
+        .iter()
+        .find_map(|member| match member {
+            verter_type_expr::ObjectMember::Property(prop)
+                if prop.string_name().expect("string-key fixture") == name =>
+            {
+                Some(&prop.ty)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("member `{name}` must exist"))
+}
+
+// ---------------------------------------------------------------------------
+// A projected terminal presents an imported component member as the shallow
+// instance-identity carrier at EVERY level of its inline structure: a
+// component reference nested a dozen inline objects deep presents exactly as
+// one nested three deep.
+// ---------------------------------------------------------------------------
+#[test]
+fn a_component_member_nested_deep_in_the_terminal_presents_as_its_carrier() {
+    const LEAF: &str = "/w/NestLeaf.vue";
+    let leaf_vue = r#"<script setup lang="ts">
+defineProps<{ f: string }>();
+</script>
+"#;
+    for depth in [3usize, 12] {
+        let holder = format!("/w/NestHolder{depth}.vue");
+        let mut nested = String::from("{ peer: Leaf }");
+        // bounded-loop: authored finite fixture depth.
+        for level in (0..depth).rev() {
+            nested = format!("{{ l{level}: {nested} }}");
+        }
+        let holder_vue = format!(
+            "<script setup lang=\"ts\">\nimport Leaf from './NestLeaf.vue';\n\
+             defineProps<{{ wrap: {nested} }}>();\n</script>\n"
+        );
+        let host = make_host_with_files(&[(LEAF, leaf_vue), (holder.as_str(), &holder_vue)]);
+        let terminal = project_vue_default_path(&host, &holder, &["$props", "wrap"]);
+        let mut cursor = &terminal;
+        // bounded-loop: walks the same authored finite fixture depth.
+        for level in 0..depth {
+            cursor = object_member(cursor, &format!("l{level}"));
+        }
+        let peer = object_member(cursor, "peer");
+        assert!(
+            matches!(peer, TypeExpr::Ref { name, type_arguments }
+                if name.as_ref() == "default" && type_arguments.is_empty()),
+            "a component member {depth} inline objects deep presents as the instance-identity \
+             Ref(\"default\") carrier, got {peer:?}"
+        );
+    }
+}
