@@ -317,3 +317,30 @@ fn a_router_resolves_to_the_union_of_its_procedure_outputs() {
     let expected: BTreeSet<String> = (0..width).map(|index| format!("p{index}")).collect();
     assert_eq!(tags, expected);
 }
+
+/// `Promise<number> extends PromiseLike<infer U>` infers `U` through
+/// `then`'s callback, the conditional's own inference (tsc answers
+/// `number`). The relation instantiates `Promise`'s generic `then` in the
+/// context of `PromiseLike<U>`'s, whose callback reads `U`: that
+/// instantiation's session takes only `then`'s parameters, so it does not
+/// settle, and the conditional stays undecided — never the false branch the
+/// uninstantiated pair would decide.
+#[test]
+fn an_inference_through_a_generic_method_it_cannot_settle_is_undecided() {
+    use super::differential_harness_tests::{Read, STRICT};
+    let rows: Vec<(Read<'_>, Vec<&str>)> = vec![(
+        Read::Type("Promise<number> extends PromiseLike<infer U> ? U : 0"),
+        vec!["number"],
+    )];
+    let verdicts = Matrix::new("")
+        .lib(GLOBALS_LIB)
+        .settings(&[STRICT])
+        .verdicts(&rows);
+    let verdict = &verdicts[0][0];
+    assert!(
+        verdict.matched || verdict.class == "GAP",
+        "{} {}",
+        verdict.class,
+        verdict.lane
+    );
+}

@@ -5153,10 +5153,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.relation_session_active() || self.signature_is_generic(target) {
             if self.signature_is_generic(source) {
                 let canonical = self.canonical_signature(target);
-                if let Some(instantiated) =
-                    self.instantiate_signature_in_context_of(source, canonical, kind)
-                {
-                    return Some((instantiated, canonical));
+                match self.in_context_instantiation(source, canonical, kind) {
+                    super::signature_instantiation::InContextInstantiation::Instantiated(
+                        instantiated,
+                    ) => return Some((instantiated, canonical)),
+                    // A target naming a conditional's `infer` declaration
+                    // (`then`'s callback reading the `U` of
+                    // `PromiseLike<infer U>`) gives the instantiation's own
+                    // session an inference only the conditional's takes, so
+                    // the uninstantiated pair would decide what it never
+                    // related: undecided.
+                    super::signature_instantiation::InContextInstantiation::Unsettled
+                        if self.relation_session_active()
+                            && self.subtree_contains_infer(canonical) =>
+                    {
+                        return None;
+                    }
+                    _ => {}
                 }
             }
             return Some((source, target));

@@ -14,7 +14,55 @@ use crate::semantic_query::{
     TypeParamDecl, VariancePhase,
 };
 
+/// What instantiating a signature in the context of another gives
+/// ([`ProjectSemanticDispatch::in_context_instantiation`]).
+pub(super) enum InContextInstantiation {
+    /// The source is not generic, or shares its type parameters with the
+    /// target: it relates as it is.
+    NotApplicable,
+    /// The source instantiated in the target's context.
+    Instantiated(SemanticNodeId),
+    /// An inference the instantiation needs does not settle.
+    Unsettled,
+}
+
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// [`Self::instantiate_signature_in_context_of`], telling a source it
+    /// does not apply to from one whose inference does not settle.
+    pub(super) fn in_context_instantiation(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        kind: SignatureKind,
+    ) -> InContextInstantiation {
+        let graph = self.graph();
+        let type_parameters =
+            |signature: SemanticNodeId| match graph.node_data(signature).as_deref() {
+                Some(SemanticNodeData::Signature {
+                    type_parameters, ..
+                }) => Some(
+                    type_parameters
+                        .iter()
+                        .map(|tp| tp.param)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            };
+        let applies = match (type_parameters(source), type_parameters(target)) {
+            (Some(source_tps), Some(target_tps)) => {
+                !source_tps.is_empty() && source_tps != target_tps
+            }
+            _ => false,
+        };
+        if !applies {
+            return InContextInstantiation::NotApplicable;
+        }
+        match self.instantiate_signature_in_context_of(source, target, kind) {
+            Some(instantiated) => InContextInstantiation::Instantiated(instantiated),
+            None => InContextInstantiation::Unsettled,
+        }
+    }
+
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
     /// each type parameter fixes, as a call's does, from the candidates the
