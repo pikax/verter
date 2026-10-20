@@ -6013,10 +6013,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // type of its own deciding: the alias's declared type
                 // requires itself — the checker's TS2456, a checker error
                 // (`any`) and a complete answer, never a step of a tail run.
-                result = checker_policy::checker_recovery(
-                    self.graph(),
-                    checker_policy::circular_type_alias(),
-                );
+                let alias = self.graph().intern_node(SemanticNodeData::DeclRef {
+                    identity: crate::semantic_query::DeclIdentity {
+                        canonical_id: build.decl_canonical.clone(),
+                        owner: build.decl_owner,
+                        whole_hash: build.decl_whole_hash,
+                        decl_name: build.decl_name.clone(),
+                    },
+                });
+                result = checker_policy::circular_type_alias_recovery(self.graph(), alias);
             } else if let Some(next) = next {
                 // A run that comes back to arguments it already took is in
                 // the state it was in then, and each step is a function of

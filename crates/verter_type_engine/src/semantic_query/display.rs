@@ -234,9 +234,22 @@ fn pattern_declares_infer(
 pub(crate) struct DisplayContext {
     substitution: DisplaySubstitution,
     ancestors: Vec<(SemanticNodeId, DisplaySubstitution)>,
+    /// Print a union without its `null` and `undefined` arms: under
+    /// `strictNullChecks: false` the checker never builds them, so a
+    /// message names neither. A union of only those arms prints whole.
+    pub(crate) omit_nullish: bool,
 }
 
 impl DisplayContext {
+    /// A context printing as the checker does when `strictNullChecks` is
+    /// `omit_nullish`'s opposite.
+    pub(crate) fn for_checker(strict_null_checks: bool) -> Self {
+        Self {
+            omit_nullish: !strict_null_checks,
+            ..Self::default()
+        }
+    }
+
     fn contains(&self, node: &SemanticNodeId) -> bool {
         self.ancestors.iter().any(|(ancestor, substitution)| {
             ancestor == node && substitution.remaining() == self.substitution.remaining()
@@ -407,6 +420,75 @@ pub(crate) fn display_type_node(
     })
 }
 
+/// Where a checker-spelled union print places one constituent: the
+/// intrinsic primitives in their creation order — `any`-class first, then
+/// `string`, `number`, `bigint`, `symbol`, `boolean`, `null`, `undefined` —
+/// before the types a program declares, with the literals a check interned
+/// last. Measured on TypeScript 7.0.2, whose unions sort by type id
+/// (`sortAndDeduplicateTypes`) and intern those classes in this order.
+fn checker_union_constituent_rank(
+    store: &SemanticGraphStore,
+    arm: &crate::semantic_query::PrintedUnionArm,
+) -> u8 {
+    use crate::semantic_query::PrintedUnionArm;
+    let PrintedUnionArm::Node(node) = arm else {
+        return 8;
+    };
+    match store.node_data(*node).as_deref() {
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::Any
+            | PrimitiveKind::Unknown
+            | PrimitiveKind::Void
+            | PrimitiveKind::Never,
+        )) => 0,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 1,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 2,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 3,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 4,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 5,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 6,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 7,
+        Some(
+            SemanticNodeData::Literal(_)
+            | SemanticNodeData::EnumLiteral(_)
+            | SemanticNodeData::TemplateLiteral { .. },
+        ) => 9,
+        _ => 8,
+    }
+}
+
+/// Where the checker meets one constituent of a union when it relates
+/// the members one by one: by type id, so `unknown`, `undefined` and
+/// `null` come first, then `void`, `string`, `number`, `bigint`, `symbol`
+/// and `boolean` in the order the checker interns those intrinsics, then the types a program declares and the literals a check
+/// interned last. Measured on TypeScript 7.0.2. It differs from the print
+/// order, which moves `null` and `undefined` last. A stable sort by this
+/// rank keeps the stored order of constituents it leaves unranked.
+pub(crate) fn checker_relation_order_rank(store: &SemanticGraphStore, node: SemanticNodeId) -> u8 {
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Any)) => 0,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Unknown)) => 1,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => 2,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => 3,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Never)) => 4,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::String)) => 5,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => 6,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::BigInt)) => 7,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Symbol)) => 8,
+        Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => 9,
+        // A literal is met where its base primitive is: the checker orders
+        // `1 | "a" | true` as `"a"`, `1`, `true`.
+        Some(SemanticNodeData::Literal(value)) => match value {
+            LiteralValue::String(_) => 5,
+            LiteralValue::Number(_) => 6,
+            LiteralValue::BigInt(_) => 7,
+            _ => 9,
+        },
+        Some(SemanticNodeData::EnumLiteral(_) | SemanticNodeData::TemplateLiteral { .. }) => 12,
+        _ => 11,
+    }
+}
+
 fn display_resolved_type_node(
     store: &SemanticGraphStore,
     id: SemanticNodeId,
@@ -444,6 +526,12 @@ fn display_resolved_type_node(
                     s.push_str("readonly ");
                 }
                 s.push_str(&match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(name)
+                        if needs.contains(DisplayFacet::CheckerSpelling)
+                            && !is_bare_member_name(name) =>
+                    {
+                        double_quoted(name)
+                    }
                     crate::semantic_query::AuthoredPropertyKey::String(name) => {
                         member_name_token(name)
                     }
@@ -472,6 +560,23 @@ fn display_resolved_type_node(
                         child_depth,
                         visited,
                     ));
+                } else if member.optional
+                    && needs.contains(DisplayFacet::CheckerSpelling)
+                    && !visited.omit_nullish
+                    && !holds_undefined(store, member.value)
+                {
+                    // Under `strictNullChecks` the checker prints an
+                    // optional property's type with `undefined` added.
+                    s.push_str(": ");
+                    s.push_str(&render_operand(
+                        store,
+                        member.value,
+                        needs,
+                        child_depth,
+                        visited,
+                        Prec::Union,
+                    ));
+                    s.push_str(" | undefined");
                 } else {
                     s.push_str(": ");
                     s.push_str(
@@ -514,6 +619,8 @@ fn display_resolved_type_node(
             }
             if parts.is_empty() {
                 "{}".to_string()
+            } else if needs.contains(DisplayFacet::CheckerSpelling) {
+                format!("{{ {}; }}", parts.join("; "))
             } else {
                 format!("{{ {} }}", parts.join("; "))
             }
@@ -578,7 +685,36 @@ fn display_resolved_type_node(
             // A union arm only parenthesises a LOOSER binder (Conditional /
             // Function). A same-kind nested union arm (`A | (B | C)`) and a
             // tighter intersection arm (`A | B & C`) both render bare.
-            let rendered: Vec<String> = crate::semantic_query::printed_union_arms(store, arms)
+            let mut printed = crate::semantic_query::printed_union_arms(store, arms);
+            if visited.omit_nullish {
+                let is_nullish = |arm: &crate::semantic_query::PrintedUnionArm| {
+                    matches!(
+                        arm,
+                        crate::semantic_query::PrintedUnionArm::Node(node)
+                            if matches!(
+                                store.node_data(*node).as_deref(),
+                                Some(SemanticNodeData::Primitive(
+                                    PrimitiveKind::Null | PrimitiveKind::Undefined
+                                ))
+                            )
+                    )
+                };
+                if printed.iter().any(|arm| !is_nullish(arm)) {
+                    printed.retain(|arm| !is_nullish(arm));
+                }
+            }
+            // A checker-spelled union prints its constituents in the
+            // checker's own id order (`sortAndDeduplicateTypes`), not the
+            // stored one: the intrinsics by their creation — `string`,
+            // `number`, `bigint`, `boolean`, `symbol`, then `null` and
+            // `undefined` — before the types a program declares, with the
+            // literals a check interned last. The sort is stable, so
+            // constituents that timeline leaves unranked keep the stored
+            // order.
+            if needs.contains(DisplayFacet::CheckerSpelling) {
+                printed.sort_by_key(|arm| checker_union_constituent_rank(store, arm));
+            }
+            let rendered: Vec<String> = printed
                 .into_iter()
                 .map(|arm| match arm {
                     crate::semantic_query::PrintedUnionArm::Node(a) => {
@@ -620,6 +756,11 @@ fn display_resolved_type_node(
             render_merged_decl_surface(store, &surface, needs, child_depth, visited)
         }
         SemanticNodeData::Primitive(kind) => primitive_keyword(*kind).to_string(),
+        SemanticNodeData::Literal(LiteralValue::String(s))
+            if needs.contains(DisplayFacet::CheckerSpelling) =>
+        {
+            double_quoted(s)
+        }
         SemanticNodeData::Literal(value) => literal_token(value),
         SemanticNodeData::EnumLiteral(literal) => literal.printed_name(),
         // Error carrier riding through display — a concise token, NOT a panic.
@@ -756,6 +897,11 @@ fn display_resolved_type_node(
                 s.push('>');
             }
             s
+        }
+        SemanticNodeData::TypeOfNominal(_) if needs.contains(DisplayFacet::CheckerSpelling) => {
+            // The checker prints a unique symbol's type as such, not as the
+            // query that names it.
+            "unique symbol".to_owned()
         }
         SemanticNodeData::TypeOfNominal(_) => {
             // Renders the AUTHORED head (`typeof TOKEN` / `typeof Ns.TOKEN`)
@@ -1256,6 +1402,27 @@ fn is_bare_member_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
 }
 
+/// Render `s` as a double-quoted string literal, as the checker spells a
+/// string literal type in a message (`"a"`), escaping `\`, `"` and control
+/// characters.
+fn double_quoted(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Render `s` as a single-quoted TS string literal, escaping `\`, `'`, and
 /// every control char (`< 0x20`) so the rendered token is valid (and round-trips
 /// through a parser without splicing the surrounding type).
@@ -1576,6 +1743,23 @@ fn element_renders_leading_readonly(
 /// than `min_prec` requires in the enclosing position. Parenthesisation is
 /// structural: the decision is taken from the node kind, so a `Conditional`
 /// operand wraps and a string literal whose TEXT contains `" | "` does not.
+/// Whether `node` already holds `undefined` (or absorbs it), so adding it
+/// as an optional property's type changes nothing.
+fn holds_undefined(store: &SemanticGraphStore, node: SemanticNodeId) -> bool {
+    let absorbs = |node: SemanticNodeId| {
+        matches!(
+            store.node_data(node).as_deref(),
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Undefined | PrimitiveKind::Any | PrimitiveKind::Unknown
+            ))
+        )
+    };
+    match store.node_data(node).as_deref() {
+        Some(SemanticNodeData::Union(arms)) => arms.iter().any(|&arm| absorbs(arm)),
+        _ => absorbs(node),
+    }
+}
+
 fn render_operand(
     store: &SemanticGraphStore,
     id: SemanticNodeId,

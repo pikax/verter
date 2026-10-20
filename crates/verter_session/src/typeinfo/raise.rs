@@ -240,6 +240,28 @@ impl VerterHost {
         Some(verter_protocol::typeinfo::graph_export::encode_type_expr_graph(&type_expr, budgets))
     }
 
+    /// The checker diagnostic an owned node root carries, when the root is
+    /// the error type the checker continues with after one
+    /// (`QueryError::CheckerRecovery`): its formatted `TS<code>: <message>`
+    /// and the file and span the checker reports it at. `None` for any
+    /// other root, and for a recovery whose message or location this does
+    /// not know.
+    #[must_use]
+    pub(crate) fn graph_root_checker_diagnostic(
+        &self,
+        node: &verter_type_engine::semantic_query_memo::node_roots::NodeRoot,
+    ) -> Option<(String, std::sync::Arc<str>, verter_span::Span)> {
+        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::from_current(self, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let node = owned_projection_subject(&dispatch, node)?;
+        let message = dispatch.checker_recovery_message(node)?;
+        let (canonical, span) = dispatch.checker_recovery_location(node)?;
+        Some((message, canonical, span))
+    }
+
     /// Fixture sibling of [`Self::project_node_to_type_expr_json_bytes`] for
     /// a construction ordinal a test already holds; production projects only
     /// an owned root.
