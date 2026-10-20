@@ -302,7 +302,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     member.value,
                     &mut budget,
                     &declared,
-                    false,
+                    None,
                 ) {
                     Ok(true) => {}
                     Ok(false) | Err(ContextualCandidateFailure::Mismatch) => {
@@ -700,7 +700,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     ))?;
                 let target = progress.pending_target.take().expect("pending callback");
                 state.typed_arguments.insert(position, typed.clone());
-                if !self.collect_contextual_argument(&typed, target, budget, &declared, false)? {
+                if !self.collect_contextual_argument(&typed, target, budget, &declared, None)? {
                     state.diagnostic =
                         Some(self.contextual_argument_failure(typed.node, target, budget));
                     state.resume_at = None;
@@ -799,9 +799,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 literal_mode: ArgumentLiteralMode::Literal,
                                 ..argument.clone()
                             };
-                            match self
-                                .collect_contextual_argument(&view, target, budget, &declared, true)
-                            {
+                            match self.collect_contextual_argument(
+                                &view,
+                                target,
+                                budget,
+                                &declared,
+                                Some(argument.node),
+                            ) {
                                 Ok(true) => {}
                                 Ok(false)
                                 | Err(ContextualCandidateFailure::Degraded(
@@ -830,7 +834,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         continue;
                     }
                     if !self
-                        .collect_contextual_argument(&argument, target, budget, &declared, false)?
+                        .collect_contextual_argument(&argument, target, budget, &declared, None)?
                     {
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
@@ -848,7 +852,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .map_err(ContextualCandidateFailure::Degraded)?
                         .unwrap_or(argument.node);
                     if !self
-                        .collect_contextual_argument(&argument, target, budget, &declared, false)?
+                        .collect_contextual_argument(&argument, target, budget, &declared, None)?
                     {
                         return Err(ContextualCandidateFailure::Mismatch);
                     }
@@ -864,7 +868,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         inference_target,
                         budget,
                         &declared,
-                        false,
+                        None,
                     )? {
                         state.diagnostic = Some(self.contextual_argument_failure(
                             typed.node,
@@ -919,15 +923,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Relate one argument to `target` collecting its candidates;
-    /// `first_pass` when the argument is a context-sensitive literal's
-    /// first-pass reading.
+    /// `first_pass_of` the argument's own type when the argument is a
+    /// context-sensitive literal's first-pass reading.
     fn collect_contextual_argument(
         &self,
         argument: &CallArgument,
         target: SemanticNodeId,
         budget: &mut CallResolutionBudget<'_>,
         declared: &[TypeParamDecl],
-        first_pass: bool,
+        first_pass_of: Option<SemanticNodeId>,
     ) -> Result<bool, ContextualCandidateFailure> {
         let before = self.accepted_inference_deposits();
         let step = self.call_argument_relation(
@@ -938,7 +942,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             argument.literal_mode,
             argument.literal_provenance.as_deref(),
             declared,
-            first_pass,
+            first_pass_of,
         );
         if !budget.charge_accepted_deposits(self.accepted_inference_deposits() - before) {
             return Err(ContextualCandidateFailure::Degraded(

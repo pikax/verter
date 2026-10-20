@@ -41,16 +41,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A context-sensitive literal's first-pass reading relates, but is
         // no candidate for a naked type parameter: that parameter keeps its
         // constraint for the second pass's contextual typing. Nor is the
-        // `any` the reading holds for a withheld member, wherever it lands
+        // `any` the reading holds for a withheld member at a naked position
         // (the checker's non-inferrable `anyFunctionType`, which its object
         // literal propagates): `hc({ s: 1, r: { inc(a) {} } })` over `hc<S,
         // R extends { inc: (a: S) => void }>(o: { s: S; r: R })` leaves `R`
         // uninferred, so `inc` is typed by its constraint. An authored `any`
-        // member deposits when the argument relates again, typed.
+        // member is a candidate: `f({ a: anyv, m(x) { return x; } })` over
+        // `f<T, U>(o: { a: T; m: (x: T) => U })` infers `any` for `T`.
         {
             let txn = self.dispatch_txn.borrow();
             if txn.call_argument_withholds(param_node, bound)
-                || (txn.call_argument_is_first_pass()
+                || (txn.call_argument_withheld_target(param_node)
                     && matches!(
                         self.graph().node_data(bound).as_deref(),
                         Some(SemanticNodeData::Primitive(

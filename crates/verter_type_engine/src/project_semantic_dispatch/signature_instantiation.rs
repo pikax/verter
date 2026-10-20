@@ -121,7 +121,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The fixation inputs of `type_parameters` after relating every
     /// `(from, into)` pair under one collecting session; `None` when a
     /// relation does not settle.
-    fn signature_inference_inputs(
+    pub(super) fn signature_inference_inputs(
         &self,
         type_parameters: &[TypeParamDecl],
         pairs: &[(SemanticNodeId, SemanticNodeId)],

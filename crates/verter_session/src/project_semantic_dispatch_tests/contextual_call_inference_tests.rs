@@ -16,8 +16,9 @@
 //!   or not that overload is assignable, and the call answers with that
 //!   inference.
 //!
-//! Every program is a semantic benchmark scenario (Verter against
-//! TypeScript 7.0.2 over the benchmark's own library). Every expected
+//! The programs are semantic benchmark scenarios (Verter against
+//! TypeScript 7.0.2 over the benchmark's own library) and the neighbouring
+//! shapes the same inference rules decide. Every expected
 //! answer is TypeScript 7.0.2's, measured with `tsc --ignoreConfig --noEmit
 //! --noLib --noErrorTruncation` over that library under each
 //! `strictNullChecks` × `noImplicitAny` setting, all four alike: read
@@ -53,6 +54,23 @@ declare function validated<S, R extends { [k: string]: (state: S, action: { payl
 const checked = validated({ initialState: { n: 0 }, reducers: { inc(state, action: { payload: number }) {} } });
 declare function named<S, R extends { inc: (a: S) => void }>(o: { s: S; r: R }): R;
 const sibling = named({ s: 1, r: { inc(a) {} } });
+"#;
+
+/// An authored `any` member of a context-sensitive literal beside a
+/// method typed by the parameter it infers.
+const AUTHORED_ANY_SIBLING: &str = r#"
+declare const anyv: any;
+declare function f<T, U>(o: { a: T; m: (x: T) => U }): U;
+const r1 = f({ a: anyv, m(x) { return x; } });
+const r2 = f({ a: anyv, m: (x) => x });
+"#;
+
+/// A higher-order call whose contextual signature's parameters name no
+/// type parameter of the callee.
+const HIGHER_ORDER_RETURN_ONLY: &str = r#"
+declare function memo<R>(fn: (x: string) => R): () => R;
+declare function idf<T>(x: T): T;
+const m = memo(idf);
 "#;
 
 /// A higher-order call over a generic function argument.
@@ -186,6 +204,12 @@ fn a_method_typed_through_a_constraint_reads_sibling_inferences() {
         .lib(BENCHMARK_LIBRARY)
         .types(&rows);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // An authored `any` member is a candidate; only the withheld method's
+    // placeholder is none.
+    let failures = Matrix::new(AUTHORED_ANY_SIBLING)
+        .lib(BENCHMARK_LIBRARY)
+        .types(&[("typeof r1", "any"), ("typeof r2", "any")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
     let named: Vec<_> = rows
         .iter()
         .map(|(probe, checker)| (CONSTRAINED_METHODS, *probe, *checker))
@@ -196,13 +220,18 @@ fn a_method_typed_through_a_constraint_reads_sibling_inferences() {
 
 /// `wrap(id)` keeps `id`'s type parameter, which the signature `wrap`
 /// returns declares; `apply(id)`, whose callee returns no signature, reads
-/// `id` instantiated in its parameter's context.
+/// `id` instantiated in its parameter's context, as does `memo(idf)`,
+/// whose parameter types infer nothing from `idf`'s.
 #[test]
 fn a_generic_function_argument_keeps_its_type_parameters() {
     let failures = Matrix::new(HIGHER_ORDER).lib(BENCHMARK_LIBRARY).types(&[
         ("typeof w", "<T extends string>(x: { v: T; }) => { v: T; }"),
         ("typeof a", "{ v: string; }"),
     ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = Matrix::new(HIGHER_ORDER_RETURN_ONLY)
+        .lib(BENCHMARK_LIBRARY)
+        .types(&[("typeof m", "() => string")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     let failures = named_mismatches(&[
         (

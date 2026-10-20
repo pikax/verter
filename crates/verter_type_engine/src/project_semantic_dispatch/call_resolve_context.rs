@@ -943,6 +943,101 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// The type parameters a context-sensitive argument's first-pass
+    /// `reading` relates a withheld member's placeholder to as a naked
+    /// inference position of `target`. A placeholder is an `any` of the
+    /// reading where the argument's own type `argument` holds no `any`: the
+    /// checker's non-inferrable `anyFunctionType`, which infers nothing for
+    /// the parameter it lands in, where an authored `any` is a candidate.
+    /// `hc({ s: 1, r: { inc(a) {} } })` over `hc<S, R extends { inc: (a: S)
+    /// => void }>(o: { s: S; r: R })` reads `r` as a placeholder for `R`;
+    /// `f({ a: anyv, m(x) { return x; } })` over `f<T, U>(o: { a: T; m: (x:
+    /// T) => U })` reads `a` as authored. A member related to a type
+    /// parameter whole relates nothing nested.
+    pub(super) fn first_pass_withheld_targets(
+        &self,
+        reading: SemanticNodeId,
+        argument: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Vec<SemanticNodeId> {
+        let graph = self.graph();
+        let is_any = |node: SemanticNodeId| {
+            matches!(
+                graph
+                    .node_data(self.resolved_reduction_view(node))
+                    .as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            )
+        };
+        let members = |node: SemanticNodeId| match graph
+            .node_data(self.resolved_reduction_view(node))
+            .as_deref()
+        {
+            Some(SemanticNodeData::Object(surface)) => Some(
+                surface
+                    .positive_members()
+                    .iter()
+                    .map(|member| (member.key.clone(), member.value))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        let mut withheld = Vec::new();
+        let mut pending = vec![(reading, argument, target)];
+        let mut seen = FxHashSet::default();
+        while let Some((reading, argument, target)) = pending.pop() {
+            if !seen.insert((reading, argument, target)) {
+                continue;
+            }
+            if is_any(reading) {
+                if !is_any(argument) {
+                    withheld.extend(self.top_level_type_param_targets(target));
+                }
+                continue;
+            }
+            let resolved = self.resolved_reduction_view(target);
+            let data = graph.node_data(resolved);
+            match data.as_deref() {
+                Some(
+                    composite @ (SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_)),
+                ) => {
+                    let arms: Vec<SemanticNodeId> = composite
+                        .composite_members()
+                        .expect("composite arm")
+                        .iter()
+                        .copied()
+                        .collect();
+                    drop(data);
+                    pending.extend(arms.into_iter().map(|arm| (reading, argument, arm)));
+                    continue;
+                }
+                Some(SemanticNodeData::TypeParam { .. }) | None => continue,
+                Some(_) => drop(data),
+            }
+            let (Some(read), Some(own)) = (members(reading), members(argument)) else {
+                continue;
+            };
+            for (key, value) in read {
+                let Some(own_value) = own
+                    .iter()
+                    .find(|(own_key, _)| *own_key == key)
+                    .map(|(_, own_value)| *own_value)
+                else {
+                    continue;
+                };
+                let mut crossed = FxHashSet::default();
+                pending.extend(
+                    self.contextual_member_types(resolved, &key, &[], &mut crossed)
+                        .into_iter()
+                        .map(|member_target| (value, own_value, member_target)),
+                );
+            }
+        }
+        withheld.sort_unstable();
+        withheld.dedup();
+        withheld
+    }
+
     /// The contextual types an object literal member named `key` takes
     /// from `contextual` (`getTypeOfPropertyOfContextualType`): the
     /// declared member of each constituent that lists it under JS property
