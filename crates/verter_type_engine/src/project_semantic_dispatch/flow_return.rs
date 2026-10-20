@@ -14323,6 +14323,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        None,
                     ) {
                         return step;
                     }
@@ -14419,6 +14420,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.holds.len(),
                         false,
                         Positional::Value(any),
+                        None,
                     ) {
                         return step;
                     }
@@ -14556,6 +14558,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        Some(member_context),
                     ) {
                         return step;
                     }
@@ -14672,6 +14675,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         holds_before: usize,
         widens_unique_symbols: bool,
         outcome: Positional<SemanticNodeId>,
+        contextual: Option<SemanticNodeId>,
     ) -> Option<ObjectEvalStep<'e>> {
         let value = self.settle_composite_part(outcome, holds_before);
         // Selective object widening (BL02-class): a member read of a
@@ -14680,8 +14684,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // publishes `b: number`), while `as const` / annotated
         // literal locals stay pinned. Direct literal members already
         // widened (or stayed pinned under a const assertion) at IR
-        // lowering.
-        let value = self.widen_value_position_read(member_value, value);
+        // lowering. A member's contextual type that is a literal context
+        // for the read keeps it (`{ a: c } satisfies { a: "a" }` is
+        // `{ a: "a" }`, the checker's
+        // `getWidenedLiteralLikeTypeForContextualType`).
+        let value = match contextual {
+            Some(contextual) if self.literal_of_contextual_type(value, contextual) => value,
+            _ => self.widen_value_position_read(member_value, value),
+        };
         let value = if widens_unique_symbols {
             widen_unique_symbols(self.dispatch, value, self.nullability)
         } else {
@@ -15312,6 +15322,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
+            // A mapped type's members are its template at each key it
+            // produces (`Partial<{ a: 1 }>` types `a` as `1`), which
+            // only a path projection materialises: its one-level surface
+            // lists none of them.
+            SemanticNodeData::Mapped { .. } => {
+                drop(data);
+                self.contextual_mapped_property_type(contextual, name)
+            }
             _ => {
                 drop(data);
                 let surface = match graph.node_data(contextual).as_deref() {
@@ -15341,6 +15359,40 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .map(|signature| signature.value_type)
             }
         }
+    }
+
+    /// The member `name` of the mapped type `contextual` through the
+    /// shared path projection; `None` when the projection does not answer
+    /// it with a modelled type.
+    fn contextual_mapped_property_type(
+        &self,
+        contextual: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        let crate::semantic_query::QueryResult::Value(output) =
+            self.dispatch
+                .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: contextual,
+                    path: verter_type_expr::OwnedSlice::from([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from(name)),
+                        ),
+                    ]),
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                })
+        else {
+            return None;
+        };
+        (!matches!(
+            self.dispatch.graph().node_data(output.value).as_deref(),
+            None | Some(SemanticNodeData::Opaque(_))
+        ))
+        .then_some(output.value)
     }
 
     /// The checker's contextual type of the element at `position` of an
@@ -15660,7 +15712,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     } else if widening_nullish {
                         frame.parts.push((ReductionArm::plain(node), true));
                     } else {
-                        let read = self.widen_value_position_read(value, node);
+                        let read = match element_context {
+                            Some(context) if self.literal_of_contextual_type(node, context) => node,
+                            _ => self.widen_value_position_read(value, node),
+                        };
                         let read = if element_context.is_none() {
                             widen_unique_symbols(self.dispatch, read, self.nullability)
                         } else {

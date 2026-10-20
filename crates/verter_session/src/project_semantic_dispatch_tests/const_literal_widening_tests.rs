@@ -946,3 +946,77 @@ fn a_declaration_widens_the_literals_the_checker_widens() {
         );
     }
 }
+
+const SATISFIES_CONTEXT: &str = "\
+const c1 = \"a\";
+const cAnn: \"a\" = \"a\";
+type SatL = { a: \"a\" };
+const satPartial = { a: 1 } satisfies Partial<{ a: 1 }>;
+const satReadonly = { a: 1 } satisfies Readonly<{ a: 1 }>;
+const satRecord = { a: 1 } satisfies Record<\"a\", 1>;
+const satPartialU = { k: \"x\" } satisfies Partial<{ k: \"x\" | \"y\" }>;
+const satPartialW = { a: 1 } satisfies Partial<{ a: number }>;
+const satRead = { a: c1 } satisfies { a: \"a\" };
+const satReadU = { a: c1 } satisfies { a: \"a\" | \"b\" };
+const satReadAlias = { a: c1 } satisfies SatL;
+const satReadW = { a: c1 } satisfies { a: string };
+const satReadAnn = { a: cAnn } satisfies { a: string };
+const satRecordS = { a: 1 } satisfies Record<string, 1>;
+const satReadArr = { a: [c1] } satisfies { a: \"a\"[] };
+const satReadArrW = { a: [c1] } satisfies { a: string[] };
+";
+
+/// A `satisfies` object's member keeps its literal exactly when its
+/// contextual type — the member the `satisfies` type gives it, through a
+/// mapped type or an alias — is a literal context for it, and that holds
+/// for the read of a widening `const` as for a fresh literal.
+///
+/// Measured on TypeScript 7.0.2, alike with `strictNullChecks` and
+/// `noImplicitAny` each on and off: `satPartial`, `satReadonly`,
+/// `satRecord` and `satRecordS` are `{ a: 1; }`, `satPartialU` `{ k: "x";
+/// }`, `satPartialW` `{ a: number; }`; `satRead`, `satReadU`,
+/// `satReadAlias` and `satReadAnn` are `{ a: "a"; }`, `satReadW` `{ a:
+/// string; }`; `satReadArr` is `{ a: "a"[]; }` and `satReadArrW` `{ a:
+/// string[]; }`.
+///
+/// Mutation: reading a mapped type's members off its one-level surface
+/// answers `satPartial` `{ a: number }`; widening a read member whatever
+/// its contextual type answers `satRead` `{ a: string }`.
+#[test]
+fn a_satisfies_member_keeps_the_literals_its_contextual_type_keeps() {
+    for compiler_options in [
+        None,
+        Some(LOOSE),
+        Some(r#"{ "strict": true, "noImplicitAny": false }"#),
+        Some(r#"{ "strict": false }"#),
+    ] {
+        let failures = mismatches_in(
+            ProbeProject {
+                files: &[],
+                compiler_options,
+                ambient_lib: None,
+            },
+            SATISFIES_CONTEXT,
+            &[
+                ("typeof satPartial", "{ a: 1; }"),
+                ("typeof satReadonly", "{ a: 1; }"),
+                ("typeof satRecord", "{ a: 1; }"),
+                ("typeof satPartialU", "{ k: \"x\"; }"),
+                ("typeof satPartialW", "{ a: number; }"),
+                ("typeof satRead", "{ a: \"a\"; }"),
+                ("typeof satReadU", "{ a: \"a\"; }"),
+                ("typeof satReadAlias", "{ a: \"a\"; }"),
+                ("typeof satReadW", "{ a: string; }"),
+                ("typeof satReadAnn", "{ a: \"a\"; }"),
+                ("typeof satRecordS", "{ a: 1; }"),
+                ("typeof satReadArr", "{ a: \"a\"[]; }"),
+                ("typeof satReadArrW", "{ a: string[]; }"),
+            ],
+        );
+        assert!(
+            failures.is_empty(),
+            "{compiler_options:?}:\n{}",
+            failures.join("\n")
+        );
+    }
+}
