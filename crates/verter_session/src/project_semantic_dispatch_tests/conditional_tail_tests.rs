@@ -12,6 +12,11 @@
 //! check or extends type, is the conditional's answer. At Verter's tail
 //! budget it is a resource partial, never kept.
 //!
+//! A selected branch that spreads the alias into a tuple (`[...R<Rest>,
+//! H]`) is no tail step: the checker never defers a tuple with a variadic
+//! element, so each application is a nested instantiation, bounded by
+//! Verter's instantiation budget.
+//!
 //! Every expected answer below is TypeScript 7.0.2's, measured with `tsc
 //! --declaration --emitDeclarationOnly` on [`FIXTURE`], each probe read off a
 //! TS2322 against `never`. The four `strictNullChecks` × `noImplicitAny`
@@ -200,16 +205,243 @@ fn a_tail_run_answers_the_same_cold_warm_and_reordered() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A recursive application that is not the selected branch itself (here a
-/// tuple's rest element) is instantiated as the checker instantiates it,
-/// nested within its instantiation depth.
+/// A recursive application that is not the selected branch itself but an
+/// element of a tuple spreading a variadic element is instantiated as the
+/// checker instantiates it: the checker never defers such a tuple, it
+/// resolves every element to normalize it, nested within its instantiation
+/// depth. In a non-tail spread (`[...R<Rest>, H]`), a tail spread, beside
+/// a repeated element, and as the path a type-fest `Get` walks.
 ///
-/// Measured: `R1<"abc">` is `["a", "b", "c"]`.
+/// Measured: `R1<"abc">` is `["a", "b", "c"]`, and over [`SPREADS`]:
+/// `Reverse<[1, "a", true, null]>` is `[null, true, "a", 1]`,
+/// `Split<"a.b.c", ".">` is `["a", "b", "c"]`, `Mirror<[1, 2]>` is `[1, 2,
+/// 2, 1]`, `Get<{ a: { b: "n" } | null }, "a.b">` is `"n" | undefined`,
+/// `Deep<[0, 0, 0]>` is `[1, 1, 1]` and `Deep<[0 ×48]>["length"]` is `48`.
 #[test]
-#[ignore = "a recursive application in a tuple rest element stays a recursive reference instead of being instantiated"]
-fn a_recursive_application_inside_a_branch_is_instantiated() {
-    let failures = mismatches(FIXTURE, &[(r#"R1<"abc">"#, r#"["a", "b", "c"]"#)]);
+fn a_recursive_application_inside_a_variadic_tuple_is_instantiated() {
+    let mut failures = mismatches(FIXTURE, &[(r#"R1<"abc">"#, r#"["a", "b", "c"]"#)]);
+    let deep = format!("Deep<{}>[\"length\"]", zeros(48));
+    failures.extend(mismatches_in_one_host(
+        SPREADS,
+        &[
+            (
+                r#"Reverse<[1, "a", true, null]>"#,
+                r#"[null, true, "a", 1]"#,
+            ),
+            (r#"Split<"a.b.c", ".">"#, r#"["a", "b", "c"]"#),
+            ("Mirror<[1, 2]>", "[1, 2, 2, 1]"),
+            (
+                r#"Get<{ a: { b: "n" } | null }, "a.b">"#,
+                r#""n" | undefined"#,
+            ),
+            ("Deep<[0, 0, 0]>", "[1, 1, 1]"),
+            (&deep, "48"),
+        ],
+    ));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A non-tail recursion through a variadic spread nests one instantiation
+/// per step, so it takes Verter's instantiation budget: at the budget it is
+/// the checker's TS2589, a resource partial never kept in the memo; on the
+/// same host a read under the production budget evaluates again and
+/// answers. A lower budget than production's stands in for it on the same
+/// path, so the run stays quick.
+///
+/// Measured: `Deep<[0 ×50]>["length"]` is `number` under TS2589, the
+/// checker's limit, where Verter's full answer is `50`.
+#[test]
+fn a_variadic_recursion_at_the_instantiation_budget_is_ts2589_and_never_kept() {
+    let host = super::checker_probe_lane_tests::default_probe_host();
+    let probe = format!("Deep<{}>", zeros(50));
+    let read = |probe: &str| {
+        super::checker_probe_lane_tests::with_probe_outcome_on_host(
+            &host,
+            Default::default(),
+            SPREADS,
+            probe,
+            |dispatch, outcome| match outcome {
+                super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                    Ok(tuple_length(dispatch, node))
+                }
+                super::evaluate::StructuralFactDemandOutcome::Recovered { node, reasons } => {
+                    Err((holds_ts2589(dispatch, node), reasons))
+                }
+                other => panic!("`{probe}` answers or recovers, got {other:?}"),
+            },
+        )
+    };
+    {
+        let _budget = super::connected_demand::InstantiationBudgetForTests::install(20);
+        assert_eq!(
+            read(&probe),
+            Err((
+                true,
+                verter_type_engine::semantic_query::PartialReasonSet::OPERATION_BUDGET
+            )),
+            "under a budget of 20 the 50-step recursion is the TS2589 resource partial"
+        );
+    }
+    assert_eq!(
+        read(&probe),
+        Ok(Some(50)),
+        "under the production budget the recursion answers, not the kept recovery"
+    );
+}
+
+/// The named demand the semantic benchmark makes (`__Probe` resolved by
+/// name in a `noLib` project over the benchmark's library, projected to its
+/// wire answer) answers a recursion spread into a tuple as the checker
+/// does: the non-tail `Reverse` of the benchmark's own module, and a
+/// type-fest `Get` whose path `Split` spreads its recursion and matches the
+/// `.` delimiter it is passed.
+///
+/// TypeScript 7.0.2, `--strict --noLib` over the same library: the reverse
+/// is `[null, true, "a", 1]`, the path's value `"n" | undefined`.
+#[test]
+fn the_named_demand_answers_a_spread_recursion_as_the_checker_does() {
+    use super::mapped_expand_tests::{display, named_answer_with_library};
+    let reverse =
+        named_answer_with_library(BENCH_REVERSE, r#"R<[1, "a", true, null]>"#, None, true);
+    assert_eq!(display(&reverse.answer), "[null, true, 'a', 1]");
+    let get = named_answer_with_library(
+        TYPE_FEST_GET,
+        r#"Get<{ a: { b: "n" } | null }, "a.b">"#,
+        None,
+        true,
+    );
+    let members: std::collections::BTreeSet<String> = match &get.answer {
+        verter_type_expr::TypeExpr::Union(members) => members.iter().map(display).collect(),
+        other => panic!("the path's value is a union, measured `{}`", display(other)),
+    };
+    assert_eq!(
+        members,
+        ["'n'", "undefined"]
+            .map(str::to_owned)
+            .into_iter()
+            .collect()
+    );
+}
+
+/// The benchmark module's prelude and its non-tail reverse.
+const BENCH_REVERSE: &str = r#"type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type Uppercase<S extends string> = intrinsic;
+type Lowercase<S extends string> = intrinsic;
+type Capitalize<S extends string> = intrinsic;
+type Uncapitalize<S extends string> = intrinsic;
+type R<T extends unknown[]> = T extends [infer H, ...infer Rest] ? [...R<Rest>, H] : [];
+"#;
+
+/// type-fest's `Get` over a dot path, with its square-bracket path fix, as
+/// a self-contained module.
+const TYPE_FEST_GET: &str = r#"type Extract<T, U> = T extends U ? T : never;
+type Record<K extends keyof any, T> = { [P in K]: T };
+type StringDigit = '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9';
+type Split<S extends string, D extends string> =
+	string extends S ? string[] :
+	S extends '' ? [] :
+	S extends `${infer T}${D}${infer U}` ? [T, ...Split<U, D>] :
+	[S];
+type GetWithPath<BaseType, Keys extends readonly string[]> =
+	Keys extends []
+	? BaseType
+	: Keys extends [infer Head, ...infer Tail]
+	? GetWithPath<PropertyOf<BaseType, Extract<Head, string>>, Extract<Tail, string[]>>
+	: never;
+type ToPath<S extends string> = Split<FixPathSquareBrackets<S>, '.'>;
+type FixPathSquareBrackets<Path extends string> =
+	Path extends `${infer Head}[${infer Middle}]${infer Tail}`
+	? `${Head}.${Middle}${FixPathSquareBrackets<Tail>}`
+	: Path;
+type ConsistsOnlyOf<LongString extends string, Substring extends string> =
+	LongString extends ''
+	? true
+	: LongString extends `${Substring}${infer Tail}`
+	? ConsistsOnlyOf<Tail, Substring>
+	: false;
+type StringKeyOf<BaseType> = `${Extract<keyof BaseType, string | number>}`;
+type UncheckedIndex<T, U extends string | number> = [T] extends [Record<string | number, any>] ? T[U] : never;
+type WithStringKeys<BaseType> = { [Key in StringKeyOf<BaseType>]: UncheckedIndex<BaseType, Key> };
+type PropertyOf<BaseType, Key extends string> =
+	BaseType extends null | undefined
+	? undefined
+	: Key extends keyof BaseType
+	? BaseType[Key]
+	: BaseType extends {
+		[n: number]: infer Item;
+		length: number;
+	}
+	? (
+		ConsistsOnlyOf<Key, StringDigit> extends true
+		? Item
+		: unknown
+	)
+	: Key extends keyof WithStringKeys<BaseType>
+	? WithStringKeys<BaseType>[Key]
+	: unknown;
+type Get<BaseType, Path extends string> = GetWithPath<BaseType, ToPath<Path>>;
+"#;
+
+/// Recursive conditionals whose selected branch spreads the recursion into
+/// a tuple.
+const SPREADS: &str = r#"
+type Extract<T, U> = T extends U ? T : never;
+type Reverse<T extends unknown[]> = T extends [infer H, ...infer Rest] ? [...Reverse<Rest>, H] : [];
+type Split<S extends string, D extends string> = S extends `${infer H}${D}${infer T}` ? [H, ...Split<T, D>] : S extends D ? [] : [S];
+type Mirror<T extends unknown[]> = T extends [infer H, ...infer Rest] ? [H, ...Mirror<Rest>, H] : [];
+type PropertyOf<B, K extends string> = B extends null | undefined ? undefined : K extends keyof B ? B[K] : unknown;
+type GetWithPath<B, Keys> = Keys extends readonly [] ? B : Keys extends readonly [infer Head, ...infer Tail] ? GetWithPath<PropertyOf<B, Extract<Head, string>>, Extract<Tail, string[]>> : never;
+type Get<B, P extends string> = GetWithPath<B, Split<P, ".">>;
+type Deep<N extends unknown[]> = N extends [unknown, ...infer Rest] ? [...Deep<Rest>, 1] : [];
+"#;
+
+/// An authored tuple type of `len` zeros.
+fn zeros(len: usize) -> String {
+    format!("[{}]", vec!["0"; len].join(", "))
+}
+
+/// How many elements the tuple `node` settles on has, when it settles on a
+/// tuple with no rest element.
+fn tuple_length(
+    dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> Option<usize> {
+    match dispatch.graph().node_data(node).as_deref() {
+        Some(SemanticNodeData::Tuple { elements, .. })
+            if elements.iter().all(|element| !element.rest) =>
+        {
+            Some(elements.len())
+        }
+        _ => None,
+    }
+}
+
+/// Whether `node` holds the checker's TS2589 recovery anywhere in it.
+fn holds_ts2589(
+    dispatch: &super::ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: verter_type_engine::semantic_query::SemanticNodeId,
+) -> bool {
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut stack = vec![node];
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        match dispatch.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { diagnostic, .. }))
+                if diagnostic.code == CheckerDiagnosticCode::ExcessivelyDeepInstantiation =>
+            {
+                return true;
+            }
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                stack.extend(elements.iter().map(|element| element.value));
+            }
+            Some(SemanticNodeData::Alias(target)) => stack.push(*target),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// `probe` reads as the TS2589 recovery of a conditional tail run: a

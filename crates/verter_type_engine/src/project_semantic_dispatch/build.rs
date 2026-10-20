@@ -18550,7 +18550,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let plan = match self.template_plan(quasis, args, eval_context) {
             TemplateSpans::Plan(plan) => plan,
-            TemplateSpans::Open => return Ok(authored()),
+            // An open template keeps its open holes; its literal holes fold
+            // into its text as the checker's construction folds them.
+            TemplateSpans::Open => {
+                return Ok(match self.folded_literal_holes(quasis, args) {
+                    Some((quasis, args)) => graph.intern_node(SemanticNodeData::TemplateLiteral {
+                        quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
+                        expressions: crate::semantic_query::PayloadArray::from(
+                            args.into_boxed_slice(),
+                        ),
+                    }),
+                    None => authored(),
+                })
+            }
             TemplateSpans::TooComplex(refusal) => {
                 return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
             }
@@ -18666,6 +18678,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         Some((texts.into_iter().map(OwnedStr::from).collect(), holes))
+    }
+
+    /// The texts and holes of a template of `quasis` and `args` with every
+    /// hole that is one literal type, `null` or `undefined` folded into the
+    /// text around it — the checker's template construction folds such a
+    /// hole whatever its other holes are (`getTemplateLiteralType`), so
+    /// `` `${infer H}${D}${infer T}` `` with `D := "."` is
+    /// `` `${infer H}.${infer T}` ``, the pattern an inference matches. None
+    /// when no hole folds, or when every hole does: a closed template is the
+    /// string its construction builds ([`Self::reduce_template_literal_nodes`]).
+    pub(super) fn folded_literal_holes(
+        &self,
+        quasis: &[OwnedStr],
+        args: &[SemanticNodeId],
+    ) -> Option<(Vec<OwnedStr>, Vec<SemanticNodeId>)> {
+        let graph = self.graph();
+        let folded = |arg: SemanticNodeId| match graph.node_data(arg).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(literal_value_template_text(value)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => Some("null".to_owned()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
+                Some("undefined".to_owned())
+            }
+            _ => None,
+        };
+        let text = |index: usize| quasis.get(index).map(|q| q.as_ref()).unwrap_or_default();
+        let mut texts: Vec<String> = vec![text(0).to_owned()];
+        let mut holes: Vec<SemanticNodeId> = Vec::with_capacity(args.len());
+        for (index, &arg) in args.iter().enumerate() {
+            match folded(arg) {
+                Some(spelled) => {
+                    let current = texts.last_mut().expect("a text");
+                    current.push_str(&spelled);
+                    current.push_str(text(index + 1));
+                }
+                None => {
+                    holes.push(arg);
+                    texts.push(text(index + 1).to_owned());
+                }
+            }
+        }
+        (!holes.is_empty() && holes.len() < args.len())
+            .then(|| (texts.into_iter().map(OwnedStr::from).collect(), holes))
     }
 
     /// The factored product of a template of `quasis` and `args`: each

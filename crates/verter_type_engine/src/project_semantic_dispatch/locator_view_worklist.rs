@@ -357,17 +357,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// it now, read off its enclosing nodes' frames on the run's stack:
     ///
     /// - where the checker defers instantiating it — inside an object type
-    ///   (its members and signatures), an array or tuple element, a
-    ///   signature, a type argument of an interface or class, or either
-    ///   branch of a conditional type that stays undecided (the checker
-    ///   defers the whole conditional; only a decided conditional's selected
-    ///   branch is instantiated);
+    ///   (its members and signatures), an array element, an element of a
+    ///   tuple with no variadic element, a signature, a type argument of an
+    ///   interface or class, or either branch of a conditional type that
+    ///   stays undecided (the checker defers the whole conditional; only a
+    ///   decided conditional's selected branch is instantiated);
     /// - or where it is the body's own value through selected conditional
     ///   branches alone: the checker's tail loop, which the build runs in
     ///   place (`getConditionalType`).
     ///
     /// Anywhere else — an alias's type argument, a conditional's check or
-    /// extends type, a union's member — the checker instantiates it
+    /// extends type, a union's member, any element of a tuple spreading a
+    /// variadic element (`[...R<Rest>, H]`, whose elements the checker
+    /// resolves to normalize the tuple) — the checker instantiates it
     /// eagerly. An instantiated body starts at its own root.
     fn in_deferred_position(&self, ancestors: &[ProjectionFrame]) -> bool {
         let tail = ancestors.iter().all(|frame| match frame {
@@ -392,8 +394,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ProjectionFrame::CompositeResume { data, .. } => match data.as_ref() {
                 SemanticNodeData::Object(_)
                 | SemanticNodeData::Array { .. }
-                | SemanticNodeData::Tuple { .. }
                 | SemanticNodeData::Signature { .. } => true,
+                SemanticNodeData::Tuple { elements, .. } => !self.has_variadic_element(elements),
                 SemanticNodeData::InstantiationRef { base, .. } => self.defers_type_arguments(base),
                 _ => false,
             },
@@ -404,6 +406,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
             _ => false,
         })
+    }
+
+    /// Whether a tuple of `elements` spreads a variadic element: a rest
+    /// element whose type is not written as an array (`...T`, not `...T[]`
+    /// or `...[...T[]]`), as the checker's `getRestTypeElementFlags` reads
+    /// it. The checker never defers such a tuple: it resolves every element
+    /// to normalize it (`getTypeFromArrayOrTupleTypeNode`).
+    fn has_variadic_element(&self, elements: &[TupleElement]) -> bool {
+        elements
+            .iter()
+            .any(|element| element.rest && !self.is_written_array(element.value))
+    }
+
+    /// Whether `node` is written as an array (`T[]`), directly or as a
+    /// tuple holding nothing but a spread of one (`[...T[]]`), the
+    /// checker's `getArrayElementTypeNode`.
+    fn is_written_array(&self, mut node: SemanticNodeId) -> bool {
+        loop {
+            match self.graph().node_data(node).as_deref() {
+                Some(SemanticNodeData::Array { .. }) => return true,
+                Some(SemanticNodeData::Tuple { elements, .. })
+                    if elements.len() == 1 && elements[0].rest =>
+                {
+                    node = elements[0].value;
+                }
+                _ => return false,
+            }
+        }
     }
 
     /// Whether the checker defers instantiating the type arguments of an

@@ -140,6 +140,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ))
     }
 
+    /// Whether the node being finished is a rest element of the tuple whose
+    /// projection encloses it: the enclosing frame's cursor has just passed
+    /// that element.
+    fn in_variadic_slot(ancestors: &[ProjectionFrame]) -> bool {
+        matches!(
+            ancestors.last(),
+            Some(ProjectionFrame::CompositeResume { data, next_child, .. })
+                if matches!(
+                    data.as_ref(),
+                    SemanticNodeData::Tuple { elements, .. }
+                        if next_child
+                            .checked_sub(1)
+                            .and_then(|slot| elements.get(slot))
+                            .is_some_and(|element| element.rest)
+                )
+        )
+    }
+
     /// An application over its projected arguments: the application itself
     /// where the view keeps it a carrier, its recursive back-edge, or the
     /// instantiation it evaluates to.
@@ -235,10 +253,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ));
         }
-        if matches!(
+        // The carrier modes keep an application a carrier, except one a
+        // tuple spreads over closed arguments: the tuple's own positions and
+        // length are the application's, so it is instantiated where the
+        // checker instantiates it, to splice (`[...Deep<[0, 0]>, 1]`).
+        let keeps_carrier = matches!(
             context.mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) {
+        ) && !(context.mode != ProjectionMode::Skeleton
+            && Self::in_variadic_slot(ancestors)
+            && !projected_args.iter().any(|argument| {
+                super::super::raise::builtin_lowering_argument_is_open(self, *argument)
+            }));
+        if keeps_carrier {
             ProjectionFinish::Node(rebuild(projected_args))
         } else if self.is_instantiate_active(
             base.canonical_id.as_ref(),
@@ -472,10 +499,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|expression| projected(memo, *expression, context))
                     .collect();
+                // A literal hole folds into the template's text, as the
+                // checker's template construction folds it.
+                let (quasis, expressions) = match self.folded_literal_holes(quasis, &expressions) {
+                    Some((folded, holes)) => {
+                        (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                    }
+                    None => ((*quasis).clone(), expressions),
+                };
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::TemplateLiteral {
-                        quasis: (*quasis).clone(),
+                        quasis,
                         expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
