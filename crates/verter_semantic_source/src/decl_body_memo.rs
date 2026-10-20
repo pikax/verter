@@ -368,17 +368,21 @@ impl FunctionIndexDemand {
             })
         }) else {
             // Broken lease pin: fail CLOSED via ReturnOnly. NEVER memoize
-            // the empty index — a retry under a live lease recovers.
+            // the empty index — a retry under a live lease recovers — and
+            // carry the refusal, so no consumer reads the empty index as the
+            // file's functions.
             tracing::error!(
                 canonical = %self.snapshot.key.canonical,
                 "decl-body lease pin broken: function_program_index's lease-only run missed \
                  the retained snapshot; failing closed to an uncached empty index (ReturnOnly)"
             );
-            return WalkedRead::clean(Arc::new(Default::default()));
+            return WalkedRead::refused(Arc::new(Default::default()));
         };
-        // A missed snapshot, or a walk-stack lease refused the program's
-        // index walks: an uncached empty index, never memoized. The refusal
-        // travels with it to the consumer that marks its result partial.
+        // A walk-stack lease refused the program's index walks, or the
+        // retained snapshot holds a fatal parse: an uncached empty index,
+        // never memoized. A refusal travels with it to the consumer that
+        // marks its result partial; a fatal parse has no functions, so its
+        // empty index is clean. (A lease miss is the broken pin above.)
         let index = match index {
             Some(Ok(index)) => index,
             missed => {
@@ -407,6 +411,16 @@ pub(crate) enum ClassBodyRequest {
     MembersNamed(u64),
     /// The `extends` base reference.
     Heritage,
+}
+
+/// One overload-group member re-borrowed by
+/// [`DeclBodyMemo::transient_value_signature_in`].
+#[derive(Debug)]
+pub(crate) struct SelectedValueSignature {
+    pub(crate) signature: verter_session_query::source::transient_parts::LoweredSignatureParts,
+    /// The group's declaration kind (its last contributor's), which names
+    /// the function position a body-derived return is served from.
+    pub(crate) kind: ValueDeclKind,
 }
 
 /// Owned, statically dispatched expression demands for one exact observed
@@ -909,7 +923,7 @@ impl DeclBodyMemo {
         let Some(contributors) = self
             .header_index
             .value_header_in(owner, name)
-            .map(|header| header.contributors.clone())
+            .map(|header| header.contributors.as_slice())
         else {
             return DemandOutcome::Ready(None);
         };
@@ -917,7 +931,7 @@ impl DeclBodyMemo {
         let (outcome, batch) = self.demand_and_commit(
             &cell,
             &key,
-            &contributors,
+            contributors,
             None,
             |batch| {
                 batch
@@ -932,7 +946,7 @@ impl DeclBodyMemo {
             },
         );
         if let Some(batch) = batch {
-            self.backfill(batch, &contributors, Some((SymbolSpace::Value, &key)), None);
+            self.backfill(batch, contributors, Some((SymbolSpace::Value, &key)), None);
         }
         outcome
     }
@@ -3023,6 +3037,103 @@ impl DeclBodyMemo {
         self.transient_value_parts_for(name, contributors, None)
     }
 
+    /// Lease-only re-borrow of ONE overload-group member of the file-scope
+    /// value declaration `name`: the signature at GROUP ordinal `ordinal`,
+    /// lowered from the single contributing statement that declares it. The
+    /// group's other statements are never lowered, so dereferencing every
+    /// member of an n-overload group lowers n statements, not n².
+    ///
+    /// The stored signature facts name the declaring statement (their span
+    /// origin's contributor anchor) and keep one statement's signatures
+    /// contiguous in group order, so the member's position inside its
+    /// statement is the run of same-statement facts before it. `None` when
+    /// the selection does not apply — a dual-space name (its header type
+    /// parameters ride every contributor's type side), a synthesized
+    /// signature, or no settled fact record — and the caller re-borrows the
+    /// whole group instead, as it does when the statement does not yield the
+    /// addressed member.
+    pub(crate) fn transient_value_signature_in(
+        &self,
+        owner: TopLevelOwnerId,
+        name: &str,
+        ordinal: u32,
+    ) -> Option<DemandOutcome<SelectedValueSignature>> {
+        let service = self.service.as_ref()?;
+        self.header_index.value_header_in(owner, name)?;
+        if self.header_index.type_header_in(owner, name).is_some() {
+            return None;
+        }
+        let DemandOutcome::Ready(Some(decl)) = self.value_decl_outcome_in(owner, name) else {
+            return None;
+        };
+        let statement_of = |signature: &FunctionSignature| match &signature.spans_origin {
+            verter_type_expr::span_origins::FunctionSpansOrigin::AliasBody { anchor }
+            | verter_type_expr::span_origins::FunctionSpansOrigin::Member { anchor, .. } => {
+                Some(anchor.contributor_index)
+            }
+            verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
+        };
+        let ordinal = ordinal as usize;
+        let statement = statement_of(decl.signatures.get(ordinal)?)?;
+        let local = decl.signatures[..ordinal]
+            .iter()
+            .rev()
+            .take_while(|signature| statement_of(signature) == Some(statement))
+            .count();
+        let kind = decl.kind;
+        self.ensure_lease();
+        let name = name.to_string();
+        let svelte_component_runes_mode = self.svelte_component_runes_mode;
+        let class_fields = Arc::clone(&self.header_index.class_field_values);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        let counters = Arc::clone(&self.counters);
+        let outcome = service.run_leased(&self.key, move |program| {
+            let program = program?;
+            let source = program.source_str();
+            let program = program.borrow_dependent();
+            let Some(stmt) = program.body.get(statement as usize) else {
+                return Some(None);
+            };
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            counters
+                .decl_statements_lowered
+                .fetch_add(1, Ordering::Relaxed);
+            let parts = if svelte_component_runes_mode {
+                lower_svelte_runes_statement_parts(stmt, source, &class_fields)
+            } else {
+                lower_statement_parts(
+                    stmt,
+                    source,
+                    program.source_type.is_typescript_definition(),
+                    &class_fields,
+                )
+            };
+            Some(
+                parts
+                    .value_decls
+                    .iter()
+                    .filter(|decl| decl.name == name)
+                    .flat_map(|decl| decl.signatures.iter())
+                    .nth(local)
+                    .cloned(),
+            )
+        });
+        match outcome {
+            None => {
+                tracing::error!(
+                    canonical = %self.key.canonical,
+                    "decl-body lease pin broken: transient overload-member re-borrow \
+                     missed the retained snapshot; failing closed to ReturnOnly"
+                );
+                Some(DemandOutcome::LeaseMiss)
+            }
+            Some(None) | Some(Some(None)) => None,
+            Some(Some(Some(signature))) => Some(DemandOutcome::Ready(Some(Arc::new(
+                SelectedValueSignature { signature, kind },
+            )))),
+        }
+    }
+
     /// Augmentation-scoped sibling of [`Self::transient_value_parts_in`].
     pub fn transient_augmentation_value_parts_in(
         &self,
@@ -3057,6 +3168,8 @@ impl DeclBodyMemo {
         let aug_scope = aug_scope.cloned();
         let svelte_component_runes_mode = self.svelte_component_runes_mode;
         let class_fields = Arc::clone(&self.header_index.class_field_values);
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        let counters = Arc::clone(&self.counters);
         let outcome = service.run_leased(&self.key, move |program| {
             let program = program?;
             let source = program.source_str();
@@ -3077,6 +3190,10 @@ impl DeclBodyMemo {
                 else {
                     continue;
                 };
+                #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+                counters
+                    .decl_statements_lowered
+                    .fetch_add(1, Ordering::Relaxed);
                 let parts = if svelte_component_runes_mode {
                     lower_svelte_runes_statement_parts(stmt, source, &class_fields)
                 } else {
@@ -3103,6 +3220,7 @@ impl DeclBodyMemo {
                     // contributor order — the index is the GROUP-level
                     // `ValueSignature` ordinal the minted locators carry.
                     merged.type_annotation = decl.type_annotation.clone();
+                    merged.read_provenance = decl.read_provenance.clone();
                     merged.object_shape = decl.object_shape.clone();
                     merged.signatures.extend(decl.signatures.iter().cloned());
                     merged.kind = Some(decl.kind);
@@ -3681,6 +3799,7 @@ pub fn lowered_value_decl_for_synthesised_default(
             reference_head: verter_type_expr::facts::AuthoredReferenceHeadFact::NotReference,
             expression_source: None,
             literal_freshness: verter_type_expr::facts::DeclaredLiteralFreshness::Regular,
+            defers_read_widening: false,
         },
         vec![FunctionSignature {
             type_parameters: From::from(Vec::new().into_boxed_slice()),

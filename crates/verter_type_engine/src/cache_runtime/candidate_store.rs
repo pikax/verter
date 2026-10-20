@@ -16,11 +16,15 @@
 //!     read-side validity oracle. Preserves R20 overlay isolation: a base
 //!     publish never clobbers a live overlay candidate on the same
 //!     content-free key.
-//!   - a per-canonical reverse index keyed `canonical -> {(key,
-//!     admission_seq)}`, so a per-canonical invalidation drains in O(K)
-//!     and a removal is identity-scoped to the exact admission
-//!     (`admission_seq`) — a concurrent same-key re-publish carrying a
-//!     distinct seq survives.
+//!   - a direct-edge reverse index
+//!     ([`ReceiptReverseIndex`](crate::semantic_query_memo::ReceiptReverseIndex))
+//!     keyed by `(key, admission_seq)`: each canonical names the evidence
+//!     whose own facts read it, each consumed receipt the evidence that
+//!     consumed it, and each carrier its candidates, so registration costs
+//!     the candidate's direct edges rather than its canonical closure, a
+//!     per-canonical invalidation walks only what reaches the canonical,
+//!     and a removal is identity-scoped to the exact admission — a
+//!     concurrent same-key re-publish carrying a distinct seq survives.
 //!   - an optional FIFO [`GlobalRetentionBudget`] (the budgeted consumers
 //!     pass a cap; the imported-registry consumer passes `None` and
 //!     relies on the per-slot cap plus per-canonical drain).
@@ -50,8 +54,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use parking_lot::{Mutex, RwLock};
-use rustc_hash::{FxHashMap, FxHasher};
+use parking_lot::RwLock;
+use rustc_hash::FxHasher;
 
 use super::admission::{
     Candidate, DeferredVictims, FactCandidateDiscriminant, PublishCoreOutcome, PublishOutcome,
@@ -68,12 +72,13 @@ use verter_session_query::facts::fact_cache::ReadSetSignature;
 /// `admission_seq` is the store-assigned per-publish identity.
 type StoredCandidate<V> = Arc<Candidate<FactCandidateDiscriminant, V>>;
 
-/// Per-canonical reverse index: `canonical -> {(key, admission_seq)}`. The
-/// value is a set so a key with several admitted seqs (distinct
-/// candidates) registers each under the canonical, and a drain returns
-/// every `(key, seq)` for O(K) per-canonical invalidation.
-type CanonicalReverseIndexMap<K> =
-    DashMap<Arc<str>, Mutex<FxHashMap<(K, u64), ()>>, std::hash::BuildHasherDefault<FxHasher>>;
+/// Direct-edge reverse index over candidates keyed `(key, admission_seq)`:
+/// a key with several admitted seqs (distinct candidates) registers each,
+/// and a per-canonical walk answers every `(key, seq)` whose receipts
+/// reach the canonical. The store charges nothing of its candidates, so the
+/// index charges the process-local account for everything it holds, the
+/// candidates' registrations included.
+type CanonicalReverseIndex<K> = crate::semantic_query_memo::ReceiptReverseIndex<(K, u64), ()>;
 
 /// One slot: a bounded, insertion-ordered candidate list behind a write
 /// lock, held in the outer map behind an `Arc` so a reader can clone the
@@ -105,8 +110,8 @@ where
 {
     /// Multi-candidate slots, keyed by the content-free slot key.
     slots: DashMap<K, Arc<CandidateSlot<V>>, std::hash::BuildHasherDefault<FxHasher>>,
-    /// Per-canonical reverse index — see [`CanonicalReverseIndexMap`].
-    canonical_index: CanonicalReverseIndexMap<K>,
+    /// Direct-edge reverse index — see [`CanonicalReverseIndex`].
+    canonical_index: CanonicalReverseIndex<K>,
     /// Optional FIFO total-size budget. `Some` for the budgeted consumers
     /// (materialise-structure / ref-cycle); `None` for imported-registry,
     /// which relies on the per-slot cap and per-canonical drain.
@@ -188,8 +193,8 @@ where
     ) -> Self {
         Self {
             slots: DashMap::with_hasher(std::hash::BuildHasherDefault::<FxHasher>::default()),
-            canonical_index: DashMap::with_hasher(
-                std::hash::BuildHasherDefault::<FxHasher>::default(),
+            canonical_index: CanonicalReverseIndex::charging_registrations(
+                &verter_session_query::retention::SemanticRetentionAccount::process_local(),
             ),
             retention_budget,
             live_counter,
@@ -293,12 +298,6 @@ where
         // Stamp the store-assigned admission identity.
         let seq = self.alloc_seq();
         candidate.admission_seq = seq;
-        // The reverse index covers every canonical a per-canonical
-        // invalidation must reach: the facts' canonicals AND the strict
-        // self-root canonicals (a candidate with no facts still self-roots
-        // its keyed canonical, e.g. the imported-registry keyed canonical).
-        let canonicals = reverse_index_canonicals(&candidate);
-
         // Net-counter accounting: an in-place replace leaves occupancy
         // unchanged; a fresh append is +1; each per-slot FIFO victim is
         // -1.
@@ -331,26 +330,29 @@ where
         {
             let mut candidates = slot_ref.candidates.write();
             let new_candidate = Arc::new(candidate);
+            let new_candidate_ref = Arc::clone(&new_candidate);
+            // The candidates this publish takes out of the slot. Their
+            // registrations are drained only after the newcomer's is in,
+            // so evidence it shares with them stays indexed.
+            let mut displaced: smallvec::SmallVec<[StoredCandidate<V>; 2]> =
+                smallvec::SmallVec::new();
             if let Some(pos) = candidates
                 .iter()
                 .position(|c| c.discriminant == new_candidate.discriminant)
             {
-                // Same-view re-publish: drop the prior candidate's
-                // reverse-index + ledger registrations, then re-append the
-                // replacement as the newest so FIFO order reflects the
-                // latest write. Occupancy is unchanged.
-                let displaced = candidates.remove(pos);
-                self.drain_candidate_registrations(&key, &displaced);
+                // Same-view re-publish: the prior candidate leaves and the
+                // replacement is re-appended as the newest so FIFO order
+                // reflects the latest write. Occupancy is unchanged.
+                displaced.push(candidates.remove(pos));
                 candidates.push(new_candidate);
             } else {
                 fresh = true;
                 candidates.push(new_candidate);
                 while candidates.len() > self.per_slot_cap {
-                    // Oldest = front (admission order). Drain its
-                    // registrations and record it as a per-slot victim.
+                    // Oldest = front (admission order): a per-slot victim.
                     let victim = candidates.remove(0);
-                    self.drain_candidate_registrations(&key, &victim);
                     per_slot_evicted.push((key.clone(), victim.admission_seq));
+                    displaced.push(victim);
                 }
             }
 
@@ -379,15 +381,17 @@ where
                 }
             }
 
-            // Register the reverse index for the freshly admitted candidate
-            // under every canonical its facts name, keyed `(key, seq)` —
-            // STILL under the slot guard.
-            for canonical in &canonicals {
-                let shard = self
-                    .canonical_index
-                    .entry(Arc::clone(canonical))
-                    .or_insert_with(|| Mutex::new(FxHashMap::default()));
-                shard.lock().insert((key.clone(), seq), ());
+            // Register the freshly admitted candidate, keyed `(key, seq)`
+            // — STILL under the slot guard. Its edges cover every canonical
+            // a per-canonical invalidation must reach: its carrier's
+            // receipts AND its strict self-root canonicals (a candidate
+            // with no facts still self-roots its keyed canonical, e.g. the
+            // imported-registry keyed canonical).
+            register_candidate(&self.canonical_index, &key, &new_candidate_ref);
+            // Then drain what it displaced: their reverse-index and ledger
+            // registrations, still under the slot guard.
+            for victim in &displaced {
+                self.drain_candidate_registrations(&key, victim);
             }
 
             // Record the retention admission and capture FIFO victims for
@@ -470,8 +474,9 @@ where
         removed.is_some()
     }
 
-    /// Drain a candidate's reverse-index registrations (one per canonical
-    /// its facts name) and forget its retention-ledger record. Does NOT
+    /// Drain a candidate's reverse-index registration (its direct edges,
+    /// and every evidence node only it reached) and forget its
+    /// retention-ledger record. Does NOT
     /// touch the live counter — the per-candidate counter decrement is the
     /// caller's responsibility, so a path that removes a candidate and a
     /// path that merely re-homes its registrations (a replace) each apply
@@ -482,24 +487,10 @@ where
         candidate: &Candidate<FactCandidateDiscriminant, V>,
     ) {
         let seq = candidate.admission_seq;
-        for canonical in reverse_index_canonicals(candidate) {
-            self.unregister_reverse_index(&canonical, key, seq);
-        }
+        self.canonical_index.unregister(&(key.clone(), seq));
         if let Some(budget) = &self.retention_budget {
             budget.forget_seq(seq);
         }
-    }
-
-    /// Drop the `(key, seq)` registration from `canonical`'s reverse-index
-    /// shard, then detach the outer shard when that removal empties its
-    /// inner map. Mirrors `prune_canonical_to_keys_registration`'s
-    /// shard-detach discipline.
-    fn unregister_reverse_index(&self, canonical: &str, key: &K, seq: u64) {
-        if let Some(shard) = self.canonical_index.get(canonical) {
-            shard.lock().remove(&(key.clone(), seq));
-        }
-        self.canonical_index
-            .remove_if(canonical, |_, m| m.lock().is_empty());
     }
 
     /// Apply a signed delta to the shared live counter, saturating at
@@ -521,22 +512,22 @@ where
         }
     }
 
-    /// Drop every candidate whose facts reference `canonical_id`, draining
-    /// via the per-canonical reverse index in O(K). Returns the number of
-    /// candidates removed.
+    /// Drop every candidate whose facts reference `canonical_id`, found by
+    /// walking the reverse index up from the evidence that reads it — each
+    /// reaching node once. Returns the number of candidates removed.
     ///
     /// **Gate discipline — EXCLUSIVE acquire.** Takes the retention gate
     /// `write()` guard across the whole drain. This is exclusive against
     /// every in-flight `publish_core` (which holds the gate `read()`), so
-    /// by the time the `canonical_index.remove(canonical_id)` call runs
+    /// by the time the `canonical_index.reached_by(canonical_id)` walk runs
     /// here, EVERY publisher that began before this invalidator has
     /// completed its reverse-index registration. Read another way: a
     /// publisher that was racing this drain — having pushed its candidate
     /// into the slot but not yet inserted into `canonical_index` — cannot
     /// exist while the write guard is held, because the publisher's read
     /// guard blocks this write acquire. After the publisher releases its
-    /// read guard, its `(key, seq)` entry IS visible in `canonical_index`,
-    /// so the drain sees and removes it correctly.
+    /// read guard, its `(key, seq)` registration IS visible in
+    /// `canonical_index`, so the drain sees and removes it correctly.
     ///
     /// Read acquisition would NOT be sufficient: read+read is shared, so a
     /// publisher mid-publish could be invisible to the drain (its push has
@@ -545,10 +536,15 @@ where
     /// facts to survive the invalidation window.
     pub(crate) fn invalidate_canonical(&self, canonical_id: &str) -> usize {
         let _retention = self.retention_gate.write();
-        let drained: Vec<(K, u64)> = match self.canonical_index.remove(canonical_id) {
-            Some((_, mutex)) => mutex.into_inner().into_keys().collect(),
-            None => return 0,
-        };
+        let drained: Vec<(K, u64)> = self
+            .canonical_index
+            .reached_by(canonical_id)
+            .into_iter()
+            .map(|(candidate, ())| candidate)
+            .collect();
+        if drained.is_empty() {
+            return 0;
+        }
         // Capture-token hook: surface the per-canonical visit count so the
         // invalidation-perf regression test can assert visited == K (NOT
         // N). Test/debug instrumentation only — gated to match the
@@ -564,6 +560,10 @@ where
         for (key, seq) in drained {
             if self.remove_candidate_by_seq(&key, seq) {
                 removed += 1;
+            } else {
+                // A registration whose candidate already left its slot
+                // is still released, so the walk never strands one.
+                self.canonical_index.unregister(&(key, seq));
             }
         }
         removed
@@ -628,19 +628,12 @@ where
             validated_at_generation,
             facts: Arc::clone(&signature.facts),
         };
-        let registrations = {
-            let mut seen: rustc_hash::FxHashSet<Arc<str>> =
-                signature.canonical_ids().into_iter().collect();
-            seen.extend(self_root_canonicals.iter().cloned());
-            seen.len()
-        };
         let Ok(candidate) = Candidate::admit::<K>(
             discriminant,
             value,
             signature,
             self_root_canonicals,
             validated_at_generation,
-            registrations,
             footprint,
             account,
         ) else {
@@ -650,8 +643,8 @@ where
         self.evict_deferred(outcome.deferred_victims);
     }
 
-    /// Test-only: is `(key, admission_seq)` currently registered under
-    /// `canonical` in the reverse index?
+    /// Test-only: does the reverse index reach `(key, admission_seq)` from
+    /// `canonical`?
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn reverse_index_contains_for_test(
         &self,
@@ -659,20 +652,35 @@ where
         key: &K,
         seq: u64,
     ) -> bool {
-        self.canonical_index
-            .get(canonical)
-            .is_some_and(|shard| shard.lock().contains_key(&(key.clone(), seq)))
+        self.canonical_index.reached_by(canonical).iter().any(
+            |((registered_key, registered_seq), ())| {
+                registered_key == key && *registered_seq == seq
+            },
+        )
     }
 
-    /// Test-only: is ANY candidate for `key` registered under `canonical`?
+    /// Test-only: does the reverse index reach ANY candidate for `key` from
+    /// `canonical`?
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn reverse_index_contains_key_for_test(&self, canonical: &str, key: &K) -> bool {
-        self.canonical_index.get(canonical).is_some_and(|shard| {
-            shard
-                .lock()
-                .keys()
-                .any(|(registered_key, _)| registered_key == key)
-        })
+        self.canonical_index
+            .reached_by(canonical)
+            .iter()
+            .any(|((registered_key, _), ())| registered_key == key)
+    }
+
+    /// Test-only: what the reverse index holds now.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn reverse_index_occupancy_for_test(
+        &self,
+    ) -> crate::semantic_query_memo::ReverseIndexOccupancy {
+        self.canonical_index.occupancy()
+    }
+
+    /// Test-only: bytes the reverse index's own storage is charged.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn reverse_index_storage_charge_bytes_for_test(&self) -> usize {
+        self.canonical_index.storage_charge_bytes()
     }
 
     /// Test-only accessor for the lifecycle retention gate.
@@ -700,10 +708,11 @@ where
             .unwrap_or(0)
     }
 
-    /// Test-only — number of distinct outer shards in the reverse index.
+    /// Test-only — number of canonicals the reverse index holds: those
+    /// some registered evidence or candidate reads directly.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn canonical_index_shard_count_for_test(&self) -> usize {
-        self.canonical_index.len()
+        self.canonical_index.occupancy().canonicals
     }
 
     /// Test-only read of the shared live counter.
@@ -713,40 +722,38 @@ where
     }
 }
 
-/// The set of canonicals a candidate's reverse-index registration covers:
-/// the union of its facts' canonicals (`signature.canonical_ids()`) and
-/// its strict `self_root_canonicals`. A per-canonical invalidation of ANY
-/// of these must reach the candidate. The self-roots are included because
-/// a candidate with no facts (an empty signature) still self-roots its
-/// keyed canonical — e.g. the imported-registry keyed canonical — and that
-/// self-root must be drainable.
+/// Register `candidate` under `(key, seq)`: its carrier's evidence and its
+/// strict `self_root_canonicals`. A per-canonical invalidation of ANY
+/// canonical its receipts reach, or of any self-root, must reach the
+/// candidate. The self-roots are registered because a candidate with no
+/// facts (an empty signature) still self-roots its keyed canonical — e.g.
+/// the imported-registry keyed canonical — and that self-root must be
+/// drainable.
 ///
-/// A COMPACTED signature deliberately registers under fewer canonicals.
-/// Its terminal aggregate names none of the files it stands in for, so
-/// this projection is an under-approximation — and that is sound HERE,
-/// where the registration is an eager-eviction index rather than a
-/// validity oracle: the aggregate rejects on ANY movement in its domain,
-/// registration and drain walk the SAME projection so they stay
-/// symmetric, and read-side validation is authoritative. The cost is a
-/// candidate that lingers until FIFO instead of being evicted eagerly,
-/// never a stale serve. See `ReadSetSignature::aggregated_domains` for the
-/// consumer class that must NOT accept the narrower projection.
-fn reverse_index_canonicals<V>(
+/// A COMPACTED fact names no canonical, so the evidence holding it
+/// registers under fewer canonicals than it stands in for. That is sound
+/// HERE, where the registration is an eager-eviction index rather than a
+/// validity oracle: the aggregate rejects on ANY movement in its domain
+/// and read-side validation is authoritative. The cost is a candidate that
+/// lingers until FIFO instead of being evicted eagerly, never a stale
+/// serve. See `ReadSetSignature::aggregated_domains` for the consumer
+/// class that must NOT accept the narrower projection.
+fn register_candidate<K, V>(
+    index: &CanonicalReverseIndex<K>,
+    key: &K,
     candidate: &Candidate<FactCandidateDiscriminant, V>,
-) -> Vec<Arc<str>> {
-    let mut seen: rustc_hash::FxHashSet<Arc<str>> = rustc_hash::FxHashSet::default();
-    let mut out: Vec<Arc<str>> = Vec::new();
-    for canonical in candidate.signature.canonical_ids() {
-        if seen.insert(Arc::clone(&canonical)) {
-            out.push(canonical);
-        }
-    }
-    for canonical in candidate.self_root_canonicals.iter() {
-        if seen.insert(Arc::clone(canonical)) {
-            out.push(Arc::clone(canonical));
-        }
-    }
-    out
+) where
+    K: Eq + Hash + Clone,
+{
+    index.register(
+        (key.clone(), candidate.admission_seq),
+        (),
+        &candidate.signature.facts,
+        candidate
+            .self_root_canonicals
+            .iter()
+            .map(|canonical| canonical.as_ref()),
+    );
 }
 
 #[cfg(test)]

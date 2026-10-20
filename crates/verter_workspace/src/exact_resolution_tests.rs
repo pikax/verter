@@ -436,6 +436,62 @@ fn add_lazy_resolved_dep_records_lazy_class_even_when_dep_exists_elsewhere() {
     );
 }
 
+/// An owner that resolves `n` imports one at a time — a barrel's `export *`
+/// edges — keeps its reverse axis in work linear in `n`: each lazy insert
+/// touches the one dep it adds, never a rebuilt union of every dep the owner
+/// already names.
+///
+/// Mutation: routing `add_lazy_resolved_dep` through `write_pattern` rebuilds
+/// both unions per insert and the work quadruples per doubling.
+#[test]
+fn lazy_resolved_deps_accumulate_in_linear_reverse_axis_work() {
+    let work_for = |n: usize| {
+        let mut store = EdgeStore::new();
+        let deps: Vec<String> = (0..n).map(|i| format!("/src/a{i}.ts")).collect();
+        let parsed: BTreeSet<String> = deps.iter().cloned().collect();
+        store.replace_parsed_edges("/src/index.ts", parsed, vec![], vec![]);
+        take_reverse_axis_work();
+        for dep in &deps {
+            assert!(store.add_lazy_resolved_dep("/src/index.ts", dep));
+            assert!(!store.add_lazy_resolved_dep("/src/index.ts", dep));
+            assert!(store.add_lazy_resolved_dep(dep, "/src/core.ts"));
+        }
+        let work = take_reverse_axis_work();
+        assert_eq!(
+            store.reverse_deps_for_target("/src/a0.ts", None),
+            vec!["/src/index.ts"]
+        );
+        assert_eq!(store.reverse_deps_for_target("/src/core.ts", None).len(), n);
+        work
+    };
+    let sizes = [64, 128, 256];
+    let work: Vec<u64> = sizes.iter().map(|&n| work_for(n)).collect();
+    for (n, size_work) in sizes.iter().zip(&work) {
+        assert!(
+            *size_work <= 4 * *n as u64,
+            "reverse-axis work grows faster than the deps: {work:?} for {sizes:?}"
+        );
+    }
+}
+
+/// Retracting a lazy dep keeps the owner in the dep's reverse bucket while
+/// another class still names it, and drops the bucket once none does.
+#[test]
+fn retract_lazy_resolved_dep_keeps_bucket_while_another_class_names_it() {
+    let mut store = EdgeStore::new();
+    store.replace_parsed_edges("/src/a.ts", btree(&["/lib/x.ts"]), vec![], vec![]);
+    store.add_lazy_resolved_dep("/src/a.ts", "/lib/x.ts");
+    store.add_lazy_resolved_dep("/src/a.ts", "/lib/y.ts");
+    store.retract_lazy_resolved_dep("/src/a.ts", "/lib/x.ts");
+    store.retract_lazy_resolved_dep("/src/a.ts", "/lib/y.ts");
+    assert_eq!(
+        store.reverse_deps_for_target("/lib/x.ts", None),
+        vec!["/src/a.ts"]
+    );
+    assert!(store.reverse_deps_for_target("/lib/y.ts", None).is_empty());
+    assert_eq!(store.reverse_dep_bucket_count(), 1);
+}
+
 // ── Test #13 ──
 #[test]
 fn add_ambient_resolved_dep_creates_canonical_reverse_bucket() {
