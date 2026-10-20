@@ -3747,9 +3747,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction would read the same arms and reach the same proof.
         let proven = self.composite_fixed_points.borrow().get(&node).cloned();
         if let Some(roots) = proven {
-            self.deposit_canonical_evidence(
-                super::canonical_algebra::CanonicalEvidence::of_reused_proof(roots.to_vec()),
-            );
+            self.deposit_reused_canonical_roots(&roots);
             return None;
         }
         self.carrier_normalizing.borrow_mut().push(node);

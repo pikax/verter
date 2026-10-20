@@ -28,7 +28,8 @@ std::thread_local! {
 }
 
 /// Count one node a conditional's operand classification read
-/// ([`ProjectSemanticDispatch::type_is_generic`], the `infer` inventory).
+/// ([`ProjectSemanticDispatch::type_is_generic`], the `infer` inventory, the
+/// lattice-extreme probe).
 #[cfg(any(test, feature = "test-support"))]
 pub(super) fn note_operand_walk_visit() {
     OPERAND_WALK_VISITS.with(|count| count.set(count.get() + 1));
@@ -351,18 +352,33 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         member: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
+        let pending = self.pending.as_ref().map(|pending| {
+            pending.distributed_over(member).map_or_else(
+                || pending.clone(),
+                verter_session_query::retention::owned::Owned::new,
+            )
+        });
+        if dispatch.decides_member_in_place(member, extends) {
+            // Evaluated in place, as a query the running decision reaches.
+            let _nested = dispatch.nested_decision_query();
+            return dispatch.decide_conditional(
+                member,
+                extends,
+                false,
+                &mut MaterializedBranches {
+                    true_branch: self.true_branch,
+                    false_branch: self.false_branch,
+                    pending,
+                },
+            );
+        }
         dispatch.conditional_query_output(SemanticQueryKey::Conditional {
             check: member,
             extends,
             true_branch: self.true_branch,
             false_branch: self.false_branch,
             distributive: false,
-            pending: self.pending.as_ref().map(|pending| {
-                pending.distributed_over(member).map_or_else(
-                    || pending.clone(),
-                    verter_session_query::retention::owned::Owned::new,
-                )
-            }),
+            pending,
         })
     }
 
@@ -1169,8 +1185,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return Some(recovery);
             }
         }
+        // A union this operation already indexed as literals only holds no
+        // lattice extreme: every member of a distributed conditional asks
+        // this of the one `extends` operand, so it is not scanned again.
+        if is_union && self.literal_union_index_proves_literal_only(operand) {
+            return None;
+        }
         let mut found: [Option<SemanticNodeId>; 5] = [None; 5];
         for arm in arms.iter() {
+            #[cfg(any(test, feature = "test-support"))]
+            note_operand_walk_visit();
             let arm_type = match graph.node_data(*arm).as_deref() {
                 Some(
                     SemanticNodeData::Intersection(_)
@@ -1261,6 +1285,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => None,
         }
+    }
+
+    /// Whether a distributed member is decided in place rather than as a
+    /// conditional query of its own: a literal member against a union
+    /// `extends` operand this operation already indexed as literals only, as
+    /// syntax-lowered members always are. Its decision reads the two operands
+    /// alone — the relation is a membership lookup — and binds the selected
+    /// branch without evaluating it, so it reaches no query that could
+    /// re-enter it, and a memo entry for each member of a wide union would be
+    /// read by nothing but this distribution.
+    fn decides_member_in_place(&self, member: SemanticNodeId, extends: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(member).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        ) && self.literal_union_index_proves_literal_only(extends)
     }
 
     fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {

@@ -1662,12 +1662,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A prepared literal index proves there are no alias arms to
             // flatten. Re-scanning that same target just to classify the
             // checker's small-union recursion exemption is quadratic too.
-            let literal_only = self
-                .literal_union_indexes
-                .borrow()
-                .get(&node)
-                .is_some_and(|index| index.values.is_some());
-            if literal_only {
+            if self.literal_union_index_proves_literal_only(node) {
                 members.len() < 4
             } else {
                 self.relation_union_members(&members.members_arc()).len() < 4
@@ -9900,6 +9895,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 RelationResult::NotAssignable
             },
         )
+    }
+
+    /// Whether this operation's membership index of `node` proves every arm
+    /// a literal, without reading the arms again.
+    pub(super) fn literal_union_index_proves_literal_only(&self, node: SemanticNodeId) -> bool {
+        self.literal_union_indexes
+            .borrow()
+            .get(&node)
+            .is_some_and(|index| index.values.is_some())
     }
 
     /// Each literal of a literal-only union source related to a union

@@ -2209,6 +2209,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Deposit the file roots a reused complete canonical proof inspected,
+    /// as [`Self::deposit_canonical_evidence`] deposits that proof's own
+    /// evidence.
+    pub(super) fn deposit_reused_canonical_roots(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        self.canonical_evidence_epoch
+            .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        self.deposit_operand_self_roots(roots);
+    }
+
     /// Merge a sealed runtime operand's producer roots into the candidate
     /// currently being built. Read-set facts travel through the fact tracer;
     /// this is the matching self-root rail.

@@ -760,15 +760,6 @@ impl CanonicalEvidence {
         !self.incomplete && self.refusal.is_none() && self.exhausted.is_empty()
     }
 
-    /// The evidence a reused complete proof deposits: exactly the file
-    /// roots its own canonicalization inspected.
-    pub(super) fn of_reused_proof(inspected_file_roots: Vec<ObservedGraphSelfRoot>) -> Self {
-        Self {
-            inspected_file_roots,
-            ..Self::default()
-        }
-    }
-
     /// Fold another canonicalization's evidence into this one — the
     /// threading primitive for helpers that run several canonical
     /// constructions before their caller reaches the single disposition
