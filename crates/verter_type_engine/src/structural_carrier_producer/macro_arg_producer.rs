@@ -829,6 +829,10 @@ fn lower_node(
                     }
                     _ => false,
                 },
+                modifiers_type: match source.as_ref() {
+                    TypeExpr::KeyOf(_) => None,
+                    _ => crate::semantic_query::modifiers_type_of_key_parameter(graph, source_node),
+                },
             };
             Ok(graph.intern_node_with_scope(
                 SemanticNodeData::Mapped {

@@ -2529,6 +2529,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             && crate::semantic_query::keyof_operand_is_type_variable(
                                 graph, source_sem,
                             )),
+                    modifiers_type: match source.as_ref() {
+                        TypeExpr::KeyOf(_) => None,
+                        _ => crate::semantic_query::modifiers_type_of_key_parameter(
+                            graph, source_sem,
+                        ),
+                    },
                 };
 
                 // Route/mode-INDEPENDENT L1 carrier-stop (LOWERING

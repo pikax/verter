@@ -743,6 +743,7 @@ struct LocatorMappedHead<'r> {
     source_node: SemanticNodeId,
     key_space: SemanticNodeId,
     over_type_variable: bool,
+    modifiers_type: Option<SemanticNodeId>,
     body: LocatorBinders<'r>,
 }
 
@@ -1730,24 +1731,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 parameter_node,
                 keyof,
             } => {
-                let (source_node, key_space, base_infer, over_type_variable) = if keyof {
-                    let inner_id = value;
-                    let key_space = graph.intern_node_with_scope(
-                        SemanticNodeData::KeyOf { base: inner_id },
-                        scope.clone(),
-                    );
-                    let base_infer = match graph.node_data(inner_id).as_deref() {
-                        Some(SemanticNodeData::Infer { name, binder, .. }) => {
-                            Some((Arc::<str>::from(name), binder.clone()))
-                        }
-                        _ => None,
+                let (source_node, key_space, base_infer, over_type_variable, modifiers_type) =
+                    if keyof {
+                        let inner_id = value;
+                        let key_space = graph.intern_node_with_scope(
+                            SemanticNodeData::KeyOf { base: inner_id },
+                            scope.clone(),
+                        );
+                        let base_infer = match graph.node_data(inner_id).as_deref() {
+                            Some(SemanticNodeData::Infer { name, binder, .. }) => {
+                                Some((Arc::<str>::from(name), binder.clone()))
+                            }
+                            _ => None,
+                        };
+                        let over_type_variable =
+                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
+                        (inner_id, key_space, base_infer, over_type_variable, None)
+                    } else {
+                        let modifiers_type =
+                            crate::semantic_query::modifiers_type_of_key_parameter(graph, value);
+                        (value, value, None, false, modifiers_type)
                     };
-                    let over_type_variable =
-                        crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
-                    (inner_id, key_space, base_infer, over_type_variable)
-                } else {
-                    (value, value, None, false)
-                };
                 // Bind only the exact `Infer` declaration selected by the
                 // lowered `keyof` operand. Its scoped `InferRef` is visible
                 // to the mapped body, while the mapper frame is pushed last
@@ -1776,6 +1780,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         source_node,
                         key_space,
                         over_type_variable,
+                        modifiers_type,
                         body: body.clone(),
                     }),
                 });
@@ -1847,6 +1852,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name_remap,
                     kind,
                     over_type_variable: head.over_type_variable,
+                    modifiers_type: head.modifiers_type,
                 },
             },
             scope.clone(),
