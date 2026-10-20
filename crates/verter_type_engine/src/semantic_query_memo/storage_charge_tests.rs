@@ -91,11 +91,11 @@ fn a_retired_signature_epoch_releases_its_storage_with_its_last_holder() {
     );
 }
 
-/// The reverse index copies each registered canonical's text into its
-/// shard key: that copy, and the shard table's unused buckets, are charged
-/// to the index while it holds them and given back when the shard drains.
+/// The reverse index keeps its own copy of each registered canonical's
+/// text: that copy is charged to the index while it holds it and given back
+/// when the canonical's last holder drains.
 #[test]
-fn a_reverse_index_shard_charges_its_canonical_text_until_it_drains() {
+fn a_reverse_index_charges_its_canonical_text_until_it_drains() {
     use crate::semantic_query::{PrimitiveKind, RelateMemoKey, RelationContext, RelationOutcome};
     use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
 
@@ -121,13 +121,13 @@ fn a_reverse_index_shard_charges_its_canonical_text_until_it_drains() {
     let charged = store.canonical_to_entries.storage_charge_bytes();
     assert!(
         charged >= arc_block_bytes(canonical.len()),
-        "the shard's copy of the oversized canonical is charged: {charged}"
+        "the index's copy of the oversized canonical is charged: {charged}"
     );
 
     assert_eq!(store.invalidate_canonical(&canonical), 1);
     assert!(
         store.canonical_to_entries.storage_charge_bytes() < arc_block_bytes(canonical.len()),
-        "the drained shard's text is no longer charged"
+        "the drained canonical's text is no longer charged"
     );
     store.invalidate_all();
     assert_eq!(
@@ -288,50 +288,4 @@ fn a_payload_a_reader_holds_past_the_store_stays_charged_until_its_own_drop() {
             "the reader's drop restores the baseline"
         );
     }
-}
-
-/// The candidates published since the reverse index was last read wait in
-/// a pending list, each with its own clone of its family key: that list is
-/// charged to the store while it waits and given back by the read that
-/// registers its candidates.
-#[test]
-fn pending_reverse_index_registrations_are_charged_until_the_next_read() {
-    use crate::semantic_query::{RelateMemoKey, RelationContext, RelationOutcome};
-    use verter_session_query::facts::fact_cache::{FactVersionRef, ReadSetSignature};
-
-    const PUBLISHES: usize = 64;
-    let account = account();
-    let store = SemanticGraphStore::with_account(StoreAccount::new(Arc::clone(&account)));
-    let canonical = "/ws/pending.ts";
-    for index in 0..PUBLISHES {
-        let source = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
-            "source-{index}"
-        ))));
-        let target = store.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
-            "target-{index}"
-        ))));
-        store.insert_relation_payload_for_tests(
-            RelateMemoKey::assignable(source, target, RelationContext::default()),
-            ReadSetSignature::new(Arc::from(vec![FactVersionRef::FileWholeHash {
-                canonical_id: canonical.to_owned(),
-                hash: [5; 16],
-            }])),
-            Arc::from(vec![Arc::<str>::from(canonical)]),
-            store.relation_payload_for_tests(RelationOutcome::Assignable),
-            0,
-        );
-    }
-    let pending = store.reverse_index_pending.lock().storage_charge_bytes();
-    assert!(
-        pending >= PUBLISHES * std::mem::size_of::<(super::family::FamilyKey, u64)>(),
-        "every waiting publish's family key is charged: {pending}"
-    );
-
-    assert_eq!(store.invalidate_canonical("/ws/unrelated.ts"), 0);
-    assert_eq!(
-        store.reverse_index_pending.lock().storage_charge_bytes(),
-        0,
-        "the read that registers the waiting publishes gives their list back"
-    );
-    assert_eq!(store.canonical_to_entries_count(canonical), PUBLISHES);
 }
