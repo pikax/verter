@@ -13594,6 +13594,7 @@ trait RelationDemandDriver {
         &self,
         elements: &[crate::semantic_query::TupleElement],
     ) -> Option<super::inference::VariadicElementFacts>;
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize>;
     fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -13844,6 +13845,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
         elements: &[crate::semantic_query::TupleElement],
     ) -> Option<super::inference::VariadicElementFacts> {
         ProjectSemanticDispatch::inferable_variadics(self, elements)
+    }
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize> {
+        ProjectSemanticDispatch::spread_fixed_arity(self, node)
     }
     fn intern_normalized_union_or_intersection(
         &self,
@@ -14306,6 +14310,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> Option<super::inference::VariadicElementFacts> {
         self.driver.inferable_variadics(elements)
     }
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize> {
+        self.driver.spread_fixed_arity(node)
+    }
     fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -14766,7 +14773,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         let mut inferred: Vec<Option<Vec<crate::semantic_query::TupleElement>>> =
             generic.iter().map(|_| None).collect();
         for step in plan {
-            let (target, slice, slice_elements, speculative) = match step {
+            let (target, slice, slice_elements, slice_arity, speculative) = match step {
                 TupleInferenceStep::Slice {
                     start,
                     end,
@@ -14789,7 +14796,8 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         ),
                         readonly: false,
                     });
-                    (target, slice, elements, speculative)
+                    let arity = Some(elements.len());
+                    (target, slice, elements, arity, speculative)
                 }
                 TupleInferenceStep::RestElement { source, target }
                     if generic_kinds[target] == TupleElementKind::Variadic =>
@@ -14805,7 +14813,7 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         optional: false,
                         rest: true,
                     };
-                    (target, slice, vec![element], false)
+                    (target, slice, vec![element], None, false)
                 }
                 TupleInferenceStep::RestArray { start, target } => {
                     let mut members = Vec::with_capacity(concrete_slots.len() - start);
@@ -14828,17 +14836,19 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                         optional: false,
                         rest: true,
                     };
-                    (target, slice, vec![element], false)
+                    (target, slice, vec![element], None, false)
                 }
                 // Matching structures infer elementwise: a variadic infers its
                 // type argument to the variadic it faces, which keeps that
-                // element in the instantiated tuple.
+                // element in the instantiated tuple. That one element spreads
+                // as many positions as its type fixes, not one.
                 TupleInferenceStep::Element { source, target }
                     if generic_kinds[target] == TupleElementKind::Variadic =>
                 {
                     let Some(concrete) = concrete else { continue };
                     let element = concrete[source].copy();
-                    (target, element.value, vec![element], false)
+                    let arity = self.spread_fixed_arity(element.value);
+                    (target, element.value, vec![element], arity, false)
                 }
                 // Every other inference is a positional one the relation below
                 // makes as it relates the pair.
@@ -14855,11 +14865,12 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 results.push(RelationResult::Unknown);
                 return;
             }
-            // A slice the length of no fixed tuple constraint fails it, and
-            // the checker fixes the element to that constraint.
+            // A slice of no fixed tuple constraint's arity (an array among
+            // them) fails it, and the checker fixes the element to that
+            // constraint.
             if facts
                 .fixed_constraint_arity(target)
-                .is_none_or(|arity| arity == slice_elements.len())
+                .is_none_or(|arity| slice_arity == Some(arity))
             {
                 inferred[target] = Some(slice_elements);
             }

@@ -149,6 +149,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// The fixed arity of the type a matching source variadic spreads: its
+    /// own length when it is a fixed tuple, else its constraint's — the
+    /// positions a generic `...U` stands for, which its one element does
+    /// not count. `None` when no fixed tuple bounds it (`U extends
+    /// unknown[]`), which no fixed tuple constraint accepts.
+    pub(in crate::project_semantic_dispatch) fn spread_fixed_arity(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<usize> {
+        let graph = self.graph();
+        let mut node = node;
+        // A constraint chain (`U extends V`, `V extends [A, B]`) is short;
+        // the bound only guards a cyclic one.
+        for _ in 0..8 {
+            if let Some(arity) = self.fixed_tuple_arity(node) {
+                return Some(arity);
+            }
+            let declared = match graph.node_data(node).as_deref() {
+                Some(
+                    SemanticNodeData::Infer { constraint, .. }
+                    | SemanticNodeData::TypeParam { constraint, .. },
+                ) => *constraint,
+                _ => return None,
+            };
+            node = declared.or_else(|| {
+                self.dispatch_txn
+                    .borrow()
+                    .active_session()
+                    .and_then(|session| session.declared_constraint(node))
+            })?;
+        }
+        None
+    }
+
     /// Deposit the slice (a mutable tuple, or the array a single rest
     /// infers) the positional plan assigns an inferable variadic. Under a
     /// call's widening literal mode each element widens as the argument's
