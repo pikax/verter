@@ -436,6 +436,20 @@ fn extracts_interface_with_methods() {
     let headers = &env.type_symbols["Logger"].primary().direct_member_headers;
     assert_eq!(headers.len(), 2);
     assert!(headers.iter().all(|h| h.method_kind.is_some()));
+
+    // An overload adds no second header: each key keeps its first header,
+    // in member order.
+    let env = parse_and_build_env(
+        "interface Logger { log(msg: string): void; warn(msg: string): void; \
+         log(msg: string, level: number): void }",
+    );
+    let keys: Vec<_> = env.type_symbols["Logger"]
+        .primary()
+        .direct_member_headers
+        .iter()
+        .map(|header| header.key.as_string().map(str::to_owned))
+        .collect();
+    assert_eq!(keys, [Some("log".to_owned()), Some("warn".to_owned())]);
 }
 
 // =============================================================================
@@ -2389,22 +2403,12 @@ fn var_widens_string_literal_initializer() {
 }
 
 /// A `let` whose initializer is a constructor-type assertion
-/// (`value as new () => { kind: "x" }`) must widen the literal members
-/// of the constructor's return type EXACTLY as the function-type
-/// equivalent does — and must PRESERVE the `ConstructorType` variant
-/// (not flatten it to `Function`).
-///
-/// `widen_literal_type` runs on analyzer-side lowered IR (the `as`
-/// expression lowers via `lower_ts_type`), BEFORE the dispatch lower
-/// interns the kind-preserving `SemanticNodeData::Signature` carrier
-/// (`TypeExpr::Function` ⇒ `Call`, `TypeExpr::ConstructorType` ⇒
-/// `Construct`). A catch-all `_ => expr` arm would forward the whole
-/// `ConstructorType` untouched, so the inner `kind: "x"` literal would
-/// silently NOT widen.
-/// Discriminator: the inner `kind` member must be `string`, never the `"x"`
-/// literal — and the outer node must remain a `ConstructorType`.
+/// (`value as new () => { kind: "x" }`) is typed as the asserted type: a
+/// literal written in a type is regular, so the constructor's return keeps
+/// its `"x"` member as the checker does (`new () => { kind: "x"; }`), and
+/// the node stays a `ConstructorType` (never flattened to `Function`).
 #[test]
-fn let_widens_constructor_type_return_literal_members() {
+fn let_keeps_asserted_constructor_type_return_literal_members() {
     let parts = lowered(r#"let C = value as new () => { kind: "x" }"#);
     let decl = parts.value_decl("C").expect("lowered C");
 
@@ -2433,24 +2437,17 @@ fn let_widens_constructor_type_return_literal_members() {
     });
     assert_eq!(
         kind_ty,
-        Some(&TypeExpr::Primitive(PrimitiveName::String)),
-        "let-bound constructor-return literal member must widen to `string`"
-    );
-    assert_ne!(
-        kind_ty,
         Some(&TypeExpr::string_literal("x")),
-        "let-bound constructor-return literal member must NOT stay the `\"x\"` literal"
+        "an asserted constructor-return literal member is regular and keeps its literal"
     );
 }
 
-/// Parity guard: the FUNCTION-type equivalent of
-/// `let_widens_constructor_type_return_literal_members` must widen the
-/// same return literal identically. The two carry the same `FunctionExpr`
-/// payload; only the variant tag differs, so widening behaviour must be
-/// identical. This pins that the ConstructorType arm mirrors the Function
-/// arm rather than diverging.
+/// The FUNCTION-type equivalent of
+/// `let_keeps_asserted_constructor_type_return_literal_members`: an
+/// asserted function type keeps its return's literal member
+/// (`() => { kind: "x"; }`).
 #[test]
-fn let_widens_function_type_return_literal_members_parity() {
+fn let_keeps_asserted_function_type_return_literal_members() {
     let parts = lowered(r#"let F = value as () => { kind: "x" }"#);
     let decl = parts.value_decl("F").expect("lowered F");
 
@@ -2474,8 +2471,8 @@ fn let_widens_function_type_return_literal_members_parity() {
     });
     assert_eq!(
         kind_ty,
-        Some(&TypeExpr::Primitive(PrimitiveName::String)),
-        "let-bound function-return literal member must widen to `string`"
+        Some(&TypeExpr::string_literal("x")),
+        "an asserted function-return literal member is regular and keeps its literal"
     );
 }
 
@@ -2543,36 +2540,21 @@ fn let_widens_array_element_literals() {
 // satisfies expression inference
 // =============================================================================
 
+/// A `satisfies` object literal is contextually typed by its `satisfies`
+/// type, which decides the literals its members keep (`{ x: 1 } satisfies
+/// { x: number }` is `{ x: number }`, `satisfies { x: 1 }` keeps `1`):
+/// the declaration stores no syntactic type and is served as its
+/// evaluated initializer, as an initializer whose methods need the
+/// context is.
 #[test]
-fn satisfies_preserves_underlying_value_type() {
-    let parts =
-        lowered(r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#);
+fn satisfies_object_initializer_is_served_as_its_evaluated_value() {
+    let source = r#"const config = { x: 1, y: "hello" } satisfies { x: number; y: string }"#;
+    let parts = lowered(source);
     let decl = parts.value_decl("config").expect("lowered config");
-    let Some(TypeExpr::Object(obj)) = decl.type_annotation.as_ref() else {
-        panic!(
-            "satisfies should infer the underlying object literal type, got {:?}",
-            decl.type_annotation
-        );
-    };
-
-    // The value type should have literal/inferred properties from the expression,
-    // not abstract types from the satisfies annotation
-    let x_prop = obj.properties.iter().find_map(|member| match member {
-        ObjectMember::Property(p) if p.string_name().expect("string-key fixture") == "x" => {
-            Some(&p.ty)
-        }
-        _ => None,
-    });
-    assert!(
-        x_prop.is_some(),
-        "satisfies result should include x property from the value"
-    );
-
-    // x should be a number literal (1), not just `number`
-    assert!(
-        matches!(x_prop.unwrap(), TypeExpr::Literal(LiteralValue::Number(_))),
-        "satisfies should preserve literal types from the value expression, got {:?}",
-        x_prop,
+    assert_eq!(decl.type_annotation, None);
+    assert_eq!(
+        decl.expression_source_offset,
+        source.find('{').map(|offset| offset as u32)
     );
 }
 
@@ -2883,6 +2865,37 @@ fn indexed_call_ir_preserves_nested_calls_and_rebases_program_points() {
         &call.args[0].expression,
         crate::analysis::type_eval_build::IndexedValueExpression::Call(nested)
             if nested.point == 45
+    ));
+}
+
+/// An angle-bracket const assertion (`<const>"a"`) pins the literal it
+/// asserts exactly as `"a" as const` does: a call argument's nested
+/// position records the asserted literal as a regular contributor, never
+/// the lowered `const` type name.
+#[test]
+fn angle_bracket_const_assertion_pins_an_argument_literal_like_as_const() {
+    fn provenance(source: &str) -> Option<Arc<verter_type_expr::IndexedLiteralProvenance>> {
+        let allocator = oxc_allocator::Allocator::default();
+        let expression =
+            verter_parser::oxc_parse::Parser::new(&allocator, source, oxc_span::SourceType::ts())
+                .parse_expression()
+                .expect("fixture expression");
+        let crate::analysis::type_eval_build::IndexedValueExpression::Call(call) =
+            crate::analysis::type_eval_build::lower_indexed_value_expression(&expression, source)
+        else {
+            panic!("a direct call lowers to indexed call IR");
+        };
+        call.args[0].literal_provenance.clone()
+    }
+    let angle = provenance(r#"f({ v: c ? <const>"a" : "a" })"#);
+    let as_const = provenance(r#"f({ v: c ? "a" as const : "a" })"#);
+    assert_eq!(angle, as_const);
+    let angle = angle.expect("the member records its regular contributor");
+    assert!(matches!(
+        angle.positions[0].arms[0].regular.as_ref(),
+        [verter_type_expr::IndexedRegularLiteralSource::Pinned(TypeExpr::Literal(
+            verter_type_expr::LiteralValue::String(value)
+        ))] if &**value == "a"
     ));
 }
 

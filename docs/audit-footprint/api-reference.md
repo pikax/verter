@@ -86,12 +86,15 @@ Six `u64` counters (decimal-string serialized, `string` in TS) on
 | `materialize_structure_calls`      | Structural-materialiser invocations. No production producer exists; always `0`.    |
 | `materialize_structure_cache_hits` | Structural-materialiser warm hits. No production producer exists; always `0`.      |
 | `node_arena_lock_acquisitions`     | Lock acquisitions on the per-scope `NodeArena` dedup index.                        |
-| `family_map_lock_acquisitions`     | Lock acquisitions on the family-map dep-signature reverse index.                   |
+| `family_map_lock_acquisitions`     | Lock acquisitions on the family-map reverse index. `semantic-observe` builds only. |
 | `dep_signature_merges`             | Non-empty dispatch dependency signatures published into the request fact tracer.   |
 | `dep_signature_intern_hits`        | Warm-candidate dependency signatures reused from the store-owned weak interner.    |
 
 The two `materialize_structure_*` rows have no production producer and
-stay `0`; they remain on the payload as schema. `dep_signature_intern_hits`
+stay `0`; they remain on the payload as schema. `family_map_lock_acquisitions`
+is produced only when the default-off `semantic-observe` feature is compiled
+in (see [`docs/arch/semantic-observe.md`](../arch/semantic-observe.md)); a
+default build reports `0` for it. `dep_signature_intern_hits`
 independently measures allocations avoided by the content-hash bucketed
 `Weak`-reference interner; it is not a subset of request-tracer merge events.
 

@@ -1646,7 +1646,17 @@ fn discover_variable_declaration<'ast>(
                     if call.arguments.iter().any(|argument|
                         super::type_eval_build::indexed_context_sensitive(argument.as_expression())));
             let contextual_literal = super::type_eval_build::contextual_object_initializer(init);
-            if contextual_call || contextual_literal {
+            // An object or array literal holding a call is typed by the
+            // flow evaluator, which evaluates each call where the literal
+            // holds it, so the literal is a served expression body too.
+            let call_literal = matches!(source, ProgramExpressionSource::UnsupportedCall)
+                && matches!(
+                    unwrap_program_expression(init),
+                    Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
+                )
+                && !super::type_eval_build::has_authoritative_value_assertion(init);
+            let served_literal = contextual_literal || call_literal;
+            if contextual_call || served_literal {
                 // The initializer is a served expression body. Its callbacks
                 // use the same flow evaluator and call continuation as bodies.
                 discover_initializer_inner(
@@ -1691,7 +1701,7 @@ fn discover_variable_declaration<'ast>(
                 },
                 source,
             });
-            if !contextual_call && !contextual_literal {
+            if !contextual_call && !served_literal {
                 discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
             }
         }

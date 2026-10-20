@@ -38,6 +38,28 @@ thread_local! {
     /// live construction a measured window holds at its peak.
     static LIVE_BYTES: Cell<i64> = const { Cell::new(0) };
     static PEAK_LIVE_BYTES: Cell<i64> = const { Cell::new(0) };
+    /// The blocks allocated and not yet freed on the current harness
+    /// thread, each costed by the retention account's declared heap-block
+    /// convention (payload rounded up to its granule, plus its header):
+    /// what a retained structure's charge must cover, measured from the
+    /// allocator's layouts rather than from the structure's own figures.
+    static LIVE_BLOCK_BYTES: Cell<i64> = const { Cell::new(0) };
+}
+
+fn add_live_block(size: usize, sign: i64) {
+    let block = verter_retention::allocation::heap_block_bytes(size) as i64;
+    let _ = LIVE_BLOCK_BYTES.try_with(|live| live.set(live.get().wrapping_add(sign * block)));
+}
+
+/// Start counting live blocks from zero on this thread.
+fn reset_live_block_bytes() {
+    LIVE_BLOCK_BYTES.with(|live| live.set(0));
+}
+
+/// The declared-convention bytes of the blocks allocated on this thread
+/// since [`reset_live_block_bytes`] and not freed since.
+fn live_block_bytes() -> i64 {
+    LIVE_BLOCK_BYTES.with(Cell::get)
 }
 
 fn increment_alloc_counter(size: usize) {
@@ -47,6 +69,7 @@ fn increment_alloc_counter(size: usize) {
     let _ = ALLOC_COUNTER.try_with(|counter| counter.set(counter.get().wrapping_add(1)));
     let _ = ALLOC_BYTES.try_with(|bytes| bytes.set(bytes.get().wrapping_add(size as u64)));
     add_live_bytes(size as i64);
+    add_live_block(size, 1);
 }
 
 fn add_live_bytes(delta: i64) {
@@ -89,6 +112,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         add_live_bytes(-(layout.size() as i64));
+        add_live_block(layout.size(), -1);
         unsafe { System.dealloc(ptr, layout) }
     }
 
@@ -102,6 +126,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
         // byte counter records requests, not net residency; the live
         // count trades the old block for the new one.
         add_live_bytes(-(layout.size() as i64));
+        add_live_block(layout.size(), -1);
         increment_alloc_counter(new_size);
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -752,5 +777,11 @@ mod expression_source_selection_allocation;
 #[path = "allocation_cases/recursive_paths.rs"]
 mod recursive_paths_allocation;
 
+#[path = "allocation_cases/reverse_index.rs"]
+mod reverse_index_backing;
+
 #[path = "allocation_cases/recursive_growth.rs"]
 mod recursive_growth_allocation;
+
+#[path = "allocation_cases/intersection_distribution.rs"]
+mod intersection_distribution_allocation;

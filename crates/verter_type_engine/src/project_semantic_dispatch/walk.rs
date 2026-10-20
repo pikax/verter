@@ -1046,6 +1046,7 @@ fn shallow_member_from_surface(m: &crate::semantic_query::SurfaceMember) -> Shal
 pub(crate) fn presence_intersection_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
@@ -1066,7 +1067,7 @@ pub(crate) fn presence_intersection_members(
             ))
         })
         .collect();
-    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, evidence) {
+    match merge_intersection_surfaces_with_graph(graph, &arm_surfaces, meter, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .iter()
@@ -1089,6 +1090,7 @@ pub(crate) fn presence_intersection_members(
 pub(crate) fn presence_union_members(
     graph: &SemanticGraphStore,
     arm_members: &[Vec<crate::semantic_query::SurfaceMember>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Vec<crate::semantic_query::SurfaceMember> {
     if let [only] = arm_members {
@@ -1109,7 +1111,7 @@ pub(crate) fn presence_union_members(
             ))
         })
         .collect();
-    match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+    match merge_union_surfaces_for_macro(graph, &arm_surfaces, meter, evidence) {
         Some(merged) => surface_view_from_shallow(&merged)
             .positive_members()
             .iter()
@@ -1472,6 +1474,9 @@ pub(crate) struct PathWalker<'a, 'b, C: crate::resolver_core::ResolverCapabiliti
     /// the entry's key names the project it read
     /// ([`Self::apparent_wrapper_read`]).
     origin_file: Option<verter_type_expr::OwnedStr>,
+    /// The shallow-surface slots filled since the synthesiser last read
+    /// them: each completes the visits that were to fill it.
+    filled_shallow_slots: Vec<BufferTarget>,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'a, C> {
@@ -1674,42 +1679,35 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         method_values: Vec<SemanticNodeId>,
         /// The contributor that declared each accumulated value.
         method_declarations: Vec<usize>,
+        /// The accumulated values, for an O(1) identical-value check.
+        seen_values: rustc_hash::FxHashSet<SemanticNodeId>,
     }
 
-    let mut by_key: indexmap::IndexMap<crate::semantic_query::AuthoredPropertyKey, Accum> =
-        indexmap::IndexMap::new();
+    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::new();
     for (declaration, surface) in contributor_surfaces.iter().enumerate() {
         for member in &surface.members {
-            match by_key.get_mut(&member.key) {
-                None => {
-                    by_key.insert(
-                        member.key.clone(),
-                        Accum {
-                            first: member.clone(),
-                            method_values: vec![member.value],
-                            method_declarations: vec![declaration],
-                        },
-                    );
-                }
-                Some(accum) => {
-                    if member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
-                        && accum.first.method_kind
-                            == Some(verter_type_expr::ObjectMethodKind::Method)
-                    {
-                        accum.first.has_implementation_body |= member.has_implementation_body;
-                        if !accum.method_values.contains(&member.value) {
-                            accum.method_values.push(member.value);
-                            accum.method_declarations.push(declaration);
-                        }
-                    }
+            let accum = by_key.entry(&member.key, || Accum {
+                first: member.clone(),
+                method_values: vec![member.value],
+                method_declarations: vec![declaration],
+                seen_values: std::iter::once(member.value).collect(),
+            });
+            if member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+                && accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
+            {
+                accum.first.has_implementation_body |= member.has_implementation_body;
+                if accum.seen_values.insert(member.value) {
+                    accum.method_values.push(member.value);
+                    accum.method_declarations.push(declaration);
                 }
             }
         }
     }
 
     let members = by_key
-        .into_values()
-        .map(|accum| {
+        .into_entries()
+        .into_iter()
+        .map(|(_, accum)| {
             let (values, declarations) =
                 if accum.first.method_kind == Some(verter_type_expr::ObjectMethodKind::Method) {
                     (accum.method_values, accum.method_declarations)
@@ -1724,23 +1722,29 @@ fn merge_declaration_surfaces_core(contributor_surfaces: &[ShallowSurface]) -> M
         })
         .collect();
 
+    // First-occurrence order, deduplicated by exact identity through a set
+    // per bucket: an overload-heavy declaration stays linear in its
+    // signatures.
     let mut call_signatures: Vec<SemanticNodeId> = Vec::new();
     let mut construct_signatures: Vec<SemanticNodeId> = Vec::new();
     let mut index_signatures: Vec<crate::semantic_query::IndexSignature> = Vec::new();
+    let mut seen_calls = rustc_hash::FxHashSet::default();
+    let mut seen_constructs = rustc_hash::FxHashSet::default();
+    let mut seen_indexes = rustc_hash::FxHashSet::default();
     let mut keyspace: Option<SemanticNodeId> = None;
     for surface in contributor_surfaces {
         for sig in &surface.call_signatures {
-            if !call_signatures.contains(sig) {
+            if seen_calls.insert(*sig) {
                 call_signatures.push(*sig);
             }
         }
         for sig in &surface.construct_signatures {
-            if !construct_signatures.contains(sig) {
+            if seen_constructs.insert(*sig) {
                 construct_signatures.push(*sig);
             }
         }
         for sig in &surface.index_signatures {
-            if !index_signatures.contains(sig) {
+            if seen_indexes.insert(sig) {
                 index_signatures.push(sig.clone());
             }
         }
@@ -1906,6 +1910,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             surface_failure: None,
             original_path_non_empty: false,
             origin_file: None,
+            filled_shallow_slots: Vec::new(),
         }
     }
 
@@ -3013,8 +3018,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         keys: &[IndexKey],
         index_node: SemanticNodeId,
     ) -> FiniteMappedIndexValues {
-        if mapper.name_remap.is_some()
-            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+        if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
             || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
         {
             return FiniteMappedIndexValues::NotApplicable;
@@ -3039,8 +3043,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return FiniteMappedIndexValues::NotApplicable;
             }
         }
-        // Prove membership once for the whole finite batch. A dictionary,
-        // remapping or open domain retains the ordinary per-key walker.
+        // Prove membership once for the whole finite batch. A dictionary or
+        // open domain retains the ordinary per-key walker.
         let domain_read = self
             .dispatch
             .observe_read(|| self.dispatch.key_space_domain(mapper.key_space));
@@ -3062,6 +3066,71 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             _ => false,
         }) {
             return FiniteMappedIndexValues::NotApplicable;
+        }
+        if mapper.name_remap.is_some() {
+            // A same-name filter has a unique preimage for every surviving
+            // string key. Classify its domain once for this batch rather than
+            // rediscovering every output key's preimage separately. Renames,
+            // collisions, numeric binders and undecidable remaps keep the
+            // ordinary path. This probe never forces the mapped VALUE body.
+            let remap_context = self.context_from_template(
+                crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+            );
+            let filter = self.dispatch.observe_read(|| {
+                if super::raise::mapped_type_key_domain_is_open_or_unknown(
+                    self.dispatch,
+                    source,
+                    mapper,
+                ) {
+                    return None;
+                }
+                let mut kept = rustc_hash::FxHashSet::default();
+                for key in domain.literal_keys() {
+                    let (
+                        PropertyKey::String(name),
+                        Some(crate::semantic_query::LiteralValue::String(literal)),
+                    ) = (&key.key, &key.literal)
+                    else {
+                        return None;
+                    };
+                    if name.as_ref() != literal.as_str()
+                        || self.dispatch.cancellation.is_cancelled()
+                    {
+                        return None;
+                    }
+                    use super::build::MappedKeyRemapOutcome;
+                    match self.dispatch.mapped_member_name_remap_outcome(
+                        mapper,
+                        key,
+                        remap_context,
+                    ) {
+                        MappedKeyRemapOutcome::Drop => continue,
+                        MappedKeyRemapOutcome::Keep(produced) if produced == key.key => {}
+                        MappedKeyRemapOutcome::Keys(produced)
+                            if matches!(produced.as_slice(), [produced] if produced == &key.key) => {}
+                        _ => return None,
+                    }
+                    kept.insert(name.clone());
+                }
+                Some(kept)
+            });
+            if filter.value().is_none() {
+                let _ = filter.discard();
+                return FiniteMappedIndexValues::NotApplicable;
+            }
+            let completion = filter.result_completeness();
+            let kept = match filter.adopt(self.dispatch) {
+                Ok(Some(kept)) if !completion.is_partial() => kept,
+                _ => {
+                    return self.stop_finite_mapped_batch(object, index_node, completion.reasons())
+                }
+            };
+            if !keys
+                .iter()
+                .all(|key| matches!(key, IndexKey::String(name) if kept.contains(name)))
+            {
+                return FiniteMappedIndexValues::NotApplicable;
+            }
         }
         self.original_path_non_empty = true;
         self.origin_file = self
@@ -7263,6 +7332,21 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         let mut visited: rustc_hash::FxHashSet<(SemanticNodeId, BufferTarget)> =
             rustc_hash::FxHashSet::default();
 
+        // Idempotent merges: a node whose contribution to an intersection
+        // merge — an interface's heritage included — is complete adds
+        // nothing when a second path reaches it under the same overrides
+        // (`A & A` is `A`; a heritage diamond inherits its shared base
+        // once). Each node is walked once per merge, so a diamond costs its
+        // distinct declarations, not its paths. A visit still in progress
+        // (a heritage cycle back to an ancestor) is no completed
+        // contribution and walks on as before.
+        let mut merge_scopes: rustc_hash::FxHashMap<usize, MergeScope> =
+            rustc_hash::FxHashMap::default();
+        let mut pending: rustc_hash::FxHashMap<BufferTarget, Vec<MergedVisit>> =
+            rustc_hash::FxHashMap::default();
+        let mut merged: rustc_hash::FxHashSet<MergedVisit> = rustc_hash::FxHashSet::default();
+        self.filled_shallow_slots.clear();
+
         // Frame-depth high-water mark for the probe used by
         // `shallow_walker_stack_depth_bounded_for_100_intersection`.
         // Reset to 0 each call so concurrent-safe single-threaded use
@@ -7286,6 +7370,12 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         });
 
         while let Some(frame) = work.pop() {
+            // A filled slot completes every visit that was to fill it.
+            for slot in self.filled_shallow_slots.drain(..) {
+                if let Some(done) = pending.remove(&slot) {
+                    merged.extend(done);
+                }
+            }
             if work.len() + 1 > max_depth {
                 max_depth = work.len() + 1;
             }
@@ -7318,6 +7408,23 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         target = ?target,
                         "walker_visit"
                     );
+                    let merge_visit = MergedVisit {
+                        node: cur,
+                        scope: MergeScope::of(target, &merge_scopes),
+                        member_role_override,
+                        heritage_overlay_body,
+                        provenance_override,
+                    };
+                    if merged.contains(&merge_visit) {
+                        self.contribute_surface(
+                            target,
+                            &mut root_contribution,
+                            &mut intersection_buffers,
+                            &mut union_buffers,
+                            None,
+                        );
+                        continue;
+                    }
                     if !visited.insert((cur, target)) {
                         // Same `(node, target)` already visited — a
                         // duplicate arm or a graph cycle. Contribute
@@ -7334,6 +7441,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         );
                         continue;
                     }
+                    pending.entry(target).or_default().push(merge_visit);
                     self.visit_shallow_node(
                         cur,
                         target,
@@ -7344,6 +7452,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         &mut intersection_buffers,
                         &mut union_buffers,
                         &mut next_buffer_id,
+                        &mut merge_scopes,
                         &mut root_contribution,
                     );
                 }
@@ -7435,6 +7544,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         let merged = merge_intersection_surfaces_with_graph(
                             self.graph(),
                             &arm_surfaces,
+                            self.dispatch.construction_meter(),
                             &mut canonical_evidence,
                         );
                         self.dispatch.deposit_canonical_evidence(canonical_evidence);
@@ -7515,12 +7625,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             merge_union_surfaces_for_macro(
                                 self.graph(),
                                 &arm_surfaces,
+                                self.dispatch.construction_meter(),
                                 &mut canonical_evidence,
                             )
                         } else {
                             merge_union_surfaces(
                                 self.graph(),
                                 &arm_surfaces,
+                                self.dispatch.construction_meter(),
                                 &mut canonical_evidence,
                             )
                         };
@@ -7667,9 +7779,19 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             let mut canonical_evidence =
                 crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
             let merged = if self.context.is_macro_object_surface() {
-                merge_union_surfaces_for_macro(self.graph(), &arms, &mut canonical_evidence)
+                merge_union_surfaces_for_macro(
+                    self.graph(),
+                    &arms,
+                    self.dispatch.construction_meter(),
+                    &mut canonical_evidence,
+                )
             } else {
-                merge_union_surfaces(self.graph(), &arms, &mut canonical_evidence)
+                merge_union_surfaces(
+                    self.graph(),
+                    &arms,
+                    self.dispatch.construction_meter(),
+                    &mut canonical_evidence,
+                )
             };
             self.dispatch.deposit_canonical_evidence(canonical_evidence);
             merged
@@ -7800,6 +7922,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         intersection_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         next_buffer_id: &mut usize,
+        merge_scopes: &mut rustc_hash::FxHashMap<usize, MergeScope>,
         root_contribution: &mut Option<ShallowSurface>,
     ) {
         let data = match self.graph().node_data(cur) {
@@ -7879,6 +8002,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let buffer_id = *next_buffer_id;
                 *next_buffer_id += 1;
                 intersection_buffers.insert(buffer_id, std::iter::repeat_with(|| None).take(arms.len()).collect::<Vec<_>>());
+                // Its arms merge into the merge it contributes to.
+                merge_scopes.insert(buffer_id, MergeScope::of(target, merge_scopes));
                 // Push the flush frame BEFORE the iterator frame so
                 // LIFO pop order executes the flush after every arm
                 // has contributed.
@@ -8629,12 +8754,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 merge_union_surfaces_for_macro(
                                     self.graph(),
                                     &arm_surfaces,
+                                    self.dispatch.construction_meter(),
                                     &mut canonical_evidence,
                                 )
                             } else {
                                 merge_union_surfaces(
                                     self.graph(),
                                     &arm_surfaces,
+                                    self.dispatch.construction_meter(),
                                     &mut canonical_evidence,
                                 )
                             };
@@ -8780,16 +8907,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     ) -> ShallowSurface {
         // JS property identity: `Pick<T, "1">` selects a numeric `1`
         // member (element-access collision, matching the fold and the
-        // merge aggregations).
+        // merge aggregations), one set probe per member.
+        let selection = crate::projection::aggregation::PropertyKeySet::new(keys);
         let members: Vec<ShallowSurfaceMember> = surface
             .members
             .into_iter()
             .filter(|m| m.visibility.is_public())
-            .filter(|m| {
-                m.key
-                    .cloned_known()
-                    .is_some_and(|key| keys.iter().any(|k| k.element_access_collides(&key)))
-            })
+            .filter(|m| selection.contains(&m.key))
             .collect();
         ShallowSurface::from_entries(
             members
@@ -8837,6 +8961,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         union_buffers: &mut rustc_hash::FxHashMap<usize, Vec<Option<ShallowSurface>>>,
         contribution: Option<ShallowSurface>,
     ) {
+        self.filled_shallow_slots.push(target);
         match target {
             BufferTarget::Root => {
                 if let Some(surface) = contribution {
@@ -9326,6 +9451,43 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             }
             index
         });
+        // A kept modifier is read off the modifiers type — the
+        // `build_mapped_type` mirror: `source` itself, or the `X` of a key
+        // parameter constrained to `keyof X`, whose `X[P]` read leaves a
+        // kept-optional member's `undefined` to its `?`.
+        let inherits_modifiers = optionality == crate::semantic_query::OptionalityMod::Keep
+            || readonly_mod == crate::semantic_query::ReadonlyMod::Keep;
+        let modifiers_members = mapper
+            .modifiers_type
+            .filter(|_| inherits_modifiers)
+            .and_then(|modifiers| {
+                self.dispatch
+                    .mapped_surface_source_members_for_projection(modifiers, self.context)
+            })
+            .map(|(members, partial_classes)| {
+                if !partial_classes.is_empty() {
+                    self.mark_partial_with(partial_classes);
+                }
+                members
+            });
+        let modifiers_member_index = modifiers_members.as_ref().map(|members| {
+            let mut index = rustc_hash::FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        });
+        let value_reads_modifiers_member = modifiers_member_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    self.graph(),
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
         for key in keys.into_iter() {
             // Cancellation before this key's remap substitution.
             //
@@ -9377,6 +9539,10 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 let source_member = source_member_index
                     .as_ref()
                     .and_then(|index| index.get(&key.key).copied());
+                let modifiers_member = match &modifiers_member_index {
+                    Some(index) => index.get(&key.key).copied(),
+                    None => source_member,
+                };
                 // Optionality / readonly resolution per TS semantics:
                 //   - Add → always on
                 //   - Remove → always off
@@ -9388,14 +9554,14 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     crate::semantic_query::OptionalityMod::Add => true,
                     crate::semantic_query::OptionalityMod::Remove => false,
                     crate::semantic_query::OptionalityMod::Keep => {
-                        source_member.map(|m| m.optional).unwrap_or(false)
+                        modifiers_member.map(|m| m.optional).unwrap_or(false)
                     }
                 };
                 let readonly = match readonly_mod {
                     crate::semantic_query::ReadonlyMod::Add => true,
                     crate::semantic_query::ReadonlyMod::Remove => false,
                     crate::semantic_query::ReadonlyMod::Keep => {
-                        source_member.map(|m| m.readonly).unwrap_or(false)
+                        modifiers_member.map(|m| m.readonly).unwrap_or(false)
                     }
                 };
                 // Identity fast path — use source_member.value
@@ -9479,25 +9645,38 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 .mapped_member_optionality(mapper, value, source, key_node)
                         })
                 } else {
-                    value
+                    match (modifiers_member, mapper.modifiers_type) {
+                        (Some(member), Some(modifiers))
+                            if value_reads_modifiers_member && optional && member.optional =>
+                        {
+                            self.dispatch.read_without_optional_member_undefined(
+                                value,
+                                member.value,
+                                modifiers,
+                            )
+                        }
+                        _ => value,
+                    }
                 };
                 let visibility = source_member
                     .map_or(verter_type_expr::MemberVisibility::Public, |sm| {
                         sm.visibility
                     });
-                // The matched source member's declaration site — whether a
-                // produced member inherits it is judged PER PRODUCED NAME
-                // inside the loop below (mirrors the Expanded path in
+                // The matched source member's declaration site — or the
+                // modifiers member's, which the produced member links to —
+                // whether a produced member inherits it is judged PER PRODUCED
+                // NAME inside the loop below (mirrors the Expanded path in
                 // `build.rs`).
-                let source_spans = source_member.map(|sm| sm.spans).unwrap_or_default();
+                let declaring_member = source_member.or(modifiers_member);
+                let source_spans = declaring_member.map(|sm| sm.spans).unwrap_or_default();
                 let source_declaration_origin =
-                    source_member.and_then(|sm| sm.declaration_origin.clone());
+                    declaring_member.and_then(|sm| sm.declaration_origin.clone());
                 (
                     value,
                     optional,
                     readonly,
                     visibility,
-                    source_member.is_some(),
+                    declaring_member.is_some(),
                     source_spans,
                     source_declaration_origin,
                 )
@@ -9606,6 +9785,41 @@ enum BufferTarget {
     Intersection { buffer_id: usize, arm_index: usize },
     /// One arm of a Union — `union_buffers[buffer_id][arm_index]`.
     Union { buffer_id: usize, arm_index: usize },
+}
+
+/// The merge a shallow-walk contribution lands in, up to idempotence.
+/// Arms joined only by intersections (an interface's heritage included)
+/// share their parent's merge; the root, a union arm and any other buffer
+/// slot (a filtered source) start one of their own, since dropping a
+/// repeat there would change what the slot holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum MergeScope {
+    Root,
+    Slot(BufferTarget),
+}
+
+impl MergeScope {
+    fn of(target: BufferTarget, merge_scopes: &rustc_hash::FxHashMap<usize, MergeScope>) -> Self {
+        match target {
+            BufferTarget::Root => Self::Root,
+            BufferTarget::Intersection { buffer_id, .. } => merge_scopes
+                .get(&buffer_id)
+                .copied()
+                .unwrap_or(Self::Slot(target)),
+            BufferTarget::Union { .. } => Self::Slot(target),
+        }
+    }
+}
+
+/// One node's contribution to one merge under the overrides it was
+/// reached with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct MergedVisit {
+    node: SemanticNodeId,
+    scope: MergeScope,
+    member_role_override: Option<crate::semantic_query::MemberMergeRole>,
+    heritage_overlay_body: bool,
+    provenance_override: Option<crate::semantic_query::SurfaceProvenanceContext>,
 }
 
 /// Worklist frame for the iterative shallow-mode terminal-surface
@@ -9817,31 +10031,30 @@ fn merge_declaration_surfaces(
     contributor_surfaces: &[ShallowSurface],
 ) -> ShallowSurface {
     let core = merge_declaration_surfaces_core(contributor_surfaces);
-    let members: indexmap::IndexMap<
-        crate::semantic_query::AuthoredPropertyKey,
-        ShallowSurfaceMember,
-    > = core
-        .members
-        .into_iter()
-        .map(|merged| {
-            let member = if merged.member.method_kind
-                == Some(verter_type_expr::ObjectMethodKind::Method)
-                && merged.values.len() > 1
-            {
-                ShallowSurfaceMember {
-                    value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
-                    ..merged.member
-                }
-            } else {
-                merged.member
-            };
-            (member.key.clone(), member)
-        })
-        .collect();
-    let mut remaining_members = members;
+    let mut remaining_members = crate::projection::aggregation::OrderedMemberAggregation::new();
+    for merged in core.members {
+        let member = if merged.member.method_kind
+            == Some(verter_type_expr::ObjectMethodKind::Method)
+            && merged.values.len() > 1
+        {
+            ShallowSurfaceMember {
+                value: intern_merged_overloads(graph, &merged.values, &merged.declarations),
+                ..merged.member
+            }
+        } else {
+            merged.member
+        };
+        remaining_members.entry(&member.key.clone(), || Some(member));
+    }
+    let core_calls: rustc_hash::FxHashSet<SemanticNodeId> =
+        core.call_signatures.iter().copied().collect();
+    let core_constructs: rustc_hash::FxHashSet<SemanticNodeId> =
+        core.construct_signatures.iter().copied().collect();
+    let core_indexes: rustc_hash::FxHashSet<&crate::semantic_query::IndexSignature> =
+        core.index_signatures.iter().collect();
     let mut seen_calls = rustc_hash::FxHashSet::default();
     let mut seen_constructs = rustc_hash::FxHashSet::default();
-    let mut seen_indexes = Vec::new();
+    let mut seen_indexes = rustc_hash::FxHashSet::default();
     let mut entries = Vec::new();
     for entry in contributor_surfaces
         .iter()
@@ -9850,26 +10063,27 @@ fn merge_declaration_surfaces(
         match entry {
             ShallowSurfaceEntry::Member(member) => {
                 // The contributor streams give the order; the map's own order
-                // is never read, so an O(1) removal keeps the merge linear.
-                if let Some(member) = remaining_members.swap_remove(&member.key) {
+                // is never read; taking its accumulator keeps the merge linear.
+                if let Some(member) = remaining_members
+                    .get_mut(&member.key)
+                    .and_then(Option::take)
+                {
                     entries.push(ShallowSurfaceEntry::Member(member));
                 }
             }
             ShallowSurfaceEntry::CallSignature(node)
-                if core.call_signatures.contains(node) && seen_calls.insert(*node) =>
+                if core_calls.contains(node) && seen_calls.insert(*node) =>
             {
                 entries.push(ShallowSurfaceEntry::CallSignature(*node));
             }
             ShallowSurfaceEntry::ConstructSignature(node)
-                if core.construct_signatures.contains(node) && seen_constructs.insert(*node) =>
+                if core_constructs.contains(node) && seen_constructs.insert(*node) =>
             {
                 entries.push(ShallowSurfaceEntry::ConstructSignature(*node));
             }
             ShallowSurfaceEntry::IndexSignature(signature)
-                if core.index_signatures.contains(signature)
-                    && !seen_indexes.contains(signature) =>
+                if core_indexes.contains(signature) && seen_indexes.insert(signature) =>
             {
-                seen_indexes.push(signature.clone());
                 entries.push(ShallowSurfaceEntry::IndexSignature(signature.clone()));
             }
             _ => {}
@@ -9881,6 +10095,7 @@ fn merge_declaration_surfaces(
 fn merge_intersection_surfaces_with_graph(
     graph: &SemanticGraphStore,
     arm_surfaces: &[Option<ShallowSurface>],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<ShallowSurface> {
     let live: Vec<&ShallowSurface> = arm_surfaces.iter().filter_map(|s| s.as_ref()).collect();
@@ -9890,39 +10105,22 @@ fn merge_intersection_surfaces_with_graph(
     if live.len() == 1 {
         return Some(live[0].clone());
     }
-    // Aggregate members by name under JS property identity
-    // ([`authored_keys_collide`]): dual spellings of one property fold
-    // into ONE accumulated member, so the collision intersects its values
-    // instead of publishing two unintersected rows. For each name track
-    // the own-body values and the heritage/authored values separately so
-    // the P2-1 own-body-shadows-heritage rule can apply ONLY to real
+    // Aggregate members by canonical JS property identity
+    // ([`crate::projection::aggregation`]): dual spellings of one property
+    // fold into ONE accumulated member, so the collision intersects its
+    // values instead of publishing two unintersected rows. For each name
+    // track the own-body values and the heritage/authored values separately
+    // so the P2-1 own-body-shadows-heritage rule can apply ONLY to real
     // interface/class heritage.
-    let mut by_key: Vec<(
-        crate::semantic_query::AuthoredPropertyKey,
-        MergedMemberAccum,
-    )> = Vec::new();
+    let mut by_key = crate::projection::aggregation::OrderedMemberAggregation::new();
     for surface in &live {
         for member in &surface.members {
-            let position = by_key
-                .iter()
-                .position(|(key, _)| authored_keys_collide(key, &member.key));
-            match position {
-                Some(index) => by_key[index].1.absorb(member),
-                None => {
-                    by_key.push((member.key.clone(), MergedMemberAccum::new(&member.key)));
-                    let last = by_key.len() - 1;
-                    by_key[last].1.absorb(member);
-                }
-            }
+            by_key
+                .entry(&member.key, || MergedMemberAccum::new(&member.key))
+                .absorb(member);
         }
     }
-    let mut members: indexmap::IndexMap<
-        crate::semantic_query::AuthoredPropertyKey,
-        ShallowSurfaceMember,
-    > = by_key
-        .into_iter()
-        .map(|(key, accum)| (key, accum.finish(graph, evidence)))
-        .collect();
+    let mut merged = by_key.map(|_, accum| Some(accum.finish(graph, meter, evidence)));
 
     // Scan the contributing canonical streams once. Merged members occupy
     // their first encountered slot; signatures retain their first encountered
@@ -9930,15 +10128,15 @@ fn merge_intersection_surfaces_with_graph(
     let mut entries = Vec::new();
     let mut seen_calls = rustc_hash::FxHashSet::default();
     let mut seen_constructs = rustc_hash::FxHashSet::default();
-    let mut seen_indexes = Vec::new();
+    let mut seen_indexes = rustc_hash::FxHashSet::default();
     let mut keyspace: Option<SemanticNodeId> = None;
     for surface in &live {
         for entry in &surface.entries {
             match entry {
                 ShallowSurfaceEntry::Member(member) => {
-                    // The arm streams give the order; the map's own order is
-                    // never read, so an O(1) removal keeps the merge linear.
-                    if let Some(member) = members.swap_remove(&member.key) {
+                    // The arm streams give the order: each property is
+                    // emitted at its first occurrence, taken from its slot.
+                    if let Some(member) = merged.get_mut(&member.key).and_then(Option::take) {
                         entries.push(ShallowSurfaceEntry::Member(member));
                     }
                 }
@@ -9949,9 +10147,8 @@ fn merge_intersection_surfaces_with_graph(
                     entries.push(ShallowSurfaceEntry::ConstructSignature(*node));
                 }
                 ShallowSurfaceEntry::IndexSignature(signature)
-                    if !seen_indexes.contains(signature) =>
+                    if seen_indexes.insert(signature) =>
                 {
-                    seen_indexes.push(signature.clone());
                     entries.push(ShallowSurfaceEntry::IndexSignature(signature.clone()));
                 }
                 _ => {}
@@ -10120,6 +10317,7 @@ impl MergedMemberAccum {
     fn finish(
         self,
         graph: &SemanticGraphStore,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> ShallowSurfaceMember {
         use crate::semantic_query::MemberMergeRole;
@@ -10156,7 +10354,7 @@ impl MergedMemberAccum {
             };
         let value = match values.as_slice() {
             [single] => *single,
-            _ => merge_value_nodes_recursive(graph, &values, evidence),
+            _ => merge_value_nodes_recursive(graph, &values, meter, evidence),
         };
         // Visibility aggregates to the MOST-RESTRICTIVE accessibility across the
         // contributors that ACTUALLY contribute to the surviving member (the
@@ -10226,6 +10424,7 @@ impl MergedMemberAccum {
 fn merge_value_nodes_recursive(
     graph: &SemanticGraphStore,
     values: &[SemanticNodeId],
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     verter_debug_assert!(values.len() >= 2);
@@ -10276,7 +10475,8 @@ fn merge_value_nodes_recursive(
     if all_objects {
         let opt_surfaces: Vec<Option<ShallowSurface>> =
             shallow_surfaces.into_iter().map(Some).collect();
-        if let Some(merged) = merge_intersection_surfaces_with_graph(graph, &opt_surfaces, evidence)
+        if let Some(merged) =
+            merge_intersection_surfaces_with_graph(graph, &opt_surfaces, meter, evidence)
         {
             return graph.intern_node(SemanticNodeData::Object(surface_view_from_shallow(&merged)));
         }
@@ -10309,8 +10509,8 @@ fn merge_value_nodes_recursive(
         ))
     } else {
         let composite =
-            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection(
-                graph, values,
+            crate::project_semantic_dispatch::canonical_algebra::intern_ordered_intersection_charged(
+                graph, values, meter,
             );
         evidence.absorb(composite.evidence);
         composite.node
@@ -10509,6 +10709,7 @@ construction_ordinal_seam! {
     fn merge_union_surfaces(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
@@ -10531,14 +10732,11 @@ construction_ordinal_seam! {
         // Emit in ARM-0 SOURCE ORDER, including duplicate-name occurrences —
         // each arm-0 occurrence emits one row aggregated from the per-arm
         // first occurrences, exactly as the retired per-name loop did. The
-        // lookup matches under JS property identity ([`authored_keys_collide`])
-        // so a dual-spelling arm-0 key finds its aggregated entry.
+        // lookup matches under canonical JS property identity, so a
+        // dual-spelling arm-0 key finds its aggregated entry.
         let mut members: Vec<ShallowSurfaceMember> = Vec::new();
         for first_member in &live[0].members {
-            let Some((_, accum)) = by_name
-                .iter()
-                .find(|(key, _)| authored_keys_collide(key, &first_member.key))
-            else {
+            let Some(accum) = by_name.get(&first_member.key) else {
                 // Unreachable: arm 0's own members always aggregate.
                 continue;
             };
@@ -10551,7 +10749,7 @@ construction_ordinal_seam! {
                 key: first_member.key.clone(),
                 // Value type = union of the per-arm member values. A single
                 // shared value node stays as-is (no singleton union wrapper).
-                value: accum.value_node(graph, evidence),
+                value: accum.value_node(graph, meter, evidence),
                 optional: accum.optional_in_any,
                 readonly: accum.readonly_in_all,
                 method_kind: None,
@@ -10643,6 +10841,7 @@ impl UnionMemberAccum {
     fn value_node(
         &self,
         graph: &SemanticGraphStore,
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> SemanticNodeId {
         match self.values.as_slice() {
@@ -10653,10 +10852,11 @@ impl UnionMemberAccum {
             // disposition boundary.
             values => {
                 let composite =
-                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
+                    crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
                         graph,
                         values,
                         verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                        meter,
                     );
                 evidence.absorb(composite.evidence);
                 composite.node
@@ -10665,44 +10865,21 @@ impl UnionMemberAccum {
     }
 }
 
-/// JS property identity for AUTHORED keys in merge aggregation: two
-/// authored keys address the same property when their known forms
-/// collide under element access (`{1: x}` and `{"1": x}`); computed keys
-/// only match themselves (strict fallback).
-fn authored_keys_collide(
-    left: &crate::semantic_query::AuthoredPropertyKey,
-    right: &crate::semantic_query::AuthoredPropertyKey,
-) -> bool {
-    match (left.cloned_known(), right.cloned_known()) {
-        (Some(existing), Some(incoming)) => existing.element_access_collides(&incoming),
-        _ => left == right,
-    }
-}
-
-/// Aggregate every live arm's members by name in ONE pass over the input
-/// (each arm contributing its first occurrence per name, in arm order),
-/// keyed under JS property identity ([`authored_keys_collide`]) — dual
-/// spellings of one property aggregate into ONE entry, matching the
-/// fold's `member_position` identity. Surfaces are one-level and small,
-/// so the aggregation is a first-seen-order linear scan.
+/// Aggregate every live arm's members by property in ONE pass over the
+/// input (each arm contributing its first occurrence per property, in arm
+/// order), keyed under canonical JS property identity
+/// ([`crate::projection::aggregation`]) — dual spellings of one property
+/// aggregate into ONE entry, matching the fold's `member_position`
+/// identity — with one index probe per member.
 fn aggregate_union_members(
     live: &[&ShallowSurface],
-) -> Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> {
-    let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
-        Vec::new();
+) -> crate::projection::aggregation::OrderedMemberAggregation<UnionMemberAccum> {
+    let mut ordered = crate::projection::aggregation::OrderedMemberAggregation::new();
     for (arm_index, arm) in live.iter().enumerate() {
         for member in &arm.members {
-            let position = ordered
-                .iter()
-                .position(|(key, _)| authored_keys_collide(key, &member.key));
-            match position {
-                Some(index) => ordered[index].1.absorb(arm_index, member),
-                None => {
-                    ordered.push((member.key.clone(), UnionMemberAccum::new()));
-                    let last = ordered.len() - 1;
-                    ordered[last].1.absorb(arm_index, member);
-                }
-            }
+            ordered
+                .entry(&member.key, UnionMemberAccum::new)
+                .absorb(arm_index, member);
         }
     }
     ordered
@@ -10737,6 +10914,7 @@ construction_ordinal_seam! {
     fn merge_union_surfaces_for_macro(
         graph: &SemanticGraphStore,
         arm_surfaces: &[Option<ShallowSurface>],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Option<ShallowSurface> {
         if arm_surfaces.is_empty() {
@@ -10751,39 +10929,21 @@ construction_ordinal_seam! {
         // every member is effectively absent from it → optional on the union.
         let has_non_object_arm = arm_surfaces.iter().any(|s| s.is_none());
 
-        // Per-name aggregation emitting in first-seen order across all arms.
-        // JS property identity: dual spellings of one property
+        // Per-property aggregation emitting in first-seen order across all
+        // arms. JS property identity: dual spellings of one property
         // (`{1: x} | {"1": y}`) aggregate into ONE entry — the fold's
-        // `member_position` already collides them, so the macro merge matches
-        // (surfaces are one-level and small, so a linear collides scan
-        // replaces the strict-key map).
-        let mut ordered: Vec<(crate::semantic_query::AuthoredPropertyKey, UnionMemberAccum)> =
-            Vec::new();
-        for (arm_index, arm) in live.iter().enumerate() {
-            for member in &arm.members {
-                let position = ordered
-                    .iter()
-                    .position(|(key, _)| authored_keys_collide(key, &member.key));
-                match position {
-                    Some(index) => ordered[index].1.absorb(arm_index, member),
-                    None => {
-                        ordered.push((member.key.clone(), UnionMemberAccum::new()));
-                        let last = ordered.len() - 1;
-                        ordered[last].1.absorb(arm_index, member);
-                    }
-                }
-            }
-        }
-
+        // `member_position` already collides them, so the macro merge
+        // matches.
+        let ordered = aggregate_union_members(&live);
         let mut members: Vec<ShallowSurfaceMember> = Vec::with_capacity(ordered.len());
-        for (key, accum) in &ordered {
+        for (key, accum) in ordered.entries() {
             // Absent from at least one arm (a live arm without it, or a
             // non-Object arm) ⇒ optional on the merged surface.
             let optional =
                 accum.optional_in_any || accum.declaring_arms < arm_count || has_non_object_arm;
             members.push(ShallowSurfaceMember {
                 key: key.clone(),
-                value: accum.value_node(graph, evidence),
+                value: accum.value_node(graph, meter, evidence),
                 optional,
                 readonly: accum.readonly_in_all,
                 method_kind: None,
@@ -10845,6 +11005,7 @@ construction_ordinal_seam! {
     fn spread_formula_positive_members_for_macro(
         graph: &SemanticGraphStore,
         alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
     ) -> Vec<crate::semantic_query::SurfaceMember> {
         if let [only] = alternatives {
@@ -10864,7 +11025,7 @@ construction_ordinal_seam! {
                 ))
             })
             .collect();
-        match merge_union_surfaces_for_macro(graph, &arm_surfaces, evidence) {
+        match merge_union_surfaces_for_macro(graph, &arm_surfaces, meter, evidence) {
             Some(merged) => surface_view_from_shallow(&merged)
                 .positive_members()
                 .iter()
@@ -11123,6 +11284,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let members = spread_formula_positive_members_for_macro(
                 self.graph(),
                 &alternatives,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
@@ -11242,13 +11404,23 @@ mod m1_merge_visibility_tests {
         graph: &SemanticGraphStore,
         arms: &[Option<ShallowSurface>],
     ) -> Option<ShallowSurface> {
-        super::merge_intersection_surfaces_with_graph(graph, arms, &mut Default::default())
+        super::merge_intersection_surfaces_with_graph(
+            graph,
+            arms,
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut Default::default(),
+        )
     }
     fn merge_union_surfaces_for_macro(
         graph: &SemanticGraphStore,
         arms: &[Option<ShallowSurface>],
     ) -> Option<ShallowSurface> {
-        super::merge_union_surfaces_for_macro(graph, arms, &mut Default::default())
+        super::merge_union_surfaces_for_macro(
+            graph,
+            arms,
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut Default::default(),
+        )
     }
     use crate::semantic_query::{MemberMergeRole, PrimitiveKind, SemanticNodeData};
     use crate::semantic_query_memo::SemanticGraphStore;
@@ -11663,6 +11835,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(alias_a), arm(alias_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -11725,6 +11898,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(object_a), arm(object_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -11785,6 +11959,7 @@ mod overload_carrier_exclusion_tests {
         let merged = merge_intersection_surfaces_with_graph(
             &graph,
             &[arm(value_a), arm(value_b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
             &mut evidence,
         )
         .expect("two live arms merge");
@@ -11885,9 +12060,13 @@ mod overload_carrier_exclusion_tests {
         };
         let mut evidence =
             crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence::default();
-        let merged =
-            merge_intersection_surfaces_with_graph(graph, &[arm(a), arm(b)], &mut evidence)
-                .expect("two live arms merge");
+        let merged = merge_intersection_surfaces_with_graph(
+            graph,
+            &[arm(a), arm(b)],
+            crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter::UNMETERED,
+            &mut evidence,
+        )
+        .expect("two live arms merge");
         let value = merged
             .members
             .iter()
@@ -12054,3 +12233,7 @@ mod overload_carrier_exclusion_tests {
         assert_authored_order_preserved(&graph, a, b, "budget-exhausted alias chain");
     }
 }
+
+#[cfg(test)]
+#[path = "walk_aggregation_scale_tests.rs"]
+mod aggregation_scale_tests;

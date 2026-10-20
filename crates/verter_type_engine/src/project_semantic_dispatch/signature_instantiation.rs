@@ -1,10 +1,13 @@
 //! The checker's `instantiateSignatureInContextOf` for a relation: a
-//! generic source signature relates to a target signature once its type
-//! parameters are inferred from the target's parameter types, and, for a
-//! type parameter no parameter infers, from the target's return type.
+//! generic source signature's type parameters are inferred from the target's
+//! parameter types, and, for a type parameter no parameter infers, from the
+//! target's return type.
 
 use std::sync::Arc;
 
+use rustc_hash::FxHashSet;
+
+use super::conditional_decision::{exact_reading, ConditionalReading};
 use super::dispatch_txn::RelationStep;
 use super::inference::session::{FixationInput, InferenceInfoSetup, InferenceSessionSetup};
 use super::ProjectSemanticDispatch;
@@ -215,9 +218,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .dispatch_txn
             .borrow_mut()
             .push_collecting_session(setup, None);
-        let settled = pairs
-            .iter()
-            .all(|&(from, into)| settled_relation(self.relate_collecting(from, into)).is_some());
+        // Inference between conditional types visits corresponding operands
+        // independently (`inferFromTypes`). A failed extends comparison must
+        // not roll back the check position's candidate. The conditional
+        // authority supplies branches with their pending substitutions applied.
+        let settled = (|| {
+            let mut pending: Vec<_> = pairs.iter().rev().copied().collect();
+            let mut seen = FxHashSet::default();
+            while let Some((from, into)) = pending.pop() {
+                if !seen.insert((from, into)) {
+                    continue;
+                }
+                match (
+                    exact_reading(self.conditional_outcome(from))?,
+                    exact_reading(self.conditional_outcome(into))?,
+                ) {
+                    (ConditionalReading::Reduced(from), _) => pending.push((from, into)),
+                    (_, ConditionalReading::Reduced(into)) => pending.push((from, into)),
+                    (ConditionalReading::Deferred(from), ConditionalReading::Deferred(into)) => {
+                        pending.extend([
+                            (from.false_branch, into.false_branch),
+                            (from.true_branch, into.true_branch),
+                            (from.extends, into.extends),
+                            (from.check, into.check),
+                        ]);
+                    }
+                    _ => {
+                        settled_relation(self.relate_collecting(from, into))?;
+                    }
+                }
+            }
+            Some(())
+        })()
+        .is_some();
         let inputs = {
             let txn = self.dispatch_txn.borrow();
             txn.relation

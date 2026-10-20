@@ -220,26 +220,28 @@ impl OneLevelSurface {
     pub(crate) fn from_spread_projection(
         graph: &SemanticGraphStore,
         alternatives: &[crate::semantic_query::ObjectProjectionAlternative],
+        meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
         evidence: &mut super::canonical_algebra::CanonicalEvidence,
     ) -> SurfaceResolution<Self> {
         use crate::semantic_query::{
             AuthoredPropertyKey, ObjectSignatureKind, PositiveKeyPresence, ProjectionEvidence,
-            PropertyKey,
         };
 
         fn union_value(
             graph: &SemanticGraphStore,
             values: Vec<SemanticNodeId>,
+            meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
             evidence: &mut super::canonical_algebra::CanonicalEvidence,
         ) -> SemanticNodeId {
             // Canonical construction: the joined per-alternative value union
             // routes through the one authority (recursive flatten +
             // structural dedup replace the hand-rolled one-level splice);
             // the evidence threads to the caller's disposition boundary.
-            let composite = super::canonical_algebra::intern_ordered_union(
+            let composite = super::canonical_algebra::intern_ordered_union_charged(
                 graph,
                 &values,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                meter,
             );
             evidence.absorb(composite.evidence);
             composite.node
@@ -257,7 +259,6 @@ impl OneLevelSurface {
         }
 
         struct MemberJoin {
-            key: PropertyKey,
             present_in: usize,
             optional_somewhere: bool,
             values: Vec<SemanticNodeId>,
@@ -267,9 +268,10 @@ impl OneLevelSurface {
         }
 
         let alternative_count = alternatives.len();
-        let mut joins: Vec<MemberJoin> = Vec::new();
+        let mut joins = crate::projection::aggregation::OrderedMemberAggregation::new();
         let mut call_nodes: Vec<SemanticNodeId> = Vec::new();
         let mut construct_nodes: Vec<SemanticNodeId> = Vec::new();
+        let mut seen_signatures = rustc_hash::FxHashSet::default();
         let mut index_joins: Vec<(usize, SemanticNodeId, Vec<SemanticNodeId>, bool)> = Vec::new();
         for alternative in alternatives {
             alternative.positive().visit(|fact| {
@@ -277,24 +279,17 @@ impl OneLevelSurface {
                 // join into ONE row (matching the walker and macro
                 // merges), so a colliding second alternative unions the
                 // value instead of publishing a mis-optionaled duplicate.
-                let join = match joins
-                    .iter_mut()
-                    .find(|join| join.key.element_access_collides(fact.key()))
-                {
-                    Some(join) => join,
-                    None => {
-                        joins.push(MemberJoin {
-                            key: fact.key().clone(),
+                let join =
+                    joins.entry(&AuthoredPropertyKey::from_known(fact.key().clone()), || {
+                        MemberJoin {
                             present_in: 0,
                             optional_somewhere: false,
                             values: Vec::new(),
                             readonly_all: true,
                             method_kind: None,
                             has_implementation_body: false,
-                        });
-                        joins.last_mut().expect("just pushed")
-                    }
-                };
+                        }
+                    });
                 join.present_in += 1;
                 join.optional_somewhere |= fact.presence() == PositiveKeyPresence::Optional;
                 if let ProjectionEvidence::Proven(value) = fact.value() {
@@ -318,7 +313,10 @@ impl OneLevelSurface {
                     ObjectSignatureKind::Call => &mut call_nodes,
                     ObjectSignatureKind::Construct => &mut construct_nodes,
                 };
-                if !bucket.contains(&signature.node()) {
+                if seen_signatures.insert((
+                    signature.kind() == ObjectSignatureKind::Call,
+                    signature.node(),
+                )) {
                     bucket.push(signature.node());
                 }
             }
@@ -350,7 +348,7 @@ impl OneLevelSurface {
         let mut entries: Vec<SurfaceEntry> = Vec::with_capacity(
             joins.len() + call_nodes.len() + construct_nodes.len() + index_count,
         );
-        for join in joins {
+        for (key, join) in joins.into_entries() {
             // A definitely-present key whose value is Indeterminate in
             // EVERY alternative (an open residual may overwrite it)
             // still publishes its row — with the honest open value,
@@ -361,10 +359,10 @@ impl OneLevelSurface {
                     crate::semantic_query::QueryError::OpenSurface,
                 ))
             } else {
-                union_value(graph, join.values, evidence)
+                union_value(graph, join.values, meter, evidence)
             };
             entries.push(SurfaceEntry::Member(SurfaceMember {
-                key: AuthoredPropertyKey::from_known(join.key),
+                key,
                 value,
                 optional: join.optional_somewhere || join.present_in < alternative_count,
                 readonly: join.readonly_all,
@@ -390,7 +388,7 @@ impl OneLevelSurface {
             }
             entries.push(SurfaceEntry::IndexSignature(IndexSignature {
                 key_type,
-                value_type: union_value(graph, values, evidence),
+                value_type: union_value(graph, values, meter, evidence),
                 readonly,
                 spans: verter_type_expr::IndexSignatureSpans::default(),
                 declaration_origin: None,
@@ -606,6 +604,7 @@ pub fn project_one_level_surface<C: crate::resolver_core::ResolverCapabilities>(
             let surface = OneLevelSurface::from_spread_projection(
                 graph,
                 &alternatives,
+                dispatch.construction_meter(),
                 &mut canonical_evidence,
             );
             dispatch.deposit_canonical_evidence(canonical_evidence);
@@ -773,7 +772,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_union_members(graph, per_arm, evidence)
+                super::walk::presence_union_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         // Intersection carriers merge under INTERSECTION rules (required
@@ -788,7 +792,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 .map(|arm| read_positive_surface_members(ctx, dispatch, *arm))
                 .collect();
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_intersection_members(graph, per_arm, evidence)
+                super::walk::presence_intersection_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         Some(SemanticNodeData::Conditional {
@@ -812,7 +821,12 @@ pub fn read_positive_surface_members<C: crate::resolver_core::ResolverCapabiliti
                 read_positive_surface_members(ctx, dispatch, false_branch),
             ];
             join_arms(dispatch, &per_arm, |graph, per_arm, evidence| {
-                super::walk::presence_union_members(graph, per_arm, evidence)
+                super::walk::presence_union_members(
+                    graph,
+                    per_arm,
+                    dispatch.construction_meter(),
+                    evidence,
+                )
             })
         }
         // An OPERATIONALLY unresolved carrier contributes no members AND
