@@ -1968,28 +1968,23 @@ impl VerterHost {
             return Some(source);
         }
 
-        let dep_id = match self.resolve_loaded_dependency_canonical(
-            owner_canonical,
-            specifier,
-            verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                match admitted.into_result() {
-                    Some(resolved) => Some(resolved),
-                    None => match self.resolve_loaded_dependency_canonical(
-                        owner_canonical,
-                        specifier,
-                        verter_session_query::resolution::ResolveRequestKind::EsmImport,
-                    ) {
-                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                            admitted.into_result()
-                        }
-                        verter_workspace::ResolutionPublication::Refused(_) => return None,
-                    },
-                }
-            }
-            verter_workspace::ResolutionPublication::Refused(_) => return None,
-        }?;
+        // The source read retains nothing, so an unretained target serves
+        // as well as an admitted one; a refusal reads nothing.
+        let dep_id = self
+            .resolve_loaded_dependency_canonical(
+                owner_canonical,
+                specifier,
+                verter_session_query::resolution::ResolveRequestKind::SfcSrcAttr,
+            )
+            .or_else_publication(|| {
+                self.resolve_loaded_dependency_canonical(
+                    owner_canonical,
+                    specifier,
+                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                )
+            })
+            .into_delivered()
+            .flatten()?;
 
         self.get_source(&dep_id)
             .or_else(|| {
@@ -2048,9 +2043,14 @@ impl VerterHost {
                             verter_session_query::resolution::ResolveRequestKind::EsmImport
                         },
                     };
+                    // An unretained target already refused the enclosing
+                    // scope's admission; the snapshot still answers with it.
                     match self.resolve_via_vfs(parent_canonical_id, &import.source, ctx) {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
+                        }
+                        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
                         }
                         verter_workspace::ResolutionPublication::Refused(_) => return,
                     }
@@ -2967,10 +2967,9 @@ impl VerterHost {
             phase: verter_session_query::resolution::ResolvePhase::CodegenBlocker,
             kind: verter_session_query::resolution::ResolveRequestKind::EsmImport,
         };
-        match self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-            verter_workspace::ResolutionPublication::Refused(_) => None,
-        }
+        self.resolve_loaded_dependency_canonical(&canonical_parent, import_source, ctx.kind)
+            .into_delivered()
+            .flatten()
     }
 
     #[cfg(test)]

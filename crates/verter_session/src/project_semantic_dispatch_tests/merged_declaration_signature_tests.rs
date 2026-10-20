@@ -884,9 +884,9 @@ fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
     ] {
         let dir = tempfile::tempdir().unwrap();
         let directory = dir.path().canonicalize().unwrap();
-        let canonical_root = crate::id::canonicalize_id(directory.to_str().unwrap());
-        let root = canonical_root.as_ref();
+        let root = verter_span::path::canonicalize_path(directory.to_str().unwrap());
         let config = directory.join("tsconfig.json");
+        let config_id = verter_span::path::canonicalize_path(config.to_str().unwrap());
         std::fs::write(&config, r#"{"compilerOptions":{"strict":true,"noLib":true},"files":["lib.bench.d.ts","entry.ts"]}"#).unwrap();
         for (name, source) in [
             bench_lib(),
@@ -899,7 +899,7 @@ fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
         }
         let make = || {
             let workspace = Arc::new(verter_workspace::FilesystemWorkspace::new(verter_workspace::FilesystemOptions::default()));
-            let project = verter_workspace::configured_ide_project(workspace.as_ref(), root.into(), root.into(), config.to_str().unwrap());
+            let project = verter_workspace::configured_ide_project(workspace.as_ref(), root.clone(), root.clone(), &config_id);
             workspace.configure_resolver(vec![project]);
             crate::VerterHost::new(crate::HostConfig::default(), workspace)
         };
@@ -912,7 +912,8 @@ fn disk_reachable_globals_and_unlisted_requesters_share_program_order() {
         let source = Contributor::GlobalInterface.source(1, 3);
         let edited = directory.join("a.ts");
         std::fs::write(&edited, &source).unwrap();
-        crate::u6_flow_shape_corpus_tests::upsert(&host, &format!("{root}/a.ts"), &source, crate::FileLanguage::script_ts());
+        let edited_id = verter_span::path::canonicalize_path(edited.to_str().unwrap());
+        crate::u6_flow_shape_corpus_tests::upsert(&host, &edited_id, &source, crate::FileLanguage::script_ts());
         assert_eq!(read(&host), 3.0, "incremental");
         assert_eq!(read(&make()), 3.0, "cold after edit");
     }

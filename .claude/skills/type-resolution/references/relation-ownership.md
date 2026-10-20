@@ -1,5 +1,25 @@
 ## Semantic Dispatch (current authority)
 
+Literal sources against literal-only union targets use an operation-local
+membership index inside the relation authority. Its keys reuse the canonical
+algebra's exact literal-value identity (including SameValueZero numbers),
+independent of file-scoped node ids. Index preparation charges work and logical
+construction bytes before insertion; its shared cost receipt is consumed by
+every dependent query, and each lookup deposits the inspected file self-roots.
+The outermost dispatch operation releases the index and its backing storage.
+If a warm consumer has already paid preparation in the connected demand,
+rebuilding the released index does not charge it again. The rebuilt index's
+receipt still records its full cold work and bytes, so a later independent
+demand consuming a newly cached sibling pays preparation in full.
+The checker's small-union recursion classification reuses the literal-only
+proof, so it does not flatten that target again for each source literal.
+Membership never changes the union's stored sequence or `VerterStableV1` order.
+Mixed, deferred, template and enum members, and active inference sessions,
+retain the ordinary ordered relation path. `Exclude` and subset relations use
+this index. Native `Omit` already enumerates canonical `PropertyKey` values into
+an `FxHashSet` and filters by membership; it retains that typed property-key
+owner, including its numeric/string key normalization, without relation scans.
+
 Closed single-property scalar object unions use a request-local property index
 inside the relation authority. Matching properties still enter the ordinary
 member relation in authored order, including the positional first attempt.
