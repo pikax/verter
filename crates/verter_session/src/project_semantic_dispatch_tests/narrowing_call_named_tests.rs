@@ -223,3 +223,35 @@ fn a_call_of_a_typeof_function_narrowed_union_calls_its_callable_arm() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// An assertion nested in an asserted condition's receiver narrows the
+/// code after the statement, as the condition around it does, however
+/// deep the receivers nest: 32 receivers `getObj((assert(c), obj))`, each
+/// asserting the condition inside it, narrow `x` by the outermost test and
+/// `y` by the innermost.
+#[test]
+fn assertions_nested_in_asserted_receivers_narrow_at_any_depth() {
+    let program = |innermost: &str, returned: &str| {
+        let mut condition = innermost.to_string();
+        for _ in 0..32 {
+            condition = format!("getObj((assert({condition}), obj)).test(x)");
+        }
+        format!(
+            "declare interface Obj {{ test(x: unknown): x is string }}\n\
+             declare function getObj(o: Obj): Obj;\n\
+             declare function assert(c: unknown): asserts c;\n\
+             function g(x: string | number, y: string | number, obj: Obj) {{ assert({condition}); return {returned}; }}\n\
+             type __Probe = ReturnType<typeof g>;"
+        )
+    };
+    let programs = [
+        program("typeof x === \"string\"", "x"),
+        program("typeof y === \"string\"", "y"),
+    ];
+    let rows: Vec<(&str, &str)> = programs
+        .iter()
+        .map(|program| (program.as_str(), "string"))
+        .collect();
+    let failures = misses(&rows);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

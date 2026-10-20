@@ -1190,6 +1190,7 @@ pub(crate) fn build_flow_slice_content(
         ),
         control_test_gap: false,
         entered_assertion_sink: None,
+        classifying_asserted_condition: false,
         narrowing_alias_locals: FxHashSet::default(),
         alias_conditions: rustc_hash::FxHashMap::default(),
         discriminant_aliases: rustc_hash::FxHashMap::default(),
@@ -4223,6 +4224,13 @@ struct Lowerer<'a> {
     /// applied after the scanned position, instead of taking the typed
     /// gap.
     entered_assertion_sink: Option<Vec<SliceStatement>>,
+    /// Whether a targetless `asserts` condition is classifying: an
+    /// assertion entered inside it takes the typed gap rather than
+    /// classifying its own condition, so the classification an entered
+    /// assertion starts never re-enters another, however deep the source
+    /// nests them. The statement's own scan still enters each nested
+    /// assertion at the top.
+    classifying_asserted_condition: bool,
     /// The same-frame `const`-kind locals whose initializer is a form the
     /// checker can bind a narrowing FACT to (a comparison, an
     /// `instanceof` / `in` test, a call, a composition of those, or
@@ -10191,40 +10199,21 @@ impl<'a> Lowerer<'a> {
                 Some((argument, target))
             })
             .and_then(|(argument, target)| {
-                // A targetless assertion over an ALIASED CONDITION narrows
-                // as an `if` over the alias does: the alias by truthiness
-                // and what its initializer tests.
-                if target.is_none() {
-                    match self.classify_aliased_condition(unwrap_reference_transparent(argument)) {
-                        Some(GuardDisposition::Modeled(guard)) => {
-                            return Some(SliceAssertion {
-                                claim: SliceAssertionClaim::Condition(*guard),
-                                call: verter_span::Span::new(call.span.start, call.span.end),
-                            });
-                        }
-                        Some(GuardDisposition::Unexpressible) => {
-                            self.control_test_gap = true;
-                            return None;
-                        }
-                        Some(GuardDisposition::NoNarrowing) | None => {}
-                    }
-                }
-                let claim = match (self.narrow_subject_of(argument), target) {
-                    (Some(subject), target) => SliceAssertionClaim::Reference { subject, target },
-                    (None, None) => match self.classify_guard(argument) {
-                        GuardDisposition::Modeled(guard) => SliceAssertionClaim::Condition(*guard),
-                        GuardDisposition::NoNarrowing => {
-                            SliceAssertionClaim::Condition(SliceGuard::None)
-                        }
-                        // The checker narrows by a test this vocabulary
-                        // cannot express: the typed gap, never a clean
-                        // unnarrowed answer.
-                        GuardDisposition::Unexpressible => {
-                            self.control_test_gap = true;
-                            return None;
-                        }
+                let claim = match target {
+                    Some(target) => SliceAssertionClaim::Reference {
+                        subject: self.narrow_subject_of(argument)?,
+                        target: Some(target),
                     },
-                    (None, Some(_)) => return None,
+                    None => {
+                        let Some(claim) = self.asserted_condition_claim(argument) else {
+                            // The checker narrows by a test this vocabulary
+                            // cannot express: the typed gap, never a clean
+                            // unnarrowed answer.
+                            self.control_test_gap = true;
+                            return None;
+                        };
+                        claim
+                    }
                 };
                 Some(SliceAssertion {
                     claim,
@@ -10237,6 +10226,51 @@ impl<'a> Lowerer<'a> {
             self.control_test_gap = true;
         }
         assertion
+    }
+
+    /// What a targetless `asserts` call claims of its `argument`, or `None`
+    /// where the checker narrows by a test this half cannot express.
+    /// Classifying the condition enters the assertions nested in it, whose
+    /// claims are the typed gap
+    /// ([`Lowerer::classifying_asserted_condition`]).
+    fn asserted_condition_claim(
+        &mut self,
+        argument: &Expression<'_>,
+    ) -> Option<SliceAssertionClaim> {
+        if std::mem::replace(&mut self.classifying_asserted_condition, true) {
+            return None;
+        }
+        let claim = self.classify_asserted_condition(argument);
+        self.classifying_asserted_condition = false;
+        claim
+    }
+
+    /// An ALIASED CONDITION narrows as an `if` over the alias does: the
+    /// alias by truthiness and what its initializer tests; another
+    /// reference narrows by truthiness, and any other condition as the
+    /// test it is.
+    fn classify_asserted_condition(
+        &mut self,
+        argument: &Expression<'_>,
+    ) -> Option<SliceAssertionClaim> {
+        let disposition =
+            match self.classify_aliased_condition(unwrap_reference_transparent(argument)) {
+                Some(GuardDisposition::NoNarrowing) | None => {
+                    if let Some(subject) = self.narrow_subject_of(argument) {
+                        return Some(SliceAssertionClaim::Reference {
+                            subject,
+                            target: None,
+                        });
+                    }
+                    self.classify_guard(argument)
+                }
+                Some(aliased) => aliased,
+            };
+        match disposition {
+            GuardDisposition::Modeled(guard) => Some(SliceAssertionClaim::Condition(*guard)),
+            GuardDisposition::NoNarrowing => Some(SliceAssertionClaim::Condition(SliceGuard::None)),
+            GuardDisposition::Unexpressible => None,
+        }
     }
 
     /// Scan the effects nested in one modeled call's callee and arguments
