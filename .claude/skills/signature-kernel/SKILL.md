@@ -98,6 +98,17 @@ An interface/class declaration body with heritage is a third construction
 outside the funnel, the `CompositeList::heritage` mint (§6, rule 8): it is a
 declaration, not a commutative intersection, and is never re-decided.
 
+A written union or intersection stays as written through lowering — its
+`AuthoredShell`, or a declaration body's order-preserving `PreservingRebuild`
+view. Where a named type is PUBLISHED (the typeinfo materializer
+`materialize_through_aliases`, both the named-resolve and evaluate entries),
+`ProjectSemanticDispatch::reduced_written_composite` asks the same two queries
+for the type the checker constructs from it: `"a" | string` is `string`, a
+pattern template absorbs the literals it matches, `string & "a"` is `"a"`. A
+composite the reduction keeps stays as written in its written order; an
+intersection with a possibly-callable arm and the written `string & {}` pair
+are never re-decided there.
+
 **Retired spellings.** `NormalizeUnion`, `NormalizeIntersection`,
 `SemanticMeet`, `canonical_intersection`,
 `build_normalize_union` and `UnionSelected` are retired names. Each is an entry
