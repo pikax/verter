@@ -3016,8 +3016,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
         keys: &[IndexKey],
         index_node: SemanticNodeId,
     ) -> FiniteMappedIndexValues {
-        if mapper.name_remap.is_some()
-            || matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
+        if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity)
             || !keys.iter().all(|key| matches!(key, IndexKey::String(_)))
         {
             return FiniteMappedIndexValues::NotApplicable;
@@ -3042,8 +3041,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 return FiniteMappedIndexValues::NotApplicable;
             }
         }
-        // Prove membership once for the whole finite batch. A dictionary,
-        // remapping or open domain retains the ordinary per-key walker.
+        // Prove membership once for the whole finite batch. A dictionary or
+        // open domain retains the ordinary per-key walker.
         let domain_read = self
             .dispatch
             .observe_read(|| self.dispatch.key_space_domain(mapper.key_space));
@@ -3065,6 +3064,71 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             _ => false,
         }) {
             return FiniteMappedIndexValues::NotApplicable;
+        }
+        if mapper.name_remap.is_some() {
+            // A same-name filter has a unique preimage for every surviving
+            // string key. Classify its domain once for this batch rather than
+            // rediscovering every output key's preimage separately. Renames,
+            // collisions, numeric binders and undecidable remaps keep the
+            // ordinary path. This probe never forces the mapped VALUE body.
+            let remap_context = self.context_from_template(
+                crate::semantic_query::ProjectionReductionContext::published(self.mode()),
+            );
+            let filter = self.dispatch.observe_read(|| {
+                if super::raise::mapped_type_key_domain_is_open_or_unknown(
+                    self.dispatch,
+                    source,
+                    mapper,
+                ) {
+                    return None;
+                }
+                let mut kept = rustc_hash::FxHashSet::default();
+                for key in domain.literal_keys() {
+                    let (
+                        PropertyKey::String(name),
+                        Some(crate::semantic_query::LiteralValue::String(literal)),
+                    ) = (&key.key, &key.literal)
+                    else {
+                        return None;
+                    };
+                    if name.as_ref() != literal.as_str()
+                        || self.dispatch.cancellation.is_cancelled()
+                    {
+                        return None;
+                    }
+                    use super::build::MappedKeyRemapOutcome;
+                    match self.dispatch.mapped_member_name_remap_outcome(
+                        mapper,
+                        key,
+                        remap_context,
+                    ) {
+                        MappedKeyRemapOutcome::Drop => continue,
+                        MappedKeyRemapOutcome::Keep(produced) if produced == key.key => {}
+                        MappedKeyRemapOutcome::Keys(produced)
+                            if matches!(produced.as_slice(), [produced] if produced == &key.key) => {}
+                        _ => return None,
+                    }
+                    kept.insert(name.clone());
+                }
+                Some(kept)
+            });
+            if filter.value().is_none() {
+                let _ = filter.discard();
+                return FiniteMappedIndexValues::NotApplicable;
+            }
+            let completion = filter.result_completeness();
+            let kept = match filter.adopt(self.dispatch) {
+                Ok(Some(kept)) if !completion.is_partial() => kept,
+                _ => {
+                    return self.stop_finite_mapped_batch(object, index_node, completion.reasons())
+                }
+            };
+            if !keys
+                .iter()
+                .all(|key| matches!(key, IndexKey::String(name) if kept.contains(name)))
+            {
+                return FiniteMappedIndexValues::NotApplicable;
+            }
         }
         self.original_path_non_empty = true;
         self.origin_file = self
