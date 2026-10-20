@@ -19,7 +19,7 @@
 //! the checker does; "wrong-but-clean" marks a lane answer published
 //! complete and undegraded.
 
-use super::differential_harness_tests::{Matrix, Read};
+use super::differential_harness_tests::{Matrix, Read, STRICT};
 
 /// Array and readonly array method calls and reads.
 const ARRAYS: &str = r##"
@@ -524,6 +524,52 @@ fn library_references_infer_through_their_global_declarations() {
         (
             "{ then(f: (v: 2) => void): void } extends PromiseLike<infer U> ? U : 0",
             "0",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A program's global augmentation of the library's `Promise` is part of the
+/// declaration `Promise<1>` refers to: `[Promise<1>] extends [{ extra: 1 }]`
+/// is `2` until a declaration file augments `interface Promise<T> { extra: T
+/// }`, then `1` (TypeScript 7.0.2) — the answer read before the augmentation
+/// does not survive its upsert.
+#[test]
+fn a_global_promise_augmentation_reaches_the_library_reference() {
+    let probe = "[Promise<1>] extends [{ extra: 1 }] ? 1 : 2";
+    let before = [(Read::Type(probe), vec!["2"])];
+    let matrix = Matrix::new(PROMISES_AND_COLLECTIONS)
+        .lib(GLOBALS_LIB)
+        .settings(&[STRICT]);
+    let host = matrix.host(&before);
+    let verdict = &matrix.verdicts_on(&host, &before)[0][0];
+    assert!(verdict.matched, "before the augmentation: {}", verdict.lane);
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &host,
+        &format!("{}/augment.d.ts", STRICT.root),
+        "interface Promise<T> { extra: T }\n",
+        crate::LanguageRegistry::global()
+            .classify_static("augment.d.ts")
+            .static_resolution(),
+    );
+    let after = [(Read::Type(probe), vec!["1"])];
+    let verdict = &matrix.verdicts_on(&host, &after)[0][0];
+    assert!(verdict.matched, "after the augmentation: {}", verdict.lane);
+}
+
+/// A module's own `interface Promise<T>` shadows the library's: `Promise<1>`
+/// names it, so it is no `PromiseLike`, `Awaited` leaves it as it is, and
+/// `Promise<infer U>` infers through the module's declaration. TypeScript
+/// 7.0.2, all four settings alike.
+#[test]
+fn a_module_promise_shadows_the_library_promise() {
+    let matrix = Matrix::new("interface Promise<T> { v: T }\n").lib(GLOBALS_LIB);
+    let failures = matrix.types(&[
+        ("[Promise<1>] extends [PromiseLike<number>] ? 1 : 2", "2"),
+        ("Awaited<Promise<1>>", "Promise<1>"),
+        (
+            "Promise<Promise<1>> extends Promise<infer U> ? U : 0",
+            "Promise<1>",
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
