@@ -13558,6 +13558,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .build_key_of(merged, context)
                     .with_observed_self_roots(observed_self_roots);
             }
+            // An array's keys are its apparent wrapper's (`keyof T[]` IS
+            // `keyof Array<T>`).
+            Some(SemanticNodeData::Array { .. }) => {
+                drop(data);
+                return self.build_array_key_of(base, context);
+            }
             Some(SemanticNodeData::Mapped { .. }) => self
                 .key_of_through_carrier(base, context)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),

@@ -445,7 +445,7 @@ fn library_inference() {
                 r#"Promise<"x">"#,
             ],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"Awaited<Promise<Promise<"x">>>"#),
@@ -457,7 +457,7 @@ fn library_inference() {
             read: Read::Type(r#"[Promise<1>] extends [PromiseLike<number>] ? 1 : 2"#),
             tsc: [r#"1"#, r#"1"#, r#"1"#, r#"1"#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Return(r#"l1"#),
@@ -485,14 +485,7 @@ fn library_inference() {
                 r#"Promise<number>"#,
             ],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [
-                Class::WrongClean,
-                // The unfixed Awaited relation is carried as an explicit
-                // proof refusal rather than silently claiming completeness.
-                Class::Gap,
-                Class::WrongClean,
-                Class::Gap,
-            ],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
     ];
     let failures = census(

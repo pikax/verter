@@ -1901,9 +1901,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 | SemanticNodeData::TemplateLiteral { .. }
                 | SemanticNodeData::Conditional { .. }
                 | SemanticNodeData::Mapped { .. } => true,
-                // A builtin utility is an operation too (`Uppercase<W>`).
+                // A builtin utility is an operation too (`Uppercase<W>`); a
+                // runtime nominal (`Promise<W>`) is a reference to the global
+                // interface, which the wildcard instantiates like any other.
                 SemanticNodeData::InstantiationRef { base, .. } => {
                     base.canonical_id.as_ref() == "__builtin__"
+                        && self.runtime_nominal_identity(base).is_none()
                 }
                 _ => false,
             };

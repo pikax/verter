@@ -40,7 +40,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => return None,
         };
-        let target_return = match graph.node_data(target).as_deref() {
+        let (target_return, target_params) = match graph.node_data(target).as_deref() {
             Some(SemanticNodeData::Signature {
                 return_type,
                 type_parameters,
@@ -50,7 +50,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .map(|tp| tp.param)
                 .ne(source_tps.iter().map(|tp| tp.param)) =>
             {
-                *return_type
+                (
+                    *return_type,
+                    type_parameters
+                        .iter()
+                        .map(|tp| tp.param)
+                        .collect::<rustc_hash::FxHashSet<_>>(),
+                )
             }
             _ => return None,
         };
@@ -64,9 +70,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .collect();
         // Candidates from the parameters first; a type parameter they leave
         // uninferred takes the return's (the checker's lower-priority
-        // return-type inference).
+        // return-type inference). A parameter the target's clause declares
+        // too binds to itself below, so it asks the return for nothing.
         let mut inputs = self.signature_inference_inputs(&source_tps, &pairs)?;
-        if inputs.iter().any(|input| input.candidates.is_empty()) {
+        if inputs.iter().zip(source_tps.iter()).any(|(input, decl)| {
+            input.candidates.is_empty() && !target_params.contains(&decl.param)
+        }) {
             let returned =
                 self.signature_inference_inputs(&source_tps, &[(target_return, source_return)])?;
             for (input, returned) in inputs.iter_mut().zip(returned) {
@@ -77,11 +86,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         // The one inference fixation a call takes: the common supertype of
         // the candidates, widened, else the default, else `unknown`.
-        let (fixed, uninferred) = self
+        let (mut fixed, uninferred) = self
             .fix_inference_inputs(inputs, &source_tps, |this, from, to| {
                 Ok(settled_relation(this.execute_relate_pair(from, to)))
             })
             .ok()?;
+        // A parameter the target's clause declares too is the target's own
+        // (a method parameter whose bounds no instantiation moved): the
+        // checker's source names a fresh copy of it, which infers exactly
+        // the target's parameter. Its occurrences on both sides are one
+        // node, so it binds to itself, never to its default.
+        for (decl, binding) in source_tps.iter().zip(fixed.iter_mut()) {
+            if target_params.contains(&decl.param) {
+                binding.bound = decl.param;
+            }
+        }
         let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
             self.graph(),
             fixed
@@ -171,9 +190,87 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         inputs
     }
 
+    /// The target a generic source signature is instantiated in the context
+    /// of and then related to (the checker's `getCanonicalSignature`): each
+    /// type parameter without a constraint is its declaration's own binder,
+    /// whatever default the instantiation that produced the signature gave
+    /// it. Instantiating a generic interface re-interns a method's
+    /// parameter whose default names the interface's own (`then<R = T>` of
+    /// `Box<T>`), so each level of a recursive relation (`Box<R>`'s `then`
+    /// returns `Box<R'>`) would otherwise name a fresh parameter and never
+    /// meet the pair it started from. A default has no part in a relation
+    /// of the target: only the source's parameters fix. `signature` itself
+    /// when no parameter's identity moves.
+    pub(super) fn canonical_signature(&self, signature: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        let type_parameters = match graph.node_data(signature).as_deref() {
+            Some(SemanticNodeData::Signature {
+                type_parameters, ..
+            }) if !type_parameters.is_empty() => Arc::clone(type_parameters.as_arc()),
+            _ => return signature,
+        };
+        let mut renamed = Vec::new();
+        let canonical: Vec<TypeParamDecl> = type_parameters
+            .iter()
+            .map(|decl| {
+                let binder = match graph.node_data(decl.param).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        decl: declaration,
+                        param_index,
+                        constraint: None,
+                        default: Some(_),
+                        display_name,
+                    }) if decl.constraint.is_none() => graph.intern_preserving_scope(
+                        decl.param,
+                        SemanticNodeData::TypeParam {
+                            decl: declaration.clone(),
+                            param_index: *param_index,
+                            constraint: None,
+                            default: None,
+                            display_name: display_name.clone(),
+                        },
+                    ),
+                    _ => decl.param,
+                };
+                if binder == decl.param {
+                    return decl.copy();
+                }
+                renamed.push((decl.param, binder));
+                TypeParamDecl {
+                    name: decl.name.clone(),
+                    param: binder,
+                    constraint: None,
+                    default: None,
+                    is_const: decl.is_const,
+                }
+            })
+            .collect();
+        if renamed.is_empty() {
+            return signature;
+        }
+        // The clause is shed before the positions take the canonical
+        // binders, as an instantiation sheds it, so no binder is rewritten
+        // through its own clause.
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(graph, renamed);
+        let positions = self.substitute_canonical(
+            self.signature_without_type_parameters(signature),
+            &substitution,
+        );
+        self.signature_with_type_parameters(positions, canonical)
+    }
+
     /// `signature` declaring no type parameters: an instantiated generic
     /// signature, whose parameters were all substituted.
     fn signature_without_type_parameters(&self, signature: SemanticNodeId) -> SemanticNodeId {
+        self.signature_with_type_parameters(signature, Vec::new())
+    }
+
+    /// `signature` declaring `type_parameters` in place of its own clause.
+    fn signature_with_type_parameters(
+        &self,
+        signature: SemanticNodeId,
+        type_parameters: Vec<TypeParamDecl>,
+    ) -> SemanticNodeId {
         let graph = self.graph();
         let Some(data) = graph.node_data(signature) else {
             return signature;
@@ -200,7 +297,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 params: params.share(),
                 return_type: *return_type,
                 type_parameters: crate::semantic_query::PayloadArray::from(
-                    Vec::new().into_boxed_slice(),
+                    type_parameters.into_boxed_slice(),
                 ),
                 occurrence: occurrence.clone(),
                 return_carrier: match return_carrier {

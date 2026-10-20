@@ -97,6 +97,54 @@ Guards: `many_distinct_relations_under_tiny_retention_keep_operand_only_residenc
 
 **Superseding notes for other owners' documents** (folded in by the documentation closure): `.claude/skills/host-session/SKILL.md` still lists relation proofs among what a close releases and names `semantic_query_memo/intern_table.rs` as the proof/relate-key table storage — both are gone; `docs/contributing/semantic-benchmark.md` still lists interned relation proofs among the retention/work counts — the counter no longer exists (the benchmark records, `session-analyze.mjs` required state and the dx-harness churn counters dropped it).
 
+### Library generic interfaces and generic-method relations
+
+A runtime nominal's `__builtin__` carrier (`Promise<T>`, `Map<K, V>`,
+`Set<T>`, `Date`, …; never `Function`, which relations decide by tag) is, to
+the relation, the project's global interface of that name
+(`relation_declaration_identity` → `runtime_nominal_global_declaration`,
+through `first_global_declaration`, read from the library
+`relation_wrapper_canonical` names). Two applications relate by their
+arguments under the interface's measured variance (`generic_reference`), and
+the identity unwrap expands an application to the interface's members, the
+members a walk's read already takes. A project that declares no such
+interface keeps the carrier unresolvable. Such a carrier is a reference, not a
+builtin utility: `infer_inventory` infers through `Promise<infer O>`'s
+arguments and the permissive test's wildcard check does not read it as an
+operation.
+
+`keyof T[]` is `keyof` the project's `Array<T>` (`ReadonlyArray<T>`):
+`scope_apparent_wrapper_subject` rewrites a reducing `KeyOf` of a scope-less
+array before memo admission, and `build_array_key_of` serves a file-scoped
+one. The wrapper is read under structural transit, so member values stay
+carriers: `Array`'s `[Symbol.unscopables]` maps over `keyof any[]`.
+
+Generic method relations follow `compareSignaturesRelated`:
+
+- A generic source is instantiated in the context of the target's canonical
+  signature (`canonical_signature`, the checker's `getCanonicalSignature`):
+  an unconstrained target parameter is its declaration's own binder whatever
+  default an instantiation gave it, so `then<R = T>` of `A<R>` against
+  `B<R>` meets its own pair one level down instead of recursing on fresh
+  binders.
+- A source parameter the target's clause declares too (a binder no
+  instantiation moved, `R2 = never`) binds to itself and asks the return for
+  nothing.
+- Two callback parameters (one non-generic call signature each, nullable
+  alike, no predicate) relate target-to-source with strictly contravariant
+  parameters, never the method-bivariant fallback (`callback_parameter_pair`).
+- Inference into a union with one naked parameter matches a source member to
+  another member referencing the same generic declaration by its type
+  arguments (`members_unmatched_by_inference`, the checker's
+  `inferToMultipleTypes` + `inferFromTypeArguments`): `PromiseLike<R'>` into
+  `R | PromiseLike<R>` infers `R'`. Only the arguments relate, so two
+  recursive declarations never expand into each other. Matching a member
+  through another declaration's structure is not done (the checker's
+  `inferFromObjectTypes`); `thenables_of_different_declarations_infer_through_their_structure`
+  pins the rows that need it.
+
+Guards: the `lib_generic_relation_tests` suite (`verter_session`).
+
 ### Object-literal spreads: canonical construction programs
 
 Every spread-bearing object is a `SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram)` — one immutable, source-ordered effect list (`DirectProperty` / `DirectMethod` / `DirectGet` / `DirectSet` / `DirectIndex` / `DirectCall` / `DirectConstruct` / `Spread`). It is the sole stored description of the object: no folded member surface, completeness mirror, replay cursor, or side log coexists. A non-spread object stays a closed `SemanticNodeData::Object` surface (every `SurfaceView` is closed by construction; the open-operand representation is gone). Direct effects carry lossless typed facts: typed key or computed-key child, value/signature children, optional/readonly, method/get/set kind, implementation-body fact, visibility, spans/declaration origin, and excess origin.

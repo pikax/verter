@@ -796,15 +796,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 _ => break,
             }
         }
-        if let Some(SemanticNodeData::DeclRef { identity }) =
-            self.graph().node_data(node).as_deref()
-        {
-            return Some((
-                identity.clone(),
-                self.declared_application_arguments(identity, &[], context)?,
-            ));
+        // A runtime nominal's builtin carrier reads as the project's global
+        // interface it stands for, so it relates by that interface's
+        // variances to another reference to it.
+        let declared_ref = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            _ => None,
+        };
+        if let Some(identity) = declared_ref {
+            let identity = self.relation_declaration_identity(identity, node);
+            let args = self.declared_application_arguments(&identity, &[], context)?;
+            return Some((identity, args));
         }
         let (declaration, args) = self.raw_generic_reference(node)?;
+        let declaration = self.relation_declaration_identity(declaration, node);
         let args = self.declared_application_arguments(&declaration, &args, context)?;
         Some((declaration, args))
     }
@@ -945,7 +950,7 @@ pub fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
 }
 
 /// Whether two declaration identities name one declaration.
-fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
+pub(super) fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
     a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
 }
 
