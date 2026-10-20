@@ -1910,7 +1910,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let same_members = match self.graph().node_data(constructed).as_deref() {
             Some(SemanticNodeData::Union(kept)) => {
                 let kept = kept.members_arc();
-                kept.len() == members.len() && kept.iter().all(|member| members.contains(member))
+                kept.len() == members.len() && super::evaluate::holds_every(&members, &kept)
             }
             _ => false,
         };

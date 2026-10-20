@@ -648,6 +648,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     self_evaluation_receipts: SelfEvaluationReceipts,
     /// Literal target membership shared by the queries of one operation.
     literal_union_indexes: relation::LiteralUnionIndexes,
+    /// Unions an operation proved its composite reduction leaves as
+    /// written, with the file roots that proof inspected.
+    composite_fixed_points: evaluate::CompositeFixedPoints,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -714,6 +717,7 @@ pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     literal_union_indexes: &'g relation::LiteralUnionIndexes,
+    composite_fixed_points: &'g evaluate::CompositeFixedPoints,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
@@ -726,6 +730,8 @@ impl Drop for DispatchOperation<'_> {
         if depth == 0 {
             let indexes = std::mem::take(&mut *self.literal_union_indexes.borrow_mut());
             drop(indexes);
+            let fixed_points = std::mem::take(&mut *self.composite_fixed_points.borrow_mut());
+            drop(fixed_points);
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -1130,6 +1136,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             literal_union_indexes: Default::default(),
+            composite_fixed_points: Default::default(),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
@@ -1195,6 +1202,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open,
             self_evaluation_receipts,
             literal_union_indexes,
+            composite_fixed_points,
             driven_root_traced,
             decision_seam,
             call_seam,
@@ -1238,6 +1246,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         request_local_open.swap(&other.request_local_open);
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
         literal_union_indexes.swap(&other.literal_union_indexes);
+        composite_fixed_points.swap(&other.composite_fixed_points);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
@@ -1262,6 +1271,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
             literal_union_indexes: &self.literal_union_indexes,
+            composite_fixed_points: &self.composite_fixed_points,
             demand: &self.connected_demand,
             owner,
         }

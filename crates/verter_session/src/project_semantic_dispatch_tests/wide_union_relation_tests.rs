@@ -69,6 +69,50 @@ fn literal_union_membership_work_grows_with_input() {
     }
 }
 
+/// The module declares its own `Exclude` (a distributive conditional, not
+/// the native utility) and derives `Most` with it. Every distributed
+/// member relates to the one `Most`, so reading what `Most` names and
+/// reducing that union happen once for the distribution, not once per
+/// member. Omit over the declared utilities distributes the same way.
+#[test]
+fn a_declared_exclude_reads_a_derived_union_once_per_distribution() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    type Dispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+    const DECLARED: &str = "type Exclude<T, U> = T extends U ? never : T;
+        type Pick<T, K extends keyof T> = { [P in K]: T[P] };
+        type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
+";
+    let reads = || {
+        Dispatch::composite_arm_reads_for_tests() + Dispatch::relation_union_arm_visits_for_tests()
+    };
+    for probe in ["Exclude<W, Most>", "keyof Omit<{ [K in W]: K }, Most>"] {
+        let visits = [32, 64, 128].map(|width| {
+            let source = format!(
+                "{DECLARED}{}type Most = Exclude<W, \"m3\" | \"m5\">;
+",
+                wide_union(width)
+            );
+            let before = reads();
+            with_probe(&source, probe, |dispatch, node| {
+                let expected =
+                    checker_syntax::parse("\"m3\" | \"m5\"").expect("valid expected type");
+                assert!(
+                    checker_syntax::matches_node(dispatch, node, &expected, 0),
+                    "{probe} over {width} members"
+                );
+            });
+            reads() - before
+        });
+        println!("declared {probe}: union reads {visits:?}");
+        for step in 0..2 {
+            assert!(
+                visits[step + 1] * 10 <= visits[step] * 22,
+                "doubling the input at most doubles union reads: {probe}: {visits:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
     use super::ProjectSemanticDispatch;
