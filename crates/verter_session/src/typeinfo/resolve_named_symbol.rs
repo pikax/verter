@@ -782,7 +782,9 @@ pub(crate) fn classify_dispatch_error(
 /// `SemanticNodeData::Opaque(QueryError::DeclPlaceholder { … })`
 /// carriers, AND to REDUCE operator-bodied top-level aliases
 /// (`type X = Y[K]` / `type X = keyof Y`) through the shared
-/// `IndexedAccess` / `KeyOf` reducer under the publication modes.
+/// `IndexedAccess` / `KeyOf` reducer under the publication modes, and
+/// written unions / intersections (`type X = "a" | string`) through the
+/// canonical union / intersection algebra.
 ///
 /// This is the SINGLE canonical materializer for every typeinfo
 /// resolution entry-point — both the named-resolve path
@@ -805,7 +807,7 @@ pub(crate) fn materialize_through_aliases(
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     // A construction reader: the scope owns every ordinal it reads.
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     let mut current = start;
     for _ in 0..16 {
         let data = store.read_in_scope(current);
@@ -1055,6 +1057,32 @@ pub(crate) fn materialize_through_aliases(
                         continue;
                     }
                     MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // Composite-bodied alias reduction. Lowering keeps a written
+            // union or intersection as written (its authored shell, or the
+            // declaration body's order-preserving view of it); under the
+            // publication modes the alias publishes the type the checker
+            // constructs from it (`type X = "a" | string` is `string`, `type
+            // Y = string & "a"` is `"a"`), reduced by the shared canonical
+            // algebra. A composite that reduction keeps as written stays as
+            // written. `Skeleton` / `Identity` keep it.
+            Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                match dispatch
+                    .owning()
+                    .reduced_written_composite(current)
+                    .into_value_in(&scope)
+                {
+                    Some(reduced) => {
+                        current = reduced;
+                        continue;
+                    }
+                    None => return Ok(current),
                 }
             }
             _ => return Ok(current),

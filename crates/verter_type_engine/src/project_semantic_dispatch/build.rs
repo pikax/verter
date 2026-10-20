@@ -19335,6 +19335,73 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    construction_ordinal_seam! {
+        /// The type the checker constructs from a WRITTEN union or
+        /// intersection (`getUnionType` / `getIntersectionType` over its
+        /// arms), when it differs from the composite as written: `"a" |
+        /// string` is `string`, `1 | number | "x"` is `number | "x"`, `"a1" |
+        /// `a${number}` | "ab"` is `"ab" | `a${number}``, and `string & "a"` is
+        /// `"a"`. `None` for any other node and for a composite the reduction
+        /// keeps as written (`"a" | "b"`, `{ a: 1 } & { b: 2 }`), which stays
+        /// the authored display form in its written order.
+        ///
+        /// A written composite is an authored shell or an order-preserving
+        /// rebuild (a declaration body's projected view is one). A rebuild
+        /// keeps no record of its original's category, so an intersection
+        /// with an arm that may contribute call signatures (an
+        /// overload-ordered list) stays as written, and so does the written
+        /// `string & {}` pair the checker keeps. The arms are read as they
+        /// stand (a named arm is not resolved) and reduced by the shared
+        /// `ReduceUnion` / `ReduceIntersection` queries, unions under the
+        /// strict `null` / `undefined` algebra.
+        fn reduced_written_composite(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+            use crate::semantic_query::composite::CompositeOriginCategory as Category;
+            let graph = self.graph();
+            let written = |category: Category| {
+                matches!(category, Category::AuthoredShell | Category::PreservingRebuild)
+            };
+            let (arms, is_union) = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms) if written(arms.origin_category()) => {
+                    (arms.members_arc(), true)
+                }
+                SemanticNodeData::Intersection(arms) if written(arms.origin_category()) => {
+                    (arms.members_arc(), false)
+                }
+                _ => return None,
+            };
+            if !is_union
+                && (super::canonical_algebra::is_written_primitive_over_empty_object(graph, &arms)
+                    || arms
+                        .iter()
+                        .any(|arm| super::walk::value_may_contribute_call_signatures(graph, *arm)))
+            {
+                return None;
+            }
+            let key = if is_union {
+                SemanticQueryKey::ReduceUnion {
+                    members: Arc::clone(&arms),
+                    nullability: verter_session_query::flow::policy::NullabilityPolicy::Strict,
+                }
+            } else {
+                SemanticQueryKey::reduce_intersection_operands(graph, Arc::clone(&arms))
+            };
+            let reduced = match self.execute_read(key).value {
+                QueryResult::Value(reduced) | QueryResult::Recursive(reduced) => reduced,
+                QueryResult::Error(_) => return None,
+            };
+            let kept_as_written = match graph.node_data(reduced).as_deref() {
+                Some(SemanticNodeData::Union(kept)) if is_union => {
+                    kept.len() == arms.len() && arms.iter().all(|arm| kept.contains(arm))
+                }
+                Some(SemanticNodeData::Intersection(kept)) if !is_union => {
+                    kept.iter().eq(arms.iter())
+                }
+                _ => false,
+            };
+            (!kept_as_written).then_some(reduced)
+        }
+    }
+
     /// Whether a member-wise composite REBUILD may re-decide its arm list
     /// through the canonical authority — the carrier-semantics dispatch for
     /// projection/expansion/realization rebuild sites, driven by the

@@ -1722,19 +1722,9 @@ fn remove_redundant_supertypes(
                     )
             )
     });
-    let written_pair_kept = supertype_reduction
-        == SupertypeReduction::ExceptPrimitiveOverEmptyObject
-        && matches!(
-            data.as_slice(),
-            [Some(first), Some(second)]
-                if matches!(
-                    first.as_ref(),
-                    SemanticNodeData::Primitive(
-                        PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
-                    )
-                ) && is_empty_object(second)
-        );
-    if written_pair_kept {
+    if supertype_reduction == SupertypeReduction::ExceptPrimitiveOverEmptyObject
+        && is_written_primitive_over_empty_object(graph, arms)
+    {
         return;
     }
     let mut position = 0usize;
@@ -1752,6 +1742,26 @@ fn remove_redundant_supertypes(
         position += 1;
         !redundant
     });
+}
+
+/// Whether `arms` are exactly `string & {}` (`number`, `bigint`): the pair
+/// the checker keeps as written ([`SupertypeReduction`]).
+pub(super) fn is_written_primitive_over_empty_object(
+    graph: &SemanticGraphStore,
+    arms: &[SemanticNodeId],
+) -> bool {
+    let [first, second] = arms else {
+        return false;
+    };
+    matches!(
+        graph.node_data(*first).as_deref(),
+        Some(SemanticNodeData::Primitive(
+            PrimitiveKind::String | PrimitiveKind::Number | PrimitiveKind::BigInt
+        ))
+    ) && matches!(
+        graph.node_data(*second).as_deref(),
+        Some(SemanticNodeData::Object(view)) if view.closed().is_empty()
+    )
 }
 
 /// A union's AUTHORED intersection arms as the checker holds them: an arm

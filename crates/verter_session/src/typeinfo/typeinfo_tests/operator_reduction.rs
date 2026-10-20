@@ -7,7 +7,9 @@
 //! through the SHARED `SemanticQueryKey::IndexedAccess` / `KeyOf` reducer
 //! (which canonicalises to `ProjectPath` / the keyof builder), and PRESERVES
 //! the operator carrier under `Skeleton` (the mode gate) and for symbolic
-//! objects the reducer cannot resolve.
+//! objects the reducer cannot resolve. A written union or intersection body
+//! publishes the type the checker constructs from it, reduced by the
+//! canonical union / intersection algebra.
 
 use super::support::*;
 use verter_type_engine::semantic_query::{
@@ -324,4 +326,114 @@ fn evaluate_keyof_reduces_on_cold_navigate_dispatch() {
          to the named-resolve of `ConcreteKeys` — a `DeclRef` operand must defer \
          to the bridge, not degrade to a semanticMiss terminal"
     );
+}
+
+// ── Written unions and intersections publish the type the checker builds ──
+
+/// The checker's lib declarations the semantic benchmark's
+/// template-literal scenario carries beside its probe.
+const BENCH_LIB_PRELUDE: &str = "type Exclude<T, U> = T extends U ? never : T;\n\
+     type Extract<T, U> = T extends U ? T : never;\n\
+     type Uppercase<S extends string> = intrinsic;\n\
+     type Lowercase<S extends string> = intrinsic;\n\
+     type Capitalize<S extends string> = intrinsic;\n\
+     type Uncapitalize<S extends string> = intrinsic;\n";
+
+/// `__Probe` in `canonical`, demanded as the semantic benchmark demands it:
+/// resolved by name in the host's default mode and projected to its wire
+/// answer.
+fn published_probe(host: &crate::VerterHost, canonical: &str) -> TypeExpr {
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(canonical, "__Probe", None)
+        .into_parts();
+    let node = outcome
+        .expect("the named demand completes")
+        .expect("the probe exists");
+    let bytes = host
+        .project_node_to_type_expr_json_bytes(&node)
+        .expect("the answer projects");
+    serde_json::from_slice(&bytes).expect("a wire answer")
+}
+
+/// The constituents of `answer` as rendered text, sorted: a union's member
+/// order is not part of its identity. Any other type is its own single
+/// constituent, rendered whole.
+fn constituents(answer: &TypeExpr) -> Vec<String> {
+    let arms: Vec<&TypeExpr> = match answer {
+        TypeExpr::Union(arms) => arms.iter().collect(),
+        other => vec![other],
+    };
+    let mut texts: Vec<String> = arms
+        .into_iter()
+        .map(|arm| {
+            verter_type_expr::render_type_expr_display(arm)
+                .expect("the answer renders")
+                .text
+        })
+        .collect();
+    texts.sort_unstable();
+    texts
+}
+
+/// A written union absorbs the literals its primitives and pattern
+/// templates already hold, and a written intersection of a literal and its
+/// primitive is the literal; a written composite the checker keeps stays as
+/// written.
+///
+/// Measured on TypeScript 7.0.2 with `declare const p: <probe>; const s:
+/// never = p;` read off the TS2322 message (all four `strictNullChecks` ×
+/// `noImplicitAny` settings agree): `"a1" | `a${number}` | "ab"` is `"ab" |
+/// `a${number}``, `"a" | string` is `string`, `1 | number | "x"` is `number
+/// | "x"`, `string & "a"` is `"a"`; `"a" | "b"` and `{ a: 1 } & { b: 2 }`
+/// print as written.
+#[test]
+fn a_written_composite_publishes_the_type_the_checker_constructs() {
+    let host = make_host_with_footprint();
+    let rows: [(&str, &str, &[&str]); 6] = [
+        (
+            BENCH_LIB_PRELUDE,
+            "\"a1\" | `a${number}` | \"ab\"",
+            &["'ab'", "`a${number}`"],
+        ),
+        ("", "\"a\" | string", &["string"]),
+        ("", "1 | number | \"x\"", &["'x'", "number"]),
+        ("", "string & \"a\"", &["'a'"]),
+        ("", "\"a\" | \"b\"", &["'a'", "'b'"]),
+        ("", "{ a: 1 } & { b: 2 }", &["{ a: 1 } & { b: 2 }"]),
+    ];
+    let mut failures = Vec::new();
+    for (index, (prelude, probe, expected)) in rows.iter().enumerate() {
+        let canonical = format!("/probes/p{index}.ts");
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!("{prelude}type __BenchInit = 0;\ntype __Probe = {probe};\n"),
+        );
+        let published = constituents(&published_probe(&host, &canonical));
+        if published != *expected {
+            failures.push(format!(
+                "`{probe}`: the checker answers {expected:?}, published {published:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // The FFI evaluate entry reduces through the same materializer.
+    let (evaluated, _r) = evaluate_expr(
+        &host,
+        "/probes/p1.ts",
+        "\"a\" | string",
+        ProjectionMode::Expanded,
+    );
+    assert_eq!(constituents(&evaluated), ["string"]);
+
+    // `Skeleton` keeps the authored shell.
+    let (skeleton, _r) = resolve_expr(
+        &host,
+        "/probes/p1.ts",
+        "__Probe",
+        &[],
+        ProjectionMode::Skeleton,
+    );
+    assert_eq!(constituents(&skeleton), ["'a'", "string"]);
 }

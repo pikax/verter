@@ -181,6 +181,10 @@ owning_methods! {
     /// Widen a nominal `typeof` carrier.
     fn widened_nominal_typeof(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
 
+    /// The type the checker constructs from a written union or
+    /// intersection, when it differs from the composite as written.
+    fn reduced_written_composite(&self, node: SemanticNodeId) -> Option<SemanticNodeId>;
+
     /// Widen every owner-local nominal `typeof` in `node`.
     fn widen_owner_local_nominal_typeofs(&self, node: SemanticNodeId, canonical: &str) -> SemanticNodeId;
 
