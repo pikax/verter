@@ -2060,6 +2060,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         argument.literal_mode,
                         argument_value.fresh,
                     ),
+                    literal_provenance: self.resolve_argument_literal_provenance(
+                        canonical,
+                        owner,
+                        argument.literal_provenance.as_deref(),
+                    ),
                 });
             }
             if let Some(argument) = call.args.get(args.len()) {
@@ -10413,6 +10418,11 @@ pub(super) trait FlowDemandDriver {
     fn unresolved_head_is_authored_import(&self, scope: &NodeScopeId, name: &str) -> bool;
     fn top_level_literals(&self, node: SemanticNodeId) -> Vec<SemanticNodeId>;
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId;
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool;
     fn subtype_reduced_union(
         &self,
         members: &[SemanticNodeId],
@@ -10724,6 +10734,16 @@ pub(super) trait FlowDemandDriver {
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> bool;
+    fn resolve_scoped_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
     fn arena(&self) -> super::arena_ops::ArenaOps<'_>;
     fn call_undecided_relations(&self) -> u64;
     fn discard_call_relation_observations(&self, count: u64);
@@ -10866,6 +10886,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         ProjectSemanticDispatch::widened_literal(self, node)
+    }
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool {
+        ProjectSemanticDispatch::literal_of_contextual_type(self, candidate, contextual, &[])
     }
     fn subtype_reduced_union(
         &self,
@@ -11385,6 +11412,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     ) -> bool {
         ProjectSemanticDispatch::value_read_widens(self, canonical, owner, path)
     }
+    fn resolve_scoped_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        ProjectSemanticDispatch::resolve_scoped_argument_literal_provenance(
+            self, canonical, owner, authored, reads,
+        )
+    }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
         super::arena_ops::ArenaOps::new(self.graph())
     }
@@ -11600,6 +11641,14 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn widened_literal(&self, node: SemanticNodeId) -> SemanticNodeId {
         self.driver.widened_literal(node)
+    }
+    fn literal_of_contextual_type(
+        &self,
+        candidate: SemanticNodeId,
+        contextual: SemanticNodeId,
+    ) -> bool {
+        self.driver
+            .literal_of_contextual_type(candidate, contextual)
     }
     fn subtype_reduced_union(
         &self,
@@ -12093,6 +12142,19 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         path: &[String],
     ) -> bool {
         self.driver.value_read_widens(canonical, owner, path)
+    }
+    fn resolve_scoped_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+        reads: &dyn Fn(
+            &verter_type_expr::ValueRef,
+            verter_span::Span,
+        ) -> super::call_resolve::ArgumentReadLiterals,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        self.driver
+            .resolve_scoped_argument_literal_provenance(canonical, owner, authored, reads)
     }
     fn arena(&self) -> super::arena_ops::ArenaOps<'_> {
         self.arena
@@ -13460,6 +13522,8 @@ struct ArrayEvalFrame<'e> {
     elements: &'e [verter_session_query::flow::slice::SliceArrayElement],
     const_asserted: bool,
     contextual: Option<SemanticNodeId>,
+    /// The literal's shape a contextual tuple reads its elements by.
+    shape: super::call_resolve::ArrayLiteralShape,
     tupled: bool,
     /// `(reduction operand, widening_nullish)` per element position of
     /// the join.
@@ -13821,7 +13885,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// reads it (`checkExpressionWithContextualType` under
     /// `SkipContextSensitive`): each context-sensitive member is the
     /// non-inferring `any` (the checker's `anyFunctionType`), every other
-    /// member its own value.
+    /// member its own value typed by the parameter's `contextual` type, so a
+    /// literal whose contextual type is a literal context keeps its literal.
     pub(super) fn eval_object_literal_first_pass(
         &mut self,
         entries: &[verter_session_query::flow::slice::SliceObjectEntry],
@@ -13837,7 +13902,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .is_some()
             }),
         };
-        let mut frame = self.object_eval_frame(entries, offset, false, None);
+        let mut frame = self.object_eval_frame(entries, offset, false, contextual);
         frame.skips_context_sensitive = true;
         let result = self.drive_object_literal(&mut frame);
         self.object_first_pass_context = enclosing;
@@ -15161,113 +15226,24 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         }
     }
 
-    /// The checker's `isLiteralOfContextualType`: whether `contextual`
-    /// keeps a literal `candidate` — some constituent of `contextual` is a
-    /// literal (or a `boolean`, a template literal, a `keyof`) of the
-    /// candidate's own primitive kind, or a type parameter constrained to
-    /// that kind.
+    /// The checker's `isLiteralOfContextualType`, decided by the one
+    /// literal-context classifier the call executor also reads.
     fn literal_of_contextual_type(
         &self,
         candidate: SemanticNodeId,
         contextual: SemanticNodeId,
     ) -> bool {
-        #[derive(Clone, Copy, PartialEq)]
-        enum Kind {
-            String,
-            Number,
-            BigInt,
-            Boolean,
-        }
-        let graph = self.dispatch.graph();
-        let has_literal_of = |kind: Kind| -> bool {
-            let literal_kind = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))) => {
-                    Some(Kind::String)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_))) => {
-                    Some(Kind::Number)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_))) => {
-                    Some(Kind::BigInt)
-                }
-                Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(
-                    _,
-                ))) => Some(Kind::Boolean),
-                _ => None,
-            };
-            match graph.node_data(candidate).as_deref() {
-                Some(SemanticNodeData::Union(members)) => members
-                    .iter()
-                    .any(|member| literal_kind(*member) == Some(kind)),
-                _ => literal_kind(candidate) == Some(kind),
-            }
-        };
-        let contextual = self.dispatch.resolved_reduction_view(contextual);
-        let data = graph.node_data(contextual);
-        let composite_members = match data.as_deref() {
-            Some(SemanticNodeData::Union(members)) => Some(members.to_vec()),
-            Some(SemanticNodeData::Intersection(members)) => Some(members.to_vec()),
-            _ => None,
-        };
-        if let Some(members) = composite_members {
-            drop(data);
-            return members
-                .iter()
-                .any(|member| self.literal_of_contextual_type(candidate, *member));
-        }
-        match data.as_deref() {
-            Some(SemanticNodeData::TypeParam { constraint, .. }) => {
-                let constraint = *constraint;
-                drop(data);
-                let Some(constraint) = constraint else {
-                    return false;
-                };
-                // Read by data: a constraint lowered in its declaration's scope
-                // is another node than the scope-free primitive.
-                let is_kind = |node: SemanticNodeId, kind: PrimitiveKind| {
-                    matches!(
-                        graph.node_data(node).as_deref(),
-                        Some(SemanticNodeData::Primitive(primitive)) if *primitive == kind
-                    )
-                };
-                let of_kind = |kind: PrimitiveKind| {
-                    is_kind(constraint, kind)
-                        || matches!(
-                            graph.node_data(constraint).as_deref(),
-                            Some(SemanticNodeData::Union(members))
-                                if members.iter().any(|member| is_kind(*member, kind))
-                        )
-                };
-                (of_kind(PrimitiveKind::String) && has_literal_of(Kind::String))
-                    || (of_kind(PrimitiveKind::Number) && has_literal_of(Kind::Number))
-                    || (of_kind(PrimitiveKind::BigInt) && has_literal_of(Kind::BigInt))
-                    || self.literal_of_contextual_type(candidate, constraint)
-            }
-            Some(
-                SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String(_))
-                | SemanticNodeData::TemplateLiteral { .. }
-                | SemanticNodeData::KeyOf { .. },
-            ) => has_literal_of(Kind::String),
-            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Number(_))) => {
-                has_literal_of(Kind::Number)
-            }
-            Some(SemanticNodeData::Literal(crate::semantic_query::LiteralValue::BigInt(_))) => {
-                has_literal_of(Kind::BigInt)
-            }
-            // `boolean` is the union `true | false` to the checker.
-            Some(
-                SemanticNodeData::Literal(crate::semantic_query::LiteralValue::Boolean(_))
-                | SemanticNodeData::Primitive(PrimitiveKind::Boolean),
-            ) => has_literal_of(Kind::Boolean),
-            _ => false,
-        }
+        self.dispatch
+            .literal_of_contextual_type(candidate, contextual)
     }
 
     /// The checker's contextual type of the property `name` of an object
     /// literal typed by `contextual` (`getTypeOfPropertyOfContextualType`):
     /// per constituent of a union, the declared property, else a tuple's
     /// element at a numeric name, else an applicable index signature's
-    /// value. `None` when no constituent types the property.
+    /// value; a constrained type parameter's through its constraint (the
+    /// apparent type `getApparentTypeOfContextualType` reads). `None` when
+    /// no constituent types the property.
     fn contextual_property_type(
         &self,
         contextual: SemanticNodeId,
@@ -15289,7 +15265,19 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
                 drop(data);
                 let index = name.parse::<usize>().ok()?;
-                self.contextual_element_type(contextual, index, false)
+                self.contextual_element_type(
+                    contextual,
+                    index,
+                    super::call_resolve::ArrayLiteralShape::default(),
+                )
+            }
+            SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            } => {
+                let constraint = *constraint;
+                drop(data);
+                self.contextual_property_type(constraint, name)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
@@ -15326,16 +15314,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// The checker's contextual type of the element at `position` of an
-    /// array literal typed by `contextual`
+    /// array literal shaped `shape` typed by `contextual`
     /// (`getContextualTypeForElementExpression`): per constituent of a
-    /// union, a tuple's element at the position while no spread came
-    /// before it (its rest element's type past its fixed elements), an
-    /// array's element type, or the object's numeric property or index.
+    /// union, a tuple's element at the position
+    /// ([`super::call_resolve::tuple_element_contexts`]), an array's
+    /// element type, or, while no spread came before it, the object's
+    /// numeric property or index; a constrained type parameter's through
+    /// its constraint.
     fn contextual_element_type(
         &self,
         contextual: SemanticNodeId,
         position: usize,
-        after_spread: bool,
+        shape: super::call_resolve::ArrayLiteralShape,
     ) -> Option<SemanticNodeId> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
@@ -15346,30 +15336,38 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 drop(data);
                 let types: Vec<SemanticNodeId> = members
                     .iter()
-                    .filter_map(|member| {
-                        self.contextual_element_type(*member, position, after_spread)
-                    })
+                    .filter_map(|member| self.contextual_element_type(*member, position, shape))
                     .collect();
                 (!types.is_empty()).then(|| self.union(&types))
             }
             SemanticNodeData::Array { element, .. } => Some(*element),
             SemanticNodeData::Tuple { elements, .. } => {
-                let fixed = elements.iter().take_while(|element| !element.rest).count();
-                if !after_spread && position < fixed {
-                    return Some(elements[position].value);
-                }
-                let rest = elements.iter().find(|element| element.rest)?;
-                match graph.node_data(rest.value).as_deref() {
-                    Some(SemanticNodeData::Array { element, .. }) => Some(*element),
-                    _ => None,
-                }
+                let types = super::call_resolve::tuple_element_contexts(
+                    elements,
+                    position,
+                    shape,
+                    |rest| match graph.node_data(rest).as_deref() {
+                        Some(SemanticNodeData::Array { element, .. }) => Some(*element),
+                        _ => None,
+                    },
+                );
+                drop(data);
+                (!types.is_empty()).then(|| self.union(&types))
+            }
+            SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            } => {
+                let constraint = *constraint;
+                drop(data);
+                self.contextual_element_type(constraint, position, shape)
             }
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
             _ => {
                 drop(data);
-                if after_spread {
+                if shape.first_spread.is_some_and(|spread| spread < position) {
                     return None;
                 }
                 self.contextual_property_type(contextual, &position.to_string())
@@ -15378,8 +15376,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// Whether `contextual` makes an array literal a TUPLE: some
-    /// constituent of it is a tuple type (the checker's `inTupleContext`).
+    /// constituent of its apparent type is a tuple type (the checker's
+    /// `inTupleContext`), a constrained type parameter's through its
+    /// constraint, as [`Self::contextual_element_type`] reads it.
     fn is_tuple_context(&self, contextual: SemanticNodeId) -> bool {
+        let mut visited = rustc_hash::FxHashSet::default();
+        self.is_tuple_context_within(contextual, &mut visited)
+    }
+
+    /// [`Self::is_tuple_context`]; `visited` holds the type parameters
+    /// already read through, so a circular constraint is no tuple context.
+    fn is_tuple_context_within(
+        &self,
+        contextual: SemanticNodeId,
+        visited: &mut rustc_hash::FxHashSet<SemanticNodeId>,
+    ) -> bool {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
         let data = graph.node_data(contextual);
@@ -15388,7 +15399,17 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             Some(SemanticNodeData::Union(members)) => {
                 let members = members.to_vec();
                 drop(data);
-                members.iter().any(|member| self.is_tuple_context(*member))
+                members
+                    .iter()
+                    .any(|member| self.is_tuple_context_within(*member, visited))
+            }
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => {
+                let constraint = *constraint;
+                drop(data);
+                visited.insert(contextual) && self.is_tuple_context_within(constraint, visited)
             }
             _ => false,
         }
@@ -15525,10 +15546,21 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // `as const` path with mutable elements.
         let tuple_context = !const_asserted
             && contextual.is_some_and(|contextual| self.is_tuple_context(contextual));
+        let spread = |element: &verter_session_query::flow::slice::SliceArrayElement| {
+            matches!(
+                element,
+                verter_session_query::flow::slice::SliceArrayElement::Spread { .. }
+            )
+        };
         ArrayEvalFrame {
             elements,
             const_asserted,
             contextual,
+            shape: super::call_resolve::ArrayLiteralShape {
+                length: Some(elements.len()),
+                first_spread: elements.iter().position(spread),
+                last_spread: elements.iter().rposition(spread),
+            },
             tupled: const_asserted || tuple_context,
             parts: Vec::with_capacity(elements.len()),
             tuple: Vec::new(),
@@ -15563,7 +15595,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     pre_widening,
                 } => {
                     let element_context = frame.contextual.and_then(|contextual| {
-                        self.contextual_element_type(contextual, position, frame.spread_seen)
+                        self.contextual_element_type(contextual, position, frame.shape)
                     });
                     let outcome = match (delivered.take(), element_context) {
                         (Some(outcome), _) => outcome,
@@ -18659,6 +18691,104 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             FlowBindingOccurrence::UnmodeledLocal => FlowIndexedArgumentBinding::UnmodeledLocal,
             FlowBindingOccurrence::Missing => FlowIndexedArgumentBinding::Missing,
         }
+    }
+
+    /// The literal provenance a call argument of this frame nests, its
+    /// reads of value bindings resolved in THIS frame's scope: a read of a
+    /// parameter or local is regular unless the binding keeps a widening
+    /// literal, a read of a binding outside the frame is the owner scope's,
+    /// and a read the frame does not model leaves its literals fresh. A
+    /// parameter that shadows a top-level binding is read as itself.
+    fn frame_argument_literal_provenance(
+        &mut self,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>> {
+        use super::call_resolve::ArgumentReadLiterals;
+        let authored = authored?;
+        let mut reads: Vec<(verter_span::Span, ArgumentReadLiterals)> = Vec::new();
+        for source in authored
+            .positions
+            .iter()
+            .flat_map(|position| position.arms.iter())
+            .flat_map(|arm| arm.regular.iter())
+        {
+            let verter_type_expr::IndexedRegularLiteralSource::Read { value, root } = source else {
+                continue;
+            };
+            if reads.iter().any(|(at, _)| at == root) {
+                continue;
+            }
+            let read = self.frame_argument_read(value, *root);
+            reads.push((*root, read));
+        }
+        self.dispatch.resolve_scoped_argument_literal_provenance(
+            self.canonical,
+            self.owner,
+            Some(authored),
+            &|_, root| {
+                reads
+                    .iter()
+                    .find(|(at, _)| *at == root)
+                    .map_or(ArgumentReadLiterals::Unmodeled, |(_, read)| *read)
+            },
+        )
+    }
+
+    /// How one read in a call argument's literal provenance contributes,
+    /// by the binding its root identifier names here.
+    fn frame_argument_read(
+        &mut self,
+        value: &verter_type_expr::ValueRef,
+        root: verter_span::Span,
+    ) -> super::call_resolve::ArgumentReadLiterals {
+        use super::call_resolve::ArgumentReadLiterals;
+        use verter_session_query::flow::{binding::FlowBindingOccurrence, frame_span::FrameSpan};
+        let binding = match self
+            .bindings
+            .occurrence(FrameSpan::rebase(self.anchor, root))
+        {
+            FlowBindingOccurrence::Resolved(binding) => binding.clone(),
+            FlowBindingOccurrence::Free => return ArgumentReadLiterals::OwnerScope,
+            FlowBindingOccurrence::UnmodeledLocal | FlowBindingOccurrence::Missing => {
+                return ArgumentReadLiterals::Unmodeled;
+            }
+        };
+        if !value.type_args.is_empty() {
+            return ArgumentReadLiterals::Unmodeled;
+        }
+        // A member of a binding (`o.v`) is no declaration of its own: it
+        // reads the member's type as it is, never a widening literal.
+        let (node, widens) = if value.path.len() > 1 {
+            let ty = verter_type_expr::TypeExpr::TypeOf(value.clone());
+            (
+                self.frame_rooted_typeof_path_node(&ty, Some(&binding)),
+                false,
+            )
+        } else {
+            (
+                self.frame_binding_read(&binding),
+                self.widening_of(&binding),
+            )
+        };
+        match node {
+            Some(node) => ArgumentReadLiterals::Frame { widens, node },
+            None => ArgumentReadLiterals::Unmodeled,
+        }
+    }
+
+    /// The value a read of one of this frame's bindings sees: its narrowed
+    /// read, else its reaching value.
+    fn frame_binding_read(&mut self, binding: &FlowProductSubject) -> Option<SemanticNodeId> {
+        let name = Arc::<str>::from(self.products.identity(binding)?.name);
+        let subject = verter_session_query::flow::slice::SliceNarrowSubject {
+            root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
+                name,
+                binding: binding.clone(),
+            },
+            path: Arc::from([]),
+        };
+        self.narrowed_read(&subject)
+            .or_else(|| self.read_local(binding))
     }
 
     /// tsc's `getAssignmentReducedType`: the union of the DECLARED
@@ -28217,6 +28347,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn eval_frame_call_argument(
         &mut self,
         expr: &verter_session_query::flow::slice::SliceExpr,
+        authored_literal: bool,
     ) -> Option<SemanticNodeId> {
         // An argument that reads nothing of this frame is the indexed
         // program's own value, typed where the parameter's context (a
@@ -28224,10 +28355,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // except a branch join, whose arms the checker types each as its
         // own fresh literal (`c ? { a: 1 } : { a: 2 }` passes `{ a: number
         // }`), where the indexed program keeps the arms' member literals.
-        let branch_join = matches!(
-            expr,
-            verter_session_query::flow::slice::SliceExpr::Union { .. }
-        );
+        // A join of bare literal arms (`authored_literal`) stays the indexed
+        // program's: each call candidate widens its literals itself, keeping
+        // those its parameter's contextual type is a literal context for.
+        let branch_join = !authored_literal
+            && matches!(
+                expr,
+                verter_session_query::flow::slice::SliceExpr::Union { .. }
+            );
         if !expression_write_tree(expr).is_empty() || !(branch_join || slice_expr_reads_frame(expr))
         {
             return None;
@@ -28298,17 +28433,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         if let FlowIndexedArgumentBinding::ValueRead(binding)
         | FlowIndexedArgumentBinding::SourceTypeQuery(binding) = binding
         {
-            let name = Arc::<str>::from(self.products.identity(binding)?.name);
-            let subject = verter_session_query::flow::slice::SliceNarrowSubject {
-                root: verter_session_query::flow::slice::SliceNarrowRoot::Local {
-                    name,
-                    binding: binding.clone(),
-                },
-                path: Arc::from([]),
-            };
             return self
-                .narrowed_read(&subject)
-                .or_else(|| self.read_local(binding))
+                .frame_binding_read(binding)
                 .map(|node| IndexedValue { node, fresh: false });
         }
         self.dispatch
