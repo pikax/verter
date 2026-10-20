@@ -172,6 +172,16 @@ owning_methods! {
         name: &Arc<str>,
     ) -> Option<SemanticNodeId>;
 
+    /// The literal provenance of a call argument's `authored` nested
+    /// positions, its value reads resolved in `canonical`'s `owner`
+    /// scope: the record the argument's call key carries.
+    fn resolve_argument_literal_provenance(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        authored: Option<&verter_type_expr::IndexedLiteralProvenance>,
+    ) -> Option<Arc<crate::semantic_query::ArgumentLiteralProvenance>>;
+
     /// Resolve a call through its indexed callee; the call's return type.
     fn execute_indexed_resolve_call(
         &self,
@@ -312,6 +322,24 @@ impl ConstructionResult for SemanticQueryValue {
 impl ConstructionResult for ObjectProjectionFormula {
     fn operands(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
         self.for_each_retained_node(visit);
+    }
+}
+impl ConstructionResult for Arc<crate::semantic_query::ArgumentLiteralProvenance> {
+    fn operands(&self, visit: &mut dyn FnMut(SemanticNodeId)) {
+        for position in self.positions.iter() {
+            for step in position.path.iter() {
+                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                    visit(*key);
+                }
+            }
+            for literal in position
+                .literals
+                .iter()
+                .flat_map(|literals| literals.iter())
+            {
+                visit(*literal);
+            }
+        }
     }
 }
 impl ConstructionResult for SurfaceMember {

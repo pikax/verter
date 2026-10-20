@@ -130,6 +130,7 @@ pub mod signature_utility;
 // guards for the output-materialization carrier escape fence. No runtime
 // consumer depends on it; it exists only for its `const _` build-time checks.
 pub mod call_resolve;
+mod declared_read_widening;
 pub mod dispatch_txn;
 pub mod flow_return;
 pub(crate) mod flow_return_callee;
@@ -180,6 +181,7 @@ mod signature_instantiation;
 pub(crate) mod substitute;
 pub mod symbol_identity;
 pub mod symbolic_root;
+mod template_product;
 mod template_relation;
 pub mod walk;
 
@@ -3380,6 +3382,9 @@ impl Drop for DispatchInjectParseFactGuard {
 pub(super) enum ConditionalBranchSelection {
     True,
     False,
+    /// An `any` check takes both branches, with the true branch's inferred
+    /// types fixed by the relation before the union is published.
+    Both,
     /// The checker defers the conditional (`getConditionalType`): an
     /// operand is generic, or the check fails the restrictive relation
     /// while its permissive instantiation still relates. An `error` check
@@ -3388,7 +3393,7 @@ pub(super) enum ConditionalBranchSelection {
     /// The checker decides the conditional and the lane cannot: the
     /// relation it asks is undecided (`Unknown`, a budget, a coinductive
     /// assumption), the `extends` pattern is one the lane does not infer
-    /// from, or an `any` check meets a pattern. The conditional is
+    /// from. The conditional is
     /// published as a typed gap
     /// ([`PartialReasonSet::UNDECIDED_CONDITIONAL`](crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL)),
     /// never as the checker's answer.

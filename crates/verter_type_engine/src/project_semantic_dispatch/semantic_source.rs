@@ -108,6 +108,7 @@ impl SourceRaiseOutcome {
             | QueryErrorDisposition::UnsupportedSurface
             | QueryErrorDisposition::UnsupportedPosition
             | QueryErrorDisposition::Partial
+            | QueryErrorDisposition::PermissiveWildcard
             | QueryErrorDisposition::Failure => Self::Failed(err),
         }
     }

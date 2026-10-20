@@ -80,16 +80,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::super::ProjectSemanti
             }
             match self.graph().node_data(node).as_deref() {
                 Some(SemanticNodeData::InstantiationRef { base, args })
-                    if base.decl_name.as_ref() == "ThisType" && args.len() == 1 =>
+                    if args.len() == 1
+                        && self.names_contextual_this_marker(
+                            canonical,
+                            &base.canonical_id,
+                            base.owner,
+                            &base.decl_name,
+                        ) =>
                 {
-                    if self
-                        .first_global_declaration(canonical, "ThisType")
-                        .is_some_and(|global| {
-                            global.canonical_id == base.canonical_id && global.owner == base.owner
-                        })
-                    {
-                        receivers.insert(node, args[0]);
-                    }
+                    receivers.insert(node, args[0]);
                 }
                 Some(SemanticNodeData::Intersection(members)) => {
                     pending.push(Work::Join(node, members.to_vec(), false));

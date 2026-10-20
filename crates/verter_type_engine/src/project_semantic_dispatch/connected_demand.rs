@@ -48,6 +48,14 @@ pub const RELATION_UNITS_PER_COMPARISON: usize = 2;
 /// together in the combined performance phase.
 pub const RELATION_PAIR_BYTES: usize = 2_048;
 
+/// The construction bytes one arm of a constructed union reserves while the
+/// union is canonicalized: its place in the member lists the passes build,
+/// its ordering key and its entries in the dedup and literal tables
+/// (measured: about 175 bytes an arm canonicalizing the 99,999 string
+/// literals a two-span template forms). Provisional, like
+/// [`RELATION_PAIR_BYTES`].
+pub const UNION_ARM_BYTES: usize = 256;
+
 /// The construction bytes interning one derived node reserves: its payload
 /// record, held twice (the arena slot and the dedup index's key), a fixed
 /// index entry, the construction root and arena ownership slots, and the
