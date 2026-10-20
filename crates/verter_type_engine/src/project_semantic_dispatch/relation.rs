@@ -8309,12 +8309,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The arms are read as the checker holds them: a nested intersection
     /// flattens and a name stands for the type it resolves to, so an
     /// intersection of union aliases is weighed by those unions. A product
-    /// taken whole under the checker's limit stays under it however the
-    /// checker divides it, so only a product at the limit is weighed as the
-    /// checker weighs it
-    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)).
+    /// taken whole under the checker's limit is accepted from its widths
+    /// alone; only one at the limit is weighed as the one distribution
+    /// authority weighs it
+    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)),
+    /// building only the halves it divides into and paying for them first.
     pub(super) fn intersection_too_complex(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = Vec::new();
         let mut stack: Vec<SemanticNodeId> = vec![node];
@@ -8362,18 +8362,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => arms.push(resolved),
             }
         }
-        if !any_union {
-            return None;
-        }
-        let whole = cross_product_union(
-            arms.iter()
-                .map(|arm| match graph.node_data(*arm).as_deref() {
-                    Some(SemanticNodeData::Union(members)) => ProductFactor::Union(members.len()),
-                    _ => ProductFactor::Single,
-                }),
-            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
-        );
-        if whole.is_ok() {
+        // A product taken whole under the checker's limit stays under it
+        // however the checker divides or simplifies it: accepted from the
+        // widths alone, with nothing built or charged.
+        if !any_union || super::canonical_algebra::cross_product_under_limit(graph, &arms) {
             return None;
         }
         let nullability =
@@ -8390,6 +8382,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             graph,
             &arms,
             nullability,
+            self.construction_meter(),
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
@@ -8463,10 +8456,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        let reduced_source =
-            super::canonical_algebra::reduced_authored_intersection(graph, source, nullability);
-        let reduced_target =
-            super::canonical_algebra::reduced_authored_intersection(graph, target, nullability);
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let reduced_source = super::canonical_algebra::reduced_authored_intersection_charged(
+            graph,
+            source,
+            nullability,
+            self.construction_meter(),
+            &mut evidence,
+        );
+        let reduced_target = super::canonical_algebra::reduced_authored_intersection_charged(
+            graph,
+            target,
+            nullability,
+            self.construction_meter(),
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
         (reduced_source.is_some() || reduced_target.is_some()).then(|| {
             (
                 reduced_source.unwrap_or(source),
