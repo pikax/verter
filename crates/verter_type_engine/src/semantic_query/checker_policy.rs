@@ -369,6 +369,32 @@ impl RelationComplexity {
     }
 }
 
+/// The checking site a refused tuple splice is reported at: the node the
+/// checker is checking when it builds the tuple (`isPartOfTypeNode` of its
+/// current node), never the place the tuple is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum TupleSplicePosition {
+    /// A type node: TS2799.
+    #[default]
+    Type,
+    /// An expression: TS2800.
+    Expression,
+}
+
+/// The refusal of a tuple splice the tuple-product constructor's size gate
+/// (`project_semantic_dispatch::build::tuple_product`) refused, reported at
+/// `position`. That gate owns the checker's tuple-size rule and is this
+/// bridge's one caller; it mints only the tuple-spread refusal.
+pub(crate) const fn tuple_splice_refusal(position: TupleSplicePosition) -> OperationRefusal {
+    OperationRefusal::of(
+        match position {
+            TupleSplicePosition::Type => CheckerDiagnosticCode::TupleTooLarge,
+            TupleSplicePosition::Expression => CheckerDiagnosticCode::ExpressionTupleTooLarge,
+        },
+        CheckerDiagnosticOperation::TupleSpread,
+    )
+}
+
 /// One factor of a cross product, as `getCrossProductUnionSize` counts it: a
 /// union contributes its constituents, `never` makes the product empty, and
 /// any other type contributes one.
@@ -519,6 +545,8 @@ mod tests {
                 .step(5, CheckerDiagnosticOperation::ConditionalTail)
                 .unwrap_err(),
             cross_product_union([ProductFactor::Union(usize::MAX)], OP).unwrap_err(),
+            tuple_splice_refusal(TupleSplicePosition::Type),
+            tuple_splice_refusal(TupleSplicePosition::Expression),
             with_relation_comparisons_for_tests(0, || RelationComplexity::default().record())
                 .unwrap_err(),
         ];

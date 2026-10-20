@@ -26,6 +26,14 @@ export {};
 The demand is **the declared type of `__Probe`**. Both arms answer it from the
 same files on disk, byte for byte.
 
+The `vue-setup-store-remap` series uses synthetic setup closures with 5, 10,
+20 and 80 groups of two ref-valued state members and one captured action.
+The key remap excludes actions and unwraps state into
+`readonly [number] | readonly [string]`. The Rust growth guard checks connected
+work, cold builds, substitutions, key-remap evaluations and flow-obligation
+expansions, since dispatch counts alone can hide repeated domain scans and
+per-member flow planning.
+
 | Arm | What runs | Enters the head-to-head |
 |---|---|---|
 | `verter` | `semantic_perf_probe`: a release executable linking the production `verter_session` library, host built with the shipped `HostConfig::default()` (no audit, trace, footprint or metrics capture) | yes |

@@ -26,6 +26,21 @@ use crate::semantic_query::{
 };
 use verter_session_query::inputs::prepared::PreparedTypeDeclResolution;
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static MAPPED_NAME_REMAP_EVALUATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual per-key remap classifications on this thread, for growth tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
+    MAPPED_NAME_REMAP_EVALUATIONS.get()
+}
+
+#[path = "tuple_product.rs"]
+mod tuple_product;
+pub(super) use tuple_product::ExpressionSplice;
+
 /// The node budget of one transitive self-root walk
 /// ([`ProjectSemanticDispatch::transitive_self_roots_from_nodes`]). A walk
 /// that exceeds it has NOT established its root set and the result it
@@ -421,43 +436,16 @@ pub(super) fn class_prototype_member(
     }
 }
 
-/// One piece of a distributed template concatenation: literal text, or a
-/// hole type the template literal type keeps (`string`, `number`, …).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) enum TemplatePiece {
-    Text(String),
-    Hole(SemanticNodeId),
-}
+pub(super) use super::template_product::TemplatePiece;
+use super::template_product::{TemplateConcatenation, TemplateConstituent, TemplatePlan};
 
-/// One constituent a template, or one of its interpolated expressions,
-/// distributes into: its pieces, and — for a literal type that is not a
-/// string (a number, bigint or boolean literal, `null`, `undefined`, an enum
-/// member) — that type. The checker counts constituents, not texts: `"0"`
-/// and `0` are two constituents of `"0" | 0` though they spell the same
-/// text, while `"a0"` and the `"a0"` a nested template forms are one.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TemplateConstituent {
-    pieces: Vec<TemplatePiece>,
-    spelled: Option<SemanticNodeId>,
-}
-
-impl TemplateConstituent {
-    /// A string literal or template literal constituent of `pieces`.
-    fn string(pieces: Vec<TemplatePiece>) -> Self {
-        Self {
-            pieces,
-            spelled: None,
-        }
-    }
-}
-
-/// The concatenations a template distributes into.
-enum TemplateAlternatives {
-    /// Every constituent, in order.
-    Finite(Vec<TemplateConstituent>),
+/// What a template literal type's spans settle to.
+enum TemplateSpans {
+    /// The product, factored.
+    Plan(TemplatePlan),
     /// Some expression does not settle; the template stays authored.
     Open,
-    /// The template's product exhausted its allowance (TS2590).
+    /// The template's product reaches the checker's limit (TS2590).
     TooComplex(crate::semantic_query::checker_policy::OperationRefusal),
     /// The connected-work ledger refused the construction.
     Exhausted(crate::semantic_query::PartialReasonSet),
@@ -466,26 +454,12 @@ enum TemplateAlternatives {
     AnyString,
 }
 
-/// The bytes one template piece holds: the piece and its text.
-fn template_piece_bytes(piece: &TemplatePiece) -> usize {
-    std::mem::size_of::<TemplatePiece>()
-        + match piece {
-            TemplatePiece::Text(text) => text.len(),
-            TemplatePiece::Hole(_) => 0,
-        }
-}
-
-/// The bytes a list of template pieces holds.
-fn template_piece_list_bytes(pieces: &[TemplatePiece]) -> usize {
-    pieces.iter().map(template_piece_bytes).sum()
-}
-
-/// The bytes a list of concatenations holds, piece for piece.
-fn template_pieces_bytes(concatenations: &[Vec<TemplatePiece>]) -> usize {
-    concatenations
-        .iter()
-        .map(|pieces| template_piece_list_bytes(pieces))
-        .sum()
+/// The constituents one interpolated expression contributes.
+enum TemplateArgAlternatives {
+    /// Every constituent, in order; none for `never`.
+    Finite(Vec<TemplateConstituent>),
+    /// The expression does not distribute into constituents.
+    Stop(TemplateSpans),
 }
 
 /// Canonical TypeScript stringification of a literal interpolated into a
@@ -500,8 +474,8 @@ fn literal_value_template_text(value: &LiteralValue) -> String {
         LiteralValue::Number(number) => js_number_to_string(*number),
         LiteralValue::Boolean(flag) => if *flag { "true" } else { "false" }.to_string(),
         // `LiteralValue::BigInt` stores the signed base-10 magnitude with no
-        // `n` suffix (see `verter_type_expr_oxc::lower_literal`), which is
-        // exactly TS's interpolated form of a bigint literal.
+        // `n` suffix and an unsigned zero (see `TypeExpr::bigint_literal`),
+        // which is exactly TS's interpolated form of a bigint literal.
         LiteralValue::BigInt(digits) => digits.clone(),
     }
 }
@@ -902,6 +876,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         self.build_typeof_suspending(value_root, path, context, None)
     }
 
@@ -920,6 +896,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         path: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> TypeofStart {
+        let _site = self
+            .checking_site_scope(crate::semantic_query::checker_policy::TupleSplicePosition::Type);
         let mut suspended = None;
         let output = self.build_typeof_suspending(value_root, path, context, Some(&mut suspended));
         match suspended {
@@ -1176,6 +1154,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         build: &mut TypeofBuild,
         delivery: Option<super::query_frames::FrameDelivery>,
     ) -> InstantiatePoll {
+        let _site = self.checking_site_scope(build.checking_site());
         let mut delivery = match &mut build.body {
             TypeofBody::Unstarted => unreachable!("a build begins its first body before it drains"),
             TypeofBody::Lowering(_) => {
@@ -6286,11 +6265,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Cross-file declaration-augmentation stitch (`declare module "./local"`
-    /// relative interface merging from sibling files).
+    /// or `declare module "<package>"` interface merging from other files).
     ///
     /// Given a base declaration `(decl_canonical, decl_name)` and its
     /// already-lowered base body `base_result`, this finds every augmenter file
-    /// whose `declare module "<rel>"` block resolves to `decl_canonical` and
+    /// whose `declare module "<specifier>"` block resolves to `decl_canonical` and
     /// augments `decl_name`, lowers each augmenter's RETAINED inner body in the
     /// augmenter's own file context, and folds all contributions into a single
     /// [`SemanticNodeData::MergedDecl`] peer-merge carrier — the ONE
@@ -6849,7 +6828,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             self.ctx.augmentation_index_with_resolutions(target.clone());
         // A specifier the index population resolved in this read is not
         // resolved again: the answer is the one the same fold just read.
-        let resolve_rel = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
+        let resolve_module_file = |augmenter: &str, spec: &str| -> Option<Arc<str>> {
             if let Some(resolved) = index_resolutions.get(augmenter).and_then(|specs| {
                 specs
                     .iter()
@@ -7025,14 +7004,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         continue;
                     }
-                    let relative = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
-                    && verter_session_query::resolution::is_relative_specifier(fact.specifier.as_ref()) {
-                    resolve_rel(augmenter_canonical, fact.specifier.as_ref())
+                    let resolved = if matches!(key.target, verter_session_query::resolution::AugmentationTargetKind::ResolvedRelativeCanonical(_))
+                    && verter_session_query::source::augmentation::fact_augments_resolved_module(fact) {
+                    resolve_module_file(augmenter_canonical, fact.specifier.as_ref())
                 } else { None };
                     if !verter_session_query::source::augmentation::augmenter_matches_target(
                         fact,
                         &key,
-                        relative.as_deref(),
+                        resolved.as_deref(),
                     ) {
                         continue;
                     }
@@ -8210,7 +8189,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         demand_canonical: &str,
         name: &str,
     ) -> Option<ResolvedRootIdentity> {
-        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if let Some(lib) = self.lib_global_declaration(demand_canonical, name, GlobalSpace::Type) {
             return Some(lib);
         }
@@ -8219,23 +8197,74 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             name,
             verter_session_query::facts::SymbolSpace::Type,
         );
-        let first = population.entries.iter().find(|entry| {
-            !entry.is_automatic_lib
-                && match entry.origin {
-                    ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
-                    ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => {
-                        true
-                    }
-                    ContributorOrigin::FileScopeNamespace
-                    | ContributorOrigin::FileScopeValue
-                    | ContributorOrigin::ModuleAugmentation => false,
-                }
-        })?;
+        let first = population
+            .entries
+            .iter()
+            .find(|entry| declares_global_type(entry))?;
         Some(ResolvedRootIdentity::new_in_owner(
             Arc::clone(&first.artifact_key.canonical),
             first.owner,
             name,
         ))
+    }
+
+    /// Whether `(canonical, owner, name)` addresses ONE declaration of the
+    /// merged GLOBAL type `name` a reference in `demand_canonical` reads —
+    /// the project's library declaration, a module's `declare global`
+    /// contribution or a script's file-scope declaration — not only the
+    /// first of them ([`Self::first_global_declaration`]): every one of
+    /// them declares the same global symbol. A module's `declare global`
+    /// contribution is not addressed by the identity when the module also
+    /// declares a module-scope type of the name, which the identity names
+    /// instead.
+    fn is_global_type_declaration(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        use verter_session_query::inputs::contributors::ContributorOrigin;
+        if self
+            .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
+            .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
+        {
+            return true;
+        }
+        let population = self.global_contributors_in(
+            demand_canonical,
+            name,
+            verter_session_query::facts::SymbolSpace::Type,
+        );
+        population.entries.iter().any(|entry| {
+            entry.artifact_key.canonical.as_ref() == canonical
+                && entry.owner == owner
+                && declares_global_type(entry)
+                && (entry.origin != ContributorOrigin::DeclareGlobal
+                    || self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .is_some_and(|serve| {
+                            !serve.indexed.shallow_state.has_type_symbol_in(owner, name)
+                        }))
+        })
+    }
+
+    /// Whether the declaration `(canonical, owner, name)` a reference in
+    /// `demand_canonical` resolves to is the contextual-this marker: a
+    /// declaration of the GLOBAL `ThisType`, whichever of its declarations
+    /// it is ([`Self::is_global_type_declaration`]). The checker identifies
+    /// the marker by the merged global symbol, so a module-scope
+    /// `ThisType` is an ordinary type.
+    pub(in crate::project_semantic_dispatch) fn names_contextual_this_marker(
+        &self,
+        demand_canonical: &str,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name: &str,
+    ) -> bool {
+        name == "ThisType"
+            && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,
@@ -8794,6 +8823,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             super::dispatch_txn::FlowMemberReuse,
         )>,
     ) {
+        let Some(recording) = self.begin_transaction_read() else {
+            return (read(), None);
+        };
+        let value = read();
+        let complete = complete(&value);
+        let recorded = recording.finish(self, complete);
+        (value, recorded)
+    }
+
+    /// Begin recording a transaction read whose work does not run inside one
+    /// closure (the explicit-stack form of [`Self::record_transaction_read`]):
+    /// every channel the reads in between reach is recorded until
+    /// [`TransactionReadRecording::finish`]. `None` when the read could not
+    /// be replayed — no live tracer, no live build-local frame, or a
+    /// cold-compute completeness already partial. Recordings nest, and each
+    /// finishes before the one begun before it.
+    pub(super) fn begin_transaction_read(&self) -> Option<TransactionReadRecording<'_>> {
         // A recording is only replayable when every channel an enclosing
         // build observes is observable here: a live tracer, a live
         // build-local frame and a cold-compute completeness that can show
@@ -8805,41 +8851,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !(completeness_scope_active
                 && crate::request_context::current_cold_compute_completeness().is_partial());
         if !recordable {
-            return (read(), None);
+            return None;
         }
         let private_completeness = (!completeness_scope_active)
             .then(crate::request_context::ColdComputeCompletenessScope::enter);
         let evidence_epoch = self.canonical_evidence_epoch.get();
         let frame = super::BuildLocalTaintGuard::push(&self.build_local_taint);
         let refusals = crate::fact_tracing::RefusalObservationScope::enter();
-        let (value, reads) = crate::resolver_core::resolver_context::record_fact_reads(read);
-        let refused = refusals.observed();
-        drop(refusals);
-        let observed = frame.finish();
-        let folded_partial =
-            crate::request_context::current_cold_compute_completeness().is_partial();
-        if let Some(scope) = private_completeness {
-            scope.discard();
-        }
-        self.fold_observed_frame_into_top(&observed);
-        let refusal = match refused {
-            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
-            None if reads.non_cacheable || observed.cache_suppress => {
-                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
-            }
-            None => verter_session_query::facts::reuse::ObservedRefusal::None,
-        };
-        let complete = !observed.result_is_partial && !folded_partial && complete(&value);
-        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
-        if !reuse.is_request_reusable() {
-            return (value, None);
-        }
-        let replay = super::dispatch_txn::FlowMemberReuse {
+        let reads = crate::resolver_core::resolver_context::FactReadRecording::begin();
+        Some(TransactionReadRecording {
             reads,
-            observed_self_roots: observed.observed_self_roots,
-            canonical_evidence_deposited: self.canonical_evidence_epoch.get() != evidence_epoch,
-        };
-        (value, Some((reuse, replay)))
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        })
     }
 
     /// Replay a read [`Self::record_transaction_read`] recorded into the
@@ -12516,176 +12542,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    // (See `NormalizedTupleShape` at module scope below the impl block.)
-
-    construction_ordinal_seam! {
-        /// Spread-normalise a tuple's element list (the shared
-        /// normalize-on-intern rule for every tuple intern site that can
-        /// receive substituted / signature-derived elements):
-        ///
-        /// 1. **Variadic splice** — a `rest: true` element whose value is a
-        ///    settled `Tuple` (through transparent aliases) splices that
-        ///    tuple's elements in place, preserving the inner labels /
-        ///    optional / rest markers. This is what makes a userland
-        ///    `Concat<A, B> = [...A, ...B]` concatenate once `A` / `B`
-        ///    substitute to concrete tuples — no utility name special-casing.
-        ///    Splicing recurses into the spliced elements under a small depth
-        ///    budget (nested `[...[...T]]` shapes); budget exhaustion keeps
-        ///    the element verbatim.
-        /// 2. **Non-trailing optional reconciliation** — an `optional` marker
-        ///    followed anywhere later by a REQUIRED (non-optional, non-rest)
-        ///    element converts to a REQUIRED `T | undefined` slot.
-        ///    Optional-before-required is unrepresentable TS (TS1257); the
-        ///    pinned tsgo materialises `[...[a?: number], string]` as
-        ///    `[number | undefined, string]` (length 2). A trailing optional
-        ///    run — including one followed only by a rest tail, which IS
-        ///    legal (`[a?: number, ...boolean[]]`) — keeps its `?`.
-        /// 3. **Sole-rest collapse** — a tuple consisting SOLELY of one
-        ///    rest-of-array element IS that array (`[...E[]]` ≡ `E[]`,
-        ///    the `(...args: E[])` parameters surface). The collapsed
-        ///    array's `readonly` mirrors the OUTER tuple (`readonly`
-        ///    parameter — pinned tsgo: `readonly [...number[]]` ≡
-        ///    `readonly number[]`; `[...(readonly number[])]` ≡ MUTABLE
-        ///    `number[]`), never the inner array's flag.
-        ///
-        /// A rest element whose value is open / unresolved (a generic, a
-        /// carrier, anything not a settled tuple/array) is preserved
-        /// verbatim — normalization never forces materialisation.
-        fn normalize_tuple_spread(
-            &self,
-            elements: &[crate::semantic_query::TupleElement],
-            readonly: bool,
-        ) -> NormalizedTupleShape {
-            let mut out: Vec<crate::semantic_query::TupleElement> = Vec::with_capacity(elements.len());
-            self.splice_tuple_elements(elements, &mut out);
-            // Non-trailing optional reconciliation (reverse scan: a slot's
-            // conversion depends only on LATER elements; a converted slot is
-            // itself required and forces conversion of earlier optionals).
-            let mut required_follows = false;
-            for index in (0..out.len()).rev() {
-                if out[index].optional && required_follows {
-                    let undefined_node = self.graph().intern_node(SemanticNodeData::Primitive(
-                        crate::semantic_query::PrimitiveKind::Undefined,
-                    ));
-                    let widened = self.intern_normalized_union_or_intersection(
-                        &[out[index].value, undefined_node],
-                        /* is_union */ true,
-                    );
-                    out[index].value = widened;
-                    out[index].optional = false;
-                }
-                if !out[index].optional && !out[index].rest {
-                    required_follows = true;
-                }
-            }
-            if out.len() == 1 && out[0].rest {
-                if let Some(array_node) = self.settled_node_through_aliases(out[0].value, |data| {
-                    matches!(data, SemanticNodeData::Array { .. })
-                }) {
-                    if let Some(SemanticNodeData::Array {
-                        element,
-                        readonly: inner_readonly,
-                    }) = self.graph().node_data(array_node).as_deref()
-                    {
-                        // The collapsed array's readonly mirrors the OUTER
-                        // tuple; reuse the inner node only when the flags
-                        // already agree. The replacement intern preserves the
-                        // inner node's origin scope so `ProjectPath`
-                        // self-rooting over the collapsed base still records
-                        // the origin file's `(canonical, whole_hash)` root.
-                        if *inner_readonly == readonly {
-                            return NormalizedTupleShape::Array(array_node);
-                        }
-                        let element = *element;
-                        return NormalizedTupleShape::Array(self.graph().intern_preserving_scope(
-                            array_node,
-                            SemanticNodeData::Array { element, readonly },
-                        ));
-                    }
-                }
-            }
-            NormalizedTupleShape::Tuple(out)
-        }
-    }
-
-    /// The splice body of [`Self::normalize_tuple_spread`]: every rest
-    /// element whose value settles on a tuple is replaced by that tuple's
-    /// elements, spliced in turn, so `[...[...[1, 2]]]` is `[1, 2]` at any
-    /// nesting. The tuples being spliced are read from a work list; a tuple
-    /// spread into itself (a cycle) keeps its rest element as it is.
-    fn splice_tuple_elements(
-        &self,
-        elements: &[crate::semantic_query::TupleElement],
-        out: &mut Vec<crate::semantic_query::TupleElement>,
-    ) {
-        // Each level: the elements it splices, the next one, and the tuple
-        // it came from (none for the outermost).
-        let mut levels: Vec<(
-            Arc<[crate::semantic_query::TupleElement]>,
-            usize,
-            Option<SemanticNodeId>,
-        )> = vec![(
-            elements
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect(),
-            0,
-            None,
-        )];
-        let mut splicing: FxHashSet<SemanticNodeId> = FxHashSet::default();
-        while let Some((elements, next, _)) = levels.last_mut() {
-            let Some(element) = elements
-                .get(*next)
-                .map(crate::semantic_query::TupleElement::copy)
-            else {
-                if let Some((_, _, Some(tuple))) = levels.pop() {
-                    splicing.remove(&tuple);
-                }
-                continue;
-            };
-            *next += 1;
-            if element.rest {
-                let inner = self
-                    .settled_node_through_aliases(element.value, |data| {
-                        matches!(data, SemanticNodeData::Tuple { .. })
-                    })
-                    .filter(|tuple| !splicing.contains(tuple))
-                    .and_then(|tuple| match self.graph().node_data(tuple).as_deref() {
-                        Some(SemanticNodeData::Tuple {
-                            elements: inner, ..
-                        }) => Some((tuple, Arc::clone(inner.as_arc()))),
-                        _ => None,
-                    });
-                if let Some((tuple, inner)) = inner {
-                    splicing.insert(tuple);
-                    levels.push((inner, 0, Some(tuple)));
-                    continue;
-                }
-            }
-            out.push(element);
-        }
-    }
-
-    /// Follow `node`'s transparent `Alias` redirects, however long the
-    /// chain, and return the settled node iff its data matches `predicate`.
-    /// `None` for open / unresolved carriers and for an alias cycle —
-    /// callers preserve those verbatim.
-    fn settled_node_through_aliases(
-        &self,
-        node: SemanticNodeId,
-        predicate: impl Fn(&SemanticNodeData) -> bool,
-    ) -> Option<SemanticNodeId> {
-        let graph = self.graph();
-        match graph.alias_chain_end(node, |_| {}) {
-            crate::semantic_query_memo::AliasChainEnd::Node(settled) => graph
-                .node_data(settled)
-                .is_some_and(|data| predicate(&data))
-                .then_some(settled),
-            crate::semantic_query_memo::AliasChainEnd::Dangling(_)
-            | crate::semantic_query_memo::AliasChainEnd::Cycle => None,
-        }
-    }
-
     /// Build a tuple node whose elements are the function's parameter
     /// types — the surface shape of `Parameters<F>` /
     /// `ConstructorParameters<F>`. Labels carry over from the parameter
@@ -13530,8 +13386,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // whose underlying ProjectPath read can be genuinely incomplete
         // (budget / recursion / walker-fatal). Carry that partiality onto
         // the published keyof surface.
-        let mut keyof_is_partial = false;
+        let keyof_is_partial = std::cell::Cell::new(false);
         let enumerated = std::cell::Cell::new(false);
+        // The names a composite's surface publishes. A stopped enumeration
+        // holds only the names it reached, so its keys stay the deferred
+        // `keyof`, never that subset (an empty one would read as `never`).
+        let published_names = || match self.member_names_for_published_projection(base) {
+            Some((_, true)) => {
+                keyof_is_partial.set(true);
+                None
+            }
+            Some((names, false)) => Some(names),
+            None => self.key_names_from_base_node(base),
+        };
         let intern_keys = |names| {
             let node = self.intern_keyspace_keys(base, names, &fence);
             if node.is_some() {
@@ -13596,13 +13463,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     {
                         self.graph().intern_node(SemanticNodeData::KeyOf { base })
                     }
-                    None => self
-                        .member_names_for_published_projection(base)
-                        .map(|(names, is_partial)| {
-                            keyof_is_partial |= is_partial;
-                            names
-                        })
-                        .or_else(|| self.key_names_from_base_node(base))
+                    None => published_names()
                         .and_then(&intern_keys)
                         .unwrap_or_else(|| {
                             self.graph().intern_node(SemanticNodeData::KeyOf { base })
@@ -13616,13 +13477,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.key_of_composite(&members.members_arc(), true)
                     .expect("the keys settled")
             }
-            Some(SemanticNodeData::Union(_)) => self
-                .member_names_for_published_projection(base)
-                .map(|(names, is_partial)| {
-                    keyof_is_partial |= is_partial;
-                    names
-                })
-                .or_else(|| self.key_names_from_base_node(base))
+            Some(SemanticNodeData::Union(_)) => published_names()
                 .and_then(&intern_keys)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
             // Declaration Merging (CRITICAL): `keyof <merged decl>` routes
@@ -13731,7 +13586,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence,
         ))
         .with_observed_self_roots(observed_self_roots);
-        keyof_output.fold_partial(keyof_is_partial);
+        keyof_output.fold_partial(keyof_is_partial.get());
         // The enumeration above emitted only keys contributed by the source;
         // an unresolved source retains its addressed keyof continuation.
         keyof_output.approximation = enumerated
@@ -13865,13 +13720,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         base: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticNodeId> {
-        let read = |base: SemanticNodeId| match self
-            .execute_read(SemanticQueryKey::KeyOf { base, context })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
-        };
+        let read = |base: SemanticNodeId| self.complete_key_of(base, context);
         let settled_keys = |keys: SemanticNodeId| {
             (!matches!(
                 self.graph().node_data(keys).as_deref(),
@@ -14025,22 +13874,34 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The `keyof base` query's answer when it is complete. A read that
+    /// stopped short holds no key set — an empty one would read as
+    /// `never` — so its partiality folds into the caller and the answer
+    /// is `None`.
+    fn complete_key_of(
+        &self,
+        base: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let read = self.execute_read(SemanticQueryKey::KeyOf { base, context });
+        if read.result_is_partial() {
+            self.fold_local_partial_completeness(read.partial_reason_classes());
+            return None;
+        }
+        match read.value {
+            QueryResult::Value(node) => Some(node),
+            _ => None,
+        }
+    }
+
     /// The literal keys `keyof base` denotes — the set a relation or a
     /// comparability question reads, whichever `keyof` carrier stands for
-    /// it in print. `None` when the keys do not settle.
+    /// it in print. `None` when the keys do not settle or their read
+    /// stopped short.
     pub(super) fn key_set_of(&self, base: SemanticNodeId) -> Option<SemanticNodeId> {
         let published =
             crate::semantic_query::ProjectionReductionContext::published(ProjectionMode::Expanded);
-        let read = |base: SemanticNodeId| match self
-            .execute_read(SemanticQueryKey::KeyOf {
-                base,
-                context: published,
-            })
-            .value
-        {
-            QueryResult::Value(node) => Some(node),
-            _ => None,
-        };
+        let read = |base: SemanticNodeId| self.complete_key_of(base, published);
         // Each step settles the carrier a `keyof` kept to the type it
         // stands for — a declaration or application to its body, a class
         // expression's instance (which keeps its `keyof` origin) to the
@@ -14358,8 +14219,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 QueryResult::Value(formula) => formula,
                 QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
             };
-            let single_closed = matches!(formula.alternatives(), [only] if only.closed().is_some());
-            let members = self.spread_formula_positive_members_for_macro(&formula);
+            let single_closed = formula.width() == 1 && formula.all_alternatives_closed();
+            let members = self
+                .spread_formula_positive_members_for_macro(&formula)
+                .ok()?;
             Some((members, !single_closed))
         }
     }
@@ -16148,6 +16011,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(remap_node) = mapper.name_remap else {
             return MappedKeyRemapOutcome::Keep(key.key.clone());
         };
+        #[cfg(any(test, feature = "test-support"))]
+        MAPPED_NAME_REMAP_EVALUATIONS.set(MAPPED_NAME_REMAP_EVALUATIONS.get() + 1);
         // Kind-preserving substitution: the `as` clause sees the key's
         // ORIGINAL literal (probe12: `{ [K in 1 as K extends number ?
         // "n" : "s"]: K }` = `{ n: 1 }` — a stringified K would select
@@ -17249,7 +17114,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let on_path = self.awaited_active.borrow().contains(relation, operand)
             || self
                 .graph()
-                .is_same_path_claim(&relation.key(operand, context));
+                .is_same_path_claim_at(&relation.key(operand, context), self.checking_site.get());
         if on_path {
             self.fold_into_top_build_local_taint(false, true);
         }
@@ -17887,7 +17752,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// answer, a complete one.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
-        if self.graph().is_same_path_claim(&application) {
+        if self
+            .graph()
+            .is_same_path_claim_at(&application, self.checking_site.get())
+        {
             return Some(Some(self.lib_awaited_recurs()));
         }
         let body = match self.execute_read(application).value {
@@ -18685,12 +18553,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             })
         };
-        let alternatives = match self.template_alternatives(quasis, args, eval_context) {
-            TemplateAlternatives::Open => return Ok(authored()),
-            TemplateAlternatives::TooComplex(refusal) => {
+        let plan = match self.template_plan(quasis, args, eval_context) {
+            TemplateSpans::Plan(plan) => plan,
+            TemplateSpans::Open => return Ok(authored()),
+            TemplateSpans::TooComplex(refusal) => {
                 return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
             }
-            TemplateAlternatives::Exhausted(reasons) => {
+            TemplateSpans::Exhausted(reasons) => {
                 self.fold_local_partial_completeness(reasons);
                 return Err(reasons);
             }
@@ -18698,30 +18567,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // type (an enum member whose value is not a constant) makes the
             // whole template `string`, as the checker's template
             // construction does.
-            TemplateAlternatives::AnyString => {
+            TemplateSpans::AnyString => {
                 return Ok(graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String)))
             }
-            TemplateAlternatives::Finite(alternatives) => alternatives,
         };
-        // Each concatenation interns one derived node: its bytes are
-        // reserved, all at once, before any is built.
-        let node_bytes = alternatives
-            .iter()
-            .map(|constituent| {
-                super::connected_demand::derived_node_bytes(template_piece_list_bytes(
-                    &constituent.pieces,
-                ))
-            })
-            .try_fold(0usize, usize::checked_add)
-            .unwrap_or(usize::MAX);
-        if let Err(reasons) = self.connected_demand.reserve_bytes(node_bytes) {
+        // Every concatenation interns one derived node: the work and the
+        // bytes of all of them are charged, from the factored plan, before
+        // the first is built.
+        if let Err(reasons) = self.charge_template_product(&plan) {
             self.fold_local_partial_completeness(reasons);
             return Err(reasons);
         }
-        let members: Vec<SemanticNodeId> = alternatives
-            .into_iter()
-            .map(|constituent| self.template_type_from_pieces(constituent.pieces))
-            .collect();
+        // The charge above refused any product whose count overflows.
+        let mut members: Vec<SemanticNodeId> = Vec::with_capacity(
+            plan.cardinality()
+                .expect("an admitted template product's cardinality fits a usize"),
+        );
+        let mut cursor = plan.cursor();
+        while let Some(concatenation) = cursor.next_concatenation() {
+            members.push(self.template_type_from_concatenation(concatenation));
+        }
+        drop(plan);
         Ok(match members.as_slice() {
             [] => graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Never)),
             [single] => *single,
@@ -18807,29 +18673,46 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         Some((texts.into_iter().map(OwnedStr::from).collect(), holes))
     }
 
-    /// Every concatenation a template of `quasis` and `args` distributes
-    /// into, each as its sequence of text and hole pieces — the cartesian
-    /// product of the per-expression alternatives
-    /// ([`Self::template_arg_alternatives`]). The product is weighed first
-    /// as the checker weighs it (`checkCrossProductUnion` over the
-    /// expressions' constituent counts, `never` an empty factor): at the
-    /// checker's limit it is TS2590 and nothing is built. Each concatenation
-    /// built is charged to the connected-work ledger before it is formed.
-    fn template_alternatives(
+    /// The factored product of a template of `quasis` and `args`: each
+    /// expression's constituents ([`Self::template_arg_alternatives`]) as
+    /// one span of a [`TemplatePlan`]. The product is weighed as the checker
+    /// weighs it (`checkCrossProductUnion` over the spans' constituent
+    /// counts) before anything is built: at the checker's limit it is TS2590.
+    ///
+    /// A `never` expression empties the product wherever it sits, so the
+    /// template is `never` even when another expression is still open: the
+    /// checker finds the empty span before it reads any other.
+    fn template_plan(
         &self,
         quasis: &[OwnedStr],
         args: &[SemanticNodeId],
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> TemplateAlternatives {
+    ) -> TemplateSpans {
         use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
-        let mut per_arg: Vec<Vec<TemplateConstituent>> = Vec::with_capacity(args.len());
+        let mut spans: Vec<Vec<TemplateConstituent>> = Vec::with_capacity(args.len());
+        let mut stopped: Option<TemplateSpans> = None;
         for &arg in args {
             match self.template_arg_alternatives(arg, eval_context) {
-                TemplateAlternatives::Finite(alternatives) => per_arg.push(alternatives),
-                other => return other,
+                TemplateArgAlternatives::Finite(constituents) => spans.push(constituents),
+                TemplateArgAlternatives::Stop(TemplateSpans::Exhausted(reasons)) => {
+                    return TemplateSpans::Exhausted(reasons)
+                }
+                TemplateArgAlternatives::Stop(other) => {
+                    stopped.get_or_insert(other);
+                }
             }
         }
-        let factors = per_arg.iter().map(|alternatives| match alternatives.len() {
+        let texts = (0..=args.len())
+            .map(|index| quasis.get(index).map(|q| q.to_string()).unwrap_or_default())
+            .collect();
+        let plan = TemplatePlan::new(texts, spans);
+        if plan.cardinality() == Some(0) {
+            return TemplateSpans::Plan(plan);
+        }
+        if let Some(stopped) = stopped {
+            return stopped;
+        }
+        let factors = plan.span_widths().map(|width| match width {
             0 => ProductFactor::Never,
             1 => ProductFactor::Single,
             width => ProductFactor::Union(width),
@@ -18838,59 +18721,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             factors,
             crate::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
         ) {
-            return TemplateAlternatives::TooComplex(refusal);
+            return TemplateSpans::TooComplex(refusal);
         }
-        let text = |index: usize| {
-            TemplatePiece::Text(quasis.get(index).map(|q| q.to_string()).unwrap_or_default())
-        };
-        let mut results: Vec<Vec<TemplatePiece>> = vec![vec![text(0)]];
-        for (index, alternatives) in per_arg.iter().enumerate() {
-            let width = results.len() * alternatives.len();
-            if let Err(reasons) = self.connected_demand.charge_units(width) {
-                return TemplateAlternatives::Exhausted(reasons);
-            }
-            // The concatenations are reserved before one is built: each
-            // holds its prefix's pieces, the alternative's and the next text.
-            let suffix = text(index + 1);
-            let bytes = template_pieces_bytes(&results)
-                .checked_mul(alternatives.len())
-                .zip(
-                    alternatives
-                        .iter()
-                        .map(|alternative| template_piece_list_bytes(&alternative.pieces))
-                        .try_fold(0usize, usize::checked_add)
-                        .and_then(|total| total.checked_mul(results.len())),
-                )
-                .and_then(|(prefixes, alternatives)| prefixes.checked_add(alternatives))
-                .and_then(|total| {
-                    total.checked_add(width.checked_mul(
-                        std::mem::size_of::<Vec<TemplatePiece>>() + template_piece_bytes(&suffix),
-                    )?)
-                })
-                .unwrap_or(usize::MAX);
-            if let Err(reasons) = self.connected_demand.reserve_bytes(bytes) {
-                return TemplateAlternatives::Exhausted(reasons);
-            }
-            let mut next: Vec<Vec<TemplatePiece>> = Vec::with_capacity(width);
-            for prefix in &results {
-                for alternative in alternatives {
-                    let mut combined = prefix.clone();
-                    combined.extend(alternative.pieces.iter().cloned());
-                    combined.push(text(index + 1));
-                    next.push(combined);
-                }
-            }
-            results = next;
-        }
-        TemplateAlternatives::Finite(
-            results
-                .into_iter()
-                .map(TemplateConstituent::string)
-                .collect(),
-        )
+        TemplateSpans::Plan(plan)
     }
 
-    /// The alternatives ONE interpolated expression contributes, each a
+    /// Charge the construction of `plan`'s product to the connected-work
+    /// ledger before any of it is built: one unit per concatenation and the
+    /// bytes they hold. `Err` with the ledger's trip when it refuses.
+    fn charge_template_product(
+        &self,
+        plan: &TemplatePlan,
+    ) -> Result<(), crate::semantic_query::PartialReasonSet> {
+        self.connected_demand
+            .charge_units(plan.cardinality().unwrap_or(usize::MAX))?;
+        self.connected_demand
+            .reserve_bytes(plan.construction_bytes().unwrap_or(usize::MAX))
+    }
+
+    /// The constituents ONE interpolated expression contributes, each a
     /// sequence of pieces: its text for a literal (TS-stringified —
     /// `` `${1 | 2}` `` is `"1" | "2"`, a bigint its base-10 digits) and for
     /// `null` / `undefined`, both texts for `boolean`, nothing at all for
@@ -18898,23 +18747,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// union (the union the checker forms from them: a string literal a
     /// nested template forms again is one constituent, a number literal
     /// spelling the same text another), a nested template literal type's own
-    /// alternatives, and a
-    /// hole for `string` / `number` / `bigint` / `any` or a string mapping
-    /// over one. A residual string-mapping application reduces first, so
-    /// `` `on${Capitalize<K>}` `` folds once `K` is substituted. Every other
-    /// shape leaves the template open.
+    /// concatenations, and a hole for `string` / `number` / `bigint` / `any`
+    /// or a string mapping over one. A residual string-mapping application
+    /// reduces first, so `` `on${Capitalize<K>}` `` folds once `K` is
+    /// substituted. Every other shape leaves the template open.
     fn template_arg_alternatives(
         &self,
         arg: SemanticNodeId,
         eval_context: crate::semantic_query::ProjectionReductionContext,
-    ) -> TemplateAlternatives {
+    ) -> TemplateArgAlternatives {
         let graph = self.graph();
         let mut resolved = self.settle_string_operand(arg, eval_context);
         if let Some((intrinsic, operand)) = self.string_mapping_of(resolved) {
             resolved = self.apply_string_intrinsic(&intrinsic, operand, eval_context);
         }
         let text = |text: String, spelled: Option<SemanticNodeId>| {
-            TemplateAlternatives::Finite(vec![TemplateConstituent {
+            TemplateArgAlternatives::Finite(vec![TemplateConstituent {
                 pieces: vec![TemplatePiece::Text(text)],
                 spelled,
             }])
@@ -18933,23 +18781,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     drop(data);
                     // The member is its own constituent, whatever its value.
                     match self.template_arg_alternatives(base, eval_context) {
-                        TemplateAlternatives::Finite(constituents) => TemplateAlternatives::Finite(
-                            constituents
-                                .into_iter()
-                                .map(|constituent| TemplateConstituent {
-                                    spelled: Some(resolved),
-                                    ..constituent
-                                })
-                                .collect(),
-                        ),
+                        TemplateArgAlternatives::Finite(constituents) => {
+                            TemplateArgAlternatives::Finite(
+                                constituents
+                                    .into_iter()
+                                    .map(|constituent| TemplateConstituent {
+                                        spelled: Some(resolved),
+                                        ..constituent
+                                    })
+                                    .collect(),
+                            )
+                        }
                         other => other,
                     }
                 } else {
-                    TemplateAlternatives::AnyString
+                    TemplateArgAlternatives::Stop(TemplateSpans::AnyString)
                 }
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Never)) => {
-                TemplateAlternatives::Finite(Vec::new())
+                TemplateArgAlternatives::Finite(Vec::new())
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => {
                 text("null".to_owned(), Some(resolved))
@@ -18958,7 +18808,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 text("undefined".to_owned(), Some(resolved))
             }
             Some(SemanticNodeData::Primitive(PrimitiveKind::Boolean)) => {
-                TemplateAlternatives::Finite(
+                TemplateArgAlternatives::Finite(
                     ["false", "true"]
                         .into_iter()
                         .map(|text| TemplateConstituent {
@@ -18986,7 +18836,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let mut seen: FxHashSet<TemplateConstituent> = FxHashSet::default();
                 for member in members.iter() {
                     match self.template_arg_alternatives(*member, eval_context) {
-                        TemplateAlternatives::Finite(alternatives) => out.extend(
+                        TemplateArgAlternatives::Finite(alternatives) => out.extend(
                             alternatives
                                 .into_iter()
                                 .filter(|alternative| seen.insert(alternative.clone())),
@@ -18994,24 +18844,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         other => return other,
                     }
                 }
-                TemplateAlternatives::Finite(out)
+                TemplateArgAlternatives::Finite(out)
             }
+            // A nested template literal type is the union of its own
+            // concatenations, built as the checker builds that type: weighed
+            // and charged as a product of its own, then streamed.
             Some(SemanticNodeData::TemplateLiteral {
                 quasis,
                 expressions,
             }) => {
                 let (quasis, expressions) = (quasis.clone(), Arc::clone(expressions.as_arc()));
                 drop(data);
-                self.template_alternatives(&quasis, &expressions, eval_context)
+                let plan = match self.template_plan(&quasis, &expressions, eval_context) {
+                    TemplateSpans::Plan(plan) => plan,
+                    other => return TemplateArgAlternatives::Stop(other),
+                };
+                if let Err(reasons) = self.charge_template_product(&plan) {
+                    return TemplateArgAlternatives::Stop(TemplateSpans::Exhausted(reasons));
+                }
+                let mut cursor = plan.cursor();
+                TemplateArgAlternatives::Finite(
+                    std::iter::from_fn(|| cursor.next_constituent()).collect(),
+                )
             }
             _ => {
                 drop(data);
                 if self.is_template_hole(resolved) {
-                    TemplateAlternatives::Finite(vec![TemplateConstituent::string(vec![
+                    TemplateArgAlternatives::Finite(vec![TemplateConstituent::string(vec![
                         TemplatePiece::Hole(resolved),
                     ])])
                 } else {
-                    TemplateAlternatives::Open
+                    TemplateArgAlternatives::Stop(TemplateSpans::Open)
                 }
             }
         }
@@ -19023,21 +18886,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// string mapping; otherwise the template literal type of its texts and
     /// holes.
     pub(super) fn template_type_from_pieces(&self, pieces: Vec<TemplatePiece>) -> SemanticNodeId {
-        let graph = self.graph();
-        let mut texts: Vec<String> = vec![String::new()];
-        let mut holes: Vec<SemanticNodeId> = Vec::new();
+        let mut concatenation = TemplateConcatenation {
+            texts: vec![String::new()],
+            holes: Vec::new(),
+        };
         for piece in pieces {
             match piece {
-                TemplatePiece::Text(text) => texts
+                TemplatePiece::Text(text) => concatenation
+                    .texts
                     .last_mut()
                     .expect("one text per hole plus one")
                     .push_str(&text),
                 TemplatePiece::Hole(hole) => {
-                    holes.push(hole);
-                    texts.push(String::new());
+                    concatenation.holes.push(hole);
+                    concatenation.texts.push(String::new());
                 }
             }
         }
+        self.template_type_from_concatenation(concatenation)
+    }
+
+    /// The type one built concatenation denotes (see
+    /// [`Self::template_type_from_pieces`]). A concatenation with no hole
+    /// moves its one text into the string literal it is.
+    pub(super) fn template_type_from_concatenation(
+        &self,
+        concatenation: TemplateConcatenation,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let TemplateConcatenation { mut texts, holes } = concatenation;
         if holes.is_empty() {
             let text = texts.pop().expect("one text per hole plus one");
             return graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(text)));
@@ -19779,8 +19656,10 @@ pub(super) enum GlobalSpace {
 }
 
 /// The result of [`ProjectSemanticDispatch::normalize_tuple_spread`]: either a
-/// (possibly spliced) element list that interns as a `Tuple`, or the array
-/// node a sole rest-of-array tuple collapses to (`[...E[]]` ≡ `E[]`).
+/// (possibly spliced) element list that interns as a `Tuple`, or the one
+/// node the tuple already is — the array a sole rest-of-array tuple
+/// collapses to (`[...E[]]` ≡ `E[]`), or the checker's error-type recovery
+/// of a splice past its tuple-size limit (TS2799 / TS2800).
 #[derive(Debug)]
 pub enum NormalizedTupleShape {
     Tuple(Vec<crate::semantic_query::TupleElement>),
@@ -20230,6 +20109,18 @@ pub(super) struct TypeofBuild {
     observed_hash: verter_session_query::analysis::types::Hash16,
 }
 
+impl TypeofBuild {
+    pub(super) fn checking_site(
+        &self,
+    ) -> crate::semantic_query::checker_policy::TupleSplicePosition {
+        use crate::semantic_query::checker_policy::TupleSplicePosition;
+        match self.body {
+            TypeofBody::Expression(_) => TupleSplicePosition::Expression,
+            _ => TupleSplicePosition::Type,
+        }
+    }
+}
+
 /// What a `typeof` build evaluates between its frame's steps.
 enum TypeofBody {
     /// Nothing yet: the build is about to begin its first body.
@@ -20521,4 +20412,86 @@ pub fn index_key_probes_for_tests() -> usize {
 struct ClauseBaseSubstitution<'n> {
     names: Vec<&'n str>,
     bases: Vec<SemanticNodeId>,
+}
+
+/// Whether the contributor `entry` declares the GLOBAL type of its name: a
+/// module's `declare global` interface or alias, or a script's file-scope
+/// one. A `declare global` block in a SCRIPT is an error that binds
+/// nothing; the automatic libraries are read through the project's library.
+fn declares_global_type(
+    entry: &verter_session_query::inputs::contributors::ContributorEntry,
+) -> bool {
+    use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
+    !entry.is_automatic_lib
+        && match entry.origin {
+            ContributorOrigin::DeclareGlobal => entry.module_kind == FileModuleKind::Module,
+            ContributorOrigin::FileScopeInterface | ContributorOrigin::FileScopeType => true,
+            ContributorOrigin::FileScopeNamespace
+            | ContributorOrigin::FileScopeValue
+            | ContributorOrigin::ModuleAugmentation => false,
+        }
+}
+
+/// A transaction read being recorded across the steps of its work
+/// ([`ProjectSemanticDispatch::begin_transaction_read`]). Dropped unfinished
+/// — an unwind — it uninstalls every scope it installed and records nothing.
+pub(super) struct TransactionReadRecording<'g> {
+    // Uninstalled innermost first: the recorder, then the refusal scope,
+    // the build-local frame and the private completeness scope.
+    reads: crate::resolver_core::resolver_context::FactReadRecording,
+    refusals: crate::fact_tracing::RefusalObservationScope,
+    frame: super::BuildLocalTaintGuard<'g>,
+    private_completeness: Option<crate::request_context::ColdComputeCompletenessScope>,
+    evidence_epoch: u64,
+}
+
+impl TransactionReadRecording<'_> {
+    /// End the recording: fold what it observed into the enclosing build,
+    /// and return what reusing the read must replay — `None` when it is not
+    /// reusable (it was partial, `complete` is false, or its refusal is not
+    /// one a later reader of this transaction may share).
+    pub(super) fn finish<C: crate::resolver_core::ResolverCapabilities>(
+        self,
+        dispatch: &ProjectSemanticDispatch<'_, C>,
+        complete: bool,
+    ) -> Option<(
+        verter_session_query::facts::reuse::ReuseClass,
+        super::dispatch_txn::FlowMemberReuse,
+    )> {
+        let Self {
+            reads,
+            refusals,
+            frame,
+            private_completeness,
+            evidence_epoch,
+        } = self;
+        let reads = reads.finish();
+        let refused = refusals.observed();
+        drop(refusals);
+        let observed = frame.finish();
+        let folded_partial =
+            crate::request_context::current_cold_compute_completeness().is_partial();
+        if let Some(scope) = private_completeness {
+            scope.discard();
+        }
+        dispatch.fold_observed_frame_into_top(&observed);
+        let refusal = match refused {
+            Some(reason) => verter_session_query::facts::reuse::ObservedRefusal::Typed(reason),
+            None if reads.non_cacheable || observed.cache_suppress => {
+                verter_session_query::facts::reuse::ObservedRefusal::Unattributed
+            }
+            None => verter_session_query::facts::reuse::ObservedRefusal::None,
+        };
+        let complete = !observed.result_is_partial && !folded_partial && complete;
+        let reuse = verter_session_query::facts::reuse::classify_reuse(refusal, complete);
+        if !reuse.is_request_reusable() {
+            return None;
+        }
+        let replay = super::dispatch_txn::FlowMemberReuse {
+            reads,
+            observed_self_roots: observed.observed_self_roots,
+            canonical_evidence_deposited: dispatch.canonical_evidence_epoch.get() != evidence_epoch,
+        };
+        Some((reuse, replay))
+    }
 }

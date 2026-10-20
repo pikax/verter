@@ -445,9 +445,8 @@ impl SemanticGraphStore {
             .iter()
             .map(|member| (&member.family, &member.entry))
             .collect();
-        let registered_canonicals =
-            reverse_index::registered_canonical_count(carrier, &dispatch_dep_signature);
-        let retentions = match self.reserve_scc_batch(&staged_entries, registered_canonicals) {
+        let direct_edges = reverse_index::direct_edge_count(carrier, &dispatch_dep_signature);
+        let retentions = match self.reserve_scc_batch(&staged_entries, direct_edges) {
             Ok(retentions) => retentions,
             Err(_) => {
                 for member in &prepared {
@@ -607,7 +606,6 @@ impl SemanticGraphStore {
             retention: None,
             validated_at_generation,
             admission_seq: 0,
-            reverse_indexed: false,
             cost_receipt: Arc::clone(cost_receipt),
         })
     }
@@ -628,7 +626,7 @@ impl SemanticGraphStore {
     pub(super) fn reserve_scc_batch(
         &self,
         members: &[(&FamilyKey, &MemoEntry)],
-        registered_canonicals: usize,
+        direct_edges: usize,
     ) -> Result<
         Vec<Arc<super::retention::MemoRetention>>,
         verter_session_query::retention::RetentionRefusal,
@@ -658,7 +656,7 @@ impl SemanticGraphStore {
         let own: Vec<verter_session_query::retention::Footprint> = members
             .iter()
             .map(|(family, entry)| {
-                super::retention::own_reservation(entry, family, 1, registered_canonicals)
+                super::retention::own_reservation(entry, family, 1, direct_edges)
             })
             .collect();
         // A shared carrier's evidence pages were claimed with the root; a
@@ -801,6 +799,8 @@ impl SemanticGraphStore {
             return NewlyKeyedFamily(false);
         };
         let admission_seq = entry.admission_seq;
+        let read_set_signature = entry.read_set_signature.clone();
+        let dispatch_dep_signature = entry.dispatch_dep_signature.clone();
         let outcome = slots.publish(
             ModeSlot::Single,
             entry,
@@ -809,17 +809,23 @@ impl SemanticGraphStore {
             eviction,
         );
         let populated_slots = outcome.populated;
+        // The member is registered under the batch's `entries` hold, before
+        // the candidates it displaced are unregistered; see
+        // `warm_publish_one`.
+        reverse_index::register_published(
+            &self.canonical_to_entries,
+            family,
+            &populated_slots,
+            admission_seq,
+            &read_set_signature,
+            &dispatch_dep_signature,
+        );
         for (displaced_slot, displaced_entry) in &outcome.displaced {
             reverse_index::drain_candidate_reverse_index_registrations(
                 &self.canonical_to_entries,
                 *displaced_slot,
                 displaced_entry,
             );
-        }
-        // The member enters the reverse index when the index is next read,
-        // under the `entries` lock this publish holds.
-        if !populated_slots.is_empty() {
-            self.defer_reverse_index_registration(family, admission_seq, entries.len());
         }
         NewlyKeyedFamily(family_was_new && !populated_slots.is_empty())
     }
@@ -868,10 +874,8 @@ impl SemanticGraphStore {
         entry.admission_seq = admission_seq;
         // A seed is charged like every published candidate; one the account
         // refuses is not seeded.
-        let registered_canonicals =
-            reverse_index::registered_canonical_count(&carrier, &dispatch_dep_signature);
-        let Ok(retention) = self.reserve_memo_candidate(&entry, &family, 1, registered_canonicals)
-        else {
+        let direct_edges = reverse_index::direct_edge_count(&carrier, &dispatch_dep_signature);
+        let Ok(retention) = self.reserve_memo_candidate(&entry, &family, 1, direct_edges) else {
             return;
         };
         entry.retention = Some(retention);

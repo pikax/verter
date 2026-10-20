@@ -15,8 +15,9 @@
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    PartialReasonSet, PrimitiveKind, ProjectionReductionContext, SemanticNodeData, SemanticNodeId,
-    SurfaceKeyProjection, SurfaceMember,
+    ObjectConstructionEffect, ObjectSpreadProgram, PartialReasonSet, PrimitiveKind,
+    ProjectionReductionContext, SemanticNodeData, SemanticNodeId, SurfaceKeyProjection,
+    SurfaceMember,
 };
 use verter_type_expr::{DeclaredReadPosition, DeclaredReadStep};
 
@@ -88,9 +89,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// `node` with the position `path` addresses rewritten by `rewrite`: an
-    /// object's member by its key, an array's element type, through each
-    /// member of a union. A path that addresses nothing leaves `node` as it
-    /// is.
+    /// object's member by its key and the authored property declaring it,
+    /// an array's element type, through each member of a union. A path that
+    /// addresses nothing leaves `node` as it is.
     fn rewrite_declared_position(
         &self,
         node: SemanticNodeId,
@@ -116,12 +117,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     self.intern_normalized_union_or_intersection(&rewritten, true)
                 }
             }
-            (Some(SemanticNodeData::Object(surface)), DeclaredReadStep::Member(key)) => {
+            (Some(SemanticNodeData::Object(surface)), DeclaredReadStep::Member { key, at }) => {
                 let surface = surface.clone();
                 drop(data);
                 let SurfaceKeyProjection::Exact(member) = surface.project_known_key(key) else {
                     return node;
                 };
+                if !written_at(&member.spans, *at) {
+                    return node;
+                }
                 let Some(index) = surface
                     .positive_members()
                     .iter()
@@ -144,6 +148,50 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     SemanticNodeData::Object(
                         surface.with_positive_members(Arc::from(members.into_boxed_slice())),
                     ),
+                )
+            }
+            // An object that spreads another addresses a member by the
+            // authored property writing it: its own write of the key, which
+            // a later spread may override but never rewrites, or a member of
+            // a spread's operand, which the object holds as its own.
+            (
+                Some(SemanticNodeData::ObjectSpreadProgram(program)),
+                DeclaredReadStep::Member { key, at },
+            ) => {
+                let mut effects: Vec<ObjectConstructionEffect> = program
+                    .effects
+                    .iter()
+                    .map(ObjectConstructionEffect::copy)
+                    .collect();
+                drop(data);
+                let mut changed = false;
+                for effect in &mut effects {
+                    match effect {
+                        ObjectConstructionEffect::DirectProperty(property)
+                            if property.key.cloned_known().as_ref() == Some(key)
+                                && written_at(&property.spans, *at) =>
+                        {
+                            let value =
+                                self.rewrite_declared_position(property.value, rest, rewrite);
+                            changed |= value != property.value;
+                            property.value = value;
+                        }
+                        ObjectConstructionEffect::Spread(operand) => {
+                            let value = self.rewrite_declared_position(*operand, path, rewrite);
+                            changed |= value != *operand;
+                            *operand = value;
+                        }
+                        _ => {}
+                    }
+                }
+                if !changed {
+                    return node;
+                }
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                        effects: crate::semantic_query::PayloadArray::from(effects),
+                    }),
                 )
             }
             (Some(SemanticNodeData::Array { element, readonly }), DeclaredReadStep::Element) => {
@@ -271,6 +319,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => self.intern_normalized_union_or_intersection(&reduced, true),
         }
     }
+}
+
+/// Whether the member `spans` locate is the one the authored property
+/// declared at `at` writes; a member without a declaration site is
+/// addressed by its key alone.
+fn written_at(spans: &verter_type_expr::MemberSpans, at: verter_span::Span) -> bool {
+    spans
+        .declaration
+        .is_none_or(|declaration| declaration == at)
 }
 
 /// Whether `a` and `b` are the same literal type, whatever scope each

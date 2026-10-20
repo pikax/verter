@@ -2043,10 +2043,22 @@ async fn sync_file(
                             .await;
                         match result {
                             Ok(CarrierDelivery::Refused) => {
-                                tracing::info!(
-                                    "sync_coordinator: TSX_SYNC_SKIPPED {ide_path} — the document \
-                                 moved after this compile; the live revision is resynced"
-                                );
+                                // A refusal is either the fence (the revision
+                                // moved) or a serving engine that did not
+                                // certify these bytes; only the former moved.
+                                if still_current() {
+                                    tracing::info!(
+                                        "sync_coordinator: TSX_SYNC_UNCERTIFIED {ide_path} — the \
+                                         serving engine has not certified these bytes; the sync \
+                                         is retried"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "sync_coordinator: TSX_SYNC_SKIPPED {ide_path} — the \
+                                         document moved after this compile; the live revision \
+                                         is resynced"
+                                    );
+                                }
                                 deps.pending_snapshot_provider_sync
                                     .insert(canonical_id.to_string());
                                 return SyncFileOutcome::Retry;

@@ -79,6 +79,9 @@ impl KeySpaceDomain {
     pub(super) fn is_finite(&self) -> bool {
         self.broad.is_empty()
     }
+    pub(super) fn literal_keys(&self) -> &[KeyDomainKey] {
+        &self.keys
+    }
     pub(super) fn membership(&self, key: &PropertyKey) -> Option<bool> {
         if self.members.contains(key) {
             return Some(true);
@@ -190,6 +193,14 @@ enum KeyNamesArm {
     /// keyof — the arm poisons the intersection combine (and propagates
     /// upward as the poisoned verdict).
     OpenConstruction,
+    /// A typed refusal while reading a spread program's key domain — the
+    /// construction or the per-alternative reads could not pay the active
+    /// connected demand. The arm's keys are computable but unknown, so a
+    /// refusal is not evidence the arm adds no keys: it poisons an
+    /// intersection combine and propagates through a union combine
+    /// (collapsing it to [`KeyNamesArm::Unresolvable`] would let an
+    /// enclosing intersection drop it and publish a false-exact domain).
+    Refused,
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -233,6 +244,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let mut seen: FxHashSet<PropertyKey> = FxHashSet::default();
                     let mut any_enumerable = false;
                     let mut open_construction = false;
+                    let mut refused = false;
                     for arm in arm_results {
                         match arm {
                             KeyNamesArm::Names(arm_names) => {
@@ -245,10 +257,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             KeyNamesArm::Unresolvable => {}
                             KeyNamesArm::OpenConstruction => open_construction = true,
+                            KeyNamesArm::Refused => refused = true,
                         }
                     }
                     results.push(if open_construction {
                         KeyNamesArm::OpenConstruction
+                    } else if refused {
+                        KeyNamesArm::Refused
                     } else if any_enumerable {
                         KeyNamesArm::Names(names)
                     } else {
@@ -258,15 +273,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 KeyNamesFrame::CombineUnion { arm_count } => {
                     // Keyof (A | B) = common keys across ALL arms (intersection
                     // of enumerated sets). Unresolvable arm → whole union None.
-                    // An OPEN CONSTRUCTION arm propagates its poison verdict:
-                    // collapsing it to a plain unresolvable arm would let an
-                    // enclosing intersection combine drop it and publish a
-                    // false-exact key domain.
+                    // An OPEN CONSTRUCTION or REFUSED arm propagates its poison
+                    // verdict: collapsing it to a plain unresolvable arm would
+                    // let an enclosing intersection combine drop it and publish
+                    // a false-exact key domain.
                     let start = results.len().saturating_sub(arm_count);
                     let arm_results: Vec<_> = results.drain(start..).collect();
                     let mut common: Option<FxHashSet<PropertyKey>> = None;
                     let mut unresolvable = false;
                     let mut open_construction = false;
+                    let mut refused = false;
                     for arm in arm_results {
                         match arm {
                             KeyNamesArm::Names(arm_names) => {
@@ -289,10 +305,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             KeyNamesArm::OpenConstruction => {
                                 open_construction = true;
                             }
+                            KeyNamesArm::Refused => {
+                                refused = true;
+                            }
                         }
                     }
                     let combined = if open_construction {
                         KeyNamesArm::OpenConstruction
+                    } else if refused {
+                        KeyNamesArm::Refused
                     } else if unresolvable {
                         KeyNamesArm::Unresolvable
                     } else {
@@ -340,16 +361,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ) {
                     crate::semantic_query::QueryResult::Value(formula) => {
-                        match formula.closed().and_then(|closed| closed.keyof()) {
-                            Some(keyof) => KeyNamesArm::Names(keyof.to_vec()),
+                        match self.object_spread_exact_keyof(&formula) {
+                            Ok(Some(keyof)) => KeyNamesArm::Names(keyof),
                             // An open / multi-alternative construction
                             // program has no exact key domain — poison
                             // the enclosing intersection combine.
-                            None => KeyNamesArm::OpenConstruction,
+                            Ok(None) => KeyNamesArm::OpenConstruction,
+                            // A demand refusal says the arm's keys were
+                            // not paid for, not that it has none — a
+                            // dropped arm would leave the remaining
+                            // arms' keys a false-exact domain.
+                            Err(_) => KeyNamesArm::Refused,
                         }
                     }
+                    // A typed query failure (refused construction,
+                    // cancellation) is likewise not a no-keys verdict.
                     crate::semantic_query::QueryResult::Recursive(_)
-                    | crate::semantic_query::QueryResult::Error(_) => KeyNamesArm::Unresolvable,
+                    | crate::semantic_query::QueryResult::Error(_) => KeyNamesArm::Refused,
                 };
                 results.push(keys);
             }
@@ -1427,7 +1455,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | crate::semantic_query::QueryResult::Error(_) => return None,
                 };
                 let mut present = true;
-                for alternative in formula.alternatives() {
+                for alternative in self.object_spread_cursor(&formula) {
+                    let alternative = alternative.ok()?;
                     let closed = alternative.closed()?;
                     // The formula was projected under `Key(needle)`, so
                     // the lookup is inside the selector's declared set —
