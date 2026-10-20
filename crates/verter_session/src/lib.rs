@@ -80,6 +80,8 @@ mod component_meta_delivery;
 mod heap_size_foreign;
 #[cfg(test)]
 mod request_view_reuse_tests;
+#[cfg(test)]
+mod request_view_verdict_tests;
 pub use compile::VueMainAssemblyFailure;
 pub use compile::{assemble_vue_main_module, AssembleMapFailure, AssembledVueModule, MapFragment};
 pub use compile::{SfcRewriteRefusal, UncomposableCode, UncomposableFamily};

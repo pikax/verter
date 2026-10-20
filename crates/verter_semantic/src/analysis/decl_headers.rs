@@ -1517,7 +1517,7 @@ fn interface_member_header(sig: &TSSignature<'_>, source: &str) -> Option<Member
         }),
         TSSignature::TSMethodSignature(method) => Some(MemberHeader {
             key: lower_property_key(&method.key, source),
-            method_kind: Some(ObjectMethodKind::Method),
+            method_kind: Some(verter_type_expr_oxc::interface_method_kind(method.kind)),
             has_implementation_body: false,
             optional: method.optional,
             readonly: false,

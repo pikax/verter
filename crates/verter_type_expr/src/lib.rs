@@ -77,9 +77,9 @@ pub use facts::{
 mod indexed_expression;
 pub use indexed_expression::{
     DeclaredReadPosition, DeclaredReadProvenance, DeclaredReadStep, IndexedElaboratedProperty,
-    IndexedElaborationForm, IndexedLiteralPosition, IndexedLiteralProvenance, IndexedLiteralStep,
-    IndexedRegularLiteralSource, IndexedReportSite, IndexedValueCall, IndexedValueCallArg,
-    IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
+    IndexedElaborationForm, IndexedLiteralArm, IndexedLiteralPosition, IndexedLiteralProvenance,
+    IndexedLiteralStep, IndexedRegularLiteralSource, IndexedReportSite, IndexedValueCall,
+    IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression, IndexedValueLiteralMode,
 };
 
 /// Property-key identity stored by authored type IR.
@@ -1692,6 +1692,22 @@ impl TypeExpr {
             n
         };
         Self::Literal(LiteralValue::Number(n))
+    }
+
+    /// Create a bigint literal type from its base-10 `magnitude` (no sign, no
+    /// `n` suffix) and the sign of the literal that wrote it.
+    ///
+    /// TypeScript keys a bigint literal type by `pseudoBigIntToString`, which
+    /// drops the sign of zero, so `-0n` IS the literal type `0n` (and
+    /// interpolates as `"0"`). The constructor applies that rule: a negated
+    /// zero yields the unsigned literal, every other negative keeps its `-`.
+    pub fn bigint_literal(negative: bool, magnitude: &str) -> Self {
+        let value = if negative && !magnitude.bytes().all(|digit| digit == b'0') {
+            format!("-{magnitude}")
+        } else {
+            magnitude.to_string()
+        };
+        Self::Literal(LiteralValue::BigInt(value))
     }
 
     /// Create a boolean literal type.

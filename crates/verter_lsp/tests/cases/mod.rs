@@ -23,6 +23,7 @@ mod lsp_audit_query_methods;
 mod lsp_audit_tls_propagation;
 mod lsp_component_meta_output_error;
 mod lsp_component_meta_wire_equivalence;
+mod managed_fallback_headless_live;
 mod one_parse_per_style_block;
 mod outbound_slow_client;
 mod owned_binding_gate;

@@ -216,20 +216,93 @@ fn a_walk_skips_the_receipts_it_is_told_are_settled() {
     ]);
     let mut asked = 0usize;
     let mut visited = Vec::new();
-    assert!(ReceiptWalk::default().leaves_unless(
-        &top,
-        |met| {
-            asked += 1;
-            met.ptr_eq(&left)
-        },
-        |fact| {
-            visited.push(fact.canonical_id().map(str::to_owned));
-            true
-        },
-    ));
+    assert_eq!(
+        ReceiptWalk::default().leaves_with_verdicts(
+            &top,
+            |met| {
+                asked += 1;
+                if met.ptr_eq(&left) {
+                    ReceiptVerdict::Valid
+                } else {
+                    ReceiptVerdict::Unknown
+                }
+            },
+            |fact| {
+                visited.push(fact.canonical_id().map(str::to_owned));
+                true
+            },
+        ),
+        Ok(())
+    );
     visited.sort();
     assert_eq!(visited, [Some("/r.ts".into()), Some("/s.ts".into())]);
     assert_eq!(asked, 4, "top, left, right and shared, once each");
+}
+
+/// A failing walk names exactly the receipts proven to reach the failure:
+/// the one holding the failing fact and each receipt it was first met
+/// through, never a sibling the walk had not finished or never read. A
+/// receipt the caller already knows is stale fails the walk unread and is
+/// not named again.
+#[test]
+fn a_failing_walk_names_only_the_receipts_proven_to_reach_the_failure() {
+    let stale = ResultReceipt::new(vec![whole("/stale.ts", 0)]);
+    let middle = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(stale.clone()),
+        whole("/m.ts", 1),
+    ]);
+    let sibling = ResultReceipt::new(vec![whole("/sibling.ts", 2)]);
+    let unread = ResultReceipt::new(vec![whole("/unread.ts", 3)]);
+    let top = ResultReceipt::new(vec![
+        FactVersionRef::Receipt(middle.clone()),
+        FactVersionRef::Receipt(sibling.clone()),
+        FactVersionRef::Receipt(unread.clone()),
+    ]);
+    let fails_on = |canonical: &'static str| {
+        move |fact: &FactVersionRef| fact.canonical_id() != Some(canonical)
+    };
+    let names = |chain: Vec<&ResultReceipt>, expected: &[&ResultReceipt]| {
+        assert_eq!(chain.len(), expected.len(), "{chain:?}");
+        for (named, expected) in chain.iter().zip(expected) {
+            assert!(named.ptr_eq(expected), "{chain:?}");
+        }
+    };
+
+    let chain = ReceiptWalk::default()
+        .leaves_with_verdicts(&top, |_| ReceiptVerdict::Unknown, fails_on("/stale.ts"))
+        .expect_err("the stale fact fails the walk");
+    names(chain, &[&stale, &middle, &top]);
+
+    let mut asked_unread = false;
+    let chain = ReceiptWalk::default()
+        .leaves_with_verdicts(
+            &top,
+            |met| {
+                asked_unread |= met.ptr_eq(&unread);
+                if met.ptr_eq(&stale) {
+                    ReceiptVerdict::Stale
+                } else {
+                    ReceiptVerdict::Unknown
+                }
+            },
+            |_| true,
+        )
+        .expect_err("a known-stale receipt fails the walk");
+    names(chain, &[&middle, &top]);
+    assert!(asked_unread, "siblings are met before the walk descends");
+
+    let chain = ReceiptWalk::default()
+        .leaves_with_verdicts(&top, |_| ReceiptVerdict::Unknown, fails_on("/sibling.ts"))
+        .expect_err("the sibling's fact fails the walk");
+    names(chain, &[&sibling, &top]);
+
+    assert_eq!(
+        ReceiptWalk::default()
+            .leaves_with_verdicts(&top, |_| ReceiptVerdict::Stale, |_| true)
+            .map_err(|chain| chain.len()),
+        Err(0),
+        "the walked receipt itself known stale names nothing"
+    );
 }
 
 /// Two equal lattices assembled apart, each level's two receipts

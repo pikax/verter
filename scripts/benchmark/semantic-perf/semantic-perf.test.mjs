@@ -494,6 +494,21 @@ test("a Verter answer is classified, and only an equal answer is matched", () =>
     classify(ANSWER("any"), { reference: REF("any", { errorAny: true, codes: [2589] }) }),
     "mismatch",
   );
+  // tsc's error type at its limit matches Verter's recovery for the same
+  // diagnostic, and only that one.
+  const ts2590 = REF("any", { errorAny: true, codes: [2590] });
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: 2590 }), { reference: ts2590 }),
+    "matched",
+  );
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: 2589 }), { reference: ts2590 }),
+    "mismatch",
+  );
+  assert.equal(
+    classify(ANSWER("any", { checkerRecovery: null }), { reference: ts2590 }),
+    "mismatch",
+  );
   assert.equal(
     classify(ANSWER(`"ok"`), {
       reference: REF("any", { errorAny: true, codes: [2589] }),

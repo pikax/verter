@@ -213,7 +213,7 @@ owning_methods! {
     fn spread_formula_positive_members_for_macro(
         &self,
         formula: &ObjectProjectionFormula,
-    ) -> Vec<SurfaceMember>;
+    ) -> Result<Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet>;
 
     /// Execute a flow return, reporting whether a degraded read was observed.
     fn execute_flow_return_observing_degraded_read(
@@ -299,6 +299,9 @@ impl<A: ConstructionResult, B: ConstructionResult> ConstructionResult for (A, B)
         self.0.operands(visit);
         self.1.operands(visit);
     }
+}
+impl ConstructionResult for crate::semantic_query::PartialReasonSet {
+    fn operands(&self, _: &mut dyn FnMut(SemanticNodeId)) {}
 }
 impl ConstructionResult for bool {
     fn operands(&self, _: &mut dyn FnMut(SemanticNodeId)) {}

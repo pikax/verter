@@ -49,6 +49,7 @@ verter_type_expr = { workspace = true }
 arc-swap = "1.9"
 boxcar = "=0.2.14"
 dashmap = "6.2"
+hashbrown = { version = "0.17.1", default-features = false, features = ["inline-more"] }
 hotpath = { version = "0.23", optional = true }
 imbl = "7.0.1"
 indexmap = "2.14"

@@ -3213,36 +3213,7 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ParseFactRef,
     ) -> bool {
-        const ZERO_HASH: Hash16 = [0u8; 16];
-        let resolved = self.canonical_view(fact.canonical_id.as_str());
-        let facts = match resolved.file_facts.as_ref() {
-            Some(f) => f,
-            // Untracked file — accept if the observed hash was the
-            // zero sentinel (producer saw the file as unavailable
-            // and recorded the sentinel; absence is consistent).
-            // Otherwise reject — the consumer observed a real fact
-            // hash but the file has dropped out of the index.
-            None => return fact.expected_hash == ZERO_HASH,
-        };
-        // `lookup_or_compute`: a recorded body-sensitive `Export` /
-        // `LocalDecl` observation revalidates through the SAME lazy
-        // body fact path that produced it (the side-store is Arc-shared
-        // with the snapshot's `FileFacts` clone).
-        match facts.lookup_or_compute(&fact.key) {
-            Some(stored) => {
-                let stored_hash = match fact.lane {
-                    verter_session_query::facts::registry::FactLane::Semantic => {
-                        stored.semantic_hash
-                    }
-                    verter_session_query::facts::registry::FactLane::Display => stored.display_hash,
-                };
-                stored_hash == fact.expected_hash
-            }
-            // Fact absent in registry — accept iff observed was the
-            // zero sentinel (consistent absence — see
-            // `fact_signature_helpers::parse_fact_ref`).
-            None => fact.expected_hash == ZERO_HASH,
-        }
+        self.check_parse_domain(fact).validates()
     }
 
     /// Resolve-imports-domain validator (R26).
@@ -3426,6 +3397,46 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
         &self,
         fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
     ) -> bool {
+        self.check_program_analysis_domain(fact).validates()
+    }
+}
+
+impl HostStoreView {
+    /// [`StoreView::validates_parse_domain`], telling a fact that fails
+    /// against what was read from one whose lazy body read was refused.
+    ///
+    /// [`StoreView::validates_parse_domain`]: verter_session_query::facts::store_view::StoreView::validates_parse_domain
+    pub(crate) fn check_parse_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+    ) -> LeafCheck {
+        const ZERO_HASH: Hash16 = [0u8; 16];
+        let resolved = self.canonical_view(fact.canonical_id.as_str());
+        let facts = match resolved.file_facts.as_ref() {
+            Some(f) => f,
+            // Untracked file — accept if the observed hash was the
+            // zero sentinel (producer saw the file as unavailable
+            // and recorded the sentinel; absence is consistent).
+            // Otherwise reject — the consumer observed a real fact
+            // hash but the file has dropped out of the index.
+            None => return LeafCheck::of(fact.expected_hash == ZERO_HASH),
+        };
+        // A recorded body-sensitive `Export` / `LocalDecl` observation
+        // revalidates through the SAME lazy body fact path that produced it
+        // (the side-store is Arc-shared with the snapshot's `FileFacts`
+        // clone).
+        check_parse_fact(facts.lookup_or_compute_read(&fact.key), fact)
+    }
+
+    /// [`StoreView::validates_program_analysis_domain`], telling a fact
+    /// that fails against the index from one whose index walk was refused
+    /// its walk-stack lease.
+    ///
+    /// [`StoreView::validates_program_analysis_domain`]: verter_session_query::facts::store_view::StoreView::validates_program_analysis_domain
+    pub(crate) fn check_program_analysis_domain(
+        &self,
+        fact: &verter_session_query::facts::fact_cache::ProgramAnalysisFactRef,
+    ) -> LeafCheck {
         match fact {
             verter_session_query::facts::fact_cache::ProgramAnalysisFactRef::FlowBody {
                 function,
@@ -3433,15 +3444,20 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
             } => {
                 let canonical = function.canonical_id.as_ref();
                 if self.is_tombstoned(canonical) {
-                    return false;
+                    return LeafCheck::Invalid;
                 }
                 let resolved = self.canonical_view(canonical);
                 let Some(indexed) = resolved.flow_body_indexed.as_ref() else {
-                    return false;
+                    return LeafCheck::Invalid;
                 };
-                let index = crate::host_source_demand::consume_walked_read(
-                    indexed.shallow_state.decl_bodies().function_program_index(),
-                );
+                let read = indexed.shallow_state.decl_bodies().function_program_index();
+                let refused = read.refusal.is_some();
+                let index = crate::host_source_demand::consume_walked_read(read);
+                // A refused walk serves an empty index no retry keeps: it
+                // proves nothing about the function's body.
+                if refused {
+                    return LeafCheck::Refused;
+                }
                 // The KEYED lookup: the fact names one function position,
                 // and validity is that position's own live body hash —
                 // never "some entry in this file matches closely enough".
@@ -3469,12 +3485,72 @@ impl verter_session_query::facts::store_view::StoreView for HostStoreView {
                             },
                         )
                     };
-                matched.is_some_and(|matched| {
+                LeafCheck::of(matched.is_some_and(|matched| {
                     &matched.entry().flow_body_stable_hash() == flow_body_stable_hash
-                })
+                }))
             }
         }
     }
+}
+
+/// What validating one fact that is not a receipt proved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeafCheck {
+    /// The fact validates against what was read.
+    Valid,
+    /// The fact does not validate against what was read.
+    Invalid,
+    /// A read the answer rests on was refused (a declaration-body lease
+    /// miss, or a walk-stack lease the index walk could not have): the fact
+    /// fails closed, and a retry once the lease can be had may answer
+    /// otherwise.
+    Refused,
+}
+
+impl LeafCheck {
+    /// The check of a read that was not refused.
+    pub(crate) fn of(valid: bool) -> Self {
+        if valid {
+            Self::Valid
+        } else {
+            Self::Invalid
+        }
+    }
+
+    pub(crate) fn validates(self) -> bool {
+        self == Self::Valid
+    }
+}
+
+/// Check a parse-domain fact against the registered or lazily computed fact
+/// `read` answered. A refused read applies its evidence to the running
+/// tracers and is [`LeafCheck::Refused`] whatever it answered: its `None`
+/// is not the consistent absence the zero sentinel records.
+pub(crate) fn check_parse_fact(
+    read: verter_session_query::source::demand::SourceRead<
+        Option<verter_session_query::facts::Fact>,
+    >,
+    fact: &verter_session_query::facts::fact_cache::ParseFactRef,
+) -> LeafCheck {
+    const ZERO_HASH: Hash16 = [0u8; 16];
+    let refused = read.refusal.is_some();
+    let stored = verter_type_engine::fact_tracing::consume_source_read(read);
+    if refused {
+        return LeafCheck::Refused;
+    }
+    LeafCheck::of(match stored {
+        Some(stored) => {
+            let stored_hash = match fact.lane {
+                verter_session_query::facts::registry::FactLane::Semantic => stored.semantic_hash,
+                verter_session_query::facts::registry::FactLane::Display => stored.display_hash,
+            };
+            stored_hash == fact.expected_hash
+        }
+        // Fact absent in registry — accept iff observed was the zero
+        // sentinel (consistent absence — see
+        // `fact_signature_helpers::parse_fact_ref`).
+        None => fact.expected_hash == ZERO_HASH,
+    })
 }
 
 /// Caches one immutable `Arc<StoreViewSnapshot>`-backed base

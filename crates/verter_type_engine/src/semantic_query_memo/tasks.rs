@@ -13,35 +13,51 @@ pub(super) use verter_execution::tasks::{
     ExecutionScope, ExecutionTask, OpenProducer, TaskId, TaskRegistry, WaitCycle,
 };
 
+use crate::semantic_query::checker_policy::TupleSplicePosition;
 use crate::semantic_query::SemanticQueryKey;
 
 use super::prepared::PreparedKeyHandle;
 
-/// The semantic producers of one task.
+/// The semantic producers of one task. A producer is one prepared key
+/// demanded at one checking site: the same key at the other site is a
+/// different computation, so it neither shares the producer nor closes
+/// same-path recursion through it.
 pub(super) trait SemanticProducers {
-    /// Open this task's producer for `key` until the registration drops.
-    fn open_producer(&self, key: PreparedKeyHandle) -> OpenProducer;
+    /// Open this task's producer for `key` at `site` until the registration
+    /// drops.
+    fn open_producer(&self, key: PreparedKeyHandle, site: TupleSplicePosition) -> OpenProducer;
 
-    /// Whether this task has a producer open for exactly `key`.
-    fn produces(&self, key: &PreparedKeyHandle) -> bool;
+    /// Whether this task has a producer open for exactly `key` at `site`.
+    fn produces(&self, key: &PreparedKeyHandle, site: TupleSplicePosition) -> bool;
 
-    /// Whether this task has a producer open for exactly `key`, whose
-    /// prepared hash is `key_hash`.
-    fn produces_key(&self, key: &SemanticQueryKey, key_hash: u64) -> bool;
+    /// Whether this task has a producer open for exactly `key` at `site`,
+    /// whose prepared hash is `key_hash`.
+    fn produces_key(
+        &self,
+        key: &SemanticQueryKey,
+        key_hash: u64,
+        site: TupleSplicePosition,
+    ) -> bool;
 }
 
 impl SemanticProducers for ExecutionTask {
-    fn open_producer(&self, key: PreparedKeyHandle) -> OpenProducer {
-        self.open(key.as_task_producer())
+    fn open_producer(&self, key: PreparedKeyHandle, site: TupleSplicePosition) -> OpenProducer {
+        self.open(key.as_site_producer(site))
     }
 
-    fn produces(&self, key: &PreparedKeyHandle) -> bool {
-        self.produces_identity(key.as_task_producer_ref())
+    fn produces(&self, key: &PreparedKeyHandle, site: TupleSplicePosition) -> bool {
+        self.produces_key(key.key(), key.cached_hash(), site)
     }
 
-    fn produces_key(&self, key: &SemanticQueryKey, key_hash: u64) -> bool {
-        self.produces_matching(key_hash, |producer| {
-            PreparedKeyHandle::producer_matches_key(producer, key, key_hash)
-        })
+    fn produces_key(
+        &self,
+        key: &SemanticQueryKey,
+        key_hash: u64,
+        site: TupleSplicePosition,
+    ) -> bool {
+        self.produces_matching(
+            PreparedKeyHandle::site_producer_hash(key_hash, site),
+            |producer| PreparedKeyHandle::producer_matches_key(producer, key, key_hash, site),
+        )
     }
 }

@@ -1403,6 +1403,25 @@ fn operator_reduction_step_propagates_fault_opaque_not_masked_as_carrier() {
         Ok(MaterializationStep::Stop(carrier)),
         "a recursive back-edge preserves the operator carrier"
     );
+
+    // (f) The checker's recovered error type (a TS2590 cross product) is the
+    //     operator's own answer: delivered as the stop node, neither the
+    //     carrier nor a propagated fault.
+    let recovery = graph.intern_node(SemanticNodeData::Opaque(QueryError::CheckerRecovery {
+        diagnostic: verter_type_engine::semantic_query::CheckerDiagnostic {
+            code: verter_type_engine::semantic_query::CheckerDiagnosticCode::UnionTooComplex,
+            operation:
+                verter_type_engine::semantic_query::CheckerDiagnosticOperation::TemplateLiteral,
+        },
+        basis: verter_type_engine::semantic_query::RecoveryBasis::Budget,
+        origin: None,
+    }));
+    let delivered = classify_operator_reduction_step(graph, QueryResult::Value(recovery), carrier);
+    assert_eq!(
+        delivered,
+        Ok(MaterializationStep::Stop(recovery)),
+        "a checker recovery is the operator's answer, not the carrier"
+    );
 }
 
 #[test]

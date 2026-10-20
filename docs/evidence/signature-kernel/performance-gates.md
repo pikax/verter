@@ -532,6 +532,17 @@ Recorded plainly so no reader mistakes absence for a pass:
   (`apply_guard_union`) reads the earlier parts' negations as one growing
   prefix whose standing facts are kept one per subject; re-reading the
   whole prefix for every alternative made the count grow with the cube.
+  That prefix is one subject-indexed environment every alternative shares,
+  each alternative's own part is read off the guard ledger as an indexed
+  delta over it, the overlay is marked by a persistent share of the
+  product state and restored only at the roots the ledger window names,
+  and the per-reference union probes each later alternative only for the
+  references the first one narrowed (`flow_return_disjunction.rs`).
+  Copying the prefix and the whole overlay into every alternative wrote
+  facts in the square of the chain, and rescanning each alternative's
+  subject list compared subjects in its cube; both now grow linearly
+  (`an_or_guard_over_independent_subjects_does_linear_environment_work`,
+  over 128 to 1,024 independent parameters).
   The evaluator walks a chain's nested left operands from the innermost
   one outward (`eval_logical`), so a 300-operand chain answers on a 1 MiB
   thread (`flow_return_null_policy_tests.rs` →
