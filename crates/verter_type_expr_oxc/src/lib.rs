@@ -33,8 +33,8 @@ use std::sync::Arc;
 use verter_type_expr::{
     AuthoredPropertyKey, CanonicalIndexInt, FunctionExpr, FunctionParam, FunctionSpans,
     IndexSignature, IndexSignatureSpans, MappedModifier, MemberSpans, MethodSignature, ObjectExpr,
-    ObjectMember, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey, SpreadMember,
-    TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
+    ObjectMember, ObjectMethodKind, ObjectProperty, PrimitiveName, PropertyKey as TypedPropertyKey,
+    SpreadMember, TupleElement, TypeAuthoredPropertyKey, TypeExpr, TypeParam, TypePredicate,
     TypePredicateSubject, UnknownValue, ValueRef,
 };
 
@@ -502,9 +502,7 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
         TSLiteral::StringLiteral(s) => TypeExpr::string_literal(s.value.as_str()),
         TSLiteral::NumericLiteral(n) => TypeExpr::number_literal(n.value),
         TSLiteral::BooleanLiteral(b) => TypeExpr::boolean_literal(b.value),
-        TSLiteral::BigIntLiteral(b) => {
-            TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
-        }
+        TSLiteral::BigIntLiteral(b) => TypeExpr::bigint_literal(false, &b.value),
         TSLiteral::UnaryExpression(unary) => match &unary.argument {
             // `-1` / `+1` — a signed numeric literal type. The sign is the
             // wrapping `UnaryExpression`'s operator, NOT a property of the inner
@@ -525,19 +523,16 @@ fn lower_literal(literal: &oxc_ast::ast::TSLiteral<'_>, source: &str) -> TypeExp
             // is the base-10 magnitude with NO sign (the sign lives on this
             // wrapping `UnaryExpression`), so the signed form is reconstructed
             // here operator-aware, mirroring the positive `TSLiteral::BigIntLiteral`
-            // arm. A `UnaryNegation` prepends `-`; a `UnaryPlus` keeps the bare
+            // arm. A `UnaryNegation` negates (a negated zero stays `0n`, see
+            // `TypeExpr::bigint_literal`); a `UnaryPlus` keeps the bare
             // magnitude (prepending `-` unconditionally would turn `+1n` into the
             // wrong literal `-1n`). Lowering it to a `BigInt` literal (rather than
             // the `Unknown` fallback) keeps it a first-class bigint literal so the
             // Vue runtime-constructor reducer maps it to `Number` exactly like a
             // positive bigint literal.
             Expression::BigIntLiteral(b) => match unary.operator {
-                UnaryOperator::UnaryNegation => TypeExpr::Literal(
-                    verter_type_expr::LiteralValue::BigInt(format!("-{}", b.value)),
-                ),
-                UnaryOperator::UnaryPlus => {
-                    TypeExpr::Literal(verter_type_expr::LiteralValue::BigInt(b.value.to_string()))
-                }
+                UnaryOperator::UnaryNegation => TypeExpr::bigint_literal(true, &b.value),
+                UnaryOperator::UnaryPlus => TypeExpr::bigint_literal(false, &b.value),
                 _ => TypeExpr::Unknown(UnknownValue::unsupported_syntax(span_text(
                     source,
                     unary.span(),
@@ -842,9 +837,10 @@ fn lower_ts_signature<'b, 'a>(
                 )),
                 type_annotation: None,
             };
-            Some(ObjectMember::Method(
-                MethodSignature::with_key_spans_public(key, func, method.optional, spans),
-            ))
+            let mut signature =
+                MethodSignature::with_key_spans_public(key, func, method.optional, spans);
+            signature.method_kind = interface_method_kind(method.kind);
+            Some(ObjectMember::Method(signature))
         }
         TSSignature::TSCallSignatureDeclaration(call) => {
             let func = normalize_function_type_params(function_with_authored_return(
@@ -1558,16 +1554,18 @@ fn normalize_object_member_type_params<'e>(
         }
         ObjectMember::Method(method) => {
             let key = normalize_property_key_type_params(&method.key, &mut ty);
-            ObjectMember::Method(
-                MethodSignature::with_key_visibility(
-                    key,
-                    child(NormalizeJob::Function(&method.function)).into_function(),
-                    method.optional,
-                    method.visibility,
-                    method.spans,
-                )
-                .with_excess_origin(method.excess_origin),
-            )
+            let mut normalized = MethodSignature::with_key_visibility(
+                key,
+                child(NormalizeJob::Function(&method.function)).into_function(),
+                method.optional,
+                method.visibility,
+                method.spans,
+            );
+            // A rebuild of an existing member, so its accessor kind and
+            // implementation-body marker carry over unchanged.
+            normalized.method_kind = method.method_kind;
+            normalized.has_implementation_body = method.has_implementation_body;
+            ObjectMember::Method(normalized.with_excess_origin(method.excess_origin))
         }
         ObjectMember::Spread(spread) => ObjectMember::Spread(SpreadMember::new(ty(&spread.ty))),
     }
@@ -1590,6 +1588,17 @@ fn normalize_property_key_type_params<'e>(
 // ---------------------------------------------------------------------------
 // Property-key lowering
 // ---------------------------------------------------------------------------
+
+/// The member kind an interface or type-literal method signature declares:
+/// `get value(): T` and `set value(v: T)` are the two halves of one accessor
+/// property, never two overloads of a method.
+pub fn interface_method_kind(kind: oxc_ast::ast::TSMethodSignatureKind) -> ObjectMethodKind {
+    match kind {
+        oxc_ast::ast::TSMethodSignatureKind::Get => ObjectMethodKind::Get,
+        oxc_ast::ast::TSMethodSignatureKind::Set => ObjectMethodKind::Set,
+        oxc_ast::ast::TSMethodSignatureKind::Method => ObjectMethodKind::Method,
+    }
+}
 
 /// Lower an authored OXC key without erasing computed syntax or canonical
 /// numeric identity.
@@ -1843,5 +1852,75 @@ mod synthetic_carrier_tests {
             })
             .expect("`pub_field` property must survive normalization");
         assert_eq!(pub_field, MemberVisibility::Public);
+    }
+
+    /// The same member rebuild keeps an accessor's kind: a getter/setter pair
+    /// inside a generic signature (`<T>() => { get value(): T; set value(v: T) }`)
+    /// must still read as accessors after its type-parameter refs are bound,
+    /// or relations see two ordinary methods instead of one property.
+    #[test]
+    fn normalize_object_member_preserves_accessor_kind() {
+        use verter_type_expr::{
+            FunctionExpr, FunctionParam, MemberSpans, MemberVisibility, MethodSignature,
+            ObjectExpr, ObjectMember, ObjectMethodKind,
+        };
+
+        let t_ref = TypeExpr::Ref {
+            name: Arc::from("T"),
+            type_arguments: Arc::from(Vec::new()),
+        };
+        let accessor = |function: FunctionExpr, kind: ObjectMethodKind| {
+            let mut method = MethodSignature::with_key_visibility(
+                "value".into(),
+                function,
+                false,
+                MemberVisibility::Public,
+                MemberSpans::default(),
+            );
+            method.method_kind = kind;
+            ObjectMember::Method(method)
+        };
+        let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            properties: vec![
+                accessor(
+                    FunctionExpr::synthetic(Vec::new(), Some(Arc::new(t_ref.clone())), Vec::new()),
+                    ObjectMethodKind::Get,
+                ),
+                accessor(
+                    FunctionExpr::synthetic(
+                        vec![FunctionParam::synthetic(
+                            Some("v".to_string()),
+                            t_ref.clone(),
+                            false,
+                            false,
+                        )],
+                        None,
+                        Vec::new(),
+                    ),
+                    ObjectMethodKind::Set,
+                ),
+            ],
+        }));
+
+        let mut env = BinderEnv::default();
+        env.introduce(TypeParam {
+            name: "T".to_string(),
+            constraint: None,
+            default: None,
+            is_const: false,
+        });
+        let normalized = normalize_in_env(&object, &mut env, 0);
+        let TypeExpr::Object(obj) = &normalized else {
+            panic!("expected object, got {normalized:?}");
+        };
+        let kinds: Vec<_> = obj
+            .properties
+            .iter()
+            .filter_map(|member| match member {
+                ObjectMember::Method(method) => Some(method.method_kind),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, [ObjectMethodKind::Get, ObjectMethodKind::Set]);
     }
 }

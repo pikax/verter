@@ -435,19 +435,42 @@ pub(crate) fn complete_with_receipt(
 /// if a tracer was installed throughout — the caller checks
 /// [`fact_tracer_installed`] first.
 pub(crate) fn record_fact_reads<R>(work: impl FnOnce() -> R) -> (R, RecordedFactReads) {
-    let recorder = tracer_stack::FactReadRecorder::default();
-    let result = {
-        let _scope = tracer_stack::install_recorder(&recorder);
-        work()
-    };
-    let (facts, non_cacheable) = recorder.into_parts();
-    (
-        result,
+    let recording = FactReadRecording::begin();
+    let result = work();
+    (result, recording.finish())
+}
+
+/// A passive fact-read recording that stays installed across the steps of a
+/// computation that does not run inside one closure — the explicit-stack
+/// form of [`record_fact_reads`]. Recordings nest: each must finish (or
+/// drop) before the one installed before it.
+pub(crate) struct FactReadRecording {
+    // Declared first so it drops first: the scope uninstalls the recorder
+    // before the recorder is freed.
+    scope: Option<tracer_stack::RecorderScope>,
+    recorder: Box<tracer_stack::FactReadRecorder>,
+}
+
+impl FactReadRecording {
+    /// Install a fresh recorder until [`Self::finish`] (or the drop).
+    pub(crate) fn begin() -> Self {
+        let recorder = Box::new(tracer_stack::FactReadRecorder::default());
+        let scope = tracer_stack::install_recorder(&recorder);
+        Self {
+            scope: Some(scope),
+            recorder,
+        }
+    }
+
+    /// Uninstall the recorder and return what it recorded.
+    pub(crate) fn finish(mut self) -> RecordedFactReads {
+        drop(self.scope.take());
+        let (facts, non_cacheable) = std::mem::take(&mut *self.recorder).into_parts();
         RecordedFactReads {
             facts: facts.into(),
             non_cacheable,
-        },
-    )
+        }
+    }
 }
 
 // ── `with_fact_tracer` installer ──────────────────────────────────────

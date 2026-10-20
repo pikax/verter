@@ -97,6 +97,15 @@ export const PROVIDER_LIVE_SELECTORS = Object.freeze([
   {
     lane: "tsgo",
     package: "verter_lsp",
+    kind: "prefix",
+    value: "cases::managed_fallback_headless_live::",
+    example:
+      "cases::managed_fallback_headless_live::headless_client_gets_typed_answers_from_the_lazy_managed_engine",
+    label: "headless managed-fallback session over the real binary",
+  },
+  {
+    lane: "tsgo",
+    package: "verter_lsp",
     kind: "exact",
     values: Object.freeze([
       "cases::quoted_prop_consumer_mistype_live::quoted_prop_consumer_mistype_surfaces_ts2322_tsgo",

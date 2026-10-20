@@ -897,6 +897,55 @@ fn publication_routes_never_demand_expanded() {
     );
 }
 
+/// A setup binding initialised by a call whose declared return is an object
+/// alias keeps the publication bar: checking the call's lazy return for a
+/// refused tuple construction instantiates only what the checker builds at
+/// the call, never a `Published(Expanded)` materialisation of the alias —
+/// including a member-recursive one whose deferred members never end.
+#[test]
+fn call_initialised_bindings_never_demand_expanded() {
+    for lib in [
+        "export type Other = { o: number };\n\
+         export type Box<T> = { v: T; w: Other };\n\
+         export declare function make(): Box<string>;\n",
+        "export type Deep<T> = { n: Deep<[T]>; m: T };\n\
+         export type Box<T> = { v: Deep<T> };\n\
+         export declare function make(): Box<string>;\n",
+    ] {
+        let host = build_host(&[
+            ("/workspace/src/lib.ts", lib),
+            (
+                "/workspace/src/Call.vue",
+                "<script setup lang=\"ts\">\n\
+                 import { make } from './lib';\n\
+                 const x = make();\n\
+                 defineExpose({ x });\n\
+                 </script>\n",
+            ),
+        ]);
+        let guard = CaptureToken::start_for_query("call_return_publication_demand_guard");
+        let resolved = host.get_component_meta_with_resolution("/workspace/src/Call.vue");
+        let snapshot = guard.end();
+        let (_, resolution) = resolved.expect("call SFC must resolve");
+        assert!(!resolution.synthesis_should_suppress);
+        assert!(
+            snapshot.dispatch_log.iter().any(|entry| matches!(
+                &entry.key,
+                SemanticQueryKey::Instantiate(key) if format!("{key:?}").contains("\"Box\"")
+            )),
+            "the call's declared return must be checked for this fixture to guard it"
+        );
+        let expanded = published_expanded_dispatches(&snapshot.dispatch_log);
+        assert!(
+            expanded.is_empty(),
+            "a call-initialised binding recorded {} `Published(Expanded)` projection \
+             context(s). Offending keys:\n{}",
+            expanded.len(),
+            expanded.join("\n")
+        );
+    }
+}
+
 /// The OUTPUT-boundary entries (the wire-envelope producers) keep the same
 /// bar: a full `get_component_meta_output` / audited
 /// `get_component_meta_output_with_resolution` — which additionally

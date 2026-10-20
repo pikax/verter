@@ -29,6 +29,31 @@ fn record_mapped_after_source_visit_for_tests() {
     MAPPED_AFTER_SOURCE_VISITS.set(MAPPED_AFTER_SOURCE_VISITS.get() + 1);
 }
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    /// Child slots examined on this thread to locate the next child of an
+    /// object or spread program under projection; test-only.
+    static PROJECTION_CHILD_SLOT_PROBES: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Child slots examined on this thread to locate the next child of an
+/// object or spread program under projection; test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn projection_child_slot_probes_for_tests() -> usize {
+    PROJECTION_CHILD_SLOT_PROBES.get()
+}
+
+/// Count the slots from the cursor `index` up to the `slot` a child was
+/// found in.
+#[inline(always)]
+fn note_projection_child_slot_probes(index: usize, slot: usize) {
+    #[cfg(any(test, feature = "test-support"))]
+    PROJECTION_CHILD_SLOT_PROBES.set(PROJECTION_CHILD_SLOT_PROBES.get() + (slot - index) + 1);
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = (index, slot);
+}
+
 use super::carrier::{
     CarrierArgsContinuation, CarrierFinish, CarrierResolutionPlan, CarrierResolverContext,
 };
@@ -242,7 +267,8 @@ pub(super) struct ProjectionDelivery {
 }
 
 /// A member-path or applied `typeof` a reference projection reads: the
-/// `TypeOf` query reading it and the type arguments the answer applies.
+/// one `TypeOf` query of its root and member path, and the type arguments
+/// the answer applies.
 pub(super) struct TypeofRead {
     key: SemanticQueryKey,
     type_args: Arc<[SemanticNodeId]>,
@@ -305,6 +331,10 @@ enum ProjectionChildPlan<'a> {
     },
     Object {
         view: &'a SurfaceView,
+        context: ProjectionReductionContext,
+    },
+    SpreadProgram {
+        program: &'a crate::semantic_query::ObjectSpreadProgram,
         context: ProjectionReductionContext,
     },
     Function {
@@ -538,6 +568,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         self.typeof_key_with_path(value_root, path, context),
                     );
                 }
+                // One root-and-path read owns namespace and value-member
+                // resolution, as where the `typeof` is lowered in place
+                // (`typeof_reference_key`): a member path that answers no
+                // value is a miss, never retried under a joined name that
+                // bypasses the module's export domain.
                 let read = Box::new(TypeofRead {
                     key: self.typeof_key_with_path(value_root, path, context),
                     type_args,
@@ -850,7 +885,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         continue;
                     }
                     loop {
-                        let Some((child, child_context)) =
+                        let Some((slot, child, child_context)) =
                             self.projection_child_from_plan(&child_plan, cursor)
                         else {
                             let synchronize =
@@ -887,6 +922,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             self.memoize_projected(memo, node, context, result);
                             break;
                         };
+                        cursor = slot;
                         let child_data = match self.prepare_projection_node(
                             child,
                             child_context,
@@ -1342,7 +1378,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         None
     }
 
-    /// Carry a `typeof` read on with what its query answered.
+    /// The projection plan a `typeof` read reaches with what its query
+    /// answered: a read that answered no value is a miss.
     fn advance_typeof_read(
         &self,
         read: TypeofRead,
@@ -1887,11 +1924,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::TemplateLiteral { expressions, .. } => expressions
                 .get(index)
                 .map(|expression| (*expression, context)),
-            SemanticNodeData::Object(view) => object_projection_child(view, context, index),
+            // An object projects through its own plan, whose cursor walks
+            // the object's child slots; this arm only keeps the scheduler
+            // total.
+            SemanticNodeData::Object(view) => object_projection_child(view, context, index)
+                .map(|(_, child, child_context)| (child, child_context)),
+            // A spread program projects through its own plan, whose cursor
+            // walks the program's child slots; this arm only keeps the
+            // scheduler total.
             SemanticNodeData::ObjectSpreadProgram(program) => program
-                .child_nodes()
-                .nth(index)
-                .map(|child| (child, context)),
+                .child_at_slot(index)
+                .map(|(_, child)| (child, context)),
             SemanticNodeData::Signature {
                 params,
                 return_type,
@@ -1994,6 +2037,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ProjectionChildPlan::General { data, context }
             }
             SemanticNodeData::Object(view) => ProjectionChildPlan::Object { view, context },
+            SemanticNodeData::ObjectSpreadProgram(program) => {
+                ProjectionChildPlan::SpreadProgram { program, context }
+            }
             SemanticNodeData::Signature {
                 params,
                 return_type,
@@ -2011,18 +2057,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// The first child of `plan` at or after the cursor slot `index`, with
+    /// the slot it occupies; `None` past the last child. An object's slots
+    /// are laid out by [`object_projection_child`] and a spread program's by
+    /// [`crate::semantic_query::ObjectSpreadProgram::child_at_slot`]; every
+    /// other plan numbers its children consecutively, so the slot is `index`
+    /// itself.
     #[inline(always)]
     fn projection_child_from_plan(
         &self,
         plan: &ProjectionChildPlan<'_>,
         index: usize,
-    ) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
-        match plan {
+    ) -> Option<(usize, SemanticNodeId, ProjectionReductionContext)> {
+        let (child, context) = match plan {
             ProjectionChildPlan::Uniform { children, context } => {
                 children.get(index).map(|child| (*child, *context))
             }
             ProjectionChildPlan::Object { view, context } => {
-                object_projection_child(view, *context, index)
+                let found = object_projection_child(view, *context, index);
+                if let Some((slot, _, _)) = found {
+                    note_projection_child_slot_probes(index, slot);
+                }
+                return found;
+            }
+            ProjectionChildPlan::SpreadProgram { program, context } => {
+                let (slot, child) = program.child_at_slot(index)?;
+                note_projection_child_slot_probes(index, slot);
+                return Some((slot, child, *context));
             }
             ProjectionChildPlan::Function {
                 params,
@@ -2033,27 +2094,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             } => {
                 let mut remaining = index;
                 if let Some(parameter) = params.get(remaining) {
-                    return Some((parameter.ty, *context));
+                    return Some((index, parameter.ty, *context));
                 }
                 remaining = remaining.saturating_sub(params.len());
                 if remaining == 0 {
-                    return Some((*return_type, *context));
+                    return Some((index, *return_type, *context));
                 }
                 remaining -= 1;
                 for parameter in type_parameters.iter() {
                     if remaining == 0 {
-                        return Some((parameter.param, *context));
+                        return Some((index, parameter.param, *context));
                     }
                     remaining -= 1;
                     if let Some(constraint) = parameter.constraint {
                         if remaining == 0 {
-                            return Some((constraint, *context));
+                            return Some((index, constraint, *context));
                         }
                         remaining -= 1;
                     }
                     if let Some(default) = parameter.default {
                         if remaining == 0 {
-                            return Some((default, *context));
+                            return Some((index, default, *context));
                         }
                         remaining -= 1;
                     }
@@ -2065,7 +2126,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ProjectionChildPlan::General { data, context } => {
                 self.projection_child_at(data, *context, index)
             }
-        }
+        }?;
+        Some((index, child, context))
     }
 }
 
@@ -2093,49 +2155,53 @@ fn projected(
         .unwrap_or_else(|| panic!("projection child {node:?} was not completed before its parent"))
 }
 
+/// The first child of an object at or after cursor slot `index`, with the
+/// slot it occupies. Member `m` owns two slots: `2m` its computed key (vacant
+/// for any other key) and `2m + 1` its value, so a member's children are
+/// found without counting the computed keys before it. The call, construct
+/// and index signatures and the keyspace follow, one slot per child.
 #[inline(always)]
 fn object_projection_child(
     view: &SurfaceView,
     context: ProjectionReductionContext,
     index: usize,
-) -> Option<(SemanticNodeId, ProjectionReductionContext)> {
-    let member_context = context.into_structural_provenance();
-    let mut remaining = index;
-    for member in view.positive_members() {
-        if let verter_type_expr::AuthoredPropertyKey::Computed(key) = &member.key {
-            if remaining == 0 {
-                return Some((*key, member_context));
+) -> Option<(usize, SemanticNodeId, ProjectionReductionContext)> {
+    let members = view.positive_members();
+    let member_slots = members.len() * 2;
+    if index < member_slots {
+        let member_context = context.into_structural_provenance();
+        let member = &members[index / 2];
+        if index.is_multiple_of(2) {
+            if let verter_type_expr::AuthoredPropertyKey::Computed(key) = &member.key {
+                return Some((index, *key, member_context));
             }
-            remaining -= 1;
+            return Some((index + 1, member.value, member_context));
         }
-        if remaining == 0 {
-            return Some((member.value, member_context));
-        }
-        remaining -= 1;
+        return Some((index, member.value, member_context));
     }
+    let mut remaining = index - member_slots;
     if let Some(signature) = view.call_signatures.get(remaining) {
-        return Some((*signature, context));
+        return Some((index, *signature, context));
     }
     remaining = remaining.saturating_sub(view.call_signatures.len());
     if let Some(signature) = view.construct_signatures.get(remaining) {
-        return Some((*signature, context));
+        return Some((index, *signature, context));
     }
     remaining = remaining.saturating_sub(view.construct_signatures.len());
     let index_signature = remaining / 2;
     if let Some(signature) = view.index_signatures.get(index_signature) {
         return Some(if remaining.is_multiple_of(2) {
-            (signature.key_type, context)
+            (index, signature.key_type, context)
         } else {
-            (signature.value_type, context)
+            (index, signature.value_type, context)
         });
     }
     remaining = remaining.saturating_sub(view.index_signatures.len() * 2);
     if let Some(keyspace) = view.keyspace {
         if remaining == 0 {
-            return Some((keyspace, context));
+            return Some((index, keyspace, context));
         }
     }
-    let _ = remaining;
     None
 }
 

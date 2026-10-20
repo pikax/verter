@@ -192,9 +192,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let Some(data) = self.graph().node_data(node) else {
                     continue;
                 };
-                if matches!(&*data, SemanticNodeData::InstantiationRef { base, .. } if base.decl_name.as_ref() == "ThisType")
-                {
-                    if let Some(receiver) = self.contextual_object_this_type(node, canonical) {
+                if let SemanticNodeData::InstantiationRef { base, args } = &*data {
+                    if args.len() == 1
+                        && self.names_contextual_this_marker(
+                            canonical,
+                            &base.canonical_id,
+                            base.owner,
+                            &base.decl_name,
+                        )
+                    {
+                        let receiver = args[0];
                         consumers[index].extend(
                             parameters
                                 .iter()
