@@ -146,6 +146,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ancestors,
             );
         }
+        if matches!(data, SemanticNodeData::IndexedAccess { .. }) {
+            return self.finish_indexed_projection(
+                node,
+                context,
+                data,
+                memo,
+                self.in_deferred_interior(ancestors),
+            );
+        }
         ProjectionFinish::Node(self.finish_projection_structure(
             node,
             context,
@@ -153,8 +162,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             inputs,
             substitutions,
             memo,
-            self.in_deferred_interior(ancestors),
         ))
+    }
+
+    /// Select through the shared indexed-access query at navigation altitude,
+    /// then let this projection's worklist resolve the selected value at the
+    /// caller's demand. A namespace's lazy TypeOf members can then suspend.
+    fn finish_indexed_projection(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        data: &SemanticNodeData,
+        memo: &ViewMemo,
+        deferred_position: bool,
+    ) -> ProjectionFinish {
+        let SemanticNodeData::IndexedAccess { object, index } = data else {
+            unreachable!("indexed projection carries an indexed access")
+        };
+        let object_context = self.indexed_access_operand_context(*object, context);
+        let object_id = projected(memo, *object, object_context);
+        let index = match index {
+            IndexKey::String(value) => IndexKey::String(value.clone()),
+            IndexKey::Number(value) => IndexKey::Number(*value),
+            IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+            // A key that already names a nominal identity is
+            // answered without projecting it at all; the projection
+            // is computed only on the fallback path.
+            IndexKey::Computed(value) => self
+                .unique_symbol_identity_for_typeof_node(*value)
+                .map(IndexKey::UniqueSymbol)
+                .unwrap_or_else(|| {
+                    let projected = projected(memo, *value, context);
+                    self.unique_symbol_identity_for_typeof_node(projected)
+                        .map(IndexKey::UniqueSymbol)
+                        .unwrap_or_else(|| self.normalized_index_key_node(projected))
+                }),
+        };
+        let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
+        let should_defer = !proven_empty
+            && (!may_reduce_operator(context)
+                || context.mode == ProjectionMode::Skeleton
+                || deferred_position
+                || !matches!(
+                    self.graph().node_data(object_id).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                ));
+        if should_defer {
+            ProjectionFinish::Node(self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::IndexedAccess {
+                    object: object_id,
+                    index,
+                },
+            ))
+        } else {
+            match self.execute_type_node(SemanticQueryKey::IndexedAccess {
+                base: object_id,
+                index,
+                mode: ProjectionMode::Navigate,
+            }) {
+                QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
+                    ProjectionFinish::Project(value)
+                }
+                QueryResult::Value(_) => ProjectionFinish::Node(node),
+                _ => ProjectionFinish::Node(self.opaque(QueryError::Miss)),
+            }
+        }
     }
 
     /// An application over its projected arguments: the application itself
@@ -294,7 +367,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         _inputs: &LocatorViewInputs<'_>,
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
-        deferred_position: bool,
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
@@ -722,50 +794,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                let object_context = self.indexed_access_operand_context(*object, context);
-                let object_id = projected(memo, *object, object_context);
-                let index = match index {
-                    IndexKey::String(value) => IndexKey::String(value.clone()),
-                    IndexKey::Number(value) => IndexKey::Number(*value),
-                    IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
-                    // A key that already names a nominal identity is
-                    // answered without projecting it at all; the projection
-                    // is computed only on the fallback path.
-                    IndexKey::Computed(value) => self
-                        .unique_symbol_identity_for_typeof_node(*value)
-                        .map(IndexKey::UniqueSymbol)
-                        .unwrap_or_else(|| {
-                            let projected = projected(memo, *value, context);
-                            self.unique_symbol_identity_for_typeof_node(projected)
-                                .map(IndexKey::UniqueSymbol)
-                                .unwrap_or_else(|| self.normalized_index_key_node(projected))
-                        }),
-                };
-                let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
-                let should_defer = !proven_empty
-                    && (!may_reduce_operator(context)
-                        || context.mode == ProjectionMode::Skeleton
-                        || deferred_position
-                        || !matches!(graph.node_data(object_id).as_deref(), Some(SemanticNodeData::Object(_))));
-                if should_defer {
-                    graph.intern_preserving_scope(
-                        node,
-                        SemanticNodeData::IndexedAccess {
-                            object: object_id,
-                            index,
-                        },
-                    )
-                } else {
-                    match self.execute_type_node(SemanticQueryKey::IndexedAccess {
-                        base: object_id,
-                        index,
-                        mode: context.mode,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
-                    }
-                }
+            SemanticNodeData::IndexedAccess { .. } => {
+                unreachable!("an indexed access finishes through its selection plan")
             }
             SemanticNodeData::InstantiationRef { .. } => {
                 unreachable!("an application finishes through its instantiation plan")

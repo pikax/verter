@@ -181,6 +181,11 @@ enum ProjectionFrame {
         selected: SemanticNodeId,
         context: ProjectionReductionContext,
     },
+    IndexedSelectedFinish {
+        node: SemanticNodeId,
+        selected: SemanticNodeId,
+        context: ProjectionReductionContext,
+    },
     ConditionalAfterTrue {
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -292,10 +297,13 @@ pub(super) enum ProjectionPoll {
     Need(SemanticQueryKey),
 }
 
-/// How a node's projection finishes: with a node, or with the
-/// instantiation whose node it is.
+/// How a node's projection finishes: a ready node, a selected value to
+/// project on the worklist, or the query whose answer it needs.
 pub(super) enum ProjectionFinish {
     Node(SemanticNodeId),
+    /// A selected value is projected on this same worklist, so any TypeOf
+    /// it needs can suspend instead of opening a native nested query.
+    Project(SemanticNodeId),
     Instantiate(SemanticQueryKey),
 }
 
@@ -903,6 +911,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 frames,
                             ) {
                                 ProjectionFinish::Node(result) => result,
+                                ProjectionFinish::Project(selected) => {
+                                    if synchronize {
+                                        if let Err(reasons) = work_credit.refresh() {
+                                            trip = Some(reasons.into());
+                                            break;
+                                        }
+                                    }
+                                    frames.push(ProjectionFrame::IndexedSelectedFinish {
+                                        node,
+                                        selected,
+                                        context,
+                                    });
+                                    frames.push(ProjectionFrame::Enter {
+                                        node: selected,
+                                        context,
+                                    });
+                                    break;
+                                }
                                 ProjectionFinish::Instantiate(key) if seam.suspend => {
                                     frames.push(ProjectionFrame::AwaitInstantiation {
                                         node,
@@ -1117,6 +1143,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     });
                 }
                 ProjectionFrame::ConditionalSelectedFinish {
+                    node,
+                    selected,
+                    context,
+                }
+                | ProjectionFrame::IndexedSelectedFinish {
                     node,
                     selected,
                     context,
@@ -1672,6 +1703,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             frames,
         ) {
             ProjectionFinish::Node(result) => result,
+            ProjectionFinish::Project(selected) => {
+                if synchronize {
+                    work_credit.refresh()?;
+                }
+                frames.push(ProjectionFrame::IndexedSelectedFinish {
+                    node,
+                    selected,
+                    context,
+                });
+                frames.push(ProjectionFrame::Enter {
+                    node: selected,
+                    context,
+                });
+                return Ok(());
+            }
             ProjectionFinish::Instantiate(key) if seam.suspend => {
                 frames.push(ProjectionFrame::AwaitInstantiation { node, context });
                 seam.need = Some(key);

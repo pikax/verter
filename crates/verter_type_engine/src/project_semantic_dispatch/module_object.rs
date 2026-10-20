@@ -34,6 +34,13 @@ use crate::semantic_query_memo::ObservedGraphSelfRoot;
 /// declarations chose its properties.
 pub(super) type ModuleObject = (SemanticNodeId, Vec<ObservedGraphSelfRoot>);
 
+/// A selected imported value, or the namespace left when every qualifier
+/// selected a namespace re-export.
+pub(super) enum ImportValueTarget {
+    Query(Box<SemanticQueryKey>),
+    Namespace(verter_type_expr::OwnedStr),
+}
+
 fn file_root(
     canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -60,12 +67,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// A qualified import reads its selected value directly. Keeping the
     /// query as a plan lets a projection suspend on it, and leaves unrelated
     /// exports cold. Whole module objects retain their namespace builder.
-    pub(super) fn import_value_query(
+    pub(super) fn import_value_target(
         &self,
         module: &str,
         qualifier: &[verter_type_expr::OwnedStr],
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<SemanticQueryKey> {
+    ) -> Option<ImportValueTarget> {
         let mut module = verter_type_expr::OwnedStr::from(module);
         let mut path = qualifier;
         // bounded-loop: each namespace consumes a qualifier segment; work
@@ -74,7 +81,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             if let Some(root) = self.export_assignment_root(&module) {
                 break (root, path);
             }
-            let (first, rest) = path.split_first()?;
+            let Some((first, rest)) = path.split_first() else {
+                return Some(ImportValueTarget::Namespace(module));
+            };
             let table = self.ctx.module_export_table(&module)?;
             self.ctx.observe_borrowed_signature(&table.facts);
             match table.bindings.get(first.as_ref())?.as_ref()? {
@@ -98,11 +107,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 }
             }
         };
-        Some(self.typeof_key_with_path(
-            root,
-            verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
-            context,
-        ))
+        Some(ImportValueTarget::Query(Box::new(
+            self.typeof_key_with_path(
+                root,
+                verter_type_expr::OwnedSlice::from(path.to_vec().into_boxed_slice()),
+                context,
+            ),
+        )))
     }
 
     /// The module object the value root names when read whole, if it names
@@ -248,16 +259,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         identity.owner,
                         identity.symbol_name.as_ref(),
                     );
-                    match self.execute_read(self.typeof_key_for(root, context)).value {
-                        QueryResult::Value(node)
-                            if !matches!(
-                                self.graph().node_data(node).as_deref(),
-                                Some(SemanticNodeData::Opaque(_)) | None
-                            ) =>
-                        {
-                            node
+                    if context.mode == crate::semantic_query::ProjectionMode::Navigate {
+                        // The export table already proves value membership. Navigation
+                        // needs the namespace's keys, not every export's type; the
+                        // selected member's TypeOf is resolved by its consumer.
+                        match self.scoped_typeof_carrier(root) {
+                            Some(node) => node,
+                            None => continue,
                         }
-                        _ => continue,
+                    } else {
+                        match self.execute_read(self.typeof_key_for(root, context)).value {
+                            QueryResult::Value(node)
+                                if !matches!(
+                                    self.graph().node_data(node).as_deref(),
+                                    Some(SemanticNodeData::Opaque(_)) | None
+                                ) =>
+                            {
+                                node
+                            }
+                            _ => continue,
+                        }
                     }
                 }
                 Some(ModuleExportBinding::Namespace(dependency)) => {
@@ -612,6 +633,29 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(false)
     }
 
+    /// A namespace inventory already proves this root is a value. Keep its
+    /// scoped TypeOf until a consumer selects it, without evaluating siblings.
+    fn scoped_typeof_carrier(&self, root: ValueRootKey) -> Option<SemanticNodeId> {
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(root.scope.canonical_id.as_ref())?
+            .indexed;
+        let scope = NodeScopeId::File {
+            canonical_id: root.scope.canonical_id.clone(),
+            owner: root.scope.owner,
+            whole_hash: indexed.whole_hash,
+            local_scope: root.scope.local_scope,
+        };
+        Some(self.graph().intern_node_with_scope(
+            SemanticNodeData::new_typeof(
+                root,
+                verter_type_expr::OwnedSlice::from([]),
+                Arc::from([]),
+            ),
+            scope,
+        ))
+    }
+
     /// Each named root's `typeof`; a root with no value (a type-only
     /// export) is no member.
     pub(super) fn typeof_members(
@@ -641,6 +685,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     })
                 {
                     return None;
+                }
+                if context.mode == crate::semantic_query::ProjectionMode::Navigate {
+                    return self.scoped_typeof_carrier(root).map(|node| (name, node));
                 }
                 let node = match self.execute_read(self.typeof_key_for(root, context)).value {
                     QueryResult::Value(node) => node,

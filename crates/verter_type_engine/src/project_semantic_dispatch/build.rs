@@ -947,6 +947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ));
         };
         let mut build = Box::new(TypeofBuild {
+            redirects: Vec::new(),
             prepared: prepared.clone(),
             env,
             scope,
@@ -1125,6 +1126,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(Some(job)) => job,
         };
         let mut build = Box::new(TypeofBuild {
+            redirects: Vec::new(),
             prepared: prepared.clone(),
             env,
             scope,
@@ -1144,12 +1146,68 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         SignaturesLowered::Suspended
     }
 
+    /// Apply each imported qualified head after its suspended value finishes.
+    /// The value itself keeps lowering under its declaring scope.
+    pub(super) fn drain_typeof(
+        &self,
+        build: &mut TypeofBuild,
+        delivery: Option<super::query_frames::FrameDelivery>,
+    ) -> InstantiatePoll {
+        match self.drain_typeof_body(build, delivery) {
+            InstantiatePoll::Done(output) => {
+                let mut output = *output;
+                for redirect in &build.redirects {
+                    output = self.finish_typeof_redirect(output, redirect);
+                }
+                InstantiatePoll::Done(Box::new(output))
+            }
+            need => need,
+        }
+    }
+
+    fn finish_typeof_redirect(
+        &self,
+        mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput,
+        redirect: &TypeofRedirect,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // A nominal carrier's head is the reference this file wrote
+        // (`Ns.A_KIND`), never the declaration the import reached, whose
+        // name is not in scope here; the declaring identity rides the
+        // payload either way.
+        if let QueryResult::Value(node) = output.result {
+            let authored = self.graph().node_data(node).and_then(|data| {
+                let (root, head_path) = data.typeof_head()?;
+                let identity = data.typeof_nominal_identity()?;
+                (*root == redirect.declaring && head_path.is_empty()).then(|| identity.clone())
+            });
+            if let Some(identity) = authored {
+                output.result = QueryResult::Value(self.intern_nominal_typeof(
+                    redirect.authored.clone(),
+                    redirect.path.clone(),
+                    identity,
+                    NodeScopeId::File {
+                        canonical_id: redirect.authored.scope.canonical_id.clone(),
+                        owner: redirect.authored.scope.owner,
+                        whole_hash: redirect.observed_hash,
+                        local_scope: redirect.authored.scope.local_scope,
+                    },
+                ));
+            }
+        }
+        // A member read through an import also depends on this file's
+        // import binding.
+        output.with_observed_self_roots([(
+            redirect.authored.scope.canonical_id.clone(),
+            redirect.observed_hash,
+        )])
+    }
+
     /// Carry a suspended `typeof` build on: its current body's projection
     /// resumes with `delivery`, the instantiation or `typeof` it waited on
     /// (or its initializer's evaluation resumes with the `typeof` of the
     /// value it named), and either needs another, begins the value's next
     /// signature, or completes the build's output.
-    pub(super) fn drain_typeof(
+    fn drain_typeof_body(
         &self,
         build: &mut TypeofBuild,
         delivery: Option<super::query_frames::FrameDelivery>,
@@ -1398,7 +1456,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         scope: value_root.scope.clone(),
                         name: verter_type_expr::OwnedStr::from(joined),
                     };
-                    return self.build_typeof(&member_root, &path[split + 1..], context);
+                    return self.build_typeof_suspending(
+                        &member_root,
+                        &path[split + 1..],
+                        context,
+                        suspend,
+                    );
                 }
             }
         }
@@ -1451,40 +1514,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some((member_root, consumed)) =
             self.qualified_value_member_root(value_root, path, shallow, unbound)
         {
-            let mut output = self.build_typeof(&member_root, &path[consumed..], context);
+            let output = self.build_typeof_suspending(
+                &member_root,
+                &path[consumed..],
+                context,
+                suspend.as_deref_mut(),
+            );
             if member_root.scope.canonical_id == value_root.scope.canonical_id {
                 return output;
             }
-            // A nominal carrier's head is the reference this file wrote
-            // (`Ns.A_KIND`), never the declaration the import reached, whose
-            // name is not in scope here; the declaring identity rides the
-            // payload either way.
-            if let QueryResult::Value(node) = output.result {
-                let authored = self.graph().node_data(node).and_then(|data| {
-                    let (root, head_path) = data.typeof_head()?;
-                    let identity = data.typeof_nominal_identity()?;
-                    (*root == member_root && head_path.is_empty()).then(|| identity.clone())
-                });
-                if let Some(identity) = authored {
-                    output.result = QueryResult::Value(self.intern_nominal_typeof(
-                        value_root.clone(),
-                        verter_type_expr::OwnedSlice::from(&path[..consumed]),
-                        identity,
-                        NodeScopeId::File {
-                            canonical_id: value_root.scope.canonical_id.clone(),
-                            owner: value_root.scope.owner,
-                            whole_hash: observed_hash,
-                            local_scope: value_root.scope.local_scope,
-                        },
-                    ));
-                }
-            }
-            // A member read through an import also depends on this file's
-            // import binding.
-            return output.with_observed_self_roots([(
-                value_root.scope.canonical_id.clone(),
+            let redirect = TypeofRedirect {
+                declaring: member_root,
+                authored: value_root.clone(),
+                path: verter_type_expr::OwnedSlice::from(&path[..consumed]),
                 observed_hash,
-            )]);
+            };
+            if let Some(Some(build)) = suspend {
+                build.redirects.push(redirect);
+                return output;
+            }
+            return self.finish_typeof_redirect(output, &redirect);
         }
         // A namespace import, or a namespace this file declares, read whole
         // is its module object; the rest of the path reads its properties.
@@ -1891,6 +1940,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         member_context,
                     ) {
                         let mut build = Box::new(TypeofBuild {
+                            redirects: Vec::new(),
                             prepared: prepared.clone(),
                             env: member_scope.env,
                             scope: member_scope.scope,
@@ -2028,6 +2078,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // the frame's build, waiting on each value it names.
                     Some(suspended) => {
                         *suspended = Some(Box::new(TypeofBuild {
+                            redirects: Vec::new(),
                             prepared: prepared.clone(),
                             env: empty_env,
                             scope,
@@ -20086,6 +20137,7 @@ fn value_position_locator(
 /// lowering, between the steps of its frame: the lowering's scope, the
 /// projection itself, what follows it, and what the build's output roots on.
 pub(super) struct TypeofBuild {
+    redirects: Vec<TypeofRedirect>,
     /// The declaration the body lowering now belongs to.
     prepared: verter_retention::heap_size::OwnedValue<
         verter_session_query::type_solver::PreparedValueDecl,
@@ -20101,6 +20153,15 @@ pub(super) struct TypeofBuild {
     value_root: ValueRootKey,
     path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     context: crate::semantic_query::ProjectionReductionContext,
+    observed_hash: verter_session_query::analysis::types::Hash16,
+}
+
+/// The authored import head and file root a qualified redirect retains until
+/// its declaring value completes, in inner-to-outer completion order.
+struct TypeofRedirect {
+    declaring: ValueRootKey,
+    authored: ValueRootKey,
+    path: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr>,
     observed_hash: verter_session_query::analysis::types::Hash16,
 }
 

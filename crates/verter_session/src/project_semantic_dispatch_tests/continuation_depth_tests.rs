@@ -166,13 +166,13 @@ fn indexed_path_answers(depth: usize) {
 #[test]
 fn typeof_import_chains_past_native_query_depth_answer_cold_and_warm() {
     import_chain_displays(50);
-    import_chain_named_answers(50, false);
+    import_chain_named_answers(50, ImportChainKind::Direct);
 }
 
 #[test]
 fn typeof_import_chains_past_native_query_depth_answer_cold_and_warm_control_22() {
     import_chain_displays(22);
-    import_chain_named_answers(22, false);
+    import_chain_named_answers(22, ImportChainKind::Direct);
 }
 
 #[test]
@@ -182,42 +182,124 @@ fn typeof_import_chains_past_native_query_depth_answer_cold_and_warm_200_display
 
 #[test]
 fn typeof_import_chains_past_native_query_depth_answer_cold_and_warm_200_named() {
-    import_chain_named_answers(200, false);
+    import_chain_named_answers(200, ImportChainKind::Direct);
 }
 
 #[test]
 fn namespace_import_chains_answer_cold_and_warm_control_1() {
-    import_chain_named_answers(1, true);
+    import_chain_named_answers(1, ImportChainKind::NamespaceReexport);
 }
 
 #[test]
 fn namespace_import_chains_answer_cold_and_warm_23() {
-    import_chain_named_answers(23, true);
+    import_chain_named_answers(23, ImportChainKind::NamespaceReexport);
 }
 
 #[test]
 fn namespace_import_chains_answer_cold_and_warm_50() {
-    import_chain_named_answers(50, true);
+    import_chain_named_answers(50, ImportChainKind::NamespaceReexport);
 }
 
-fn import_chain_files(depth: usize, namespace: bool) -> Vec<(String, String)> {
+#[test]
+fn declared_namespace_import_chains_answer_cold_and_warm_control_1() {
+    import_chain_named_answers(1, ImportChainKind::DeclaredNamespace);
+}
+
+#[test]
+fn declared_namespace_import_chains_answer_cold_and_warm_23() {
+    import_chain_named_answers(23, ImportChainKind::DeclaredNamespace);
+}
+
+#[test]
+fn indexed_namespace_import_chains_answer_cold_and_warm_control_1() {
+    import_chain_named_answers(1, ImportChainKind::IndexedNamespaceReexport);
+}
+
+#[test]
+fn indexed_namespace_import_chains_answer_cold_and_warm_23() {
+    import_chain_named_answers(23, ImportChainKind::IndexedNamespaceReexport);
+}
+
+#[test]
+fn declared_namespace_named_import_chains_answer_cold_and_warm_23() {
+    import_chain_named_answers(23, ImportChainKind::NamedDeclaredNamespace);
+}
+
+#[test]
+fn indexed_declared_namespace_import_chains_answer_cold_and_warm_23() {
+    import_chain_named_answers(23, ImportChainKind::IndexedDeclaredNamespace);
+}
+
+#[test]
+fn computed_indexed_namespace_import_chains_answer_cold_and_warm_23() {
+    import_chain_named_answers(23, ImportChainKind::ComputedIndexedNamespaceReexport);
+}
+
+#[derive(Clone, Copy)]
+enum ImportChainKind {
+    Direct,
+    NamespaceReexport,
+    DeclaredNamespace,
+    IndexedNamespaceReexport,
+    NamedDeclaredNamespace,
+    IndexedDeclaredNamespace,
+    ComputedIndexedNamespaceReexport,
+}
+
+fn import_chain_files(depth: usize, kind: ImportChainKind) -> Vec<(String, String)> {
     let mut files = vec![(
         "m0.ts".to_string(),
         "export declare const value: { deep: 1 };".to_string(),
     )];
     for level in 1..=depth {
-        let import = if namespace {
-            files.push((
-                format!("ns{level}.ts"),
-                format!("export * as ns from './m{}';", level - 1),
-            ));
-            format!("typeof import('./ns{level}').ns.value")
-        } else {
-            format!("typeof import('./m{}').value", level - 1)
+        let import = match kind {
+            ImportChainKind::Direct => format!("typeof import('./m{}').value", level - 1),
+            ImportChainKind::NamespaceReexport
+            | ImportChainKind::IndexedNamespaceReexport
+            | ImportChainKind::ComputedIndexedNamespaceReexport => {
+                files.push((
+                    format!("ns{level}.ts"),
+                    format!("export * as ns from './m{}';", level - 1),
+                ));
+                if matches!(kind, ImportChainKind::ComputedIndexedNamespaceReexport) {
+                    format!("(typeof import('./ns{level}').ns)[SelectedKey]")
+                } else if matches!(kind, ImportChainKind::IndexedNamespaceReexport) {
+                    format!("(typeof import('./ns{level}').ns)['value']")
+                } else {
+                    format!("typeof import('./ns{level}').ns.value")
+                }
+            }
+            ImportChainKind::DeclaredNamespace
+            | ImportChainKind::NamedDeclaredNamespace
+            | ImportChainKind::IndexedDeclaredNamespace => {
+                files.push((
+                    format!("ns{level}.ts"),
+                    format!(
+                        "export declare namespace ns {{ export const value: typeof import('./m{}').value; }}",
+                        level - 1
+                    ),
+                ));
+                match kind {
+                    ImportChainKind::NamedDeclaredNamespace => "typeof ns.value".to_string(),
+                    ImportChainKind::IndexedDeclaredNamespace => {
+                        format!("(typeof import('./ns{level}').ns)['value']")
+                    }
+                    _ => format!("typeof import('./ns{level}').ns.value"),
+                }
+            }
+        };
+        let prelude = match kind {
+            ImportChainKind::NamedDeclaredNamespace => {
+                format!("import {{ ns }} from './ns{level}';")
+            }
+            ImportChainKind::ComputedIndexedNamespaceReexport => {
+                "type SelectedKey = 'value';".to_string()
+            }
+            _ => String::new(),
         };
         files.push((
             format!("m{level}.ts"),
-            format!("export declare const value: {import};"),
+            format!("{prelude} export declare const value: {import};"),
         ));
     }
     files
@@ -226,7 +308,7 @@ fn import_chain_files(depth: usize, namespace: bool) -> Vec<(String, String)> {
 fn import_chain_displays(depth: usize) {
     use super::checker_probe_lane_tests::{probe_host, with_probe_on_host};
     use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::render_node;
-    let files = import_chain_files(depth, false);
+    let files = import_chain_files(depth, ImportChainKind::Direct);
     let files: Vec<_> = files
         .iter()
         .map(|(name, text)| (name.as_str(), text.as_str()))
@@ -249,9 +331,9 @@ fn import_chain_displays(depth: usize) {
     assert_eq!(displays, ["{ deep: 1 }", "{ deep: 1 }"], "depth {depth}");
 }
 
-fn import_chain_named_answers(depth: usize, namespace: bool) {
+fn import_chain_named_answers(depth: usize, kind: ImportChainKind) {
     use super::checker_probe_lane_tests::probe_host;
-    let files = import_chain_files(depth, namespace);
+    let files = import_chain_files(depth, kind);
     let files: Vec<_> = files
         .iter()
         .map(|(name, text)| (name.as_str(), text.as_str()))
