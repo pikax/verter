@@ -672,11 +672,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // them answered instead of evaluating them in place. What the
         // demand observed is the relation's to observe, so it is dropped.
         if self.deciding_on_the_runtime() {
-            let demanded = self.observe_read(|| {
-                for operand in [check, extends] {
-                    let _ = self.unwrap_identity_carrier_for_relation(operand);
-                }
-            });
+            let demanded = self.observe_read(|| self.demand_relation_operands([check, extends]));
             let _ = demanded.discard();
             if self.decision_waits() {
                 return self.waiting_decision_output();
