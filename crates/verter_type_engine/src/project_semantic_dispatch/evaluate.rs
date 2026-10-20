@@ -2487,15 +2487,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.evaluate_deferred_demand(node, context, DeferredEvaluationDemand::MappedIndexValue)
     }
 
-    /// Consume a mapped member's helper aliases through the shared value
-    /// evaluator. Navigate keeps object interiors addressable while the
-    /// publication demand still reduces the selected operators.
+    /// Evaluate the selected value at the caller's publication demand before
+    /// consuming residual helper aliases. Their Navigate continuation keeps
+    /// instantiated object interiors addressable without narrowing the original
+    /// value demand or its memo identity.
     pub(super) fn evaluate_mapped_member_value_outcome(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        self.evaluate_mapped_index_value_outcome(node, context.with_mode(ProjectionMode::Navigate))
+        let selected = self.evaluate_selected_value_outcome(node, context);
+        if selected.completeness.is_partial() {
+            return selected;
+        }
+        let resolved = self.evaluate_mapped_index_value_outcome(
+            selected.node,
+            context.with_mode(ProjectionMode::Navigate),
+        );
+        EvaluateDeferredOutcome {
+            completeness: selected.completeness.merge(resolved.completeness),
+            availability: selected.availability.join(resolved.availability),
+            cache_suppress: selected.cache_suppress | resolved.cache_suppress,
+            ..resolved
+        }
     }
 
     fn evaluate_deferred_demand(
