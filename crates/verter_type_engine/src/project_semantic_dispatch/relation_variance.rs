@@ -274,8 +274,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Some(acc)
     }
 
-    /// Enforce fixed annotated arguments without changing candidate collection
-    /// or measuring unannotated parameters inside the inference session.
+    /// Enforce fixed annotated arguments before candidate collection, preserving
+    /// the whole declaration's eligibility for structural fallback.
     fn relate_fixed_annotated_arguments(
         &self,
         declaration: &DeclIdentity,
@@ -315,6 +315,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             return None;
         }
         let related = self.relate_variances(&sources, &targets, &variances, bindings);
+        if matches!(related, Some(RelationResult::NotAssignable))
+            && sources.len() < source_args.len()
+        {
+            let DeclarationVariance::Known(declaration_variances) =
+                self.parameter_variances(declaration, source_args.len(), true)?
+            else {
+                return None;
+            };
+            if self.variances_allow_structural_fallback(&declaration_variances, target_args) {
+                return None;
+            }
+        }
         if sources.len() == source_args.len()
             || matches!(
                 related,
@@ -380,7 +392,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !matches!(acc, RelationResult::NotAssignable) {
             return Some(acc);
         }
-        let structural_fallback = variances
+        (!self.variances_allow_structural_fallback(variances, target_args))
+            .then_some(RelationResult::NotAssignable)
+    }
+
+    fn variances_allow_structural_fallback(
+        &self,
+        variances: &[Variance],
+        target_args: &[SemanticNodeId],
+    ) -> bool {
+        variances
             .iter()
             .any(|variance| variance.unmeasurable || variance.unreliable)
             || variances
@@ -392,8 +413,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             self.graph().node_data(target).as_deref(),
                             Some(SemanticNodeData::Primitive(PrimitiveKind::Void))
                         )
-                });
-        (!structural_fallback).then_some(RelationResult::NotAssignable)
+                })
     }
 
     /// Two type arguments of an unmeasurable parameter relate only when

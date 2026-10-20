@@ -94,6 +94,7 @@ fn composite_targets_preserve_annotated_generic_relations() {
          type IntersectionTarget = Cell<string> & { get(): string };\n\
          type SourceUnion = Cell<'a'> | Cell<'b'>;\n\
          interface ValueCell<in out T> { v: T }\n\
+         interface PlainCell<T> { get(): T }\n\
          interface IndexedSource { value: { cell: Cell<'a'> }['cell'] }\n\
          interface RecursiveCell<in out T> { next: RecursiveCell<T> | number }\n\
          interface DefaultRecursiveCell<in out T = string> { next: DefaultRecursiveCell | number }\n",
@@ -104,6 +105,11 @@ fn composite_targets_preserve_annotated_generic_relations() {
             ("Cell<'a'> extends IntersectionTarget ? 1 : 0", "0"),
             ("Cell<'a'> extends Cell<'a'> | number ? 1 : 0", "1"),
             ("Cell<'a'> extends Cell<'a'> & { get(): string } ? 1 : 0", "1"),
+            ("Cell<'a'> extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("PlainCell<'a'> extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("{ get(): 'a' } extends { other?: 1 } & { more?: 2 } ? 1 : 0", "0"),
+            ("Cell<'a'> extends { other?: 1 } ? 1 : 0", "0"),
+            ("Cell<'a'> extends { get?: () => string } & { more?: 2 } ? 1 : 0", "1"),
             ("Cell<'a'> extends Cell<string> | { get(): string } ? 1 : 0", "1"),
             ("Cell<'a'> extends { get(): string } & { get(): string } ? 1 : 0", "1"),
             ("Cell<'a'> | Cell<'b'> extends Cell<string> | number ? 1 : 0", "0"),
@@ -150,7 +156,8 @@ fn unannotated_variance_survives_named_publication() {
 fn fixed_annotations_are_checked_before_inference() {
     assert_named_answers(
         "interface Cell<in out T> { get(): T }\n\
-         interface Mixed<in out T, U> { value: T; other: U }\n",
+         interface Mixed<in out T, U> { value: T; other: U }\n\
+         interface RestMixed<in out T, U extends unknown[]> { value: T; f: (...args: U) => void }\n",
         &[
             (
                 "Cell<'a'> extends Cell<string> | { other: infer U } ? 1 : 0",
@@ -162,6 +169,9 @@ fn fixed_annotations_are_checked_before_inference() {
             ),
             ("Mixed<'a', 1> extends Mixed<string, infer U> ? U : 0", "0"),
             ("Mixed<'a', 1> extends Mixed<'a', infer U> ? U : 0", "1"),
+            ("RestMixed<'a', []> extends RestMixed<string, infer U> ? 1 : 0", "1"),
+            ("RestMixed<'a', []> extends RestMixed<string, [number]> ? 1 : 0", "1"),
+            ("RestMixed<string, []> extends RestMixed<'a', infer U> ? 1 : 0", "0"),
         ],
     );
 }

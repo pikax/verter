@@ -9883,6 +9883,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(targets) = self.weak_target_surfaces(target) else {
             return false;
         };
+        // Constituent relations retain declaration identity for variance, but
+        // this whole-target guard reads the properties of its surface.
+        let source = if self
+            .graph()
+            .node_data(source)
+            .as_deref()
+            .is_some_and(is_declaration_reference)
+        {
+            let IdentityCarrierUnwrap::Concrete(source) =
+                self.unwrap_identity_carrier_for_relation(source)
+            else {
+                return false;
+            };
+            source
+        } else {
+            source
+        };
         self.weak_surfaces_reject(source, target, &targets)
     }
 
