@@ -127,19 +127,52 @@ fn slice_growth<T>(count: usize) -> usize {
     heap_block_bytes(count * std::mem::size_of::<T>())
 }
 
+/// A printer for a message that prints no type.
+struct NoTypes;
+
+impl crate::semantic_query::CheckerDiagnosticPrinter for NoTypes {
+    fn relation_operands(&self, _: SemanticNodeId, _: SemanticNodeId) -> Option<(String, String)> {
+        unreachable!("the message has no type argument")
+    }
+    fn relation_failure(
+        &self,
+        _: SemanticNodeId,
+        _: SemanticNodeId,
+        _: crate::semantic_query::CheckerDiagnostic,
+        _: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        unreachable!("the message reports no relation")
+    }
+}
+
 #[test]
 fn a_flow_return_is_charged_for_its_nested_backing() {
     use crate::project_semantic_dispatch::flow_return::{ExactMemberValue, ExactReturnKeyDomain};
-    use crate::semantic_query::{CheckerDiagnostic, FlowReturnResult};
+    use crate::semantic_query::{
+        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticOccurrence,
+        CheckerDiagnosticRecipe, CheckerDiagnosticSite, CheckerDiagnosticSubject, FlowReturnResult,
+    };
 
     const ARMS: usize = 5_000;
     const TEXT: usize = 9_000;
     let canonical: Arc<str> = Arc::from("/a.ts");
     let small = FlowReturnResult::for_footprint_tests(SemanticNodeId(1), nodes(0));
-    let diagnostics: OwnedSlice<CheckerDiagnostic> = (0..ARMS)
-        .map(|_| CheckerDiagnostic {
-            code: crate::semantic_query::CheckerDiagnosticCode::NoMatchingOverload,
-            operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
+    let recipe = CheckerDiagnosticRecipe::call(
+        CheckerDiagnosticCode::NoMatchingOverload,
+        CheckerDiagnosticArguments::None,
+        CheckerDiagnosticSubject::Operation,
+    );
+    let diagnostics: OwnedSlice<CheckerDiagnosticOccurrence> = (0..ARMS)
+        .map(|ordinal| {
+            let site = CheckerDiagnosticSite {
+                operation_start: Some(ordinal as u32),
+                operation_end: Some(ordinal as u32),
+                ..Default::default()
+            };
+            recipe
+                .bind(&site, &NoTypes)
+                .expect("the site names the call")
+                .remove(0)
         })
         .collect();
     let long_key: Arc<str> = Arc::from("k".repeat(TEXT));
@@ -164,7 +197,7 @@ fn a_flow_return_is_charged_for_its_nested_backing() {
         verter_session_query::retention::owned::Owned::new(large),
     ));
     let nested = slice_growth::<SemanticNodeId>(ARMS)
-        + slice_growth::<CheckerDiagnostic>(ARMS)
+        + slice_growth::<CheckerDiagnosticOccurrence>(ARMS)
         + 2 * arc_block_bytes(TEXT);
     assert!(
         large_bytes >= small_bytes + nested,
@@ -333,4 +366,39 @@ fn a_relation_is_charged_for_its_recursion_identities() {
     let without = relation(None);
     let lists = 2 * heap_block_bytes(IDENTITIES * std::mem::size_of::<(u64, u16)>());
     assert!(value_bytes(with) >= value_bytes(without) + lists);
+}
+
+#[test]
+fn a_diagnostic_chain_is_charged_one_block_per_allocation() {
+    use crate::semantic_query::{
+        CheckerDiagnostic, CheckerDiagnosticChainLine, CheckerDiagnosticCode,
+        CheckerDiagnosticOccurrence, CheckerDiagnosticOperation,
+    };
+    use verter_session_query::retention::allocation::heap_block_bytes;
+
+    const TEXT: usize = 37;
+    let occurrence = |chain: Vec<CheckerDiagnosticChainLine>| {
+        CheckerDiagnosticOccurrence::new(
+            0,
+            0,
+            CheckerDiagnostic {
+                code: CheckerDiagnosticCode::TypeNotAssignable,
+                operation: CheckerDiagnosticOperation::CallResolution,
+            },
+            Box::new([]),
+            chain.into_boxed_slice(),
+        )
+    };
+    let bare = occurrence(Vec::new()).heap_bytes(&mut AliasSet::estimating());
+    let chained = occurrence(vec![
+        CheckerDiagnosticChainLine::new(1, "a".repeat(TEXT).into_boxed_str()),
+        CheckerDiagnosticChainLine::new(2, "b".repeat(TEXT).into_boxed_str()),
+    ])
+    .heap_bytes(&mut AliasSet::estimating());
+    let line = std::mem::size_of::<CheckerDiagnosticChainLine>();
+    assert_eq!(
+        chained - bare,
+        heap_block_bytes(2 * line) + 2 * heap_block_bytes(TEXT),
+        "the chain backing and each message are separate allocations"
+    );
 }

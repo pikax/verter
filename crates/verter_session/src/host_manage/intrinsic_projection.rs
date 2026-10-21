@@ -126,12 +126,8 @@ impl VerterHost {
                 },
             )
             .into_publication();
-        let resolved = match publication {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                admitted.into_result()?
-            }
-            verter_workspace::ResolutionPublication::Refused(_) => return None,
-        };
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
+        let resolved = publication.into_delivered().flatten()?;
         let _ = self.ensure_indexed_ready_serve(&resolved.source_id);
         Some(resolved.source_id)
     }

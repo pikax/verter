@@ -1030,9 +1030,10 @@ pub enum ClosednessRecipe {
     /// environment. An object with a non-scalar index-signature key escapes
     /// via [`Self::LowerAndClassify`] instead (the key needs the walker).
     ObjectClosed,
-    /// A function / constructor-type body: not an enumerable key surface —
-    /// decided-open at the key domain in every binding environment.
-    OpenLeaf,
+    /// A function / constructor-type body: it has no properties, so its key
+    /// domain is the closed empty set (`keyof (() => void)` is `never`) in
+    /// every binding environment.
+    CallableLeaf,
     /// A union / intersection composition: closed iff every arm's recipe is
     /// closed. The ONLY composition arm (parentheses are normalized away). On
     /// this arm only, the recursive-self escape REPLACES the plain marker

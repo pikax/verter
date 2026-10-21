@@ -869,6 +869,7 @@ impl VerterHost {
         // consumer normalizing it again in the request shares that run.
         let normalization = self.request_normalized_canonical(canonical_id, || {
             let mut refused = false;
+            let mut unretained = false;
             let resolved = resolve_eval_dependency_canonical_with(canonical_id, |candidate| {
                 if refused {
                     return false;
@@ -884,6 +885,12 @@ impl VerterHost {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         admitted.result().is_some()
                     }
+                    // The complete answer normalizes; the resolution entry
+                    // already refused every enclosing scope's admission.
+                    verter_workspace::ResolutionPublication::Unretained(unretained_answer) => {
+                        unretained = true;
+                        unretained_answer.result().is_some()
+                    }
                     verter_workspace::ResolutionPublication::Refused(_) => {
                         refused = true;
                         false
@@ -898,12 +905,12 @@ impl VerterHost {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
-                return (None, true);
+                return (None, true, unretained);
             }
             let normalized = resolved
                 .filter(|resolved| resolved != canonical_id)
                 .map(|resolved| std::sync::Arc::<str>::from(resolved.as_str()));
-            (normalized, false)
+            (normalized, false, unretained)
         });
         match normalization.normalized.as_deref() {
             Some(normalized) => std::borrow::Cow::Owned(normalized.to_string()),

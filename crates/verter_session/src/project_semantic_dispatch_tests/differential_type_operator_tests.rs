@@ -112,6 +112,7 @@ type Opt<T> = { [K in keyof T]+?: T[K] };
 type FilterStr<T> = { [K in keyof T as T[K] extends string ? K : never]: T[K] };
 type FromUnion<K extends string> = { [P in K]: P };
 type Boxed<T> = { [K in keyof T]: { v: T[K] } };
+type NestedGetters<T> = { [K in keyof T as Uppercase<K & string>]: () => { value: T[K][] } };
 "##;
 
 /// A mapped type maps each key's value, adds or removes `readonly` and `?`,
@@ -161,7 +162,10 @@ fn mapped_types_read_as_the_checker_reads_them() {
 #[test]
 fn a_key_remapped_mapped_type_reads_its_remapped_members() {
     let matrix = Matrix::new(MAPPED);
-    let failures = matrix.types(&[("Getters<{ a: 1 }>['getA']", "() => 1")]);
+    let failures = matrix.types(&[
+        ("Getters<{ a: 1 }>['getA']", "() => 1"),
+        ("NestedGetters<{ a: 1 }>['A']", "() => { value: 1[]; }"),
+    ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
