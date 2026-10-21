@@ -870,7 +870,7 @@ pub enum ResolveCallSelection {
         fresh_literal_returns: Vec<SemanticNodeId>,
         /// The diagnostic of an error-recovery winner (see
         /// [`ResolvedCallResult::Selected`]).
-        recovery_diagnostic: Option<crate::semantic_query::CheckerDiagnostic>,
+        recovery_diagnostic: Option<Box<crate::semantic_query::CheckerDiagnosticRecipe>>,
     },
     DynamicAny,
 }
@@ -954,7 +954,7 @@ impl ResolveCallSelection {
                 substitution: substitution.clone(),
                 return_type,
                 fresh_literal_returns: fresh_literal_returns.clone().into(),
-                recovery_diagnostic: *recovery_diagnostic,
+                recovery_diagnostic: recovery_diagnostic.as_deref().copied(),
             },
             Self::DynamicAny => ResolvedCallResult::DynamicAny { return_type },
         }
@@ -2426,6 +2426,10 @@ struct CallArgumentLiteralPolicy {
     /// into a naked type parameter (`inferFromTypes` skips a
     /// `NonInferrableType` source).
     first_pass: bool,
+    /// The type parameters the first-pass reading relates a withheld
+    /// member's placeholder `any` to at a naked position: no candidate
+    /// for them, as the checker's non-inferrable `anyFunctionType` is none.
+    withheld_targets: Vec<SemanticNodeId>,
 }
 
 /// A literal an authored position of a call argument keeps, with a type
@@ -3067,7 +3071,7 @@ impl CheckerDispatchTransaction {
         top_level_infer_targets: Vec<SemanticNodeId>,
         argument: Option<SemanticNodeId>,
         context_keeps: Vec<ContextKeptLiteral>,
-        first_pass: bool,
+        first_pass: Option<Vec<SemanticNodeId>>,
     ) {
         self.relation
             .call_argument_literal_modes
@@ -3076,7 +3080,8 @@ impl CheckerDispatchTransaction {
                 top_level_infer_targets,
                 argument,
                 context_keeps,
-                first_pass,
+                first_pass: first_pass.is_some(),
+                withheld_targets: first_pass.unwrap_or_default(),
             });
     }
 
@@ -3117,6 +3122,18 @@ impl CheckerDispatchTransaction {
             .call_argument_literal_modes
             .last()
             .is_some_and(|policy| policy.argument == Some(bound))
+    }
+
+    /// Whether the CURRENT call argument relates as its first-pass reading
+    /// and lands a withheld member's placeholder at a naked position of
+    /// `param_node`.
+    pub(crate) fn call_argument_withheld_target(&self, param_node: SemanticNodeId) -> bool {
+        self.relation
+            .call_argument_literal_modes
+            .last()
+            .is_some_and(|policy| {
+                policy.first_pass && policy.withheld_targets.contains(&param_node)
+            })
     }
 
     /// Whether depositing `bound` into `param_node` would deposit the

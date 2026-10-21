@@ -148,6 +148,20 @@ fn main() {
         }
     };
 
+    // An empty selection is only a clean pass when `include` matched nothing:
+    // when `exclude` removed every matched carrier, say so instead of silently
+    // reporting zero errors.
+    if config.vue_files.is_empty() {
+        let matched = tsconfig::include_matched_carrier_count(&tsconfig_path);
+        if matched > 0 {
+            eprintln!(
+                "verter-tsc: warning: `include` matched {matched} .vue file(s) in {}, but \
+                 `exclude` removed all of them; no .vue file is checked.",
+                tsconfig_path.display()
+            );
+        }
+    }
+
     if cli.list_files {
         for f in &config.vue_files {
             println!("{}", f.display());

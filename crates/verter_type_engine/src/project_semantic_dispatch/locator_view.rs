@@ -197,8 +197,22 @@ pub struct LocatorViewInputs<'a> {
     pub self_value: Option<&'a verter_type_expr::locators::AuthoredAnchor>,
 }
 
-/// Per-projection memo so shared sub-graphs project once per context.
-pub type ViewMemo = FxHashMap<(SemanticNodeId, ProjectionReductionContext), SemanticNodeId>;
+/// Where a node is projected, where the place changes what it projects to:
+/// an application a tuple spreads is instantiated to splice, though the
+/// carrier modes keep the same application a carrier anywhere else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProjectionSlot {
+    /// Any position that does not change the node's projection.
+    Plain,
+    /// A tuple's rest element holding an application, under a carrier mode
+    /// that splices it (`Navigate`, `Shallow`).
+    Spread,
+}
+
+/// Per-projection memo so shared sub-graphs project once per context and
+/// slot.
+pub type ViewMemo =
+    FxHashMap<(SemanticNodeId, ProjectionReductionContext, ProjectionSlot), SemanticNodeId>;
 
 /// Prepared input for the projection-view Criterion benchmark. This lives
 /// behind `test-support`; ordinary production builds cannot construct or see

@@ -145,7 +145,7 @@ pub struct FlowReturnResult {
     /// body's own — a caller of this function reads its signature, not
     /// its errors. Every rebuild carries them.
     checker_diagnostics:
-        verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
+        verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnosticOccurrence>,
     /// The graph ownership of a result handed out of the engine: its
     /// return node and every node it carries, held for as long as the
     /// delivered result lives. Transport only — never identity.
@@ -341,7 +341,7 @@ impl FlowReturnResult {
 
     /// The diagnostics riding with the value (see the field).
     #[must_use]
-    pub fn checker_diagnostics(&self) -> &[super::CheckerDiagnostic] {
+    pub fn checker_diagnostics(&self) -> &[super::CheckerDiagnosticOccurrence] {
         &self.checker_diagnostics
     }
 
@@ -349,7 +349,8 @@ impl FlowReturnResult {
     /// over: a clone shares their one charge.
     pub(crate) fn checker_diagnostics_owned(
         &self,
-    ) -> &verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic> {
+    ) -> &verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnosticOccurrence>
+    {
         &self.checker_diagnostics
     }
 
@@ -358,7 +359,9 @@ impl FlowReturnResult {
     #[must_use]
     pub(crate) fn with_checker_diagnostics(
         mut self,
-        diagnostics: verter_session_query::retention::owned::OwnedSlice<super::CheckerDiagnostic>,
+        diagnostics: verter_session_query::retention::owned::OwnedSlice<
+            super::CheckerDiagnosticOccurrence,
+        >,
     ) -> Self {
         self.checker_diagnostics = diagnostics;
         self

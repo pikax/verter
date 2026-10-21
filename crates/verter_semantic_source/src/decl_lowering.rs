@@ -479,6 +479,10 @@ struct DeclWorker {
     /// its snapshot is retained, so this holds no more entries than the
     /// shard does.
     releases: Arc<parking_lot::Mutex<FxHashMap<SnapshotKey, usize>>>,
+    /// The worker thread, joined when the service drops: it owns the
+    /// shard, so its exit is when the shard's retained snapshots, and the
+    /// retention charges pinning them, are released.
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// Spawn `worker_count` decl-lowering worker threads, each owning its own
@@ -500,7 +504,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
         let (wake, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
         let pending = Arc::clone(&releases);
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
@@ -529,6 +533,7 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
             jobs,
             wake,
             releases,
+            thread,
         });
     }
     workers
@@ -586,6 +591,28 @@ impl std::fmt::Debug for DeclLoweringService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeclLoweringService")
             .finish_non_exhaustive()
+    }
+}
+
+/// Closing the job queues ends the workers; joining them means a dropped
+/// service has released every retained snapshot and the retention charge
+/// pinning it by the time its drop returns. Every lease holds the service,
+/// so none is left to release afterwards. A worker never joins itself: if
+/// the last handle drops on one, that worker exits once its job returns.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DeclLoweringService {
+    fn drop(&mut self) {
+        let Some(workers) = self.workers.take() else {
+            return;
+        };
+        let current = std::thread::current().id();
+        let threads: Vec<std::thread::JoinHandle<()>> =
+            workers.into_iter().map(|worker| worker.thread).collect();
+        for thread in threads {
+            if thread.thread().id() != current {
+                let _ = thread.join();
+            }
+        }
     }
 }
 

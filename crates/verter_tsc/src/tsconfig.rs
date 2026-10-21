@@ -46,8 +46,10 @@ pub struct TsConfig {
 struct RawTsConfig {
     #[serde(default)]
     include: Vec<String>,
+    /// `None` when the property is absent, which TypeScript treats
+    /// differently from an explicit `[]` (see `default_excludes`).
     #[serde(default)]
-    exclude: Vec<String>,
+    exclude: Option<Vec<String>>,
     #[serde(default)]
     files: Vec<String>,
     #[serde(rename = "extends")]
@@ -169,7 +171,14 @@ pub fn load_tsconfig(tsconfig_path: &Path) -> Result<TsConfig, String> {
     let mut ts_files: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
-    load_tsconfig_recursive(tsconfig_path, &mut vue_files, &mut ts_files, &mut seen, 0)?;
+    load_tsconfig_recursive(
+        tsconfig_path,
+        ExcludeMode::Apply,
+        &mut vue_files,
+        &mut ts_files,
+        &mut seen,
+        0,
+    )?;
 
     let root_dir = simplify_verbatim_path(
         &safe_parent(tsconfig_path)
@@ -190,8 +199,34 @@ pub fn load_tsconfig(tsconfig_path: &Path) -> Result<TsConfig, String> {
     })
 }
 
+/// How many carrier files the tsconfig's `files`/`include` select before
+/// `exclude` is applied. A caller whose selection came out empty uses it to
+/// tell "nothing matched" from "exclude removed everything".
+pub fn include_matched_carrier_count(tsconfig_path: &Path) -> usize {
+    let mut vue_files = Vec::new();
+    let mut ts_files = Vec::new();
+    let mut seen = HashSet::new();
+    let _ = load_tsconfig_recursive(
+        tsconfig_path,
+        ExcludeMode::Ignore,
+        &mut vue_files,
+        &mut ts_files,
+        &mut seen,
+        0,
+    );
+    vue_files.len()
+}
+
+/// Whether file discovery applies the tsconfig `exclude` entries.
+#[derive(Clone, Copy)]
+enum ExcludeMode {
+    Apply,
+    Ignore,
+}
+
 fn load_tsconfig_recursive(
     tsconfig_path: &Path,
+    exclude_mode: ExcludeMode,
     vue_files: &mut Vec<PathBuf>,
     ts_files: &mut Vec<PathBuf>,
     seen: &mut HashSet<PathBuf>,
@@ -232,7 +267,14 @@ fn load_tsconfig_recursive(
                 ref_path
             };
             if ref_tsconfig.exists() {
-                load_tsconfig_recursive(&ref_tsconfig, vue_files, ts_files, seen, depth + 1)?;
+                load_tsconfig_recursive(
+                    &ref_tsconfig,
+                    exclude_mode,
+                    vue_files,
+                    ts_files,
+                    seen,
+                    depth + 1,
+                )?;
             }
         }
         return Ok(());
@@ -249,19 +291,14 @@ fn load_tsconfig_recursive(
         }
     }
 
-    // Build exclude rules from patterns.
-    // Always exclude node_modules (matching tsc behavior), even when explicit
-    // exclude patterns are provided.
-    let mut exclude_rules: Vec<ExcludeRule> =
-        vec![ExcludeRule::AnyComponent("node_modules".to_string())];
-    if raw.exclude.is_empty() {
-        exclude_rules.push(ExcludeRule::Prefix(root_dir.join("bower_components")));
-        exclude_rules.push(ExcludeRule::Prefix(root_dir.join("jspm_packages")));
-    } else {
-        for p in &raw.exclude {
-            exclude_rules.push(ExcludeRule::from_pattern(p, &root_dir));
-        }
-    }
+    // `exclude` filters only what `include` finds; `files` entries are immune.
+    // TypeScript's package-folder handling is a property of include wildcards
+    // (see `is_implicitly_excluded_dir`), not a default exclude entry.
+    let excludes = match (exclude_mode, &raw.exclude) {
+        (ExcludeMode::Apply, Some(exclude)) => compile_excludes(exclude, &root_dir),
+        (ExcludeMode::Apply, None) => default_excludes(tsconfig_path, &root_dir),
+        (ExcludeMode::Ignore, _) => Vec::new(),
+    };
 
     // Determine include patterns — default to root if none specified.
     let effective_include: Vec<String> = if raw.include.is_empty() && raw.files.is_empty() {
@@ -299,6 +336,8 @@ fn load_tsconfig_recursive(
             .into_iter()
             // CRITICAL: filter_entry() prunes the walk — prevents descending into
             // excluded directories (node_modules, dist) and hidden directories (.git).
+            // Pruning a directory an exclude entry matches is exact: the entry
+            // then matches every path below it too.
             // Without this, WalkDir enters node_modules and yields every file inside,
             // causing 19s+ overhead on projects with large dependency trees.
             .filter_entry(|e| {
@@ -308,8 +347,8 @@ fn load_tsconfig_recursive(
                     if name.starts_with('.') && name.len() > 1 {
                         return false;
                     }
-                    // Skip excluded directories
-                    !is_excluded(e.path(), &exclude_rules)
+                    !is_implicitly_excluded_dir(e.path(), &scan_dir, pattern)
+                        && !is_excluded(e.path(), &excludes)
                 } else {
                     true
                 }
@@ -319,8 +358,7 @@ fn load_tsconfig_recursive(
             let path = entry.path();
 
             if path.is_file() {
-                // Check file-level exclude rules (e.g. *.spec.ts, *.stories.ts).
-                if is_excluded(path, &exclude_rules) {
+                if is_excluded(path, &excludes) {
                     continue;
                 }
                 let ext = path.extension().and_then(|e| e.to_str());
@@ -417,18 +455,18 @@ fn glob_match_segments(pat: &[&str], segs: &[&str]) -> bool {
 }
 
 fn glob_match_name(pattern: &str, name: &str) -> bool {
+    let pat: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
     let mut pi = 0;
     let mut ni = 0;
-    let pat = pattern.as_bytes();
-    let name = name.as_bytes();
     let mut star_pat = None;
     let mut star_name = 0;
     while ni < name.len() {
-        if pi < pat.len() && pat[pi] == b'*' {
+        if pi < pat.len() && pat[pi] == '*' {
             star_pat = Some(pi);
             star_name = ni;
             pi += 1;
-        } else if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == name[ni]) {
+        } else if pi < pat.len() && (pat[pi] == '?' || pat[pi] == name[ni]) {
             pi += 1;
             ni += 1;
         } else if let Some(sp) = star_pat {
@@ -439,7 +477,7 @@ fn glob_match_name(pattern: &str, name: &str) -> bool {
             return false;
         }
     }
-    while pi < pat.len() && pat[pi] == b'*' {
+    while pi < pat.len() && pat[pi] == '*' {
         pi += 1;
     }
     pi == pat.len()
@@ -490,90 +528,155 @@ fn classify_file(path: &Path, vue_files: &mut Vec<PathBuf>, ts_files: &mut Vec<P
     }
 }
 
-/// An exclude rule derived from a tsconfig `exclude` pattern.
-enum ExcludeRule {
-    /// Exclude any path that starts with this prefix (e.g. `node_modules`).
-    Prefix(PathBuf),
-    /// Exclude any path that contains this component name (e.g. `dist` from `**/dist`).
-    AnyComponent(String),
-    /// Exclude files matching a glob suffix (e.g. `*.spec.ts` from `src/**/*.spec.ts`).
-    /// Only matches files, never prunes directories.
-    FileSuffix(String),
+/// Whether file names on this platform's default file system are matched
+/// case-sensitively, as TypeScript decides `useCaseSensitiveFileNames`.
+const FILE_NAMES_ARE_CASE_SENSITIVE: bool = !cfg!(any(windows, target_os = "macos"));
+
+/// The package folders TypeScript's include wildcards never descend into
+/// (`implicitExcludePathRegexPattern`), whatever `exclude` says.
+const IMPLICITLY_EXCLUDED_FOLDERS: [&str; 3] =
+    ["node_modules", "bower_components", "jspm_packages"];
+
+/// One tsconfig `exclude` entry, compiled the way TypeScript compiles it
+/// (`getSubPatternFromSpec` with the `exclude` matcher).
+///
+/// The entry is resolved against the tsconfig directory and lexically
+/// normalised (`.` dropped, `..` applied), then split into path components. In
+/// a component `*` matches any run of characters and `?` any one character,
+/// neither crossing `/` and both matching a leading `.`; every other character
+/// is literal. A `**` component matches zero or more whole components. An entry
+/// whose last component holds no `.`, `*` or `?` names a directory and gains a
+/// trailing `**/*`. A path is excluded when the entry matches it or one of its
+/// ancestors (TypeScript's `($|/)` terminator).
+struct ExcludeSpec {
+    components: Vec<String>,
 }
 
-impl ExcludeRule {
-    fn from_pattern(pattern: &str, root_dir: &Path) -> Self {
-        if let Some(tail) = pattern.strip_prefix("**/") {
-            // `**/name` or `**/name/**` → exclude any path component named `name`.
-            let name = tail
-                .trim_end_matches("/**")
-                .trim_end_matches("/*")
-                .trim_end_matches('/')
-                .to_string();
-            if name.contains('*') {
-                // e.g. `**/*.spec.ts` → file suffix match
-                ExcludeRule::FileSuffix(name)
-            } else {
-                ExcludeRule::AnyComponent(name)
+impl ExcludeSpec {
+    /// Compile `spec`, or `None` for an entry TypeScript rejects: one with a
+    /// `..` component after a `**` component.
+    fn compile(spec: &str, root_dir: &Path) -> Option<Self> {
+        let spec = spec.replace('\\', "/");
+        let mut after_recursive = false;
+        for component in spec.split('/') {
+            match component {
+                "**" => after_recursive = true,
+                ".." if after_recursive => return None,
+                _ => {}
             }
-        } else if pattern.contains("/**/") {
-            // `src/**/__tests__/*` → extract the directory name after `**/` as an
-            // AnyComponent rule. Without this, glob_dir_prefix("src/**/__tests__/*")
-            // returns "src" and incorrectly excludes the entire src directory.
-            if let Some(pos) = pattern.find("/**/") {
-                let after = &pattern[pos + 4..]; // skip "/**/"
-                let name = after
-                    .split('/')
-                    .next()
-                    .unwrap_or(after)
-                    .trim_end_matches("/*")
-                    .trim_end_matches('*');
-                if !name.is_empty() && !name.contains('*') {
-                    return ExcludeRule::AnyComponent(name.to_string());
-                }
-            }
-            // Patterns like `src/**/*.spec.ts` — extract the file glob part.
-            if let Some(last_slash) = pattern.rfind('/') {
-                let file_glob = &pattern[last_slash + 1..];
-                if file_glob.contains('*') {
-                    return ExcludeRule::FileSuffix(file_glob.to_string());
-                }
-            }
-            // Fallback: prefix-based
-            let prefix = glob_dir_prefix(pattern);
-            ExcludeRule::Prefix(root_dir.join(prefix))
-        } else {
-            let prefix = glob_dir_prefix(pattern);
-            ExcludeRule::Prefix(root_dir.join(prefix))
         }
+        let mut components = normalized_components(&root_dir.join(&spec));
+        let implicit_glob = components
+            .last()
+            .is_some_and(|last| !last.contains(['.', '*', '?']));
+        if implicit_glob {
+            components.push("**".to_string());
+            components.push("*".to_string());
+        }
+        if !FILE_NAMES_ARE_CASE_SENSITIVE {
+            for component in &mut components {
+                *component = component.to_lowercase();
+            }
+        }
+        Some(Self { components })
     }
 
+    /// Whether `path` (absolute, not necessarily normalised) or one of its
+    /// ancestors matches this entry.
     fn matches(&self, path: &Path) -> bool {
-        match self {
-            ExcludeRule::Prefix(prefix) => path.starts_with(prefix),
-            ExcludeRule::AnyComponent(name) => path
-                .components()
-                .any(|c| c.as_os_str().to_string_lossy() == name.as_str()),
-            ExcludeRule::FileSuffix(glob) => {
-                // Only match files, never directories.
-                // `glob` is e.g. "*.spec.ts" — match against the file name.
-                let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                    Some(n) => n,
-                    None => return false,
-                };
-                // Simple glob matching: "*.ext" matches any file ending with ".ext".
-                if let Some(suffix) = glob.strip_prefix('*') {
-                    file_name.ends_with(suffix)
-                } else {
-                    file_name == glob
-                }
+        let mut segments = normalized_components(path);
+        if !FILE_NAMES_ARE_CASE_SENSITIVE {
+            for segment in &mut segments {
+                *segment = segment.to_lowercase();
             }
         }
+        let pattern: Vec<&str> = self.components.iter().map(String::as_str).collect();
+        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+        exclude_match_segments(&pattern, &segments)
     }
 }
 
-fn is_excluded(path: &Path, rules: &[ExcludeRule]) -> bool {
-    rules.iter().any(|r| r.matches(path))
+/// Match `pattern` against a leading run of `segments`: the remainder of the
+/// path lies under a matched ancestor.
+fn exclude_match_segments(pattern: &[&str], segments: &[&str]) -> bool {
+    let Some((head, rest)) = pattern.split_first() else {
+        return true;
+    };
+    if *head == "**" {
+        return (0..=segments.len()).any(|skip| exclude_match_segments(rest, &segments[skip..]));
+    }
+    let Some((segment, remaining)) = segments.split_first() else {
+        return false;
+    };
+    glob_match_name(head, segment) && exclude_match_segments(rest, remaining)
+}
+
+/// The lexically normalised components of `path`: `.` dropped, `..` applied
+/// (never above the root). The root and any drive prefix are components too.
+fn normalized_components(path: &Path) -> Vec<String> {
+    use std::path::Component;
+
+    let mut components: Vec<String> = Vec::new();
+    let mut named = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                components.push(prefix.as_os_str().to_string_lossy().into_owned());
+            }
+            Component::RootDir => components.push("/".to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if named > 0 {
+                    components.pop();
+                    named -= 1;
+                }
+            }
+            Component::Normal(name) => {
+                components.push(name.to_string_lossy().into_owned());
+                named += 1;
+            }
+        }
+    }
+    components
+}
+
+/// Compile the effective `exclude` entries of one tsconfig.
+fn compile_excludes(exclude: &[String], root_dir: &Path) -> Vec<ExcludeSpec> {
+    exclude
+        .iter()
+        .filter_map(|spec| ExcludeSpec::compile(spec, root_dir))
+        .collect()
+}
+
+/// The `exclude` TypeScript applies when a tsconfig has no `exclude` property:
+/// the resolved `outDir` and `declarationDir`, so a later run never selects its
+/// own build output. An explicit `exclude` (even `[]`) replaces this default.
+fn default_excludes(tsconfig_path: &Path, root_dir: &Path) -> Vec<ExcludeSpec> {
+    let output_dirs = resolve_output_dirs(tsconfig_path, 0);
+    [output_dirs.out_dir, output_dirs.declaration_dir]
+        .into_iter()
+        .flatten()
+        .filter_map(|dir| ExcludeSpec::compile(&dir.to_string_lossy(), root_dir))
+        .collect()
+}
+
+fn is_excluded(path: &Path, excludes: &[ExcludeSpec]) -> bool {
+    excludes.iter().any(|spec| spec.matches(path))
+}
+
+/// Whether a walk from `scan_dir` for include `pattern` must not enter `dir`:
+/// a package folder below the include's literal directory is reached only
+/// through a wildcard, which TypeScript never lets match one unless `pattern`
+/// spells it.
+fn is_implicitly_excluded_dir(dir: &Path, scan_dir: &Path, pattern: &str) -> bool {
+    if dir == scan_dir {
+        return false;
+    }
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    IMPLICITLY_EXCLUDED_FOLDERS.contains(&name)
+        && !pattern.replace('\\', "/").split('/').any(|c| c == name)
 }
 
 /// Strip single-line (`//`) and block (`/* */`) comments from JSON-like content.
@@ -1116,3 +1219,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tsconfig_exclude_tests.rs"]
+mod exclude_tests;

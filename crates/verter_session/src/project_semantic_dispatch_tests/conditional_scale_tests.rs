@@ -8,7 +8,9 @@
 //! - a pattern that repeats an `infer` distributes over a 1,000-member union
 //!   of distinct object aliases;
 //! - a tuple of 1,000 distinct aliases of one generic infers through each
-//!   alias once.
+//!   alias once;
+//! - an `infer` through a chain of generic aliases, each naming the one
+//!   before, reads each alias of the chain a bounded number of times.
 //!
 //! Each demand is the named demand the semantic benchmark makes (`__Probe`
 //! resolved by name and projected to its wire answer). Every expected answer
@@ -120,6 +122,20 @@ fn distinct_aliases(members: usize) -> (String, String) {
     )
 }
 
+/// A chain of `depth` generic aliases over one interface, each naming the
+/// one before, and the inference through its last alias: the semantic
+/// benchmark's `reference-infer-depth` shape.
+fn alias_chain(depth: usize) -> (String, String) {
+    let mut source = String::from("interface Box<T> { v: T }\ntype N0<T> = Box<T>;\n");
+    for i in 0..depth {
+        source.push_str(&format!("type N{}<T> = N{i}<T>;\n", i + 1));
+    }
+    (
+        source,
+        format!("N{depth}<\"x\"> extends Box<infer P> ? P : never"),
+    )
+}
+
 fn numbers(members: usize) -> BTreeSet<Literal> {
     (0..members).map(|i| Literal::Number(i as u64)).collect()
 }
@@ -156,7 +172,7 @@ type Work = [(&'static str, u64); 7];
 
 /// Resolve `__Probe = probe` in a fresh project holding `source`, as the
 /// benchmark's probe does, and return its literal members and its work. An
-/// answer that is not a union of literals (an unevaluated conditional, the
+/// answer that is neither a literal nor a union of literals (an unevaluated conditional, the
 /// probe expression itself, a template not built into its string) fails.
 ///
 /// The request's operation fuse is `operations`.
@@ -196,8 +212,9 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         .project_node_to_type_expr_json_bytes(&node)
         .expect("the answer projects");
     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("a wire answer");
-    let TypeExpr::Union(arms) = &answer else {
-        panic!("`{}` is not a union of literals", short(&answer));
+    let arms = match &answer {
+        TypeExpr::Union(arms) => &arms[..],
+        single => std::slice::from_ref(single),
     };
     let literals = arms
         .iter()
@@ -408,6 +425,28 @@ fn distinct_aliases_answer_at_every_size_with_linear_work() {
         (members, work)
     });
     assert_linear_growth("aliases", work[0], work[1]);
+}
+
+/// An `infer` through a chain of aliases answers at three depths, with work
+/// linear from each to the next. The decision waits on the chain one alias
+/// at a time; each run after a delivery resumes the chain where the last
+/// one stopped instead of reading every answered alias again, which would
+/// cost the square of the depth. Measured on TypeScript 7.0.2: `"x"`.
+#[test]
+fn an_infer_through_an_alias_chain_answers_with_linear_work() {
+    let work = [50, 100, 200].map(|depth| {
+        let (source, probe) = alias_chain(depth);
+        let (answer, work) = named_probe(
+            &source,
+            &probe,
+            verter_type_engine::request_budget::DEFAULT_PROJECTION_OP_BUDGET,
+        );
+        let expected = [Literal::String("x".into())].into();
+        assert_answer(&format!("the chain of {depth}"), &answer, &expected);
+        (depth, work)
+    });
+    assert_linear_growth("chain", work[0], work[1]);
+    assert_linear_growth("chain", work[1], work[2]);
 }
 
 /// One request builds each query once: a later read of the same key is
