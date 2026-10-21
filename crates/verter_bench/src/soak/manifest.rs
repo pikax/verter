@@ -36,9 +36,11 @@ pub const SURGE_MODULES: u32 = 300;
 /// Props of each surge component: its retained result stays below the
 /// account's per-entry cap.
 pub const SURGE_PROPS: u32 = 1_000;
-/// Props of the surge's first component: its retained result is above the
-/// account's per-entry cap.
-pub const OVERSIZED_PROPS: u32 = 1_600;
+/// Props of the surge's first component: its single retained result is
+/// above the account's per-entry cap (measured: results of 2,200 props stay
+/// under the 4 MiB cap, results of 2,400 props are refused as oversized; this
+/// leaves margin above the measured threshold).
+pub const OVERSIZED_PROPS: u32 = 2_600;
 /// Components of a bounded surge: the first oversized, the rest ordinary.
 /// Every tranche at a multiple of [`SURGE_PERIOD`] (the smoke tranche among
 /// them) runs one, so every pressure action class runs on any worker; only

@@ -194,6 +194,20 @@ pub fn check_isolation(index: u32, e: &IsolationEvidence) -> Vec<SoakFailure> {
         e.repeat_recomputes == 0 && e.repeat_producer_runs == 0,
         "the fresh-request repeat was not served from the retained result",
     );
+    // Same root, profile and entry allowance under a different paid set: the
+    // refusal sealed in the first spent context must not be replayed.
+    check(
+        e.other_context_recomputes > 0,
+        "a different paid context was answered without computing: it inherited another context's refusal",
+    );
+    check(
+        e.other_context == e.oracle_other_context,
+        "the other paid context's answer differs from its cold oracle",
+    );
+    check(
+        e.other_context.class == AnswerClass::OperationProfile,
+        "the other paid context did not deliver the operation-profile refusal",
+    );
     out
 }
 
@@ -491,6 +505,13 @@ pub fn check_ownership(
             matches!((before, after), (Some(b), Some(a)) if a.charges == b.charges),
             "sharing a copy changed the account's charges",
         );
+        check(
+            [before, after].iter().all(|s| {
+                s.and_then(|s| s.charges.content_pinned())
+                    .is_some_and(|c| c > 0)
+            }),
+            "the held answer carries no content charge",
+        );
         return out;
     }
     let (before, retired, first, last) = (
@@ -521,6 +542,26 @@ pub fn check_ownership(
                 && l.charges.retained <= f.charges.retained
                 && l.charges.active <= f.charges.active),
         "retirement or the final release grew the retained or active charges",
+    );
+    // The held allocation's own charge: pinned bytes less the stores' backing
+    // storage. The surviving readers hold it through retirement and the
+    // first release (one allocation charge, transferred from the cache to the
+    // readers, never dropped or doubled), and the last reader's release
+    // gives it back.
+    let content = |s: Option<&OwnerStep>| s.and_then(|s| s.charges.content_pinned());
+    check(
+        [before, retired, first]
+            .iter()
+            .all(|s| content(*s).is_some_and(|c| c > 0)),
+        "a live reader holds no content charge before the final release",
+    );
+    check(
+        matches!((content(before), content(retired)), (Some(b), Some(r)) if r <= b),
+        "retirement grew the content charge instead of transferring it to the readers",
+    );
+    check(
+        matches!((content(first), content(last)), (Some(f), Some(l)) if l < f),
+        "the final release did not give back the content charge",
     );
     out
 }
@@ -579,6 +620,25 @@ pub fn check_pressure_outcomes(
                 surge.digests.len(),
                 modules
             ));
+        }
+        match surge
+            .pressure
+            .as_ref()
+            .and_then(|p| p.surge_counts.as_ref())
+        {
+            Some(live) => {
+                let violations = absolute_violations_for(live, modules);
+                if !violations.is_empty() {
+                    fail(format!(
+                        "surge {}'s host exceeded the absolute limits while its results were live: {violations:?}",
+                        surge.index
+                    ));
+                }
+            }
+            None => fail(format!(
+                "surge {} recorded no live populations of its host",
+                surge.index
+            )),
         }
         let pressure = surge.pressure.as_ref();
         let attributed = pressure
@@ -647,6 +707,12 @@ pub const ABSOLUTE_LIMITS: &[(&str, u64)] = &[
     ("resolution_retired_decisions", 256),
     ("active_bytes", 512 * 1024 * 1024),
     ("pinned_bytes", 512 * 1024 * 1024),
+    // A workload bound well under the account's own ceiling (which can never
+    // fail: the account refuses past it): a tranche's retained results peak
+    // near a megabyte and fall back as it closes, so growth that the close
+    // route later clears, per-entry byte growth with flat entry counts
+    // included, crosses this long before the ceiling.
+    ("retained_bytes", 64 * 1024 * 1024),
     ("live_artifacts", 16),
     ("registered_sources", 16),
     ("live_roots", 64),
@@ -657,15 +723,39 @@ pub const ABSOLUTE_LIMITS: &[(&str, u64)] = &[
 /// past: the ratified aggregate ceiling.
 pub const REFUSABLE_CEILING_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// The populations a surge host holds one of per requested component: its
+/// bound is the surge's own module count, not the soak host's.
+const SURGE_SCALED_FIGURES: &[&str] = &["live_artifacts", "registered_sources", "snapshot_leases"];
+/// A surge exists to fill the account: its retained bytes are bounded by the
+/// refusable ceiling, not by the soak host's workload bound.
+const SURGE_UNBOUNDED_FIGURES: &[&str] = &["retained_bytes"];
+
 fn absolute_violations(counts: &verter_audit::soak::SoakCounts) -> Vec<CountViolation> {
+    absolute_violations_for(counts, None)
+}
+
+/// The absolute limits for `counts`; the surge host's per-component
+/// populations are bounded by its `surge_modules` instead of the soak host's
+/// fixed counts, every other figure by the same limits.
+fn absolute_violations_for(
+    counts: &verter_audit::soak::SoakCounts,
+    surge_modules: Option<u32>,
+) -> Vec<CountViolation> {
     let figures = counts.figures();
     let mut out: Vec<CountViolation> = ABSOLUTE_LIMITS
         .iter()
         .filter_map(|(name, limit)| {
             let observed = figures.iter().find(|(n, _, _)| n == name)?.2;
-            (observed > *limit).then(|| CountViolation {
+            if surge_modules.is_some() && SURGE_UNBOUNDED_FIGURES.contains(name) {
+                return None;
+            }
+            let limit = match surge_modules {
+                Some(modules) if SURGE_SCALED_FIGURES.contains(name) => u64::from(modules),
+                _ => *limit,
+            };
+            (observed > limit).then(|| CountViolation {
                 figure: (*name).to_string(),
-                expected_at_most: *limit,
+                expected_at_most: limit,
                 observed,
             })
         })
@@ -851,15 +941,25 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                     Target::Churn { edits, .. } => u64::from(*edits),
                     _ => 0,
                 };
+                // Eviction needs positive evidence: the churned identity held a
+                // candidate that a later version displaced. Uncached or
+                // refused demands (no candidate ever admitted) are no
+                // eviction.
                 let evicted = record.pressure.as_ref().is_some_and(|p| {
-                    p.memo_candidates_after
-                        .saturating_sub(p.memo_candidates_before)
-                        < edits
+                    let trace = &p.memo_candidate_trace;
+                    trace.len() as u64 > edits
+                        && trace
+                            .iter()
+                            .zip(trace.iter().skip(1))
+                            .map(|(was, now)| now > was)
+                            .skip_while(|admitted| !admitted)
+                            .any(|admitted| !admitted)
                 });
                 if !evicted {
                     failures.push(wrong(
                         record.index,
-                        "the churned identity retained every published candidate: nothing was evicted".into(),
+                        "the churned identity displaced no admitted candidate: nothing was evicted"
+                            .into(),
                     ));
                 }
                 let key = query_of(action.tranche, &action.target);
@@ -933,6 +1033,17 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                         index: record.index,
                     });
                 }
+                if record.retry == Some(Outcome::Value)
+                    && record
+                        .retry_digest
+                        .as_deref()
+                        .is_none_or(|d| d == ABSENT_DELIVERY || d == "unmaterialised")
+                {
+                    failures.push(wrong(
+                        record.index,
+                        "the uncancelled retry delivered no materialised answer".into(),
+                    ));
+                }
                 if record.retry != Some(Outcome::Value) {
                     failures.push(wrong(
                         record.index,
@@ -999,12 +1110,40 @@ fn check_samples(summary: &SoakSummary, failures: &mut Vec<SoakFailure>) {
         failures.push(SoakFailure::SamplingGap { from: 0, to: 0 });
         return;
     };
-    if baseline.at != "baseline" || last.at != "final" {
-        failures.push(SoakFailure::SamplingGap {
-            from: 0,
-            to: summary.records.len() as u32,
-        });
-        return;
+    // The timeline is complete: the baseline at zero actions, one `action`
+    // sample at every multiple of the cadence up to the executed actions
+    // (the opening window included), then the closed and final samples at the
+    // executed total — no other tag, no missing or repeated position.
+    let total = summary.records.len() as u32;
+    let during: Vec<u32> = samples
+        .iter()
+        .filter(|s| s.at == "action")
+        .map(|s| s.actions_done)
+        .collect();
+    let expected: Vec<u32> = (1..=total / SAMPLE_EVERY)
+        .map(|n| n * SAMPLE_EVERY)
+        .collect();
+    let tags_in_order = samples.len() == during.len() + 3
+        && samples
+            .get(1 + during.len())
+            .is_some_and(|s| s.at == "closed")
+        && samples
+            .iter()
+            .skip(1)
+            .take(during.len())
+            .all(|s| s.at == "action");
+    if baseline.at != "baseline"
+        || last.at != "final"
+        || baseline.actions_done != 0
+        || last.actions_done != total
+        || !tags_in_order
+        || samples
+            .iter()
+            .filter(|s| s.at == "closed")
+            .any(|s| s.actions_done != total)
+        || during != expected
+    {
+        failures.push(SoakFailure::SamplingGap { from: 0, to: total });
     }
     for sample in samples {
         let violations = absolute_violations(&sample.counts);

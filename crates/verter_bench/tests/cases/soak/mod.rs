@@ -416,6 +416,9 @@ fn evidence() -> IsolationEvidence {
         isolated_recomputes: 1,
         repeat_recomputes: 0,
         repeat_producer_runs: 0,
+        other_context: answer("spent", AnswerClass::OperationProfile),
+        other_context_recomputes: 1,
+        oracle_other_context: answer("spent", AnswerClass::OperationProfile),
         oracle_spent: answer("spent", AnswerClass::OperationProfile),
         oracle_isolated: answer("isolated", AnswerClass::Complete),
     }
@@ -435,7 +438,19 @@ fn isolation_details(evidence: &IsolationEvidence) -> Vec<String> {
 fn isolation_rules_fail_each_broken_property() {
     assert!(isolation_details(&evidence()).is_empty());
     type Break = fn(&mut IsolationEvidence);
-    let cases: [(&str, Break); 14] = [
+    let cases: [(&str, Break); 17] = [
+        // A different paid context must compute, match its own cold oracle
+        // and be a refusal, not reuse the first context's retained refusal
+        // or a complete answer.
+        ("without computing", |e| e.other_context_recomputes = 0),
+        ("other paid context's answer differs", |e| {
+            e.other_context = answer("spent", AnswerClass::OperationProfile);
+            e.oracle_other_context = answer("other", AnswerClass::OperationProfile);
+        }),
+        ("other paid context did not deliver", |e| {
+            e.other_context = answer("isolated", AnswerClass::Complete);
+            e.oracle_other_context = e.other_context.clone();
+        }),
         ("never ran", |e| e.callback_ran = false),
         ("spent no operations", |e| e.ops_before = 0),
         ("batch's budget", |e| e.same_budget = false),
@@ -716,7 +731,7 @@ fn charges(retained: u64, pinned: u64) -> Charges {
         active: 0,
         retained,
         pinned,
-        storage: 0,
+        storage: 100,
     }
 }
 
@@ -734,22 +749,22 @@ fn release_steps() -> Vec<OwnerStep> {
         step(
             OwnerStepKind::BeforeRelease,
             50,
-            charges(900, 400),
+            charges(900, 500),
             Some("held"),
         ),
         step(
             OwnerStepKind::AfterRetirement,
             5,
-            charges(300, 380),
+            charges(300, 480),
             Some("held"),
         ),
         step(
             OwnerStepKind::AfterFirstRelease,
             5,
-            charges(300, 380),
+            charges(300, 480),
             Some("held"),
         ),
-        step(OwnerStepKind::AfterFinalRelease, 4, charges(300, 384), None),
+        step(OwnerStepKind::AfterFinalRelease, 4, charges(300, 104), None),
     ]
 }
 
@@ -758,10 +773,10 @@ fn copy_steps() -> Vec<OwnerStep> {
         step(
             OwnerStepKind::BeforeCopy,
             5,
-            charges(300, 380),
+            charges(300, 480),
             Some("held"),
         ),
-        step(OwnerStepKind::AfterCopy, 5, charges(300, 380), Some("held")),
+        step(OwnerStepKind::AfterCopy, 5, charges(300, 480), Some("held")),
     ]
 }
 
@@ -805,6 +820,39 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
             &|s| s[1].charges.retained = 1_000,
             "retirement grew the retained charge",
         );
+        // The held allocation's own (content) charge: pinned bytes less the
+        // stores' backing storage.
+        fails(
+            &|s| {
+                for step in s.iter_mut().take(3) {
+                    step.charges.pinned = step.charges.storage;
+                }
+            },
+            "a live reader holds no charge",
+        );
+        fails(
+            &|s| {
+                s[1].charges.pinned = s[1].charges.storage;
+                s[2].charges.pinned = s[2].charges.storage;
+            },
+            "retirement freed the charge the surviving readers hold",
+        );
+        fails(
+            &|s| s[3].charges.pinned = s[2].charges.pinned,
+            "the final release freed nothing",
+        );
+        fails(
+            &|s| s[3].charges.pinned = s[2].charges.pinned + 64,
+            "the final release grew the pinned charge",
+        );
+        fails(
+            &|s| s[1].charges.pinned = s[0].charges.pinned + 64,
+            "retirement grew the content charge",
+        );
+        fails(
+            &|s| s[1].charges.storage = s[1].charges.pinned + 1,
+            "storage past the pinned total is inconsistent accounting",
+        );
         fails(
             &|s| s[3].charges.retained += 64,
             "the final release grew the retained charge",
@@ -815,6 +863,11 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
         );
     }
     assert!(check_ownership(0, copy, Some(&held), &copy_steps()).is_empty());
+    let mut uncharged_copy = copy_steps();
+    for step in &mut uncharged_copy {
+        step.charges.pinned = step.charges.storage;
+    }
+    assert!(!check_ownership(0, copy, Some(&held), &uncharged_copy).is_empty());
     let mut doubled_root = copy_steps();
     doubled_root[1].roots = 6;
     assert!(!check_ownership(0, copy, Some(&held), &doubled_root).is_empty());
@@ -851,8 +904,14 @@ fn surge(
         pressure: Some(PressureEvidence {
             memo_candidates_before: 0,
             memo_candidates_after: 0,
+            memo_candidate_trace: Vec::new(),
             refusals_active: 0,
             retained_results: Some(u64::from(modules) / 2),
+            surge_counts: Some(SoakCounts {
+                live_artifacts: u64::from(modules),
+                registered_sources: u64::from(modules),
+                ..SoakCounts::default()
+            }),
             active: Some(active(
                 Some(FORMER_ACTIVE_TARGET_BYTES),
                 FORMER_ACTIVE_TARGET_BYTES,
@@ -925,7 +984,38 @@ fn full_pressure_outcomes_fail_zero_missing_or_incomplete_evidence() {
         plant(&mut records[1]);
         records
     };
-    let cases: [(Vec<ActionRecord>, &str); 9] = [
+    let cases: [(Vec<ActionRecord>, &str); 12] = [
+        // The surge host's own populations are judged while its results are
+        // live: more live artifacts than requested components, a byte figure
+        // over its absolute limit, or no recorded populations fail.
+        (
+            full(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .live_artifacts = u64::from(SURGE_MODULES) + 1
+            }),
+            "exceeded the absolute limits",
+        ),
+        (
+            full(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .pinned_bytes = 1 << 40
+            }),
+            "exceeded the absolute limits",
+        ),
+        (
+            full(|r| r.pressure.as_mut().unwrap().surge_counts = None),
+            "no live populations",
+        ),
         (vec![], "ran no surge"),
         (sound_surges()[..1].to_vec(), "full surges were recorded"),
         (
@@ -1185,4 +1275,149 @@ fn single_demand_without_a_materialised_answer_fails() {
             "{failures:#?}"
         );
     }
+}
+
+fn record_of(s: &mut SoakSummary, class: LifecycleClass) -> &mut ActionRecord {
+    s.records
+        .iter_mut()
+        .find(|r| r.class == class)
+        .expect("a record of the class")
+}
+
+/// The judgments that read a finished run's summary fail closed on a doctored
+/// copy of a real run: a churn that admitted nothing is no eviction, a retry
+/// without a materialised answer is no answer, a timeline missing its
+/// endpoints or opening samples is no timeline, and a retained-byte figure
+/// over the workload bound fails.
+#[test]
+fn summary_judgments_fail_closed_on_doctored_evidence() {
+    let (summary, failures) = smoke(Mode::Pressure);
+    assert!(failures.is_empty(), "{failures:#?}");
+    let judged = |edit: &dyn Fn(&mut SoakSummary)| {
+        let mut doctored = summary.clone();
+        edit(&mut doctored);
+        verify_summary(Mode::Pressure, 1, &doctored)
+    };
+    let wrong_with = |failures: &[SoakFailure], needle: &str| {
+        failures.iter().any(|f| match f {
+            SoakFailure::WrongOutcome { detail, .. } => detail.contains(needle),
+            _ => false,
+        })
+    };
+    // A churn whose candidate count never grows admitted nothing; one that
+    // never stops growing displaced nothing.
+    for trace in [vec![3; 25], (0..25).collect::<Vec<u64>>()] {
+        let failures = judged(&|s| {
+            record_of(s, LifecycleClass::CandidateChurn)
+                .pressure
+                .as_mut()
+                .unwrap()
+                .memo_candidate_trace = trace.clone();
+        });
+        assert!(
+            wrong_with(&failures, "displaced no admitted candidate"),
+            "{trace:?}: {failures:#?}"
+        );
+    }
+    for digest in [None, Some("unmaterialised".to_string())] {
+        let failures = judged(&|s| {
+            record_of(s, LifecycleClass::Cancellation).retry_digest = digest.clone();
+        });
+        assert!(
+            wrong_with(&failures, "no materialised answer"),
+            "{digest:?}: {failures:#?}"
+        );
+    }
+    let gap = |failures: Vec<SoakFailure>| {
+        failures
+            .iter()
+            .any(|f| matches!(f, SoakFailure::SamplingGap { .. }))
+    };
+    let total = summary.records.len() as u32;
+    assert!(gap(judged(&|s| {
+        for sample in &mut s.samples {
+            sample.actions_done = 0;
+        }
+    })));
+    assert!(gap(judged(&|s| {
+        for sample in &mut s.samples {
+            if sample.at == "action" {
+                sample.at = "renamed".into();
+            }
+        }
+    })));
+    assert!(gap(judged(&|s| {
+        s.samples
+            .retain(|x| !(x.at == "action" && x.actions_done == 25));
+    })));
+    assert!(gap(judged(&|s| {
+        s.samples.last_mut().unwrap().actions_done = total - 1;
+    })));
+    let over = judged(&|s| s.samples[2].counts.retained_bytes = 100 * 1024 * 1024);
+    assert!(over.iter().any(|f| matches!(
+        f,
+        SoakFailure::AbsoluteLimitExceeded { violations, .. }
+            if violations.iter().any(|v| v.figure == "retained_bytes")
+    )));
+}
+
+/// The frozen oversized component is one retained result above the account's
+/// per-entry cap: on a fresh public host it is refused retention as oversized
+/// (not for aggregate pressure) and is still delivered complete.
+#[test]
+fn the_oversized_surge_component_exceeds_the_entry_cap_alone() {
+    use std::sync::Arc;
+    use verter_bench::soak::fixtures::surge_source;
+    use verter_bench::soak::manifest::OVERSIZED_PROPS;
+    use verter_session::{HostConfig, UpsertRequest, VerterHost};
+    use verter_workspace::{MemoryOptions, MemoryWorkspace, WorkspaceAccess};
+    let _serial = serial();
+    let workspace: Arc<dyn WorkspaceAccess> =
+        Arc::new(MemoryWorkspace::new(MemoryOptions::default()));
+    let host = VerterHost::new(HostConfig::default(), workspace);
+    let before = host.retention_snapshot();
+    let id = "/w/oversized.vue".to_string();
+    let _ = host
+        .upsert(UpsertRequest {
+            canonical_id: Some(id.clone()),
+            input_id: id.clone(),
+            source: Arc::from(surge_source(0, 0, OVERSIZED_PROPS).as_str()),
+            file_language: verter_session::LanguageRegistry::global()
+                .classify_static(&id)
+                .static_resolution(),
+            aliases: Vec::new(),
+        })
+        .expect("an upsert");
+    let delivery = host.get_component_meta(&id);
+    let after = host.retention_snapshot();
+    assert!(delivery.as_ref().is_some_and(|d| d.is_complete()));
+    assert!(after.refusals_oversized > before.refusals_oversized);
+    assert_eq!(after.refusals_pressure, before.refusals_pressure);
+    drop(delivery);
+    host.close();
+    host.release_completion().wait().expect("release boundary");
+}
+
+/// Two deliveries that keep every prop name and cause but change one prop's
+/// type differ in their digest; the answer class alone would not tell them
+/// apart.
+#[test]
+fn delivery_digest_binds_recovery_content_not_just_names() {
+    use verter_bench::soak::isolation::Rig;
+    let _serial = serial();
+    let ask = |ty: &str| {
+        let rig = Rig::new(0);
+        rig.publish(
+            0,
+            &[(
+                "c.vue",
+                format!("<script setup lang=\"ts\">\ndefineProps<{{ a: {ty} }}>()\n</script>\n"),
+            )],
+        );
+        rig.demand_of(0, "c.vue")
+    };
+    let (string, number) = (ask("string"), ask("number"));
+    assert_eq!(string.class, number.class);
+    assert_ne!(string.digest, number.digest);
+    assert_eq!(string, ask("string"));
 }

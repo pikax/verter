@@ -154,30 +154,30 @@ pub struct IsolationEvidence {
     pub repeat_recomputes: u64,
     /// Cold semantic producer runs of the repeated fresh request.
     pub repeat_producer_runs: u64,
+    /// The same demand inside a callback that spent the same number of
+    /// operations on a different component: equal entry allowance, a
+    /// different paid set.
+    pub other_context: Answer,
+    /// Resolutions the other-context demand itself ran: it never inherits the
+    /// refusal the first spent context sealed.
+    pub other_context_recomputes: u64,
+    /// The cold oracle for the other paid context.
+    pub oracle_other_context: Answer,
     /// The cold oracle for the spent context.
     pub oracle_spent: Answer,
     /// The cold oracle for the fresh request.
     pub oracle_isolated: Answer,
 }
 
-/// The names of the causes `status` carries; empty when complete.
-fn reason_names(status: FactStatus) -> Vec<PartialReason> {
-    match status {
-        FactStatus::Complete => Vec::new(),
-        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => {
-            reasons.get().iter().collect()
-        }
-    }
-}
-
-/// The digest of a delivery: the causes its status names and the published
-/// prop names.
+/// The digest of a delivery: its complete status (availability arm, every
+/// cause and the interpretation) and the structural content of every
+/// recovered prop, so a replay that keeps names and causes but changes a
+/// type, requiredness, default, diagnostics or the availability arm differs.
 #[must_use]
 pub fn delivery_digest(delivery: &ComponentMetaDelivery) -> String {
-    let mut text = format!("status={:?}", reason_names(delivery.status()));
+    let mut text = format!("status={:?}", delivery.status());
     for prop in &delivery.analysis().props {
-        text.push('|');
-        text.push_str(&prop.name);
+        text.push_str(&format!("|{prop:?}"));
     }
     sha256_hex(text.as_bytes())
 }
@@ -239,6 +239,7 @@ impl Rig {
             &[
                 ("ref.ts", isolation_types_source()),
                 ("spend.vue", isolation_component_source(&tag, spend_props)),
+                ("spend2.vue", isolation_component_source(&tag, spend_props)),
                 ("refuse.vue", isolation_component_source(&tag, refuse_props)),
             ],
         );
@@ -302,10 +303,10 @@ impl Rig {
 
     /// The refuser, demanded from inside the spender's batch callback.
     /// Returns the callback's observations; `None` when it never ran.
-    fn spent_demand(&self, tranche: u32) -> Option<SpentDemand> {
+    fn spent_demand(&self, tranche: u32, spender: &str) -> Option<SpentDemand> {
         let seen = Mutex::new(None);
         let _ = self.session.get_component_meta_batch_payloads(
-            &[isolation_file(tranche, "spend.vue")],
+            &[isolation_file(tranche, spender)],
             |_output| {
                 let before = current_request_budget();
                 let ops = before
@@ -389,10 +390,15 @@ pub fn run(
     let subject = Rig::new(op_budget);
     let oracle_spent = Rig::new(op_budget);
     let oracle_isolated = Rig::new(op_budget);
-    for rig in [&subject, &oracle_spent, &oracle_isolated] {
+    let oracle_other = Rig::new(op_budget);
+    for rig in [&subject, &oracle_spent, &oracle_isolated, &oracle_other] {
         rig.open(tranche, spend_props, refuse_props);
     }
-    let spent = subject.spent_demand(tranche);
+    let spent = subject.spent_demand(tranche, "spend.vue");
+    // Before any fresh request retains a complete answer (valid in every
+    // context): the refusal sealed above is the only retained answer the
+    // other paid context could wrongly reuse.
+    let other = subject.spent_demand(tranche, "spend2.vue");
     let after_spent = subject.recomputes();
     let isolated = subject.demand(tranche);
     let after_isolated = subject.recomputes();
@@ -400,11 +406,12 @@ pub fn run(
     let repeat = subject.demand(tranche);
     let after_repeat = subject.recomputes();
     let repeat_producer_runs = subject.producer_runs() - producers_before_repeat;
-    let published = [&subject, &oracle_spent, &oracle_isolated]
+    let published = [&subject, &oracle_spent, &oracle_isolated, &oracle_other]
         .into_iter()
         .flat_map(Rig::published)
         .collect();
-    let oracle_spent = oracle_spent.spent_demand(tranche);
+    let oracle_other = oracle_other.spent_demand(tranche, "spend2.vue");
+    let oracle_spent = oracle_spent.spent_demand(tranche, "spend.vue");
     let oracle_isolated = oracle_isolated.demand(tranche);
     let evidence = IsolationEvidence {
         callback_ran: spent.is_some(),
@@ -417,6 +424,9 @@ pub fn run(
         isolated_recomputes: after_isolated - after_spent,
         repeat_recomputes: after_repeat - after_isolated,
         repeat_producer_runs,
+        other_context_recomputes: other.as_ref().map_or(0, |s| s.recomputes),
+        other_context: other.map_or_else(Answer::absent, |s| s.answer),
+        oracle_other_context: oracle_other.map_or_else(Answer::absent, |s| s.answer),
         oracle_spent: oracle_spent.map_or_else(Answer::absent, |s| s.answer),
         oracle_isolated,
     };

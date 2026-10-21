@@ -24,22 +24,22 @@
       "normal": {
         "actions": 10000,
         "distinctQueries": 6200,
-        "digest": "c1daa5bf22eab70c1b32b00e79cd73eed71bd7126454d60f446ec54c97bbfd09"
+        "digest": "7738eb53c16411bb0d3a1072e6cfdd26c96ecda21f6cfabee11e816f929389bf"
       },
       "pressure": {
         "actions": 10000,
         "distinctQueries": 5800,
-        "digest": "a47098d191c15510c4411402158f104a57edce5544b190450f69b8e7148d52ba"
+        "digest": "ab9604943c222e883fe50f3ad391d3a05035ed90283bcebddb52bada39da1676"
       }
     },
     "smoke": {
       "normal": {
         "tranches": 1,
-        "digest": "56e211b7399cec6e301362132212547e7a41e42edfea7a4ad0a8ef0dae4afe7e"
+        "digest": "44ed5e79c72d5280539cfc4d7257db18f8f0d97cd031caf886c36ae194e17255"
       },
       "pressure": {
         "tranches": 1,
-        "digest": "dc8ff2ced5026ce4125c703d189e37124186e9d34d49814e814a80ba4f2e1a3f"
+        "digest": "5af81e6e8ff3db6704377e47b2128b39a14d03c8788d10adb5a7c1d07630b496"
       }
     },
     "binding": {

@@ -642,7 +642,7 @@ describe("soak manifests", () => {
     controls: loaded.manifest.soak.controls.names.map((name) => ({ name, bit: true })),
   });
   const stand =
-    (verdict, digest, { summary = true, controls = controlsPassed } = {}) =>
+    (verdict, digest, { summary = true, controls = controlsPassed, figures = true } = {}) =>
     (loaded) => {
       const shared = controls(loaded);
       return {
@@ -660,9 +660,25 @@ describe("soak manifests", () => {
                     mode,
                     tranches: loaded.run.soak.tranches,
                     manifestDigest: digest ?? loaded.manifest.soak.workloads[mode].digest,
-                    records: Array(10_000),
-                    samples: [{ at: "closed", counts: { retainedBytes: 0, peakTotalBytes: 9 } }],
-                    process: { peakBytes: 7 },
+                    ...(figures
+                      ? {
+                          records: Array.from({ length: 10_000 }, (_, i) =>
+                            i === 0
+                              ? {
+                                  class: "pressure-surge",
+                                  refusalsPressure: 1,
+                                  refusalsOversized: 1,
+                                  pressure: { refusalsActive: 0, active: { attributedPeak: 5 } },
+                                }
+                              : { class: "cold-demand" },
+                          ),
+                          samples: [
+                            { at: "closed", counts: { retainedBytes: 0, peakTotalBytes: 9 } },
+                            { at: "final", counts: { retainedBytes: 0, peakTotalBytes: 9 } },
+                          ],
+                          process: { peakBytes: 7 },
+                        }
+                      : {}),
                   }
                 : null,
               controls: shared,
@@ -689,6 +705,24 @@ describe("soak manifests", () => {
     const drifted = await run(stand("passed", "0".repeat(64)));
     assert.equal(drifted.code, 1);
     assert.ok(drifted.summary.validation.problems.some((p) => /not the frozen/.test(p)));
+  });
+
+  test("a passing verdict with required work figures unrecorded is not accepted", async () => {
+    const dir = freshDir();
+    const code = await quiet(() =>
+      main(["--run", "rev11-l1-soak", "--out", dir], {
+        runSoak: stand("passed", undefined, { figures: false }),
+      }),
+    );
+    assert.equal(code, 1);
+    const problems = readSummary(dir).validation.problems;
+    for (const metric of ["actions", "samples", "closedRetainedBytes", "surgeRefusalsOversized"])
+      assert.ok(
+        problems.some((p) => p.includes(`required work metric ${metric} is unavailable`)),
+        problems.join("\n"),
+      );
+    // Time and memory stay advisory.
+    assert.ok(!problems.some((p) => /peakRssBytes|wallMs/.test(p)));
   });
 
   test("a passing verdict without the summary it judged is not accepted", async () => {

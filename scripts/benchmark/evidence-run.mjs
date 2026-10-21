@@ -573,6 +573,15 @@ export function buildSoakSummary(loaded, { dryRun, worker, results = {} }) {
   );
   const problems = [];
   if (!dryRun) {
+    // Correctness and accounting figures are required evidence whatever the
+    // runner's verdict says: a required work metric the run did not record
+    // fails the summary. Time and memory metrics stay advisory.
+    for (const cell of cells)
+      for (const [name, metric] of Object.entries(cell.metrics))
+        if (metric.kind === "work" && metric.status !== "measured")
+          problems.push(
+            `cell ${cell.mode}: required work metric ${name} is ${metric.status}: ${metric.reason ?? "no figure"}`,
+          );
     const controls = results.controls;
     const frozenControls = loaded.manifest.soak.controls.names;
     const reported = (controls?.controls ?? []).map((c) => c.name);

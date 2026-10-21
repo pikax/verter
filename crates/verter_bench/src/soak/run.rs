@@ -133,6 +133,10 @@ pub struct ActionRecord {
     /// For a cancellation: the uncancelled retry's outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry: Option<Outcome>,
+    /// For a cancellation: the digest of the retry's complete delivered
+    /// answer; absent when the retry delivered none or a degraded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_digest: Option<String>,
     /// For a surge: reservations the account refused for aggregate pressure
     /// while the surge ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +179,7 @@ impl ActionRecord {
             joined_waits: None,
             flight: None,
             retry: None,
+            retry_digest: None,
             refusals_pressure: None,
             refusals_oversized: None,
             isolation: None,
@@ -224,6 +229,12 @@ pub struct PressureEvidence {
     pub memo_candidates_before: u64,
     /// Retained memo candidates when it finished.
     pub memo_candidates_after: u64,
+    /// For a candidate churn: the retained memo candidate count before the
+    /// churn and after each published version, in order. A step that admits
+    /// grows it; a step after an admission that does not grow it displaced a
+    /// candidate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memo_candidate_trace: Vec<u64>,
     /// Reservations refused because the active class was exhausted while
     /// the action ran.
     pub refusals_active: u64,
@@ -231,6 +242,10 @@ pub struct PressureEvidence {
     /// every requested result was delivered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retained_results: Option<u64>,
+    /// For a surge: the surge host's own populations and charges, read while
+    /// every delivered result was still live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surge_counts: Option<SoakCounts>,
     /// For a surge: the ACTIVE-occupancy window that covered it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<ActiveEvidence>,
@@ -409,7 +424,14 @@ pub fn counts(host: &VerterHost) -> SoakCounts {
         active_bytes: n(s.active_bytes),
         retained_bytes: n(s.retained_bytes),
         pinned_bytes: n(s.pinned_bytes),
-        content_pinned_bytes: n(s.pinned_bytes.saturating_sub(storage)),
+        // Backing storage is pinned against the same account, so storage past
+        // the pinned total is inconsistent accounting: it reads as an
+        // unbounded content charge and fails every drain judgment rather than
+        // as a plausible zero.
+        content_pinned_bytes: s
+            .pinned_bytes
+            .checked_sub(storage)
+            .map_or(u64::MAX, |content| content as u64),
         storage_bytes: n(storage),
         peak_total_bytes: n(s.peak_total_bytes),
         refusals_pressure: s.refusals_pressure,
@@ -425,8 +447,9 @@ struct Engine {
     /// Held roots per pin slot: the original, then its public copy.
     pins: HashMap<u32, Vec<NodeRoot>>,
     leaked: Vec<NodeRoot>,
-    /// Actions that kept a root past their release.
-    leaked_at: Vec<u32>,
+    /// Actions the planted mutation was applied to, recorded where each plant
+    /// takes effect (a root kept past its release is one of them).
+    applied_at: Vec<u32>,
     /// Publications since the last action finished.
     publications: Mutex<Vec<String>>,
 }
@@ -443,6 +466,14 @@ pub struct Charges {
 }
 
 impl Charges {
+    /// The pinned bytes that are content charges (pinned less the stores' own
+    /// backing storage); `None` when storage exceeds the pinned total, which
+    /// is inconsistent accounting.
+    #[must_use]
+    pub fn content_pinned(self) -> Option<u64> {
+        self.pinned.checked_sub(self.storage)
+    }
+
     /// Every charged byte.
     #[must_use]
     pub fn total(self) -> u64 {
@@ -519,7 +550,7 @@ impl Engine {
             host,
             pins: HashMap::new(),
             leaked: Vec::new(),
-            leaked_at: Vec::new(),
+            applied_at: Vec::new(),
             publications: Mutex::new(Vec::new()),
         };
         engine.configure(ConfigVariant::Original);
@@ -751,7 +782,12 @@ impl Engine {
         (outcome, answers.into_iter().map(|(_, d)| d).collect())
     }
 
-    fn cancellation(&self, file: &str, symbol: &str, cancel: bool) -> (Outcome, Outcome) {
+    fn cancellation(
+        &self,
+        file: &str,
+        symbol: &str,
+        cancel: bool,
+    ) -> (Outcome, Outcome, Option<String>) {
         let identity = FlowFunctionReturnIdentity {
             anchor: AuthoredAnchor {
                 canonical_id: canonical(file).as_str().into(),
@@ -783,7 +819,28 @@ impl Engine {
             whole(),
             CancellationToken::new(),
         );
-        (first, classify(retry.as_result()))
+        // The retry must deliver the exact whole-return answer: a degraded
+        // success or an unmaterialisable return is not a value.
+        let delivered = retry
+            .as_result()
+            .ok()
+            .map(|result| match result.fact().exact() {
+                Some(exact) => Ok(super::manifest::sha256_hex(
+                    format!("flow-return:{:?}", exact.return_type()).as_bytes(),
+                )),
+                None => Err(format!("{:?}", result.fact().status())),
+            });
+        match delivered {
+            Some(Ok(digest)) => (first, Outcome::Value, Some(digest)),
+            Some(Err(detail)) => (
+                first,
+                Outcome::Fault {
+                    detail: format!("degraded retry: {detail}"),
+                },
+                None,
+            ),
+            None => (first, classify(retry.as_result()), None),
+        }
     }
 
     /// Demand the component-meta result of every surge component on a fresh
@@ -833,6 +890,7 @@ impl Engine {
         // Read while every delivered result the account admitted is still
         // retained.
         let after = host.retention_snapshot();
+        let surge_counts = counts(&host);
         let retained_results = host.project_type_store().component_meta_results().len() as u64;
         let report = window.finish();
         record.refusals_pressure = Some(
@@ -848,8 +906,10 @@ impl Engine {
         record.pressure = Some(PressureEvidence {
             memo_candidates_before: before.semantic_memo_candidates as u64,
             memo_candidates_after: after.semantic_memo_candidates as u64,
+            memo_candidate_trace: Vec::new(),
             refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
             retained_results: Some(retained_results),
+            surge_counts: Some(surge_counts),
             active: Some(ActiveEvidence::of(&report)),
         });
         host.close();
@@ -858,6 +918,16 @@ impl Engine {
         if let Err(err) = host.release_completion().wait() {
             record.outcome = Outcome::Fault {
                 detail: format!("surge release completion: {err:?}"),
+            };
+        }
+    }
+
+    /// Wait on the host's release boundary so a charge read next reflects
+    /// every release the action has made.
+    fn settle_releases(&self, record: &mut ActionRecord) {
+        if let Err(err) = self.host.release_completion().wait() {
+            record.outcome = Outcome::Fault {
+                detail: format!("release completion: {err:?}"),
             };
         }
     }
@@ -922,6 +992,9 @@ impl Engine {
                 },
             ) => {
                 let fake = mutation == Some(Mutation::FakeOverlap);
+                if fake {
+                    self.applied_at.push(action.index);
+                }
                 let overlapped = self.overlap(file, alias, *threads, fake);
                 record = ActionRecord {
                     index: action.index,
@@ -967,7 +1040,7 @@ impl Engine {
                 Some(mut handles) if handles.len() == 2 => {
                     if mutation == Some(Mutation::RetainedKeyLeak) && self.leaked.is_empty() {
                         self.leaked.push(handles[0].clone());
-                        self.leaked_at.push(action.index);
+                        self.applied_at.push(action.index);
                     }
                     record.ownership.push(OwnerStep {
                         step: OwnerStepKind::BeforeRelease,
@@ -979,6 +1052,7 @@ impl Engine {
                     // retired.
                     self.host.evict(&canonical(file));
                     self.host.reclaim_retired_artifacts();
+                    self.settle_releases(&mut record);
                     record.ownership.push(OwnerStep {
                         step: OwnerStepKind::AfterRetirement,
                         ..owner_step(&host, handles.first())
@@ -987,11 +1061,13 @@ impl Engine {
                     // is the final reader.
                     let first = usize::from(action.class == ReleaseCopyThenOriginal);
                     drop(handles.remove(first));
+                    self.settle_releases(&mut record);
                     record.ownership.push(OwnerStep {
                         step: OwnerStepKind::AfterFirstRelease,
                         ..owner_step(&host, handles.first())
                     });
                     drop(handles);
+                    self.settle_releases(&mut record);
                     record.ownership.push(OwnerStep {
                         step: OwnerStepKind::AfterFinalRelease,
                         ..owner_step(&host, None)
@@ -1008,14 +1084,19 @@ impl Engine {
             },
             (Cancellation, Target::Function { file, symbol }) => {
                 let cancel = mutation != Some(Mutation::OmitCancellation);
-                let (first, retry) = self.cancellation(file, symbol, cancel);
+                if !cancel {
+                    self.applied_at.push(action.index);
+                }
+                let (first, retry, digest) = self.cancellation(file, symbol, cancel);
                 record.outcome = first;
                 record.retry = Some(retry);
+                record.retry_digest = digest;
             }
             (ConfigChange | ConfigRestore, Target::Config { variant }) => {
                 let variant = if action.class == ConfigRestore
                     && mutation == Some(Mutation::WrongProjectReversion)
                 {
+                    self.applied_at.push(action.index);
                     ConfigVariant::Alternate
                 } else {
                     *variant
@@ -1031,6 +1112,7 @@ impl Engine {
                     .expect("a churn module of the tranche");
                 let mut text = fixtures::churn_source(action.tranche, ordinal);
                 if mutation == Some(Mutation::UnfrozenFixture) {
+                    self.applied_at.push(action.index);
                     text.push_str(
                         "// unfrozen
 ",
@@ -1046,6 +1128,7 @@ impl Engine {
             }
             (CandidateChurn, Target::Churn { file, alias, edits }) => {
                 let before = host.retention_snapshot();
+                let mut trace = vec![before.semantic_memo_candidates as u64];
                 'churn: {
                     for edit in 0..*edits {
                         let text = fixtures::module_source(self.mode, action.tranche, 100 + edit);
@@ -1054,6 +1137,7 @@ impl Engine {
                             break 'churn;
                         }
                         observe(&mut record, demand(&self.host, file, alias, None));
+                        trace.push(host.retention_snapshot().semantic_memo_candidates as u64);
                         if record.outcome != Outcome::Value {
                             break 'churn;
                         }
@@ -1068,8 +1152,10 @@ impl Engine {
                 record.pressure = Some(PressureEvidence {
                     memo_candidates_before: before.semantic_memo_candidates as u64,
                     memo_candidates_after: after.semantic_memo_candidates as u64,
+                    memo_candidate_trace: trace,
                     refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
                     retained_results: None,
+                    surge_counts: None,
                     active: None,
                 });
             }
@@ -1201,6 +1287,7 @@ pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
         let record = if options.mutation == Some(Mutation::UnexpectedSkip)
             && affected.first() == Some(&action.index)
         {
+            engine.applied_at.push(action.index);
             ActionRecord {
                 outcome: Outcome::Skipped {
                     reason: "planted skip".into(),
@@ -1221,10 +1308,11 @@ pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
         }
     }
     let leaked = engine.teardown()?;
-    let affected = if options.mutation == Some(Mutation::RetainedKeyLeak) {
-        std::mem::take(&mut engine.leaked_at)
-    } else {
-        affected
+    // An omitted class is applied by absence, so the plan names it; every
+    // other plant is recorded by the execution that applied it.
+    let affected = match options.mutation {
+        Some(Mutation::OmitClass(_)) | Some(Mutation::MissingSummary) | None => affected,
+        Some(_) => std::mem::take(&mut engine.applied_at),
     };
     samples.push(Sample {
         at: "closed".into(),

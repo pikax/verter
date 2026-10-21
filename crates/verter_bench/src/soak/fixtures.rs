@@ -224,13 +224,14 @@ pub fn expected_publications(mode: Mode, action: &Action) -> Vec<String> {
             let one_host = [
                 ("ref.ts", isolation_types_source()),
                 ("spend.vue", isolation_component_source(&tag, *spend_props)),
+                ("spend2.vue", isolation_component_source(&tag, *spend_props)),
                 (
                     "refuse.vue",
                     isolation_component_source(&tag, *refuse_props),
                 ),
             ];
-            // The subject host and its two cold oracle hosts.
-            (0..3)
+            // The subject host and its three cold oracle hosts.
+            (0..4)
                 .flat_map(|_| one_host.iter())
                 .map(|(name, text)| publication_digest(&isolation_file(tranche, name), text))
                 .collect()
