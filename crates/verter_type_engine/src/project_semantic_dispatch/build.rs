@@ -5525,55 +5525,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
             }
 
-            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
-            // `ReturnType<F>`, …) inspects its argument nodes to form the
-            // result — `build_builtin_utility` reads `X`'s Object surface,
-            // enumerates `K`'s key space, walks `F`'s call signature, etc.
-            // The result therefore transitively depends on the file
-            // content each file-derived argument was lowered from. Derive
-            // the self-roots from the `args` node set (the same
-            // file-derived-input rooting `KeyOf` / `MappedType` /
-            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
-            // contributes one `(canonical, observed_hash)` self-root so an
-            // edit to that file rejects this utility memo entry on the
-            // strict warm-read validator. Structural args (`Global`-scoped
-            // primitives, literal-union key sets) contribute nothing.
-            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-            // Builtin-utility results are NEVER macro-T own-body (by
-            // design): `defineProps<Omit<Vendor, K>>()` surfaces
-            // members that came from `Vendor` via the utility, none of
-            // which the author wrote in the macro T body. Downgrade the
-            // provenance to structural so the utility's produced members
-            // report `declared_in_macro_type_arg = false`. (A carrier
-            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
-            // direct-decl case: CarrierProps's own body is stamped below
-            // and only its `extends`-reached members go through this
-            // utility path as structural.)
-            // `builtin_utility` is the identity the gate above proved; builders
-            // never resolve a spelling themselves.
-            let (utility_result, utility_fence, utility_is_partial, approximation) = self
-                .build_builtin_utility(
-                    base,
-                    decl_name.as_ref(),
-                    builtin_utility,
-                    args,
-                    context.into_structural_provenance(),
-                );
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                (utility_result, utility_fence).into();
-            // Two-signal fold: a mapper-utility surface whose
-            // nested KeyOf/MappedType subquery was genuinely incomplete
-            // (budget / recursion / walker-fatal) surfaces here as a
-            // complete-looking `Value` shell — carry its partiality
-            // through the published value so the component-meta + shape /
-            // materialize warm gates refuse it. Benign non-cacheability of
-            // the nested read does NOT taint this (it is `cache_suppress`
-            // on the inner memo only).
-            output.fold_partial(utility_is_partial);
-            output.approximation = approximation;
-            return InstantiateStart::Done(Box::new(
-                output.with_observed_self_roots(observed_self_roots),
-            ));
+            return InstantiateStart::Done(Box::new(self.build_instantiated_builtin_utility(
+                base,
+                decl_name,
+                args,
+                context,
+                builtin_utility,
+            )));
         }
 
         // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
@@ -5599,6 +5557,97 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             out.cache_suppress = true;
             return InstantiateStart::Done(Box::new(out));
         }
+        self.begin_prepared_instantiation(
+            base,
+            args,
+            &builtin_identity,
+            is_non_file_base,
+            scope,
+            context,
+            suspend,
+        )
+    }
+
+    /// Build the builtin answer without retaining declaration-building locals.
+    #[inline(never)]
+    fn build_instantiated_builtin_utility(
+        &self,
+        base: SemanticNodeId,
+        decl_name: &OwnedStr,
+        args: &Arc<[SemanticNodeId]>,
+        context: crate::semantic_query::ProjectionReductionContext,
+        builtin_utility: Option<BuiltinUtility>,
+    ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
+        // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
+        // `ReturnType<F>`, …) inspects its argument nodes to form the
+        // result — `build_builtin_utility` reads `X`'s Object surface,
+        // enumerates `K`'s key space, walks `F`'s call signature, etc.
+        // The result therefore transitively depends on the file
+        // content each file-derived argument was lowered from. Derive
+        // the self-roots from the `args` node set (the same
+        // file-derived-input rooting `KeyOf` / `MappedType` /
+        // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
+        // contributes one `(canonical, observed_hash)` self-root so an
+        // edit to that file rejects this utility memo entry on the
+        // strict warm-read validator. Structural args (`Global`-scoped
+        // primitives, literal-union key sets) contribute nothing.
+        let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+        // Builtin-utility results are NEVER macro-T own-body (by
+        // design): `defineProps<Omit<Vendor, K>>()` surfaces
+        // members that came from `Vendor` via the utility, none of
+        // which the author wrote in the macro T body. Downgrade the
+        // provenance to structural so the utility's produced members
+        // report `declared_in_macro_type_arg = false`. (A carrier
+        // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
+        // direct-decl case: CarrierProps's own body is stamped below
+        // and only its `extends`-reached members go through this
+        // utility path as structural.)
+        // `builtin_utility` is the identity the gate proved; builders never
+        // resolve a spelling themselves.
+        let (utility_result, utility_fence, utility_is_partial, approximation) = self
+            .build_builtin_utility(
+                base,
+                decl_name.as_ref(),
+                builtin_utility,
+                args,
+                context.into_structural_provenance(),
+            );
+        let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+            (utility_result, utility_fence).into();
+        // Two-signal fold: a mapper-utility surface whose
+        // nested KeyOf/MappedType subquery was genuinely incomplete
+        // (budget / recursion / walker-fatal) surfaces here as a
+        // complete-looking `Value` shell — carry its partiality
+        // through the published value so the component-meta + shape /
+        // materialize warm gates refuse it. Benign non-cacheability of
+        // the nested read does NOT taint this (it is `cache_suppress`
+        // on the inner memo only).
+        output.fold_partial(utility_is_partial);
+        output.approximation = approximation;
+        output.with_observed_self_roots(observed_self_roots)
+    }
+
+    /// Keep declaration lookup, binding and its build frame off the builtin
+    /// utility path's recursive stack. In debug builds, the unused locals of
+    /// this path otherwise enlarge every nested builtin instantiation frame.
+    #[inline(never)]
+    fn begin_prepared_instantiation(
+        &self,
+        base: SemanticNodeId,
+        args: &Arc<[SemanticNodeId]>,
+        identity: &crate::semantic_query::DeclIdentity,
+        is_non_file_base: bool,
+        scope: NodeScopeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+        suspend: bool,
+    ) -> InstantiateStart {
+        let decl_canonical = &identity.canonical_id;
+        let decl_owner = identity.owner;
+        let decl_name = &identity.decl_name;
+        let decl_whole_hash = identity.whole_hash;
+        let body_mode = context.mode;
+
+        let adapter = SessionDispatchHost::from_facade(self);
         let ri = ResolvedRootIdentity::new_in_owner(
             decl_canonical.as_ref(),
             decl_owner,
@@ -5667,43 +5716,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(out));
             }
         };
-
-        self.begin_prepared_instantiation(
-            base,
-            args,
-            &builtin_identity,
-            is_non_file_base,
-            scope,
-            prepared,
-            authored_resolution_debt,
-            context,
-            suspend,
-        )
-    }
-
-    /// Keep declaration binding and its suspended build frame off the builtin
-    /// utility path's recursive stack. In debug builds, the unused locals of
-    /// this path otherwise enlarge every nested builtin instantiation frame.
-    #[inline(never)]
-    fn begin_prepared_instantiation(
-        &self,
-        base: SemanticNodeId,
-        args: &Arc<[SemanticNodeId]>,
-        identity: &crate::semantic_query::DeclIdentity,
-        is_non_file_base: bool,
-        scope: NodeScopeId,
-        prepared: verter_retention::heap_size::OwnedValue<PreparedTypeDecl>,
-        authored_resolution_debt: Option<
-            crate::project_semantic_dispatch::carrier::AuthoredResolutionDebtFrame,
-        >,
-        context: crate::semantic_query::ProjectionReductionContext,
-        suspend: bool,
-    ) -> InstantiateStart {
-        let decl_canonical = &identity.canonical_id;
-        let decl_owner = identity.owner;
-        let decl_name = &identity.decl_name;
-        let decl_whole_hash = identity.whole_hash;
-        let body_mode = context.mode;
 
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
