@@ -78,8 +78,14 @@ builds exactly that configuration and the validator rejects any other. Its
 two workloads, `normal` and `pressure`, are 100 tranches of one 100-action
 template (10,000 actions, at least 3,000 distinct query identities, every
 lifecycle class, both typed refusal classes), frozen by the digests under
-`soak.workloads`. A digest covers the action list and the digest of the path
-and exact bytes of every publication of every action and of the setup; the
+`soak.workloads`. A digest covers the action list, the digest of the path
+and exact bytes of every publication of every action and of the setup, and
+the registered surge shapes' frozen bounds (`soak.surgeLimits`: each shape's
+module count, props and oversized props, its largest published input bytes,
+the components whose results it holds live at once, its absolute
+live-artifact, registered-source and snapshot-lease maxima, and its finite
+retained-byte bound — fixed figures a larger request never enlarges; the
+full surge's retained bound is the ratified aggregate ceiling); the
 runner records what it actually published and the verdict fails any action
 whose publications differ, so a fixture the freeze omits fails the run. The
 runner's test (`cargo nextest run -p verter_bench --features soak-support -E

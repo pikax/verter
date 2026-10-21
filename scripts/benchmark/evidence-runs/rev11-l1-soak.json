@@ -2,7 +2,10 @@
   "name": "rev11-l1-soak",
   "kind": "soak",
   "description": "The long-churn soak: 100 tranches of 100 editor actions (10,000 actions, every lifecycle class, both typed refusal classes) in normal and pressure modes through the public host routes, retention sampled every 25 actions with capture off, judged by the runner's action, result and publication inventories, answer rules, opening-window envelope and close/teardown drain; process memory and wall time beside it on the benchmark machine.",
-  "modes": ["normal", "pressure"],
+  "modes": [
+    "normal",
+    "pressure"
+  ],
   "noise": [
     "docs/contributing/semantic-benchmark.md#verdicts",
     "docs/contributing/semantic-benchmark.md#schedule"
@@ -13,7 +16,9 @@
       "package": "verter_bench",
       "bin": "verter-soak",
       "profile": "release",
-      "features": ["soak-support"]
+      "features": [
+        "soak-support"
+      ]
     },
     "tranches": 100,
     "actionsPerTranche": 100,
@@ -24,22 +29,22 @@
       "normal": {
         "actions": 10000,
         "distinctQueries": 6200,
-        "digest": "7738eb53c16411bb0d3a1072e6cfdd26c96ecda21f6cfabee11e816f929389bf"
+        "digest": "d1d4597fdf273227778133dc5d63d0ebbd9c0eb7c961187992a381c13b23fa00"
       },
       "pressure": {
         "actions": 10000,
         "distinctQueries": 5800,
-        "digest": "ab9604943c222e883fe50f3ad391d3a05035ed90283bcebddb52bada39da1676"
+        "digest": "f255522a19961af18b0da8c380a062b5abad7c553986e6e8054cc11b38fc64ca"
       }
     },
     "smoke": {
       "normal": {
         "tranches": 1,
-        "digest": "44ed5e79c72d5280539cfc4d7257db18f8f0d97cd031caf886c36ae194e17255"
+        "digest": "0d04896fba71f4adf79c9c9040656fa506e3d5a40bba27cb8fa8f3b0a368e338"
       },
       "pressure": {
         "tranches": 1,
-        "digest": "5af81e6e8ff3db6704377e47b2128b39a14d03c8788d10adb5a7c1d07630b496"
+        "digest": "1d45dc601fbf27eef93bf2070db9bdd48e0352c2e1dec14fc9108026479ea2a4"
       }
     },
     "binding": {
@@ -58,6 +63,30 @@
         "unexpected-skip",
         "unfrozen-fixture"
       ]
+    },
+    "surgeLimits": {
+      "bounded": {
+        "modules": 3,
+        "props": 200,
+        "oversizedProps": 200,
+        "inputBytesMax": 2954,
+        "concurrency": 3,
+        "liveArtifactsMax": 3,
+        "registeredSourcesMax": 3,
+        "snapshotLeasesMax": 3,
+        "retainedBytesMax": 67108864
+      },
+      "full": {
+        "modules": 300,
+        "props": 1000,
+        "oversizedProps": 2600,
+        "inputBytesMax": 40554,
+        "concurrency": 300,
+        "liveArtifactsMax": 300,
+        "registeredSourcesMax": 300,
+        "snapshotLeasesMax": 300,
+        "retainedBytesMax": 1073741824
+      }
     }
   },
   "requiredCells": [
@@ -91,12 +120,20 @@
     {
       "mode": "normal",
       "benchM3Only": true,
-      "metrics": ["wallMs", "peakRssBytes", "processTreePeakBytes"]
+      "metrics": [
+        "wallMs",
+        "peakRssBytes",
+        "processTreePeakBytes"
+      ]
     },
     {
       "mode": "pressure",
       "benchM3Only": true,
-      "metrics": ["wallMs", "peakRssBytes", "processTreePeakBytes"]
+      "metrics": [
+        "wallMs",
+        "peakRssBytes",
+        "processTreePeakBytes"
+      ]
     }
   ]
 }

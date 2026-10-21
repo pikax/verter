@@ -49,6 +49,82 @@ pub const BOUNDED_SURGE_MODULES: u32 = 3;
 /// Props of every bounded-surge component: a bounded instance drives the
 /// surge route on any worker without the full surge's volume.
 pub const BOUNDED_SURGE_PROPS: u32 = 200;
+
+/// The frozen bounds of one pressure-surge shape: the request the manifest
+/// may make of it (module count, props, the first component's oversized
+/// props, its largest published input bytes and the components whose
+/// results it holds live at once) and the absolute maxima its host may
+/// reach while every result is live. Every figure is fixed at its
+/// registered value: a larger request has no registered shape, and no
+/// maximum grows with what a request asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SurgeLimits {
+    /// Components the shape demands and holds the results of at once.
+    pub modules: u32,
+    /// Props of every component but the first.
+    pub props: u32,
+    /// Props of the first component.
+    pub oversized_props: u32,
+    /// The byte length of the largest component source this shape
+    /// publishes anywhere in the frozen workload.
+    pub input_bytes_max: u64,
+    /// Components whose results are simultaneously live.
+    pub concurrency: u32,
+    /// Live artifacts on the shape's host at the peak.
+    pub live_artifacts_max: u64,
+    /// Registered sources on the shape's host at the peak.
+    pub registered_sources_max: u64,
+    /// Snapshot leases on the shape's host at the peak.
+    pub snapshot_leases_max: u64,
+    /// The shape's finite retained-byte bound: the ratified retention
+    /// policy's ceiling for a host of this shape.
+    pub retained_bytes_max: u64,
+}
+
+/// The bounded surge's registered shape: measured on the smoke workload
+/// (one component per artifact, source and lease; roots stay at the
+/// host's own one), with the ordinary workload bound as its retained
+/// ceiling.
+pub const BOUNDED_SURGE_LIMITS: SurgeLimits = SurgeLimits {
+    modules: BOUNDED_SURGE_MODULES,
+    props: BOUNDED_SURGE_PROPS,
+    oversized_props: BOUNDED_SURGE_PROPS,
+    input_bytes_max: 2_954,
+    concurrency: BOUNDED_SURGE_MODULES,
+    live_artifacts_max: 3,
+    registered_sources_max: 3,
+    snapshot_leases_max: 3,
+    retained_bytes_max: 64 * 1024 * 1024,
+};
+
+/// The full surge's registered shape: measured on a live 300-component
+/// surge (one component per artifact, source and lease; roots stay at the
+/// host's own one; retained peaks near 935 MiB under the pressure
+/// refusals), with the ratified aggregate ceiling as its retained bound.
+pub const FULL_SURGE_LIMITS: SurgeLimits = SurgeLimits {
+    modules: SURGE_MODULES,
+    props: SURGE_PROPS,
+    oversized_props: OVERSIZED_PROPS,
+    input_bytes_max: 40_554,
+    concurrency: SURGE_MODULES,
+    live_artifacts_max: 300,
+    registered_sources_max: 300,
+    snapshot_leases_max: 300,
+    retained_bytes_max: 1024 * 1024 * 1024,
+};
+
+/// The registered shape a `modules`-wide surge request resolves to: the
+/// frozen limits of the one shape whose request it matches exactly. A
+/// request of any other size has no registered allowance.
+#[must_use]
+pub fn surge_limits_of(modules: u32) -> Option<&'static SurgeLimits> {
+    match modules {
+        BOUNDED_SURGE_MODULES => Some(&BOUNDED_SURGE_LIMITS),
+        SURGE_MODULES => Some(&FULL_SURGE_LIMITS),
+        _ => None,
+    }
+}
 /// Nested aliases of a depth-refusal component: past the fixed connected
 /// query-depth bound.
 pub const DEPTH_LEVELS: u32 = 30;
@@ -322,10 +398,11 @@ impl Manifest {
     }
 
     /// SHA-256 of the canonical JSON of the action list, of the setup's
-    /// publications and of every publication of every action (the digest of
+    /// publications, of every publication of every action (the digest of
     /// its path and exact bytes, see
-    /// [`super::fixtures::expected_publications`]), so a change to any
-    /// published fixture moves the identity of the workload it drives.
+    /// [`super::fixtures::expected_publications`]) and of the registered
+    /// surge shapes, so a change to any published fixture or to any
+    /// frozen surge bound moves the identity of the workload it drives.
     #[must_use]
     pub fn digest(&self) -> String {
         self.digest_over(&super::fixtures::setup_publications(), |action| {
@@ -352,6 +429,12 @@ impl Manifest {
                 bytes.extend_from_slice(publication.as_bytes());
             }
         }
+        // The registered surge bounds ride in every workload's identity:
+        // re-freezing a bound re-ratifies the workloads it can drive.
+        bytes.extend_from_slice(
+            &serde_json::to_vec(&(BOUNDED_SURGE_LIMITS, FULL_SURGE_LIMITS))
+                .expect("surge limits serialise"),
+        );
         sha256_hex(&bytes)
     }
 

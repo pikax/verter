@@ -5,6 +5,7 @@
 //! The retention account is process-wide, so runs in one process are
 //! serialised: a concurrent run's charges would move another run's drain.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
@@ -14,8 +15,9 @@ use verter_bench::soak::controls::{self, Control};
 use verter_bench::soak::gates::{self, GateEvidence};
 use verter_bench::soak::isolation::{Answer, AnswerClass, IsolationEvidence};
 use verter_bench::soak::manifest::{
-    Action, LifecycleClass, Manifest, Mode, Target, BOUNDED_SURGE_MODULES, FULL_TRANCHES,
-    SURGE_MODULES, SURGE_PERIOD,
+    surge_limits_of, Action, LifecycleClass, Manifest, Mode, SurgeLimits, Target,
+    BOUNDED_SURGE_LIMITS, BOUNDED_SURGE_MODULES, FULL_SURGE_LIMITS, FULL_TRANCHES, SURGE_MODULES,
+    SURGE_PERIOD,
 };
 use verter_bench::soak::refusal::{Demand, DemandRole, RefusalEvidence, RefusalVariant};
 use verter_bench::soak::run::{
@@ -189,6 +191,55 @@ fn full_manifests_match_the_frozen_registration() {
             "{mode:?} smoke manifest digest"
         );
     }
+    // The separately declared surge bounds are frozen in the registration
+    // and ride in every workload digest above: each shape's request, its
+    // populations' absolute maxima and its finite retained bound.
+    for (name, frozen) in [
+        ("bounded", BOUNDED_SURGE_LIMITS),
+        ("full", FULL_SURGE_LIMITS),
+    ] {
+        let shape: SurgeLimits = serde_json::from_value(soak["surgeLimits"][name].clone())
+            .expect("the registered surge shape");
+        assert_eq!(shape, frozen, "{name} surge limits");
+    }
+    // The shapes' input byte maxima are what the frozen fixtures publish:
+    // a fixture that grows a component past its registered bound fails
+    // here, not only in a run.
+    let manifest = Manifest::generate(Mode::Pressure, FULL_TRANCHES);
+    let mut input_bytes = BTreeMap::new();
+    for action in &manifest.actions {
+        let Target::Surge {
+            modules,
+            props,
+            oversized_props,
+        } = &action.target
+        else {
+            continue;
+        };
+        for ordinal in 0..*modules {
+            let count = if ordinal == 0 {
+                *oversized_props
+            } else {
+                *props
+            };
+            let len = verter_bench::soak::fixtures::surge_source(action.tranche, ordinal, count)
+                .len() as u64;
+            input_bytes.insert(
+                modules,
+                len.max(input_bytes.get(modules).copied().unwrap_or(0)),
+            );
+        }
+    }
+    assert_eq!(
+        input_bytes.get(&BOUNDED_SURGE_LIMITS.modules),
+        Some(&BOUNDED_SURGE_LIMITS.input_bytes_max),
+        "bounded surge input bytes"
+    );
+    assert_eq!(
+        input_bytes.get(&FULL_SURGE_LIMITS.modules),
+        Some(&FULL_SURGE_LIMITS.input_bytes_max),
+        "full surge input bytes"
+    );
 }
 
 /// The frozen identity covers every byte every action publishes: altering
@@ -946,6 +997,9 @@ fn surge(
     oversized: Option<u64>,
     outcome: Outcome,
 ) -> ActionRecord {
+    // The surge's populations sit exactly at their registered maxima: one
+    // live artifact, source and lease per component.
+    let shape = surge_limits_of(modules).expect("a registered surge shape");
     ActionRecord {
         outcome,
         digests: (0..modules).map(|i| format!("d{i}")).collect(),
@@ -958,8 +1012,9 @@ fn surge(
             refusals_active: 0,
             retained_results: Some(u64::from(modules) / 2),
             surge_counts: Some(SoakCounts {
-                live_artifacts: u64::from(modules),
-                registered_sources: u64::from(modules),
+                live_artifacts: shape.live_artifacts_max,
+                registered_sources: shape.registered_sources_max,
+                snapshot_leases: shape.snapshot_leases_max,
                 ..SoakCounts::default()
             }),
             active: Some(active(
@@ -1004,8 +1059,12 @@ fn sound_surges() -> Vec<ActionRecord> {
 }
 
 fn pressure_details(records: &[ActionRecord]) -> Vec<String> {
+    pressure_details_over(&surge_manifest(), records)
+}
+
+fn pressure_details_over(expected: &[Action], records: &[ActionRecord]) -> Vec<String> {
     let mut failures = Vec::new();
-    check_pressure_outcomes(&surge_manifest(), records, &mut failures);
+    check_pressure_outcomes(expected, records, &mut failures);
     failures
         .into_iter()
         .map(|f| match f {
@@ -1034,7 +1093,12 @@ fn full_pressure_outcomes_fail_zero_missing_or_incomplete_evidence() {
         plant(&mut records[1]);
         records
     };
-    let cases: [(Vec<ActionRecord>, &str); 12] = [
+    let bounded = |plant: fn(&mut ActionRecord)| {
+        let mut records = sound_surges();
+        plant(&mut records[0]);
+        records
+    };
+    let cases = [
         // The surge host's own populations are judged while its results are
         // live: more live artifacts than requested components, a byte figure
         // over its absolute limit, or no recorded populations fail.
@@ -1084,6 +1148,60 @@ fn full_pressure_outcomes_fail_zero_missing_or_incomplete_evidence() {
             full(|r| r.pressure.as_mut().unwrap().refusals_active = 1),
             "refused active work",
         ),
+        // The registered figures are bounded by the shape's frozen maxima,
+        // never by what the request asks for.
+        (
+            full(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .registered_sources = FULL_SURGE_LIMITS.registered_sources_max + 1
+            }),
+            "exceeded the absolute limits",
+        ),
+        (
+            full(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .snapshot_leases = FULL_SURGE_LIMITS.snapshot_leases_max + 1
+            }),
+            "exceeded the absolute limits",
+        ),
+        // The retained-byte bound is finite and explicit: the surge fills
+        // the account up to the ratified ceiling and not one byte past it.
+        (
+            full(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .retained_bytes = FULL_SURGE_LIMITS.retained_bytes_max + 1
+            }),
+            "exceeded the absolute limits",
+        ),
+        // The bounded surge's retained bytes stay under the ordinary
+        // workload bound: its smaller shape earns no surge-wide exemption.
+        (
+            bounded(|r| {
+                r.pressure
+                    .as_mut()
+                    .unwrap()
+                    .surge_counts
+                    .as_mut()
+                    .unwrap()
+                    .retained_bytes = BOUNDED_SURGE_LIMITS.retained_bytes_max + 1
+            }),
+            "exceeded the absolute limits",
+        ),
     ];
     for (records, needle) in cases {
         let details = pressure_details(&records);
@@ -1092,6 +1210,58 @@ fn full_pressure_outcomes_fail_zero_missing_or_incomplete_evidence() {
             "{needle}: {details:?}"
         );
     }
+    // At the registered maxima, the ratified ceiling included, the surge
+    // passes: the bounds are the shape's own, not a tighter guess.
+    assert_eq!(
+        pressure_details(&full(|r| {
+            r.pressure
+                .as_mut()
+                .unwrap()
+                .surge_counts
+                .as_mut()
+                .unwrap()
+                .retained_bytes = FULL_SURGE_LIMITS.retained_bytes_max
+        })),
+        Vec::<String>::new()
+    );
+    // A request no registered shape covers has no allowance at all: one
+    // module past the frozen size, or a frozen size asked for with other
+    // props, fails however many answers it delivers — increasing a request
+    // never increases the maxima it is judged by.
+    let reprops = |mutate: &dyn Fn(&mut u32, &mut u32, &mut u32)| {
+        let mut expected = surge_manifest();
+        for action in &mut expected {
+            if let Target::Surge {
+                modules,
+                props,
+                oversized_props,
+            } = &mut action.target
+            {
+                if *modules == SURGE_MODULES {
+                    mutate(modules, props, oversized_props);
+                }
+            }
+        }
+        expected
+    };
+    let unregistered = reprops(&|modules, _, _| *modules += 1);
+    let mut grown = sound_surges();
+    grown[1].digests.push("one more".into());
+    let details = pressure_details_over(&unregistered, &grown);
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("no registered surge shape")),
+        "{details:?}"
+    );
+    let wrong_props = reprops(&|_, props, _| *props += 1);
+    let details = pressure_details_over(&wrong_props, &sound_surges());
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("no registered surge shape")),
+        "{details:?}"
+    );
     // A full surge whose own window stayed below the former active target
     // fails however large its total or pre-window peak was; a window that
     // saw foreign work attributes nothing; a missing window fails.

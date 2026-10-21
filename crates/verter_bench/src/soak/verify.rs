@@ -17,7 +17,9 @@ use verter_audit::soak::{
 
 use super::gates::GateEvidence;
 use super::isolation::{Answer, AnswerClass, IsolationEvidence};
-use super::manifest::{Action, LifecycleClass, Manifest, Mode, Target, SURGE_MODULES};
+use super::manifest::{
+    surge_limits_of, Action, LifecycleClass, Manifest, Mode, SurgeLimits, Target, SURGE_MODULES,
+};
 use super::refusal::{Demand, DemandRole, RefusalEvidence, RefusalVariant};
 use super::run::{
     ActionRecord, Outcome, OwnerStep, OwnerStepKind, SoakSummary, SAMPLE_EVERY, SUMMARY_FILE,
@@ -623,7 +625,14 @@ pub fn check_pressure_outcomes(
         expected
             .iter()
             .find_map(|a| match (&a.target, a.index == index) {
-                (Target::Surge { modules, .. }, true) => Some(*modules),
+                (
+                    Target::Surge {
+                        modules,
+                        props,
+                        oversized_props,
+                    },
+                    true,
+                ) => Some((*modules, *props, *oversized_props)),
                 _ => None,
             })
     };
@@ -641,7 +650,24 @@ pub fn check_pressure_outcomes(
     }
     let mut full = Vec::new();
     for surge in &surges {
-        let modules = requested(surge.index);
+        // The request must be exactly a registered shape — its size, props
+        // and oversized props all matching one set of frozen bounds: a
+        // request no registered shape covers has no allowance at all, and a
+        // larger request never enlarges the maxima it is judged by.
+        let shape = match requested(surge.index) {
+            Some((modules, props, oversized_props)) => match surge_limits_of(modules) {
+                Some(l) if l.props == props && l.oversized_props == oversized_props => Some(l),
+                _ => {
+                    fail(format!(
+                        "surge {} requested {modules} modules x {props}/{oversized_props} props: no registered surge shape",
+                        surge.index
+                    ));
+                    None
+                }
+            },
+            None => None,
+        };
+        let modules = shape.map(|l| l.modules);
         let complete = surge.outcome == Outcome::Value
             && modules.map(|m| m as usize) == Some(surge.digests.len())
             && surge.digests.iter().all(|d| d != ABSENT_DELIVERY);
@@ -660,7 +686,7 @@ pub fn check_pressure_outcomes(
             .and_then(|p| p.surge_counts.as_ref())
         {
             Some(live) => {
-                let violations = absolute_violations_for(live, modules);
+                let violations = absolute_violations_for(live, shape);
                 if !violations.is_empty() {
                     fail(format!(
                         "surge {}'s host exceeded the absolute limits while its results were live: {violations:?}",
@@ -756,36 +782,43 @@ pub const ABSOLUTE_LIMITS: &[(&str, u64)] = &[
 /// past: the ratified aggregate ceiling.
 pub const REFUSABLE_CEILING_BYTES: u64 = 1024 * 1024 * 1024;
 
-/// The populations a surge host holds one of per requested component: its
-/// bound is the surge's own module count, not the soak host's.
-const SURGE_SCALED_FIGURES: &[&str] = &["live_artifacts", "registered_sources", "snapshot_leases"];
-/// A surge exists to fill the account: its retained bytes are bounded by the
-/// refusable ceiling, not by the soak host's workload bound.
-const SURGE_UNBOUNDED_FIGURES: &[&str] = &["retained_bytes"];
+/// The populations a registered surge shape bounds at its own frozen
+/// maxima instead of the soak host's: (figure, its bound in
+/// [`SurgeLimits`]).
+const SURGE_REGISTERED_FIGURES: &[(&str, fn(&SurgeLimits) -> u64)] = &[
+    ("live_artifacts", |l| l.live_artifacts_max),
+    ("registered_sources", |l| l.registered_sources_max),
+    ("snapshot_leases", |l| l.snapshot_leases_max),
+    ("retained_bytes", |l| l.retained_bytes_max),
+];
 
 fn absolute_violations(counts: &verter_audit::soak::SoakCounts) -> Vec<CountViolation> {
     absolute_violations_for(counts, None)
 }
 
-/// The absolute limits for `counts`; the surge host's per-component
-/// populations are bounded by its `surge_modules` instead of the soak host's
-/// fixed counts, every other figure by the same limits.
+/// The absolute limits for `counts`; a registered surge shape's host is
+/// bounded by that shape's frozen maxima for the populations it scales
+/// with its components, every other figure by the same limits as the soak
+/// host. The maxima are fixed at their registered values: they never grow
+/// with what a request asks for.
 fn absolute_violations_for(
     counts: &verter_audit::soak::SoakCounts,
-    surge_modules: Option<u32>,
+    surge: Option<&SurgeLimits>,
 ) -> Vec<CountViolation> {
     let figures = counts.figures();
+    let registered = |name: &str| {
+        surge.and_then(|l| {
+            SURGE_REGISTERED_FIGURES
+                .iter()
+                .find(|(figure, _)| *figure == name)
+                .map(|(_, bound)| bound(l))
+        })
+    };
     let mut out: Vec<CountViolation> = ABSOLUTE_LIMITS
         .iter()
         .filter_map(|(name, limit)| {
             let observed = figures.iter().find(|(n, _, _)| n == name)?.2;
-            if surge_modules.is_some() && SURGE_UNBOUNDED_FIGURES.contains(name) {
-                return None;
-            }
-            let limit = match surge_modules {
-                Some(modules) if SURGE_SCALED_FIGURES.contains(name) => u64::from(modules),
-                _ => *limit,
-            };
+            let limit = registered(name).unwrap_or(*limit);
             (observed > limit).then(|| CountViolation {
                 figure: (*name).to_string(),
                 expected_at_most: limit,
