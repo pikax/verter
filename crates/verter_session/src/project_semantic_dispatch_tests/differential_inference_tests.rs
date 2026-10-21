@@ -3053,3 +3053,61 @@ fn intersection_with_a_mapped_type_over_the_inferred_parameter() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The fixture of [`a_mapped_parameter_over_closed_keys_relates_as_its_members`].
+const MAPPED_PARAMETER_MEMBERS: &str = r##"
+declare function dup<K extends PropertyKey>(x: { [P in K]: P }, k: K): "first";
+declare function dup<K>(x: unknown, k: K): "second";
+export const sameSpelling = dup<1 | "1">({ 1: "1" }, 1);
+declare function req<T>(x: { [K in keyof T]-?: T[K] | null }, t: T): "first";
+declare function req<T>(x: unknown, t: T): "second";
+export const required = req<{ a?: number }>({ a: undefined }, {});
+"##;
+
+/// A mapped parameter over a closed key domain relates the argument to the
+/// members the mapped type has: `-?` drops the `undefined` an optional
+/// source member adds under `strictNullChecks`, and keys of one spelling
+/// (`1` and `"1"`) are one member holding both productions, so the lane
+/// never answers that call with the overload the checker rejects.
+#[test]
+fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
+    let failures = Matrix::new(MAPPED_PARAMETER_MEMBERS).four(&[
+        (
+            Read::Type("typeof required"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof sameSpelling"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+    ]);
+    let wrong: Vec<&String> = failures
+        .iter()
+        .filter(|failure| failure.contains("`typeof required`") || !failure.starts_with("GAP "))
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{}",
+        wrong
+            .iter()
+            .map(|failure| failure.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// [`a_mapped_parameter_over_closed_keys_relates_as_its_members`]'s
+/// same-spelling call, answered.
+#[test]
+#[ignore = "typed gap in the lane: an argument to an explicitly instantiated mapped parameter degrades by UnresolvedValue"]
+fn pinned_same_spelling_mapped_parameter_call() {
+    let failures =
+        Matrix::new(MAPPED_PARAMETER_MEMBERS).types(&[("typeof sameSpelling", "\"first\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
