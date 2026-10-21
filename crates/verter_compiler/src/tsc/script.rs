@@ -2662,8 +2662,9 @@ fn render_authored_fragment(
     fragment: &AuthoredFragment,
     edits: &[DeclarationEdit],
 ) -> RenderedText {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let allocator = Allocator::default();
-    let mut transform = CodeTransform::new(&fragment.text, &allocator);
+    let mut transform = CodeTransform::<M>::new_in(&fragment.text, &allocator);
     for token_start in &fragment.token_starts {
         let _ = transform.try_add_sourcemap_location(*token_start);
     }
@@ -2705,6 +2706,8 @@ fn render_authored_fragment(
     let (text, ranges, unmapped_boundaries) =
         transform.build_string_with_source_ranges_and_unmapped_boundaries();
     compose_authored_transform(text, ranges, unmapped_boundaries, fragment.source_start)
+
+    })
 }
 
 fn relative_range(span: oxc_span::Span, authored_start: u32) -> Option<(u32, u32)> {
@@ -6772,8 +6775,9 @@ fn render_authored_props_argument(
     defaulted_prop_names: &[String],
     generic_props: Option<&FxHashSet<&str>>,
 ) -> (RenderedText, Vec<String>) {
+    verter_audit::specialise!(crate::code_transform::installed_capture_mode() => M, {
     let allocator = Allocator::default();
-    let mut transform = CodeTransform::new(&argument.text, &allocator);
+    let mut transform = CodeTransform::<M>::new_in(&argument.text, &allocator);
     let mut handled_defaults = FxHashSet::default();
     for member in &argument.members {
         transform
@@ -6802,6 +6806,8 @@ fn render_authored_props_argument(
         compose_authored_transform(text, ranges, unmapped_boundaries, argument.source_start),
         unresolved_defaults,
     )
+
+    })
 }
 
 fn compose_authored_transform(

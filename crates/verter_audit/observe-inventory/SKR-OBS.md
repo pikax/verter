@@ -158,7 +158,7 @@ this row supersedes that owner's gate column.
 | `hotpath::measure` attributes on compile, codegen, source-map, AST, lint and analysis entries | none; profiling | OPTIONAL | Profiler window | `crates/verter_compiler/src/**`, `crates/verter_parser/src/ast/mod.rs`, `crates/verter_diagnostics/src/linter.rs`, `crates/verter_semantic/src/analysis/build.rs` | `cfg(feature = "semantic-observe")` |
 | Compile phase timers and source-map clocks reported to the audit observer | Audit records only | OPTIONAL | One compile | `crates/verter_compiler/src/compile/mod.rs` | `cfg(feature = "semantic-observe")` (`observe!`, `Stopwatch`) |
 | Compile-result wall-clock durations (`parse_start`, `total_start`, `style_start`, `script_start`, `tpl_start`, `tsx_start`, `tsc_start` clock reads feeding `VerterCompileResult::{parse_duration_ms, total_duration_ms}` and each block's `duration_ms`) | none in production: the public result fields (and the FFI `parseDurationMs`) are read only by the `ffi-bench` measurement | OPTIONAL timers on a public result shape | One compile | `crates/verter_compiler/src/compile/{mod,types}.rs` | always (open item: compiler attribution owns the result-shape change) |
-| `CodeTransform` per-op audit emission (`record_audit_op`) | Audit records only | OPTIONAL | Per op | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` (`observe!`) |
+| `CodeTransform<'_, M>` operation tally (`record_audit_op`) | Audit records only | OPTIONAL | One transform, published on drop | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` and `M::CAPTURED`; uncaptured updates and drop-time observation compile out |
 
 ## Bindings
 

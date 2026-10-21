@@ -87,7 +87,7 @@ impl AnchoredInsertOp {
 }
 
 #[allow(dead_code)] // Many API methods only exercised by tests currently
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// The single range-replacement implementation behind `update` /
     /// `overwrite` (unchecked) and `try_update` / `try_overwrite` /
     /// `try_remove` (checked).

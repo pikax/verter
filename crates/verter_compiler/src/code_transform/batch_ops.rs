@@ -76,7 +76,7 @@ impl<'a> PrependMerge<'_, 'a> {
 }
 
 #[allow(dead_code)] // Some batch API methods are only exercised by tests currently
-impl<'a> CodeTransform<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> CodeTransform<'a, M> {
     /// Apply multiple prepend_left operations in a single O(n+m) pass.
     ///
     /// `items` must be sorted by position (ascending). Content strings must

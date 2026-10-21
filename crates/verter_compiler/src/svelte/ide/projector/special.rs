@@ -21,7 +21,7 @@ use oxc_ast_visit::{walk, Visit};
 use oxc_span::{GetSpan, SourceType};
 use verter_parser::oxc_parse::{with_program_stack, Parser};
 
-impl TemplateProjector<'_, '_> {
+impl<M: verter_audit::observe::ObserveExec> TemplateProjector<'_, '_, M> {
     /// Project a `<svelte:*>` special element.
     pub(super) fn project_special_element(&mut self, el: &SvelteElement, kind: SvelteSpecialKind) {
         match kind {
