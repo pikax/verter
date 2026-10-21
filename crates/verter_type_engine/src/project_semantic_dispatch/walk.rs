@@ -8644,8 +8644,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             None,
                         );
                     }
-                    QueryResult::Error(_) => {
-                        self.note_unresolved_surface_arm(target, name, ref_owner);
+                    QueryResult::Error(error) => {
+                        // A lookup its own demand stopped early is not an
+                        // unresolvable arm: the read already folded its
+                        // causes, and the arm stays unknown, not missing.
+                        if !matches!(error, QueryError::IncompleteSemanticOperand { .. }) {
+                            self.note_unresolved_surface_arm(target, name, ref_owner);
+                        }
                         self.contribute_surface(
                             target,
                             root_contribution,
