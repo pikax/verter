@@ -2316,6 +2316,18 @@ export function n54(p: "a") { return id({ v: p, w: "b" }); }
 export function n55(o: { v: "a" }) { return pu({ v: o.v }); }
 export function n56() { return kc({ v: [sl, "b"] }); }
 export function n57(p: number) { return kc({ v: [p, "b"] }); }
+export function n58() { return kc({ v: "a" }); }
+export function n59() { return kcn("a"); }
+export function n60() { return kc({ v: c ? "a" : "b" }); }
+export function n61() { return kc({ v: s }); }
+export function n62() { return kcn(c ? "a" : "b"); }
+export function n63() { return kcn(s); }
+declare function kt<const T>(x: [T]): T;
+export function n64() { return kt(["a"]); }
+export function n65() { return kt([s]); }
+export function n66() { return kc({ v: c ? s : "b" }); }
+declare function kx<const T>(x: { v: (T & {}) | undefined }): T;
+export function n67() { return kx({ v: "a" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2647,10 +2659,25 @@ fn nested_regular_literals_keep_their_type() {
     ]));
     // A fresh literal beside a regular read keeps its type in a const
     // context: the array literal's contextual type is a `const` type
-    // parameter, whatever the parameters the argument reaches.
+    // parameter, whatever the parameters the argument reaches. So does a
+    // fresh literal whose own contextual type is a `const` type parameter,
+    // alone, as a tuple element or under a union or intersection naming
+    // the parameter. A read or a conditional in a member or element
+    // position is no literal of its own and widens there, while a naked
+    // `const T` argument infers its literals as written.
     failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
         (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
         (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
+        (Read::Return(r#"n58"#), r#""a""#),
+        (Read::Return(r#"n59"#), r#""a""#),
+        (Read::Return(r#"n60"#), r#"string"#),
+        (Read::Return(r#"n61"#), r#"string"#),
+        (Read::Return(r#"n62"#), r#""a" | "b""#),
+        (Read::Return(r#"n63"#), r#""a""#),
+        (Read::Return(r#"n64"#), r#""a""#),
+        (Read::Return(r#"n65"#), r#"string"#),
+        (Read::Return(r#"n66"#), r#"string"#),
+        (Read::Return(r#"n67"#), r#""a""#),
     ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2707,6 +2734,13 @@ let d41 = c ? { v: sl, k: 1 } : { v: s, k: "z" };
 let d42 = { ...{ v: s } };
 let d43 = { ...{ v: sl } };
 let d44 = [...[s]];
+let d46 = { ["v"]: s };
+declare const u: unique symbol;
+let d48 = { [u]: s };
+let d49 = { [u]: c ? "a" : sl };
+let d50 = c ? { [u]: s } : { [u]: 1 };
+let d51 = c ? [s, 1] : [sl, true];
+let d52 = c ? [s, [1, "x"]] : [true];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2757,7 +2791,8 @@ fn declared_literal_occurrences() {
 /// the regular one — through a nested conditional, beside an asserted
 /// element, and through a member read of the declaration. A member read
 /// widens in each object or array arm of a conditional and beside a
-/// spread, while a later spread's own member of that key keeps its type.
+/// spread, while a later spread's own member of that key keeps its type,
+/// and under a computed key as under a written one.
 #[test]
 fn declared_reads_follow_their_binding_freshness() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
@@ -2802,6 +2837,18 @@ fn declared_reads_follow_their_binding_freshness() {
         (Read::Type("typeof d42"), r#"{ v: string; }"#),
         (Read::Type("typeof d43"), r#"{ v: "a"; }"#),
         (Read::Type("typeof d44"), r#"string[]"#),
+        (Read::Type("typeof d46"), r#"{ v: string; }"#),
+        (Read::Type("(typeof d48)[typeof u]"), r#"string"#),
+        (Read::Type("(typeof d49)[typeof u]"), r#""a""#),
+        (Read::Type("(typeof d50)[typeof u]"), r#"string | number"#),
+        (
+            Read::Type("typeof d51"),
+            r#"(string | number)[] | ("a" | boolean)[]"#,
+        ),
+        (
+            Read::Type("typeof d52"),
+            r#"(string | (string | number)[])[] | boolean[]"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
