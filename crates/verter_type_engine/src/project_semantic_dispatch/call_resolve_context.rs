@@ -273,7 +273,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     } else {
                         ConstParamPolicy::NonConst
                     },
-                    decl.constraint.is_some(),
+                    decl.constraint,
                 )
             })
             .collect()

@@ -57,7 +57,7 @@ fn inference_context_key_projects_every_session_setup_axis() {
         param_node: _,
         param_name: _,
         const_policy: _,
-        has_constraint: _,
+        constraint: _,
     } = info;
     let InferenceContextKey {
         inferable_params: _,
@@ -83,15 +83,6 @@ fn inference_context_key_projects_every_session_setup_axis() {
             active_param,
             VariancePhase::Contravariant,
             InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        ),
-        setup(
-            active_param,
-            VariancePhase::Covariant,
-            InferencePassKind::ReverseHomomorphicMapped,
             InferenceCandidatePriority::Argument,
             NoInferMask::empty(),
             ConstParamPolicy::NonConst,
@@ -150,7 +141,7 @@ fn inference_context_key_projects_every_session_setup_axis() {
         "each setup-axis mutation must have a distinct fingerprint"
     );
 
-    let mut session = InferenceSession::new(SessionId(1), baseline, None);
+    let mut session = InferenceSession::new(SessionId(1), baseline);
     assert_eq!(session.context_key(), &baseline_key);
     assert!(session.deposit(
         active_param,
@@ -282,7 +273,7 @@ fn repeated_infer_sites_share_one_setup_record_and_one_fixed_binding() {
         1,
         "the immutable setup authority must deduplicate repeated sites by exact param"
     );
-    let mut session = InferenceSession::new(SessionId(17), setup, None);
+    let mut session = InferenceSession::new(SessionId(17), setup);
     assert!(session.deposit(
         param,
         SemanticNodeId(601),
@@ -325,7 +316,7 @@ fn staged_session_is_deposit_inactive_and_commits_exactly_once() {
         ContextualInferenceMode::None,
     );
     let mut txn = CheckerDispatchTransaction::default();
-    let session_id = txn.push_collecting_session(setup, None);
+    let session_id = txn.push_collecting_session(setup);
     assert_eq!(
         txn.active_session().map(|session| session.id),
         Some(session_id)
@@ -401,7 +392,6 @@ fn abandonment_respects_the_commit_boundary() {
                 ConstParamPolicy::NonConst,
                 ContextualInferenceMode::None,
             ),
-            None,
         )
     };
 
@@ -451,18 +441,15 @@ fn nested_call_owned_session_isolates_outer_and_resumes_it() {
     let inner_candidate = SemanticNodeId(634);
     let mut txn = CheckerDispatchTransaction::default();
 
-    let outer_id = txn.push_collecting_session(
-        setup(
-            outer_param,
-            VariancePhase::Covariant,
-            InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        ),
-        None,
-    );
+    let outer_id = txn.push_collecting_session(setup(
+        outer_param,
+        VariancePhase::Covariant,
+        InferencePassKind::Ordinary,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    ));
     assert!(txn.active_session_mut().expect("outer collector").deposit(
         outer_param,
         outer_candidate,
@@ -470,18 +457,15 @@ fn nested_call_owned_session_isolates_outer_and_resumes_it() {
         VariancePhase::Covariant,
     ));
 
-    let inner_id = txn.push_collecting_session(
-        setup(
-            inner_param,
-            VariancePhase::Covariant,
-            InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        ),
-        None,
-    );
+    let inner_id = txn.push_collecting_session(setup(
+        inner_param,
+        VariancePhase::Covariant,
+        InferencePassKind::Ordinary,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    ));
     assert_ne!(inner_id, outer_id, "the nested call must own its session");
     assert_eq!(
         txn.active_session().map(|session| session.id),
@@ -531,32 +515,26 @@ fn nested_call_owned_session_isolates_outer_and_resumes_it() {
 #[test]
 fn binding_disabled_barrier_hides_outer_but_allows_nested_call_session() {
     let mut txn = CheckerDispatchTransaction::default();
-    let outer = txn.push_collecting_session(
-        setup(
-            SemanticNodeId(641),
-            VariancePhase::Covariant,
-            InferencePassKind::Ordinary,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        ),
-        None,
-    );
+    let outer = txn.push_collecting_session(setup(
+        SemanticNodeId(641),
+        VariancePhase::Covariant,
+        InferencePassKind::Ordinary,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    ));
     txn.begin_binding_disabled();
     assert!(txn.active_session().is_none());
-    let nested = txn.push_collecting_session(
-        setup(
-            SemanticNodeId(642),
-            VariancePhase::Covariant,
-            InferencePassKind::CallApplicability,
-            InferenceCandidatePriority::Argument,
-            NoInferMask::empty(),
-            ConstParamPolicy::NonConst,
-            ContextualInferenceMode::None,
-        ),
-        None,
-    );
+    let nested = txn.push_collecting_session(setup(
+        SemanticNodeId(642),
+        VariancePhase::Covariant,
+        InferencePassKind::CallApplicability,
+        InferenceCandidatePriority::Argument,
+        NoInferMask::empty(),
+        ConstParamPolicy::NonConst,
+        ContextualInferenceMode::None,
+    ));
     assert_eq!(txn.active_session().map(|session| session.id), Some(nested));
     txn.end_binding_disabled();
     assert_eq!(txn.active_session().map(|session| session.id), Some(nested));
@@ -613,7 +591,7 @@ fn candidate_writes_mark_every_non_owner_ancestor_mutating_an_outer_session() {
     let owner = txn
         .reentry_mut()
         .push_relate(relation_key(301), occurrence, 0);
-    let session = txn.push_collecting_session(one_parameter_session_setup(), None);
+    let session = txn.push_collecting_session(one_parameter_session_setup());
     txn.note_opened_session(owner, session);
     txn.note_candidate_write(Some(session));
 
@@ -658,7 +636,7 @@ fn a_call_session_write_marks_only_the_frames_opened_inside_the_session() {
     txn.reentry_mut()
         .push_relate(relation_key(313), occurrence, 0);
     txn.reentry_mut().push_resolve_call(resolve_call_key(), 0);
-    let session = txn.push_collecting_session(one_parameter_session_setup(), None);
+    let session = txn.push_collecting_session(one_parameter_session_setup());
     txn.reentry_mut()
         .push_relate(relation_key(315), occurrence, 0);
     txn.note_candidate_write(Some(session));
@@ -894,7 +872,6 @@ fn candidate_session_lifecycle_states_are_collecting_staged_committed_abandoned(
                 ConstParamPolicy::NonConst,
                 ContextualInferenceMode::None,
             ),
-            None,
         )
     };
 
@@ -1025,10 +1002,10 @@ fn return_equation_identity_spans_flow_return_and_resolve_call() {
 #[test]
 fn closed_sessions_leave_the_collecting_search() {
     let mut txn = CheckerDispatchTransaction::default();
-    let outer = txn.push_collecting_session(one_parameter_session_setup(), None);
+    let outer = txn.push_collecting_session(one_parameter_session_setup());
     // bounded-loop: a thousand sessions, each opened and closed once.
     for _ in 0..1_000 {
-        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        let inner = txn.push_collecting_session(one_parameter_session_setup());
         assert_eq!(txn.active_session().map(|session| session.id), Some(inner));
         txn.relation
             .session_mut(inner)
@@ -1051,7 +1028,7 @@ fn closed_sessions_leave_the_collecting_search() {
     let suspended = txn.relation.sessions.remove(position);
     // bounded-loop: ten sessions, each opened and closed once.
     for _ in 0..10 {
-        let inner = txn.push_collecting_session(one_parameter_session_setup(), None);
+        let inner = txn.push_collecting_session(one_parameter_session_setup());
         txn.relation
             .session_mut(inner)
             .expect("pushed session")

@@ -2405,7 +2405,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             None => (
                 self.dispatch_txn
                     .borrow_mut()
-                    .push_collecting_session(setup, None),
+                    .push_collecting_session(setup),
                 None,
                 None,
             ),
@@ -4172,7 +4172,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect::<Vec<_>>()
                     .into_boxed_slice(),
             ),
-            readonly: policy == Some(ConstParamPolicy::Const),
+            readonly: policy == Some(ConstParamPolicy::Const)
+                && !self.const_context_is_mutable_array_like(target),
         });
         if !binding_enabled {
             return self.call_relation(source, target, source, budget, false, false);
