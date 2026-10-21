@@ -196,14 +196,16 @@ pub(crate) struct WorkspaceSourceLoader {
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        self.load_through(canonical_id, |workspace| workspace.read_file(canonical_id))
+        self.load_through(canonical_id, |workspace, canonical| {
+            workspace.read_file(canonical)
+        })
     }
 
     #[cfg(feature = "semantic-observe")]
     fn load_captured(&self, canonical_id: &str, request_id: u64, timing: bool) -> Option<Arc<str>> {
-        self.load_through(canonical_id, |workspace| {
+        self.load_through(canonical_id, |workspace, canonical| {
             workspace.read_file_captured(
-                canonical_id,
+                canonical,
                 &verter_workspace::audit_sink::VfsReadCapture { request_id, timing },
             )
         })
@@ -235,7 +237,7 @@ impl WorkspaceSourceLoader {
     fn load_through(
         &self,
         canonical_id: &str,
-        read: impl FnOnce(&dyn verter_workspace::WorkspaceAccess) -> Option<Arc<str>>,
+        read: impl FnOnce(&dyn verter_workspace::WorkspaceAccess, &str) -> Option<Arc<str>>,
     ) -> Option<Arc<str>> {
         let workspace = self.workspace.read();
         // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
@@ -250,7 +252,7 @@ impl WorkspaceSourceLoader {
         {
             return workspace.read_ambient_lib(project, canonical.as_ref());
         }
-        read(workspace.as_ref())
+        read(workspace.as_ref(), canonical_id)
     }
 }
 
