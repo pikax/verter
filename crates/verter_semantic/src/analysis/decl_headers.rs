@@ -350,6 +350,14 @@ fn index_top_level_statement(
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
             index_declaration(decl, ctx, index);
+            // `export import X = N.M`: an importing module reads `N.M`
+            // through `X`.
+            if let Declaration::TSImportEqualsDeclaration(import) = decl {
+                let key = ctx.key(import.id.name.as_str());
+                if index.namespace_aliases.contains_key(&key) {
+                    index.exported_namespace_aliases.insert(key);
+                }
+            }
         }
         Statement::ExportDefaultDeclaration(export) => match &export.declaration {
             ExportDefaultDeclarationKind::FunctionDeclaration(func) => {

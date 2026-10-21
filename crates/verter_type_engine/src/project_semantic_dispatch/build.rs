@@ -1532,6 +1532,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     suspend,
                 );
             }
+            // An import of a module's `export import X = N.M` alias reads
+            // what the alias names, in the module that declares it.
+            if let Some(alias) = crate::resolver_core::bare_name_resolve::imported_namespace_alias(
+                self.ctx,
+                value_root.scope.canonical_id.as_ref(),
+                value_root.scope.owner,
+                value_root.name.as_ref(),
+            ) {
+                let declaring = ValueRootKey {
+                    scope: crate::semantic_query::ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(alias.module.as_str()),
+                        owner: alias.owner,
+                        local_scope: None,
+                        binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(
+                            alias.owner,
+                        ),
+                    },
+                    name: verter_type_expr::OwnedStr::from(alias.name.as_str()),
+                };
+                let output =
+                    self.build_typeof_suspending(&declaring, path, context, suspend.as_deref_mut());
+                let redirect = TypeofRedirect {
+                    declaring,
+                    authored: value_root.clone(),
+                    path: verter_type_expr::OwnedSlice::default(),
+                    observed_hash,
+                };
+                if let Some(Some(build)) = suspend {
+                    build.redirects.push(redirect);
+                    return output;
+                }
+                return self.finish_typeof_redirect(output, &redirect);
+            }
         }
 
         // A namespace member path: a namespace block has no value surface

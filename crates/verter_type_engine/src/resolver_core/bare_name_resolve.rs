@@ -449,6 +449,19 @@ fn resolve_namespace_member_from_facts<C: crate::resolver_core::ResolverCapabili
         if !named_import {
             return None;
         }
+        // `X.Member` over an import of an `export import X = N.M` alias: the
+        // member of the entity the alias names, read in the module that
+        // declares the alias.
+        if let Some(alias) = imported_namespace_alias(ctx, canonical_id, owner, prefix) {
+            return resolve_bare_name_in_scope(
+                ctx,
+                dispatch,
+                &alias.module,
+                alias.owner,
+                None,
+                &format!("{}.{member}", alias.name),
+            );
+        }
         let declaring =
             resolve_import_binding_from_facts(ctx, canonical_id, owner, scope_payload, prefix)?;
         return qualified_member_declaration(ctx, dispatch, &declaring, member);
@@ -486,6 +499,47 @@ fn resolve_namespace_member_from_facts<C: crate::resolver_core::ResolverCapabili
         .map(|target| {
             dispatch.intern_resolved_identity(&target.canonical_id, target.owner, &target.name)
         })
+}
+
+/// The `export import X = N.M` alias a named import binds: the module that
+/// exports it, the alias's owner there, and its name `X`.
+pub(crate) struct ImportedNamespaceAlias {
+    pub(crate) module: String,
+    pub(crate) owner: verter_type_expr::TopLevelOwnerId,
+    pub(crate) name: String,
+}
+
+/// The exported namespace alias the named import `local_name` of
+/// `canonical_id`'s `owner` binds, when the module it imports from exports
+/// `export import local_name = N.M` under the imported name: a read
+/// through the import reads what the alias names. `None` for any other
+/// import (a namespace import, a declaration, an alias the module keeps
+/// private).
+pub(crate) fn imported_namespace_alias<C: crate::resolver_core::ResolverCapabilities>(
+    ctx: &dyn ResolverContext<C>,
+    canonical_id: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    local_name: &str,
+) -> Option<ImportedNamespaceAlias> {
+    let entry = ctx
+        .ensure_indexed_ready_serve(canonical_id)
+        .map(|serve| serve.indexed)?;
+    let target = entry.shallow_state.import_target_in(owner, local_name)?;
+    if target.is_namespace {
+        return None;
+    }
+    let module = ctx.resolve_type_dependency_canonical(canonical_id, &target.source_specifier)?;
+    let alias_owner = ctx
+        .ensure_indexed_ready_serve(&module)
+        .map(|serve| serve.indexed)?
+        .shallow_state
+        .headers
+        .exported_namespace_alias_owner(&target.imported_name)?;
+    Some(ImportedNamespaceAlias {
+        module,
+        owner: alias_owner,
+        name: target.imported_name.clone(),
+    })
 }
 
 /// The declaration `member` names inside the namespace `declaring`
