@@ -555,6 +555,7 @@ fn a_call_inside_a_literal_types_as_its_return() {
 /// missing body-return routing; computed returns avoid literal-widening rules.
 const BLOCK_BODIES_IN_LITERALS: &str = r##"
 declare function keep<T>(value: T): T;
+type Returned<T> = T extends (...args: any[]) => infer R ? R : never;
 export const property = { run: () => {} };
 export const returned = keep({ run: () => { return; } });
 export const beside = keep({ run: () => {}, size: 2 });
@@ -592,14 +593,17 @@ fn a_block_bodied_function_inside_a_literal_types_its_body_return() {
         ),
         (Read::Type("typeof expression"), "{ run: () => 1; }"),
         (Read::Return("inBody"), "{ run: () => void; }"),
-        (Read::Return("methodInBody"), "{ run(this: void): number; }"),
         (
-            Read::Return("nestedMethodInBody"),
-            "{ o: { run(this: void): number; }; }",
+            Read::Type("Returned<Returned<typeof methodInBody>['run']>"),
+            "number",
         ),
         (
-            Read::Return("methodInArrayInBody"),
-            "{ run(this: void): number; }[]",
+            Read::Type("Returned<Returned<typeof nestedMethodInBody>['o']['run']>"),
+            "number",
+        ),
+        (
+            Read::Type("Returned<Returned<typeof methodInArrayInBody>[number]['run']>"),
+            "number",
         ),
         (Read::Return("annotatedMethodInBody"), "{ run(): \"s\"; }"),
         (
