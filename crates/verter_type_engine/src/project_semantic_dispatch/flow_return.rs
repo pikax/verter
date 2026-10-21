@@ -17860,7 +17860,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// The type a narrowing stands for, building a remainder's union on
     /// its first read ([`FlowArmRemainder`]).
     fn narrowed_node(&self, narrowed: &FlowNarrowed) -> SemanticNodeId {
-        narrowed.node_or_build(|arms| self.union_or_never(arms))
+        narrowed
+            .node_or_build(|arms| super::flow_products::FlowAlgebraComposite {
+                node: self.union_or_never(arms),
+                incomplete: false,
+            })
+            .node
     }
 
     /// Apply one evaluated write to its target: a parameter write rides

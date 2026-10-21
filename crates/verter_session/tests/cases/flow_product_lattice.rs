@@ -763,6 +763,75 @@ fn product_domains_refuse_conflicts_mismatches_and_unproven_algebra() {
 }
 
 #[test]
+fn a_join_refusing_a_remainder_union_refuses_it_on_every_repeat() {
+    // The remainder's own union is unproven; the union of the two edges
+    // would be proven. Caching the first, refused, build must not let a
+    // repeat of the same join skip the refusal and publish.
+    struct RefusesRemainder {
+        remainder: [SemanticNodeId; 2],
+        builds: std::cell::Cell<usize>,
+    }
+    impl FlowSemanticAlgebra for RefusesRemainder {
+        fn subtype_union(&self, _: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
+        fn evolving_array(&self, _: &[EvolvingElement]) -> FlowAlgebraComposite {
+            unreachable!()
+        }
+        fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
+            let incomplete = members == self.remainder;
+            self.builds.set(self.builds.get() + usize::from(incomplete));
+            FlowAlgebraComposite {
+                node: members[0],
+                incomplete,
+            }
+        }
+        fn literal_provenance(
+            &self,
+            _: &[LiteralProvenance<'_>],
+            _: SemanticNodeId,
+        ) -> Result<LiteralProvenanceResult, verter_session_query::flow::policy::FlowGap> {
+            unreachable!()
+        }
+    }
+    let (inputs, execution) = execution(SOURCE, 1, FlowProductBudget::default());
+    let (graph, number, string) = types();
+    let _scope = graph.enter_node_root_scope();
+    let boolean = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Boolean));
+    let key = binding(&execution, &inputs, "y", FlowDomain::ReachingType);
+    let narrowing = |narrowed_to| {
+        FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
+            binding: key.binding().unwrap().clone(),
+            path: Arc::from([]),
+            narrowed_to,
+            fresh_literal: None,
+        }]))
+    };
+    let remainder =
+        FlowArmRemainder::whole(number, Arc::from([number, string, boolean])).excluding(&[2]);
+    let left = narrowing(FlowNarrowed::Remainder(remainder));
+    let right = narrowing(FlowNarrowed::Node(boolean));
+    let algebra = RefusesRemainder {
+        remainder: [number, string],
+        builds: std::cell::Cell::new(0),
+    };
+    for repeat in 1..=2 {
+        assert!(
+            matches!(
+                join_product(&algebra, &FlowProductBudget::default(), &left, &right),
+                FlowTransferOutcome::Gap(_)
+            ),
+            "join {repeat} must refuse the unproven remainder"
+        );
+        assert_eq!(
+            algebra.builds.get(),
+            repeat,
+            "an unproven build is never kept"
+        );
+    }
+}
+
+#[test]
 fn widening_joins_preserve_pinned_values_and_only_surviving_literal_arms() {
     let graph = SemanticGraphStore::new();
     let _scope = graph.enter_node_root_scope();

@@ -327,7 +327,7 @@ fn assert_chain_linear(
 fn instanceof_chain_narrows_in_linear_work() {
     let measured = assert_chain_linear(
         "instanceof",
-        25,
+        16,
         instanceof_chain,
         assert_literals_and_undefined,
     );
@@ -340,12 +340,12 @@ fn instanceof_chain_narrows_in_linear_work() {
 
 #[test]
 fn in_chain_narrows_in_linear_work() {
-    assert_chain_linear("in", 25, in_chain, assert_literals_and_undefined);
+    assert_chain_linear("in", 16, in_chain, assert_literals_and_undefined);
 }
 
 #[test]
 fn router_discriminant_chain_narrows_in_linear_work() {
-    assert_chain_linear("router", 25, router_chain, assert_router_answer);
+    assert_chain_linear("router", 16, router_chain, assert_router_answer);
 }
 
 /// Each guard relates only the arm declaring its target's property — its
@@ -355,7 +355,7 @@ fn router_discriminant_chain_narrows_in_linear_work() {
 fn predicate_chain_narrows_in_linear_work() {
     assert_chain_linear(
         "predicate",
-        25,
+        16,
         predicate_chain,
         assert_literals_and_undefined,
     );

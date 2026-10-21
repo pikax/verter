@@ -1453,13 +1453,17 @@ impl FlowNarrowed {
 
     /// The type, building a remainder's union with `build` on its first
     /// read. Every later read of the same remainder, from any clone of it,
-    /// answers the node that read built.
+    /// answers the node that read built — once a build proved its
+    /// construction canonical; an incomplete build is answered, never kept.
     pub fn node_or_build(
         &self,
-        build: impl FnOnce(&[SemanticNodeId]) -> SemanticNodeId,
-    ) -> SemanticNodeId {
+        build: impl FnOnce(&[SemanticNodeId]) -> FlowAlgebraComposite,
+    ) -> FlowAlgebraComposite {
         match self {
-            Self::Node(node) => *node,
+            Self::Node(node) => FlowAlgebraComposite {
+                node: *node,
+                incomplete: false,
+            },
             Self::Remainder(remainder) => remainder.node_or_build(build),
         }
     }
@@ -1575,12 +1579,29 @@ impl FlowArmRemainder {
         self.node.get().copied()
     }
 
-    /// The remaining arms' union, built with `build` on the first read.
+    /// The remaining arms' union, built with `build` on the first read
+    /// whose construction is proven canonical. An incomplete construction
+    /// is returned to its reader and not kept: a later read rebuilds and
+    /// sees the incompleteness again, so a join that refuses it refuses it
+    /// every time.
     pub fn node_or_build(
         &self,
-        build: impl FnOnce(&[SemanticNodeId]) -> SemanticNodeId,
-    ) -> SemanticNodeId {
-        *self.node.get_or_init(|| build(&self.remaining_arms()))
+        build: impl FnOnce(&[SemanticNodeId]) -> FlowAlgebraComposite,
+    ) -> FlowAlgebraComposite {
+        if let Some(node) = self.node.get() {
+            return FlowAlgebraComposite {
+                node: *node,
+                incomplete: false,
+            };
+        }
+        let built = build(&self.remaining_arms());
+        if built.incomplete {
+            return built;
+        }
+        FlowAlgebraComposite {
+            node: *self.node.get_or_init(|| built.node),
+            incomplete: false,
+        }
     }
 }
 
@@ -2021,11 +2042,9 @@ pub fn join_product(
                 }
                 let mut incomplete = false;
                 let mut node = |narrowed: &FlowNarrowed| {
-                    narrowed.node_or_build(|arms| {
-                        let built = algebra.union(arms);
-                        incomplete |= built.incomplete;
-                        built.node
-                    })
+                    let built = narrowed.node_or_build(|arms| algebra.union(arms));
+                    incomplete |= built.incomplete;
+                    built.node
                 };
                 let sides = [node(&fact.narrowed_to), node(&other.narrowed_to)];
                 if incomplete {
