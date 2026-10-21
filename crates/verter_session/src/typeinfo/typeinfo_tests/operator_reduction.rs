@@ -536,12 +536,21 @@ fn a_reducer_fault_during_composite_publication_fails_the_request() {
     let written = written
         .expect("the skeleton demand completes")
         .expect("the probe exists");
+    let scope = verter_type_engine::semantic_query::NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(FILE),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host
+            .shallow_file_state(FILE)
+            .expect("the probe's file is indexed")
+            .whole_hash,
+        local_scope: None,
+    };
 
     let cancelled = RequestContext::new(7101, Arc::from(FILE), false, None);
     cancelled.cancel();
     let outcome = {
         let _guard = RequestContextGuard::install(cancelled);
-        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded)
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded, &scope)
     };
     assert!(
         matches!(outcome, Err(TypeResolutionRequestError::Cancelled)),
@@ -549,7 +558,7 @@ fn a_reducer_fault_during_composite_publication_fails_the_request() {
     );
 
     let published =
-        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded)
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded, &scope)
             .expect("the uncancelled publication completes");
     assert_ne!(
         published, written,
