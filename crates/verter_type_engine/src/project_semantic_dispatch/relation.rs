@@ -12580,6 +12580,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// predicate, [`Self::callback_parameter_pair`]) as the checker's
     /// `compareSignaturesRelated` does under `StrictCallback` or, with
     /// `bivariant_return`, `BivariantCallback`.
+    ///
+    /// Under `strictFunctionTypes` the pair's own relation — a memoized
+    /// frame relating the parameters strictly and the return covariantly —
+    /// already is that verdict when it holds or when the return is not
+    /// bivariant; only a bivariant return it does not discharge relates the
+    /// pair again in the callback mode.
     fn relate_callback_signatures(
         &self,
         target_callback: SemanticNodeId,
@@ -12587,6 +12593,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bivariant_return: bool,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        let strict_function_types = {
+            let txn = self.dispatch_txn.borrow();
+            txn.relation
+                .strict
+                .unwrap_or(StrictFamilyConfig::TS_STRICT)
+                .strict_function_types
+        };
+        if strict_function_types {
+            let checkpoint = self.relation_session_checkpoint();
+            let bindings_len = bindings.len();
+            let related = self.relate_member(
+                target_callback,
+                source_callback,
+                bindings,
+                InferPosition::ContravariantParam,
+            );
+            if !bivariant_return || matches!(related, RelationResult::Assignable { .. }) {
+                return related;
+            }
+            self.relation_session_rollback(&checkpoint);
+            bindings.truncate(bindings_len);
+        }
         let result_of = |node: SemanticNodeId| match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Signature {
                 return_type,
