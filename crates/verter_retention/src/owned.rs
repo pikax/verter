@@ -319,7 +319,6 @@ pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
     }
     let (bytes, children) = measure(node, slot.block_share.is_some());
     slot.charge = Some(ctx.account.pin(bytes));
-    node.charged().store(true, Ordering::Release);
     for child in children.iter() {
         pin_node(&**child, ctx);
     }
@@ -329,6 +328,9 @@ pub(crate) fn pin_node(node: &dyn Node, ctx: ChargeCtx<'_>) {
             holds: HeldHandles::default(),
         }));
     }
+    // Published only once every child it reaches is pinned: a caller
+    // taking the lock-free return above never sees an uncharged child.
+    node.charged().store(true, Ordering::Release);
 }
 
 /// A cache hold on each of `children`, all or nothing: a refusal drops the
