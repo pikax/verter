@@ -129,8 +129,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }) {
             let returned =
                 self.signature_inference_inputs(&source_tps, &[(target_return, source_return)])?;
-            for (input, returned) in inputs.iter_mut().zip(returned) {
-                if input.candidates.is_empty() {
+            for ((input, decl), returned) in inputs.iter_mut().zip(source_tps.iter()).zip(returned)
+            {
+                if input.candidates.is_empty() && !target_params.contains(&decl.param) {
                     input.candidates = returned.candidates;
                 }
             }
