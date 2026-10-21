@@ -447,6 +447,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     /// the active-instantiation back-edge are the PRIMARY termination mechanism,
     /// this is only the pre-memo guard). NOT an arbitrary depth budget.
     pub(super) carrier_normalizing: std::cell::RefCell<smallvec::SmallVec<[SemanticNodeId; 8]>>,
+    /// The closed operators the open demand's answer has read
+    /// ([`locator_view_worklist::AnswerReads`]).
+    answer_reads: std::cell::RefCell<locator_view_worklist::AnswerReads>,
     /// The KEY-DOMAIN closedness proofs in flight on this dispatcher — the
     /// DISPATCH-WIDE cycle guard of the fact-native closedness evaluator
     /// (`raise::prepared_decl_body_is_closed` /
@@ -1103,6 +1106,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiate_active: std::cell::RefCell::new(ActiveInstantiations::default()),
             awaited_active: std::cell::RefCell::new(build::AwaitedPath::default()),
             carrier_normalizing: std::cell::RefCell::new(smallvec::SmallVec::new()),
+            answer_reads: std::cell::RefCell::default(),
             closedness: std::cell::RefCell::default(),
             free_type_variables: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             heritage_ancestry: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
@@ -1172,6 +1176,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             instantiate_active,
             awaited_active,
             carrier_normalizing,
+            answer_reads,
             closedness,
             free_type_variables,
             heritage_ancestry,
@@ -1205,6 +1210,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         instantiate_active.swap(&other.instantiate_active);
         awaited_active.swap(&other.awaited_active);
         carrier_normalizing.swap(&other.carrier_normalizing);
+        answer_reads.swap(&other.answer_reads);
         closedness.swap(&other.closedness);
         free_type_variables.swap(&other.free_type_variables);
         heritage_ancestry.swap(&other.heritage_ancestry);

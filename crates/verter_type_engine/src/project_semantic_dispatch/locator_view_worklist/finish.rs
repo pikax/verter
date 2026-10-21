@@ -304,10 +304,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| {
-                    let context = self.argument_operand_context(*argument, argument_context);
+                    let operand_context =
+                        self.argument_operand_context(*argument, argument_context);
                     self.canonical_argument_carrier(self.answer_member(
-                        projected(memo, *argument, context),
-                        context,
+                        projected(memo, *argument, operand_context),
+                        Self::argument_read_context(context, argument_context, operand_context),
                         inputs,
                     ))
                 })
@@ -495,6 +496,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// over `type X = { a: { b: X['a'] } }`) keeps it as written there:
     /// the re-entry reads the dispatcher's in-progress record, never a
     /// depth limit.
+    ///
+    /// One operator is read once per demand ([`AnswerReads`]), however
+    /// many places of the answer hold it. Reads nest on the native stack, so
+    /// one more read past the connected demand's nesting bound is refused:
+    /// the operator stays as written and the demand is a partial.
     fn read_answer_operator(
         &self,
         operator: SemanticNodeId,
@@ -502,20 +508,59 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         then: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        if self.carrier_normalizing.borrow().contains(&operator) {
+        if self.carrier_normalizing_holds(operator) {
             return None;
         }
-        let read = self.reduce_closed_answer_operator(operator, context)?;
-        self.carrier_normalizing.borrow_mut().push(operator);
-        let answer = match read {
-            ClosedOperatorRead::Named(node) => Some(node),
-            ClosedOperatorRead::Evaluated(node) => {
-                self.project_operator_read(node, context, inputs)
-            }
+        let open = self.answer_reads.borrow().open;
+        if let Some(reasons) = self.connected_demand().nesting_trip(open) {
+            self.fold_local_partial_completeness(reasons);
+            return None;
         }
-        .map(then);
-        self.carrier_normalizing.borrow_mut().pop();
+        let build = self.build_local_taint.borrow().len();
+        let key = (operator, context, inputs.scope.clone());
+        let frame = self.answer_reads.borrow_mut().open(build);
+        let memoized = self.answer_reads.borrow().memoized(&key, build);
+        let read = memoized.unwrap_or_else(|| {
+            let cycle_hits = self.answer_reads.borrow().cycle_hits;
+            let read = match self.reduce_closed_answer_operator(operator, context) {
+                None => None,
+                Some(ClosedOperatorRead::Named(node)) => Some(node),
+                Some(ClosedOperatorRead::Evaluated(node)) => {
+                    self.carrier_normalizing.borrow_mut().push(operator);
+                    let projected = self.project_operator_read(node, context, inputs);
+                    self.carrier_normalizing.borrow_mut().pop();
+                    projected
+                }
+            };
+            self.answer_reads
+                .borrow_mut()
+                .settle(key, read, cycle_hits, build);
+            read
+        });
+        let answer = read.map(|read| {
+            self.carrier_normalizing.borrow_mut().push(operator);
+            let answer = then(read);
+            self.carrier_normalizing.borrow_mut().pop();
+            answer
+        });
+        self.answer_reads.borrow_mut().close(frame);
         answer
+    }
+
+    /// Whether `node` is already being normalized or read on this
+    /// dispatcher's call chain: the in-progress record every carrier,
+    /// composite and answer read consults before it enters a node. A hit
+    /// makes what the chain computes depend on where it was entered from,
+    /// so it is counted ([`AnswerReads`]).
+    pub(in crate::project_semantic_dispatch) fn carrier_normalizing_holds(
+        &self,
+        node: SemanticNodeId,
+    ) -> bool {
+        let holds = self.carrier_normalizing.borrow().contains(&node);
+        if holds {
+            self.answer_reads.borrow_mut().record_cycle_hit();
+        }
+        holds
     }
 
     /// `read` projected at `context` as a root of its own, in place. A
@@ -527,6 +572,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         inputs: &LocatorViewInputs<'_>,
     ) -> Option<SemanticNodeId> {
+        #[cfg(any(test, feature = "test-support"))]
+        ANSWER_MEMBER_READS_FOR_TESTS.with(|reads| reads.set(reads.get() + 1));
         // The operator is closed, so what it reads binds nothing of the
         // body being projected.
         let mut substitutions = Vec::new();
@@ -595,6 +642,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         match self.project_operator_read(read, context, &inputs) {
             Some(projected) => self.reduce_answer_constituents(projected, context, &inputs),
             None => read,
+        }
+    }
+
+    /// The altitude an application reads a closed argument at, once the
+    /// argument is projected at `operand_context`. An application that
+    /// defers its arguments (an interface's, a class's, a builtin
+    /// carrier's), projecting them at navigation altitude, keeps them as
+    /// the type arguments of the reference it is, which the checker builds
+    /// over what they read: it reads them at its own altitude
+    /// (`Promise<V["a"]>` answers `Promise<1>`). An alias's application
+    /// substitutes them into its body, which reads them where it holds
+    /// them, so its arguments keep their authored identity.
+    pub(super) fn argument_read_context(
+        holder: ProjectionReductionContext,
+        argument_context: ProjectionReductionContext,
+        operand_context: ProjectionReductionContext,
+    ) -> ProjectionReductionContext {
+        if may_reduce_operator(argument_context) {
+            operand_context
+        } else {
+            holder
         }
     }
 
@@ -1278,6 +1346,93 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
     }
+}
+
+/// The closed operators one demand's answer has read, so each is read once
+/// however many places hold it.
+///
+/// A read is reused only where it would be recomputed identically: in the
+/// build that read it (whose taint, partiality and facts it already
+/// carries), and only when nothing it computed met the in-progress record,
+/// since a read that stopped at a cycle answers by where it was entered
+/// from. The record lives while a read is open and is dropped when the
+/// outermost read closes.
+#[derive(Default)]
+pub(in crate::project_semantic_dispatch) struct AnswerReads {
+    /// Reads open on the native stack.
+    open: usize,
+    /// The build-local taint depth the outermost open read runs in.
+    build: usize,
+    /// In-progress-record hits on the dispatcher so far, wrapping.
+    cycle_hits: u64,
+    read: rustc_hash::FxHashMap<AnswerReadKey, Option<SemanticNodeId>>,
+}
+
+type AnswerReadKey = (SemanticNodeId, ProjectionReductionContext, NodeScopeId);
+
+/// One open read's place in [`AnswerReads`].
+#[must_use = "an opened read is closed"]
+struct AnswerReadFrame(());
+
+impl AnswerReads {
+    fn record_cycle_hit(&mut self) {
+        self.cycle_hits = self.cycle_hits.wrapping_add(1);
+    }
+
+    fn open(&mut self, build: usize) -> AnswerReadFrame {
+        if self.open == 0 {
+            self.build = build;
+        }
+        self.open += 1;
+        AnswerReadFrame(())
+    }
+
+    fn close(&mut self, AnswerReadFrame(()): AnswerReadFrame) {
+        self.open -= 1;
+        if self.open == 0 {
+            self.read.clear();
+        }
+    }
+
+    /// What `key` read earlier in this demand's build, if it did.
+    fn memoized(&self, key: &AnswerReadKey, build: usize) -> Option<Option<SemanticNodeId>> {
+        if build == self.build {
+            self.read.get(key).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Keep what `key` read, unless the read met the in-progress record
+    /// after `cycle_hits` or ran in another build.
+    fn settle(
+        &mut self,
+        key: AnswerReadKey,
+        read: Option<SemanticNodeId>,
+        cycle_hits: u64,
+        build: usize,
+    ) {
+        if self.cycle_hits == cycle_hits && build == self.build {
+            self.read.insert(key, read);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Member reads projected on this thread.
+    static ANSWER_MEMBER_READS_FOR_TESTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Run `run` and count the member reads closed operators in its answers
+/// projected on this thread. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_answer_member_reads_for_tests<R>(run: impl FnOnce() -> R) -> (R, usize) {
+    let before = ANSWER_MEMBER_READS_FOR_TESTS.with(std::cell::Cell::get);
+    let value = run();
+    let after = ANSWER_MEMBER_READS_FOR_TESTS.with(std::cell::Cell::get);
+    (value, after - before)
 }
 
 /// What a closed answer operator read: the declaration an access names,

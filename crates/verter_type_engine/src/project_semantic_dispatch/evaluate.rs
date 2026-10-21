@@ -3515,9 +3515,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let started = if settled.exit_reasons.is_none() {
                             let started =
                                 self.begin_composite(settled.n, !settled.resolve_declaration_refs);
-                            if started.is_none()
-                                && self.carrier_normalizing.borrow().contains(&settled.n)
-                            {
+                            if started.is_none() && self.carrier_normalizing_holds(settled.n) {
                                 *reentered = true;
                             }
                             started
@@ -3691,7 +3689,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
-        if self.carrier_normalizing.borrow().contains(&node) {
+        if self.carrier_normalizing_holds(node) {
             return None;
         }
         self.carrier_normalizing.borrow_mut().push(node);

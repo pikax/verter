@@ -45,6 +45,17 @@ fn answer_with_options(
     strict_null_checks: bool,
     no_implicit_any: bool,
 ) -> TypeExpr {
+    let host = host_with_options(source, probe, strict_null_checks, no_implicit_any);
+    resolve_answer(&host, SCENARIO, mode)
+}
+
+/// A fresh project holding `source` and `__Probe = probe`.
+fn host_with_options(
+    source: &str,
+    probe: &str,
+    strict_null_checks: bool,
+    no_implicit_any: bool,
+) -> crate::VerterHost {
     let config = serde_json::json!({
         "compilerOptions": {
             "strict": true,
@@ -68,7 +79,7 @@ fn answer_with_options(
             aliases: vec![],
         })
         .expect("fixture admitted");
-    resolve_answer(&host, SCENARIO, mode)
+    host
 }
 
 fn resolve_answer(
@@ -76,8 +87,18 @@ fn resolve_answer(
     canonical: &str,
     mode: Option<ProjectionMode>,
 ) -> TypeExpr {
+    resolve_named_answer(host, canonical, "__Probe", mode)
+}
+
+/// Resolve `name` in `canonical` at `mode` and decode its wire answer.
+fn resolve_named_answer(
+    host: &crate::VerterHost,
+    canonical: &str,
+    name: &str,
+    mode: Option<ProjectionMode>,
+) -> TypeExpr {
     let (outcome, _) = host
-        .resolve_named_symbol_with_audit(canonical, "__Probe", mode)
+        .resolve_named_symbol_with_audit(canonical, name, mode)
         .into_parts();
     let node = outcome
         .expect("the named demand completes")
@@ -539,4 +560,129 @@ fn an_access_to_a_member_typed_by_polymorphic_this_reads_through_it() {
             "strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}"
         );
     }
+}
+
+/// Measured on TypeScript 7.0.2, under every `strictNullChecks` /
+/// `noImplicitAny` combination: over `type V = { a: 1 }`, `Promise<V["a"]>`
+/// is `Promise<1>` and `{ p: Promise<V["a"]> }` is `{ p: Promise<1>; }`: a
+/// closed access written as a type argument reads its member there too,
+/// though the application defers its own members. A Navigate resolution
+/// keeps the argument its carrier.
+#[test]
+fn a_closed_access_in_a_type_argument_reads_the_member() {
+    let source = "type V = { a: 1 };\ntype __Held = { p: Promise<V[\"a\"]> };\n";
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        let host = host_with_options(
+            source,
+            "Promise<V[\"a\"]>",
+            strict_null_checks,
+            no_implicit_any,
+        );
+        assert_eq!(
+            display(&resolve_named_answer(&host, SCENARIO, "__Probe", None)),
+            "Promise<1>",
+            "{settings}"
+        );
+        assert_eq!(
+            display(&resolve_named_answer(&host, SCENARIO, "__Held", None)),
+            "{ p: Promise<1> }",
+            "{settings}"
+        );
+    }
+    assert_eq!(
+        display(&answer_at(
+            source,
+            "Promise<V[\"a\"]>",
+            Some(ProjectionMode::Navigate)
+        )),
+        "Promise<V['a']>"
+    );
+}
+
+/// `type T0 = { a: 1 }` and `type Tk = { a: { x: T(k-1)["a"]; y:
+/// T(k-1)["a"] } }`, up to `depth`.
+fn doubling_reads(depth: usize) -> String {
+    let mut source = String::from("type T0 = { a: 1 };\n");
+    for level in 1..=depth {
+        let below = level - 1;
+        source.push_str(&format!(
+            "type T{level} = {{ a: {{ x: T{below}[\"a\"]; y: T{below}[\"a\"] }} }};\n"
+        ));
+    }
+    source
+}
+
+/// The member reads one cold `{ z: T{depth}["a"] }` demand projects.
+fn member_reads_of_doubling_answer(depth: usize) -> usize {
+    let (_, reads) =
+        verter_type_engine::project_semantic_dispatch::locator_view_worklist::count_answer_member_reads_for_tests(
+            || answer(&doubling_reads(depth), &format!("{{ z: T{depth}[\"a\"] }}")),
+        );
+    reads
+}
+
+/// An access the answer holds at many places is one member read for the
+/// demand: each `Tk["a"]` in `{ z: T8["a"] }` is read once, though the
+/// answer holds it at `2^(8-k)` places, so the reads grow with the
+/// declarations, never with the places. The answer is what the places read.
+#[test]
+fn an_access_held_at_many_places_is_read_once_per_demand() {
+    assert_eq!(
+        display(&answer(&doubling_reads(2), "{ z: T2[\"a\"] }")),
+        "{ z: { x: { x: 1; y: 1 }; y: { x: 1; y: 1 } } }"
+    );
+    let (shallow, deep) = (
+        member_reads_of_doubling_answer(4),
+        member_reads_of_doubling_answer(8),
+    );
+    assert!(shallow > 0, "the demand reads its accesses");
+    assert!(
+        deep < 2 * shallow,
+        "reads grow with the declarations: depth 4 read {shallow}, depth 8 read {deep}"
+    );
+}
+
+/// `type T0 = { a: 1 }` and `type Tk = { a: { b: T(k-1)["a"] } }`, up to
+/// `depth`: each declaration reads the next through one access.
+fn chained_reads(depth: usize) -> String {
+    let mut source = String::from("type T0 = { a: 1 };\n");
+    for level in 1..=depth {
+        let below = level - 1;
+        source.push_str(&format!(
+            "type T{level} = {{ a: {{ b: T{below}[\"a\"] }} }};\n"
+        ));
+    }
+    source
+}
+
+/// A chain of member reads nests on the native stack. Within the demand's
+/// nesting bound it reads to its end; past it the demand stops reading and
+/// keeps the access as written, a partial answer, instead of exhausting the
+/// native stack.
+#[test]
+fn a_chain_of_member_reads_stops_at_the_nesting_bound() {
+    const WITHIN: usize = 8;
+    let within = answer(
+        &chained_reads(WITHIN),
+        &format!("{{ z: T{WITHIN}[\"a\"] }}"),
+    );
+    let mut innermost = property(&within, "z");
+    for _ in 0..WITHIN {
+        innermost = property(innermost, "b");
+    }
+    assert_eq!(
+        innermost,
+        &TypeExpr::Literal(LiteralValue::Number(1.0)),
+        "a chain within the bound reads to its end: `{}`",
+        display(&within)
+    );
+    const PAST: usize = 200;
+    let past = answer(&chained_reads(PAST), &format!("{{ z: T{PAST}[\"a\"] }}"));
+    assert!(
+        matches!(property(&past, "z"), TypeExpr::IndexedAccess { .. }),
+        "a chain past the bound keeps its access as written: `{}`",
+        display(&past)
+    );
 }
