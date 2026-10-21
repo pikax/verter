@@ -467,9 +467,13 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
 /// the answer came from releases the cache's share (retained bytes never
 /// grow) and leaves both handles reading it. Releasing the first handle
 /// changes neither the roots nor any charge while the other survives and
-/// still reads the same answer. Releasing the last gives its root back and
-/// grows neither the retained nor the active charge. Correct roots with the
-/// wrong charges fail, and so does a final drain alone.
+/// still reads the same answer. Releasing the last gives its root back,
+/// grows neither the retained nor the active charge, and gives back exactly
+/// the one allocation charge the transfer probe measures by demanding and
+/// releasing the same answer again — a transfer that dropped, doubled or
+/// short-charged the allocation fails, as does a release with no probe
+/// evidence. Correct roots with the wrong charges fail, and so does a final
+/// drain alone.
 pub fn check_ownership(
     index: u32,
     class: LifecycleClass,
@@ -563,6 +567,35 @@ pub fn check_ownership(
         matches!((content(first), content(last)), (Some(f), Some(l)) if l < f),
         "the final release did not give back the content charge",
     );
+    // The give-back is exact: the transfer probe — the same answer demanded
+    // and released once more after the final release — returns precisely one
+    // allocation's charge, so the final release must return the same amount.
+    // A transfer that doubled or short-charged the allocation, amounts the
+    // unrelated pins around the release cannot expose, fails; so does a
+    // release with no probe evidence.
+    let (acquired, released) = (
+        step(OwnerStepKind::ProbeAcquired),
+        step(OwnerStepKind::ProbeReleased),
+    );
+    match (content(acquired), content(released)) {
+        (Some(pa), Some(pr)) => {
+            check(
+                pa.checked_sub(pr).is_some_and(|give_back| give_back > 0),
+                "the transfer probe's release gave back no charge",
+            );
+            check(
+                matches!(
+                    (content(first), content(last), pa.checked_sub(pr)),
+                    (Some(f), Some(l), Some(probe)) if f.checked_sub(l) == Some(probe)
+                ),
+                "the final release did not give back exactly the charge the transfer probe measured",
+            );
+        }
+        _ => check(
+            false,
+            "the release recorded no transfer probe to measure the allocation against",
+        ),
+    }
     out
 }
 

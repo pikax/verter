@@ -744,27 +744,43 @@ fn step(kind: OwnerStepKind, roots: u64, charges: Charges, projected: Option<&st
     }
 }
 
+/// The allocation charge of one held answer at the magnitudes of a real
+/// run: the readers' 384 bytes ride on about 126 KB of unrelated pins.
+const HELD_ALLOCATION: u64 = 384;
+
 fn release_steps() -> Vec<OwnerStep> {
     vec![
         step(
             OwnerStepKind::BeforeRelease,
             50,
-            charges(900, 500),
+            charges(900, 151_332),
             Some("held"),
         ),
         step(
             OwnerStepKind::AfterRetirement,
             5,
-            charges(300, 480),
+            charges(300, 126_500),
             Some("held"),
         ),
         step(
             OwnerStepKind::AfterFirstRelease,
             5,
-            charges(300, 480),
+            charges(300, 126_500),
             Some("held"),
         ),
-        step(OwnerStepKind::AfterFinalRelease, 4, charges(300, 104), None),
+        step(
+            OwnerStepKind::AfterFinalRelease,
+            4,
+            charges(300, 126_116),
+            None,
+        ),
+        step(
+            OwnerStepKind::ProbeAcquired,
+            5,
+            charges(300, 126_500),
+            Some("held"),
+        ),
+        step(OwnerStepKind::ProbeReleased, 4, charges(300, 126_116), None),
     ]
 }
 
@@ -860,6 +876,40 @@ fn ownership_rules_fail_early_destruction_wrong_charges_and_lost_release() {
         fails(
             &|s| s[3].charges.active += 64,
             "the final release grew the active charge",
+        );
+        // Wrong amounts on the held allocation itself at real magnitudes:
+        // the unrelated pins dwarf it, so only the exact give-back against
+        // the transfer probe discriminates. Retirement re-charges the
+        // readers at twice the allocation and the final release returns the
+        // doubled charge.
+        fails(
+            &|s| {
+                s[1].charges.pinned += HELD_ALLOCATION;
+                s[2].charges.pinned += HELD_ALLOCATION;
+                s[3].charges.pinned = s[2].charges.pinned - 2 * HELD_ALLOCATION;
+            },
+            "a doubled charge transfer through retirement",
+        );
+        // Retirement keeps only a fraction of the allocation and the final
+        // release returns that fraction.
+        fails(
+            &|s| {
+                s[1].charges.pinned -= HELD_ALLOCATION - 128;
+                s[2].charges.pinned -= HELD_ALLOCATION - 128;
+                s[3].charges.pinned = s[2].charges.pinned - 128;
+            },
+            "a partial charge transfer through retirement",
+        );
+        // The probe's own evidence is required and must measure the same
+        // allocation the release returns.
+        fails(&|s| s.truncate(4), "no transfer probe recorded");
+        fails(
+            &|s| s[5].charges.pinned = s[4].charges.pinned,
+            "the transfer probe's release gave back nothing",
+        );
+        fails(
+            &|s| s[5].charges.pinned = s[4].charges.pinned - 256,
+            "the transfer probe measured a different allocation",
         );
     }
     assert!(check_ownership(0, copy, Some(&held), &copy_steps()).is_empty());

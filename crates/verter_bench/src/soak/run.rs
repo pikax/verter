@@ -303,6 +303,11 @@ pub enum OwnerStepKind {
     AfterFirstRelease,
     /// After the last handle was released.
     AfterFinalRelease,
+    /// After the final release, the same answer demanded once more (the
+    /// transfer probe), releases settled.
+    ProbeAcquired,
+    /// After the probe's handle was released, releases settled.
+    ProbeReleased,
 }
 
 /// The ownership figures at one step.
@@ -446,6 +451,9 @@ struct Engine {
     host: Arc<VerterHost>,
     /// Held roots per pin slot: the original, then its public copy.
     pins: HashMap<u32, Vec<NodeRoot>>,
+    /// The alias each pin slot's answer was demanded by, so a release can
+    /// re-demand the same answer for its transfer probe.
+    pin_aliases: HashMap<u32, String>,
     leaked: Vec<NodeRoot>,
     /// Actions the planted mutation was applied to, recorded where each plant
     /// takes effect (a root kept past its release is one of them).
@@ -549,6 +557,7 @@ impl Engine {
             workspace,
             host,
             pins: HashMap::new(),
+            pin_aliases: HashMap::new(),
             leaked: Vec::new(),
             applied_at: Vec::new(),
             publications: Mutex::new(Vec::new()),
@@ -1008,6 +1017,7 @@ impl Engine {
             }
             (HoldPin, Target::Hold { slot, file, alias }) => {
                 let node = observe(&mut record, demand(&self.host, file, alias, None));
+                self.pin_aliases.insert(*slot, alias.clone());
                 self.pins.insert(*slot, node.into_iter().collect());
             }
             (PublicCopy, Target::Slot { slot }) => match self.pins.get_mut(slot) {
@@ -1038,6 +1048,7 @@ impl Engine {
                 },
             ) => match self.pins.remove(slot) {
                 Some(mut handles) if handles.len() == 2 => {
+                    let probe_alias = self.pin_aliases.remove(slot);
                     if mutation == Some(Mutation::RetainedKeyLeak) && self.leaked.is_empty() {
                         self.leaked.push(handles[0].clone());
                         self.applied_at.push(action.index);
@@ -1072,6 +1083,30 @@ impl Engine {
                         step: OwnerStepKind::AfterFinalRelease,
                         ..owner_step(&host, None)
                     });
+                    // The transfer probe: the same answer demanded once more,
+                    // its fresh cache entries retired, and then released.
+                    // That final drop — the last reader of a retired cache,
+                    // exactly the release above — gives back precisely the
+                    // one allocation's charge, so the release above can be
+                    // judged against the allocation's own amount, not just
+                    // its sign.
+                    if let Some(alias) = probe_alias.as_deref() {
+                        if let (_, Some(probe)) = demand(&self.host, file, alias, None) {
+                            self.host.evict(&canonical(file));
+                            self.host.reclaim_retired_artifacts();
+                            self.settle_releases(&mut record);
+                            record.ownership.push(OwnerStep {
+                                step: OwnerStepKind::ProbeAcquired,
+                                ..owner_step(&host, Some(&probe))
+                            });
+                            drop(probe);
+                            self.settle_releases(&mut record);
+                            record.ownership.push(OwnerStep {
+                                step: OwnerStepKind::ProbeReleased,
+                                ..owner_step(&host, None)
+                            });
+                        }
+                    }
                     // The document reopens for the actions that follow.
                     let text = self.source_of(file, action.tranche, *revision);
                     record.outcome = self.upsert(file, &text);
