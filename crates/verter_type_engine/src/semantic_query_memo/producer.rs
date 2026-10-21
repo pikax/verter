@@ -390,6 +390,18 @@ impl SemanticGraphStore {
             .is_some_and(|task| task.produces_key(key, prepared::hash_key(key), site))
     }
 
+    /// Whether a producer of the key `attempt` claims is in flight at its
+    /// checking site, so the claim would join it rather than produce. A
+    /// read-only preflight: the claim stays the sole authority that joins.
+    /// An independent claim never joins another producer.
+    pub(crate) fn has_flight(&self, attempt: &ClaimAttempt) -> bool {
+        !attempt.independent
+            && self
+                .site_inflight(attempt.site)
+                .lock()
+                .contains_key(&attempt.prepared)
+    }
+
     /// The recursion carrier for `recursion`, with `sentinel` as its value.
     pub(crate) fn recursion_read(
         &self,
@@ -1216,6 +1228,15 @@ fn settle_output(
     }
 }
 
+/// The rails a completed result is kept on outside the family memo: the
+/// carrier every read of it replays and the self-roots that carrier
+/// completed under — what a memo candidate records.
+#[derive(Clone)]
+pub(crate) struct CompletedCarrier {
+    pub(crate) carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
+    pub(crate) self_roots: Arc<[Arc<str>]>,
+}
+
 impl SemanticGraphStore {
     /// Complete a build the requesting dispatcher ran for itself after the
     /// lookup `attempt` missed, outside the family memo's claim: the key's
@@ -1223,9 +1244,9 @@ impl SemanticGraphStore {
     /// enters the family memo. The output
     /// settles exactly as a producer's does ([`ProducerLease::settle`]),
     /// its carrier is delivered through `capture`, and the read
-    /// carries the receipt its recording sealed. The returned carrier is
+    /// carries the receipt its recording sealed. The returned rails are
     /// `Some` when the result is complete, cacheable and priced — what the
-    /// dispatcher may keep and serve again — and `None` otherwise. A
+    /// request may keep and serve again — and `None` otherwise. A
     /// cancelled request answers with the cancellation read.
     pub(crate) fn complete_request_local(
         &self,
@@ -1236,10 +1257,7 @@ impl SemanticGraphStore {
             Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         >,
         capture: &mut ReadCapture<'_>,
-    ) -> (
-        ValueRead,
-        Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
-    ) {
+    ) -> (ValueRead, Option<CompletedCarrier>) {
         if !attempt.miss_recorded {
             // The one miss a claim of the key records.
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -1268,7 +1286,39 @@ impl SemanticGraphStore {
             fact_status: settled.fact_status,
             receipt: cost_receipt.into(),
         };
-        (read, settled.admissible.then_some(settled.carrier))
+        let kept = settled.admissible.then(|| CompletedCarrier {
+            carrier: settled.carrier,
+            self_roots: settled.self_root_canonicals,
+        });
+        (read, kept)
+    }
+
+    /// The read a member of a component completed for the request is kept
+    /// with: its decided value on a delivery lease of its own, complete,
+    /// carrying the receipt of the component's root — every member of a
+    /// component shares its root's cost, as a published member does. `Err`
+    /// when the value names a node that is no longer live.
+    pub(crate) fn completed_member_read(
+        &self,
+        value: SemanticQueryValue,
+        receipt: crate::semantic_query::ReadReceipt,
+    ) -> Result<ValueRead, QueryError> {
+        let value = QueryResult::Value(value);
+        let walker_diagnostics = super::empty_diagnostics();
+        let dep_signature = empty_signature();
+        Ok(CacheRead {
+            lease: self.lease_delivery(super::delivery_lease::DeliveredAllocations::read(
+                &value,
+                &walker_diagnostics,
+                &dep_signature,
+            ))?,
+            value,
+            dep_signature,
+            walker_diagnostics,
+            cache_suppress: false,
+            fact_status: crate::semantic_query::FactStatus::Complete,
+            receipt,
+        })
     }
 }
 
@@ -1542,12 +1592,13 @@ impl SettledProducer<'_> {
         Ok(())
     }
 
-    /// The published result's fact carrier, when [`Self::admit`] entered
-    /// it into the family memo.
-    pub(crate) fn published_carrier(
-        &self,
-    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
-        self.published.then(|| self.carrier.clone())
+    /// The published result's fact carrier and self-roots, when
+    /// [`Self::admit`] entered it into the family memo.
+    pub(crate) fn published_carrier(&self) -> Option<CompletedCarrier> {
+        self.published.then(|| CompletedCarrier {
+            carrier: self.carrier.clone(),
+            self_roots: Arc::clone(&self.self_root_canonicals),
+        })
     }
 
     fn abort_for_cancellation(&self) -> ValueRead {

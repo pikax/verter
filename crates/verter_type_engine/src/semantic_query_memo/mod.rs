@@ -95,6 +95,7 @@ pub mod unresolved_reach;
 pub use arena::{NodeData, UNALLOCATABLE_ID_FLOOR};
 pub(crate) use inflight::InlineMemberFlight;
 pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
+pub(crate) use producer::CompletedCarrier;
 pub use producer::{
     Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
 };

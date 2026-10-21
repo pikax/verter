@@ -925,7 +925,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 Err(delivery) => return Start::Answer(Ok(*delivery)),
             },
         };
-        // A result this dispatcher published answers before any claim: a
+        // A result the request already completed answers before any claim: a
         // claim installs a flight other tasks may join, so it is taken only
         // to produce.
         if let Some((read, carrier)) = dispatch.own_published_read(key, nesting) {
@@ -946,7 +946,11 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         if dispatch.request_local_is_open(key) {
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
-        if dispatch.completes_nested_request_locally(key) {
+        // A relation completes for the request only through its synchronous
+        // root, which keeps its component with it.
+        if !matches!(key, SemanticQueryKey::Relate { .. })
+            && dispatch.completes_nested_request_locally(key)
+        {
             dispatch
                 .request_local_open
                 .borrow_mut()
@@ -1231,16 +1235,18 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Whether a demand of `key` a frame needs completes for this request
-    /// alone, outside the family memo's claim and admission: exactly when a
-    /// read of it nested in a synchronous build does
-    /// ([`super::completes_request_locally`]) — outside every checker
-    /// obligation and every forced operand, and not already produced on this
-    /// task's path.
-    fn completes_nested_request_locally(&self, key: &SemanticQueryKey) -> bool {
+    /// Whether a read of `key` nested in another computation — a demand a
+    /// frame needs, or a read nested in a synchronous build — completes for
+    /// this request alone, outside the family memo's claim and admission
+    /// ([`super::completes_request_locally`]): outside every forced operand,
+    /// outside every checker obligation unless the family completes inside
+    /// one ([`super::completes_request_locally_in_obligations`]), and not
+    /// already produced on this task's path.
+    pub(super) fn completes_nested_request_locally(&self, key: &SemanticQueryKey) -> bool {
         super::completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
-            && self.dispatch_txn.borrow().obligations.decides_root()
+            && (super::completes_request_locally_in_obligations(key)
+                || self.dispatch_txn.borrow().obligations.decides_root())
             && !self
                 .graph()
                 .is_same_path_claim_at(key, self.checking_site.get())
@@ -2027,7 +2033,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let lease = match producer {
             FrameProducer::Lease(lease) => lease,
             // A request-local completion settles as a producer's would and
-            // enters no family memo; the dispatcher keeps what it may serve
+            // enters no family memo; the request keeps what it may serve
             // again.
             FrameProducer::RequestLocal { attempt } => {
                 let (read, kept) = self.graph().complete_request_local(

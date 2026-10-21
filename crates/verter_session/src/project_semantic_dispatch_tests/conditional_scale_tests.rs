@@ -179,6 +179,17 @@ type Work = [(&'static str, u64); 7];
 ///
 /// The request's operation fuse is `operations`.
 fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Literal>, Work) {
+    let (answer, work, _) = named_probe_on_host(source, probe, operations);
+    (answer, work)
+}
+
+/// [`named_probe`], returning the host the probe ran on as well, for what
+/// it retains after the request.
+fn named_probe_on_host(
+    source: &str,
+    probe: &str,
+    operations: usize,
+) -> (BTreeSet<Literal>, Work, crate::VerterHost) {
     let host = crate::VerterHost::new_standalone_with_tsconfig_projects(
         crate::HostConfig {
             projection_op_budget: operations,
@@ -247,7 +258,7 @@ fn named_probe(source: &str, probe: &str, operations: usize) -> (BTreeSet<Litera
         ("substitutions", stats.substitute_memo_misses),
         ("decision need questions", seam_need_questions),
     ];
-    (literals, work)
+    (literals, work, host)
 }
 
 fn short(expr: &TypeExpr) -> String {
@@ -422,6 +433,41 @@ fn repeated_infer_decision_needs_grow_linearly_across_three_sizes() {
     });
     assert_linear_growth("Pat", work[0], work[1]);
     assert_linear_growth("Pat", work[1], work[2]);
+}
+
+/// Distributing the repeated-infer pattern relates each member to the
+/// pattern and reads the signatures of both callable positions: work for
+/// that member alone, read by the decision that distributes over it, which
+/// the family memo retains as the answer. Those per-member relations and
+/// signature reads complete for the request and leave no family-memo entry
+/// behind; what the memo keeps per member is the member's own declaration —
+/// its resolution, its lowering and its instantiation — which any later
+/// request naming the member reads again. Measured: the numbers `0` to
+/// `n - 1`.
+#[test]
+fn repeated_infer_retains_its_declarations_not_its_per_member_work() {
+    for members in [10, 30, 100] {
+        let (source, probe) = repeated_infer(members);
+        let (answer, _, host) = named_probe_on_host(
+            &source,
+            &probe,
+            checker_instantiations_repeated_infer(members),
+        );
+        assert_answer(&format!("Pat over {members}"), &answer, &numbers(members));
+        let graph = host.project_type_store().semantic_graph();
+        let families = graph.memo_entry_counts_by_family();
+        for family in ["Relate", "SignaturesOfType"] {
+            assert!(
+                families.iter().all(|(name, _)| *name != family),
+                "Pat over {members}: the family memo retains {family} entries: {families:?}"
+            );
+        }
+        let entries = graph.stats_snapshot().memo_entry_count;
+        assert!(
+            entries <= 6 * members as u64 + 16,
+            "Pat over {members}: {entries} family-memo entries retained: {families:?}"
+        );
+    }
 }
 
 /// The distinct aliases answer at both listed sizes, with work linear from

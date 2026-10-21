@@ -1251,43 +1251,83 @@ deliveries skip it, so the outermost operation's owner releases them when the
 operation ends and a result outlives it only through the carrier it is
 delivered in (`SemanticQueryOutput`, `CacheRead`) or an explicit builder owner.
 
-Kept results: a dispatcher keeps the results its builds published
-(`keep_published`: admitted results, and request-local completions) under the
-workspace edit clocks they were computed at. The kept table is a cache the
-dispatcher owns past its operations, so every entry holds a `Retained` charge
-on the process retention account: a refused reservation keeps nothing, and
-the result's delivery stays its only owner. A later read first performs the
-family memo's validated lookup. After a miss, `own_published_read` can answer
-from a kept result before a producer claim is installed, provided its edit
-clocks are current and its nodes and kernel epochs remain live. The read
-replays the result's receipt into the active demand (`served_read`) and
-delivers its carrier. A result the demand cannot pay for is recomputed, never
-served. Results a lookup SERVED are not kept: a memo candidate is validated
-against the live view on every read, and the edit clocks alone miss a file the
-host reloads mid-request (`invalidation_imported_prop_type_file_edit`).
+Request completion tier: the results a REQUEST computed and may serve again
+live in one request-shared tier (`project_semantic_dispatch/request_completions.rs`),
+owned by the request context (`RequestContext::semantic_completions`), one
+tier per graph and store view (`RequestCompletions::tier_for(graph,
+compat_token)`). Every dispatcher of the request on that graph and view holds
+the same tier — one per host operation, and every semantic task a drive lends
+its state to (`task_dispatcher` shares the tier; `exchange_request_state` does
+not swap it) — so a result one dispatcher completed answers every other. A
+dispatcher made with no request context installed owns a tier its tasks share.
+The tier is reclaimed with its owner: dropping the request context releases
+every result it kept.
 
-Request-local completion: a NESTED read of a cheap intermediate family —
-`Conditional`, `TemplateLiteralReduce`, `ProjectPath` (`completes_request_locally`
-in `project_semantic_dispatch/mod.rs`) — outside every checker obligation
-(`ObligationRuntime::decides_root`), uncaptured, with no operand force active
-and no family-memo producer of the key open on this task, completes for the
-requesting dispatcher alone. It makes the family memo's validated lookup
-exactly as a claim does (`begin_query_claim`: a stored result answers, one the
-demand cannot pay for is recomputed, a result the dispatcher kept answers a
-miss), then runs the same traced build under the producer's cost identity
+The tier keeps (`keep_published`) the results the request's builds published
+— admitted results, kept for a claim the memo cannot serve back to the
+request's own view (the candidate records facts newer than the view) — and
+its request-local completions, each with its read (and the receipt its
+computation sealed), its carrier and self-roots (`CompletedCarrier`), and the
+workspace edit clocks it was computed at. Every entry holds a `Retained`
+charge on the process retention account: a refused reservation keeps nothing,
+and the result's delivery stays its only owner. A kept result serves
+(`own_published_read`, `kept_value_read`) only while its edit clocks are
+current and its kernel epochs remain live; the read replays its receipt into
+the active demand (`served_read`) and delivers its carrier. A result the
+demand cannot pay for is recomputed, never served. Results a lookup SERVED are
+not kept: a memo candidate is validated against the live view on every read,
+and the edit clocks alone miss a file the host reloads mid-request
+(`invalidation_imported_prop_type_file_edit`).
+
+Request-local completion: a NESTED read of an intermediate family —
+`Conditional`, `TemplateLiteralReduce`, `ProjectPath`, `SignaturesOfType` and
+`Relate` (`completes_request_locally` in `project_semantic_dispatch/mod.rs`) —
+uncaptured, with no operand force active, no family-memo producer of the key
+open on this task, and outside every checker obligation
+(`ObligationRuntime::decides_root`) unless the family completes inside one
+(`completes_request_locally_in_obligations`: a callable-shape read decides no
+obligation, so inside a relation, flow or call frame it is the result the memo
+would admit there), completes for the request. A relation does so only as the
+root of its checker transaction read by another computation (a decision's
+relation of each distributed member): its publication capture stays empty.
+The completion reads the request's kept result first, then makes the family
+memo's validated lookup exactly as a claim does (`begin_query_claim`: a stored
+result answers, one the demand cannot pay for is recomputed). A key another
+task is producing (`SemanticGraphStore::has_flight`) is joined through the
+family memo's claim instead, never computed beside it, so two computations
+that need each other across tasks meet the wait-cycle cut. Otherwise the
+completion runs the same traced build under the producer's cost identity
 (`ClaimAttempt::cost_identity`) and settles its output through the SAME
 `settle_output` the memo's `ProducerLease::settle` uses
 (`SemanticGraphStore::complete_request_local`): the carrier is bubbled, the
-read carries its receipt, and a complete priced result is kept on the
-dispatcher (`keep_published`) for repeated reads. It registers no flight and is
-never admitted: the evaluation or build that reads it is itself retained (the
-deferred-evaluation memo, the enclosing instantiation or root query), so an
-entry of its own would be claimed, admitted, reverse-indexed and FIFO-evicted
-without a later request reaching it. A re-entry of a key whose local
-completion is open answers the same-path recursion carrier on either path.
-Root reads, obligation-frame reads (relation, flow, call — whose decisions are
-shared through the memo) and captured reads keep the family memo. Guarded by
-`recursive_paths_admit_their_instantiations_not_their_nested_steps`.
+read carries its receipt, and a complete priced result is kept in the tier.
+It registers no flight and is never admitted: the evaluation or build that
+reads it is itself retained (the deferred-evaluation memo, the enclosing
+instantiation or root query), so an entry of its own would be claimed,
+admitted, reverse-indexed and FIFO-evicted without a later request reaching
+it — a conditional distributed over `n` members would leave `2n` relation and
+`2n` signature entries behind. A re-entry of a key whose local completion is
+open answers the same-path recursion carrier on either path. Root reads,
+other obligation-frame reads and captured reads keep the family memo.
+
+A relation root completed for the request keeps its component with it
+(`relation_keep_completed_component`): the root and every member the
+component completed that a published root's batched member publish would
+admit — decided binary relation members, proven flow members and call
+members, each with a flight — kept under the root's carrier, self-roots,
+receipt and edit clocks (`completed_member_read`), under ONE charge for the
+whole component, all or nothing (`RequestCompletionTier::keep_component`). The
+members' flights end unpublished (a joiner computes again; a reader in the
+request finds the kept member), and the inline relation, flow-return and
+call-resolution warm reads consult the tier after the memo
+(`relation_warm_step`, `warm_flow_return_read`, `kept_call_result`). A root
+that is not kept (partial, unpriced, cancelled) releases its members unkept,
+as an unpublished root does. Guarded by
+`recursive_paths_admit_their_instantiations_not_their_nested_steps`,
+`repeated_infer_retains_its_declarations_not_its_per_member_work`,
+`dispatchers_of_one_request_share_its_completed_relations`,
+`mixed_component_member_entry_self_roots_cover_all_component_files` and the
+tier's own reclamation and pressure tests (`request_completions_tests.rs`).
 
 Instantiation serves: every instantiation reads its declaration file's
 `IndexedReady` record (`ProjectSemanticDispatch::transaction_indexed_record`), as do its global-interface, member-index and augmentation-candidate reads.
