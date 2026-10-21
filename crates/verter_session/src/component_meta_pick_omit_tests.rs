@@ -2164,3 +2164,76 @@ fn pick_over_genuinely_open_source_heritage_still_enumerates_picked_keys() {
         "heritage Pick over open source must NOT publish unpicked `c`, got {names:?}"
     );
 }
+
+/// A carrier-stopped `Pick` (its source's key domain is open over the
+/// SFC's `generic="T"`) still enumerates the source's enumerable arms at a
+/// heritage surface demand. `Pick` maps each accessor as the property it
+/// is, exactly as the materialising `Pick` does: a getter publishes its
+/// read type and a setter its parameter, never the accessor function.
+const CARRIER_PICK_ACCESSOR_VUE: &str = r#"<script lang="ts">
+interface Acc<T> {
+  get r(): T
+  set w(v: string)
+  x: T
+}
+type Base<T> = Acc<T> & (T extends string ? { s: 1 } : { n: 2 })
+interface Props<T> extends Pick<Base<T>, 'r' | 'w'> {
+  own?: boolean
+}
+</script>
+
+<script setup lang="ts" generic="T">
+defineProps<Props<T>>()
+</script>
+
+<template><div /></template>
+"#;
+
+#[test]
+fn carrier_stopped_pick_publishes_accessors_as_properties() {
+    use verter_type_expr::{PrimitiveName, TypeExpr};
+
+    let path = "/workspace/src/components/CarrierPickAccessor.vue";
+    let project = build_hermetic_project_with_workspace_graph(&[(path, CARRIER_PICK_ACCESSOR_VUE)]);
+    let session = project.open_session_batch().expect("session");
+    let meta = session
+        .get_component_meta(path)
+        .expect("session result")
+        .expect("component must resolve");
+    let names: Vec<&str> = meta.props.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names.iter().filter(|name| **name == "r").count(),
+        1,
+        "the getter `r` publishes as ONE prop, got {names:?}"
+    );
+    assert!(
+        names.contains(&"w") && names.contains(&"own") && !names.contains(&"x"),
+        "the carrier-stopped Pick selects `r` and `w` beside `own`, got {names:?}"
+    );
+    let prop_type = |name: &str| {
+        let prop = meta
+            .props
+            .iter()
+            .find(|p| p.name == name)
+            .expect("prop present");
+        crate::test_only::semantic_source_probe::demand_type_expr(
+            project.host(),
+            path,
+            prop.publication
+                .source_position()
+                .present()
+                .expect("the prop publishes a typed source"),
+        )
+        .expect("the prop's published source must demand-materialize")
+    };
+    let r = prop_type("r");
+    assert!(
+        !matches!(r, TypeExpr::Function(_)),
+        "`r` publishes the getter's read type `T`, not the getter, got {r:?}"
+    );
+    let w = prop_type("w");
+    assert!(
+        matches!(w, TypeExpr::Primitive(PrimitiveName::String)),
+        "`w` publishes the setter's parameter type `string`, got {w:?}"
+    );
+}

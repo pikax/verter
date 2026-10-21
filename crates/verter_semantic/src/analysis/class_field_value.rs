@@ -23,20 +23,55 @@
 //! `function` or class has a `this` of its own.
 use verter_session_query::declarations::class_fields::{ClassFieldValueSource, ClassFieldValues};
 
-use oxc_ast::ast::{Class, ClassElement, Expression, PropertyDefinition, PropertyKey};
+use oxc_ast::ast::{Class, ClassElement, Expression, PropertyKey, TSTypeAnnotation};
 use oxc_ast_visit::Visit;
 use oxc_span::GetSpan;
 
-/// Classify `prop`, a field of `class`, and record the answer in `values`.
+/// A class field: a property definition, or an `accessor` field, which to
+/// every reader is one mutable property typed as a property definition is.
+#[derive(Clone, Copy)]
+pub struct ClassField<'s, 'a> {
+    pub key: &'s PropertyKey<'a>,
+    pub value: Option<&'s Expression<'a>>,
+    pub type_annotation: Option<&'s TSTypeAnnotation<'a>>,
+    pub r#static: bool,
+    pub readonly: bool,
+}
+
+impl<'s, 'a> ClassField<'s, 'a> {
+    /// The field `element` declares, if it is one.
+    #[must_use]
+    pub fn of(element: &'s ClassElement<'a>) -> Option<Self> {
+        match element {
+            ClassElement::PropertyDefinition(prop) => Some(Self {
+                key: &prop.key,
+                value: prop.value.as_ref(),
+                type_annotation: prop.type_annotation.as_deref(),
+                r#static: prop.r#static,
+                readonly: prop.readonly,
+            }),
+            ClassElement::AccessorProperty(property) => Some(Self {
+                key: &property.key,
+                value: property.value.as_ref(),
+                type_annotation: property.type_annotation.as_deref(),
+                r#static: property.r#static,
+                readonly: false,
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Classify `field`, a field of `class`, and record the answer in `values`.
 pub fn classify_class_field(
     values: &mut ClassFieldValues,
     class: &Class<'_>,
-    prop: &PropertyDefinition<'_>,
+    field: ClassField<'_, '_>,
     source: &str,
 ) -> Option<ClassFieldValueSource> {
     values.record_class(class.span.start);
-    let classified = classify_field(prop, source);
-    if let (Some(kind), Some(value)) = (classified, prop.value.as_ref()) {
+    let classified = classify_field(field, source);
+    if let (Some(kind), Some(value)) = (classified, field.value) {
         values.record_field(value.span().start, kind);
     }
     classified
@@ -46,29 +81,28 @@ pub fn classify_class_field(
 pub fn classify_class_fields(values: &mut ClassFieldValues, class: &Class<'_>, source: &str) {
     values.record_class(class.span.start);
     for element in &class.body.body {
-        if let ClassElement::PropertyDefinition(prop) = element {
-            classify_class_field(values, class, prop, source);
+        if let Some(field) = ClassField::of(element) {
+            classify_class_field(values, class, field, source);
         }
     }
 }
 
-/// The classification of `prop`, a field of `class`: the recorded one
+/// The classification of `field`, a field of `class`: the recorded one
 /// when `values` classified the class, else classified here (a class the
 /// header walk does not index).
 #[must_use]
 pub fn class_field_value(
     values: &ClassFieldValues,
     class: &Class<'_>,
-    prop: &PropertyDefinition<'_>,
+    field: ClassField<'_, '_>,
     source: &str,
 ) -> Option<ClassFieldValueSource> {
     if values.classified_class(class.span.start) {
-        return prop
+        return field
             .value
-            .as_ref()
             .and_then(|value| values.recorded_field(value.span().start));
     }
-    classify_field(prop, source)
+    classify_field(field, source)
 }
 
 /// Classify one field's initializer (see the module documentation). `None`
@@ -76,11 +110,11 @@ pub fn class_field_value(
 /// one with no initializer or a computed key, a direct function value (a
 /// method-like served position of its own), an authoritative assertion, and
 /// an initializer that neither derives from a call nor reads `this`.
-fn classify_field(prop: &PropertyDefinition<'_>, source: &str) -> Option<ClassFieldValueSource> {
-    if prop.type_annotation.is_some() || matches!(prop.key, PropertyKey::PrivateIdentifier(_)) {
+fn classify_field(field: ClassField<'_, '_>, source: &str) -> Option<ClassFieldValueSource> {
+    if field.type_annotation.is_some() || matches!(field.key, PropertyKey::PrivateIdentifier(_)) {
         return None;
     }
-    let value = prop.value.as_ref()?;
+    let value = field.value?;
     if matches!(
         value,
         Expression::ArrowFunctionExpression(_) | Expression::FunctionExpression(_)
@@ -88,7 +122,7 @@ fn classify_field(prop: &PropertyDefinition<'_>, source: &str) -> Option<ClassFi
     {
         return None;
     }
-    crate::analysis::function_program::static_property_key_name(&prop.key)?;
+    crate::analysis::function_program::static_property_key_name(field.key)?;
     let mut probe = FieldValueProbe {
         call_relevant: true,
         ..FieldValueProbe::default()

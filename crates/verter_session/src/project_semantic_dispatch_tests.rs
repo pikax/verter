@@ -19,6 +19,7 @@ use verter_type_engine::semantic_query::{
 use verter_type_engine::semantic_query_memo::SemanticGraphStore;
 
 mod abstract_construct_tests;
+mod accessor_property_tests;
 mod ambient_module_value_tests;
 mod apparent_type_tests;
 mod augmentation_scale_tests;
