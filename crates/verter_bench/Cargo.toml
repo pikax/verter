@@ -28,9 +28,16 @@ semantic-observe = [
 hotpath-alloc = ["semantic-observe", "verter_compiler/hotpath-alloc", "hotpath/hotpath-alloc"]
 # The long-churn soak runner (`src/soak/`, `verter-soak`). Default-off
 # tooling opt-in that forwards only the session's soak seams: the engine's
-# flight rendezvous and the retention account's ACTIVE-occupancy window.
-# Audit/footprint capture and `semantic-observe` stay off in this lane.
-soak-support = ["verter_session/soak-support", "verter_type_engine/soak-support"]
+# flight rendezvous and the retention account's ACTIVE-occupancy window —
+# plus the semantic graph store's test-support measurement counters (joined
+# waits and cold producer runs). The engine's test-support compiles only
+# through the session's matching opt-in, which forwards it. Audit/footprint
+# capture and `semantic-observe` stay off in this lane.
+soak-support = [
+  "verter_session/soak-support",
+  "verter_session/test-support",
+  "verter_type_engine/soak-support",
+]
 
 [dependencies]
 # `bench` unlocks `template`/`script` module visibility (see

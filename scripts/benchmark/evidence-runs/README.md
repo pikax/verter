@@ -72,8 +72,10 @@ exactly; its required cells are the largest sizes' cold Verter `coldMs` and
 long-churn soak runner (`crates/verter_bench/src/soak/`, binary
 `verter-soak`) rather than a semantic-perf invocation. The runner exists only
 in the declared `soak.build` (`verter_bench` with its default-off
-`soak-support` feature, which forwards the engine's flight rendezvous and the
-retention account's ACTIVE-occupancy window and nothing else); the driver
+`soak-support` feature, which forwards the engine's flight rendezvous, the
+retention account's ACTIVE-occupancy window and the session's test-support
+seams for the semantic graph store's joined-wait and query counters, never
+`semantic-observe` or audit capture); the driver
 builds exactly that configuration and the validator rejects any other. Its
 two workloads, `normal` and `pressure`, are 100 tranches of one 100-action
 template (10,000 actions, at least 3,000 distinct query identities, every
@@ -118,7 +120,9 @@ Candidate churn records the demanded slot's admission tokens and declared
 cap: an old token leaving while a new one enters at the cap proves displacement.
 An unchanged aggregate candidate count alone does not. Concurrent refusal
 demands report `null` for unmeasured work counters; only measured zero counters
-can prove a replay without recomputation. Paid-context controls also record and
+can prove a replay without recomputation. A demand's work is the semantic graph
+queries it ran (a retained component-meta replay runs none) and its producer
+runs are the graph's cold misses. Paid-context controls also record and
 check their equal entry allowance.
 
 | Field                             | Meaning                                                                                                                                                                                                  |

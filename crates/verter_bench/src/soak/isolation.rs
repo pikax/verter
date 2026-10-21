@@ -17,7 +17,6 @@
 //! refusal must not reach the fresh request; a complete answer is valid in
 //! any context, so the fresh request's retained answer is simply repeated.
 
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -343,23 +342,32 @@ impl Rig {
             .clone()
     }
 
-    /// Cold semantic producer runs the host has made (resolver node-cache
-    /// misses): zero across a demand means nothing was recomputed.
+    /// Cold semantic producer runs the host has made (semantic-graph memo
+    /// misses): zero across a demand means nothing was recomputed. Read from
+    /// the store's measurement counters, which the soak-support build
+    /// compiles in with capture off.
     #[must_use]
     pub fn producer_runs(&self) -> u64 {
         self.host
-            .provenance()
-            .resolver_node_cache_misses
-            .load(Ordering::Relaxed)
+            .project_type_store()
+            .semantic_graph()
+            .stats_snapshot()
+            .misses
     }
 
-    /// Component-meta resolutions the host has run.
+    /// Semantic-graph queries the host has run, warm or cold: a demand
+    /// served from its retained component-meta result runs none, while one
+    /// that resolves again queries the graph even when every node it reads
+    /// is already warm. The host's per-resolution component-meta counter
+    /// exists only under `semantic-observe`, which this lane keeps off.
     #[must_use]
     pub fn recomputes(&self) -> u64 {
-        self.host
-            .provenance()
-            .component_meta_resolved_state_recomputes
-            .load(Ordering::Relaxed)
+        let stats = self
+            .host
+            .project_type_store()
+            .semantic_graph()
+            .stats_snapshot();
+        stats.hits + stats.misses
     }
 }
 
