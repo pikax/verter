@@ -9,6 +9,9 @@ authors.workspace = true
 description = "Soak-support feature-profile compile contracts for verter_session"
 publish = false
 
+[features]
+semantic-observe = ["verter_session/semantic-observe"]
+
 [[bin]]
 name = "verter_compile_contracts_session_soak"
 path = "src/main.rs"
@@ -17,6 +20,9 @@ bench = false
 
 [dependencies]
 trybuild = "1.0"
+verter_audit = { path = "../verter_audit" }
+verter_workspace = { path = "../verter_workspace" }
+verter_session_query = { path = "../verter_session_query" }
 # The soak/tooling runner's own profile: the flight rendezvous and the
 # retention account's ACTIVE-occupancy window reach a plain consumer only
 # through verter_session's default-off `soak-support` forwarding — never through `test-support` unification. verter_type_engine
@@ -27,3 +33,6 @@ verter_type_engine = { path = "../verter_type_engine" }
 # The fixtures name the function whose return they request through the
 # query vocabulary's own identity carriers.
 verter_type_expr = { path = "../verter_type_expr" }
+
+[build-dependencies]
+verter_session = { path = "../verter_session", features = ["soak-support"] }

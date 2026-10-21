@@ -111,6 +111,13 @@ pub(crate) use verter_execution::tasks::ExecutionTask;
 
 pub mod producer;
 pub(crate) mod stats;
+#[cfg(any(
+    test,
+    feature = "test-support",
+    feature = "semantic-observe",
+    feature = "soak-support"
+))]
+pub use stats::GraphWorkSnapshot;
 pub(crate) mod tasks;
 // `SemanticGraphStore`'s `#[doc(hidden)]` `*_for_tests` publish / probe
 // helpers live in a sibling continuation-impl file so the hot-path memo
@@ -785,6 +792,12 @@ impl Default for SemanticGraphStore {
 #[inline(always)]
 pub(super) const fn records_telemetry<M: verter_audit::observe::ObserveExec>() -> bool {
     cfg!(any(test, feature = "test-support")) || M::CAPTURED
+}
+
+/// Only the selected work counters count independently of capture in tooling.
+#[inline(always)]
+pub(super) const fn records_work<M: verter_audit::observe::ObserveExec>() -> bool {
+    cfg!(feature = "soak-support") || records_telemetry::<M>()
 }
 
 impl AsRef<SemanticGraphStore> for SemanticGraphStore {

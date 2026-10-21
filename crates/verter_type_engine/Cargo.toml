@@ -22,7 +22,9 @@ test-support = ["verter_execution/test-support", "verter_session_query/test-supp
 # which reads through the retention account's observer — hence the forwarding.
 # `test-support` already carries both. Forwarded by `verter_session`'s
 # `soak-support`; no production edge enables it.
-soak-support = ["verter_session_query/soak-support"]
+# Also retains only memo misses and actual joined waits for capture-off work
+# discrimination; full statistics and other telemetry keep their own gates.
+soak-support = ["verter_session_query/soak-support", "verter_audit/soak-support"]
 # The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
 # also compiles this crate's `hotpath` measurement attributes. Forwarded by
 # `verter_session`; no production edge enables it.

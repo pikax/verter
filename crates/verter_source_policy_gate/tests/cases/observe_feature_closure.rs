@@ -745,6 +745,49 @@ struct Fixture {
     config: Vec<String>,
 }
 
+/// A narrow consumer must not pull capture or the broad test seams through
+/// either normal or build dependency feature forwarding.
+#[test]
+fn narrow_work_feature_closure_keeps_capture_and_general_support_off() {
+    let root = repository_root();
+    let metadata = metadata(root, &[]);
+    for target in [host_target(root).as_str(), "wasm32-unknown-unknown"] {
+        let enabled = closure(
+            root,
+            "verter_compile_contracts_session_soak",
+            target,
+            None,
+            false,
+            &[],
+            &metadata,
+        );
+        for (id, feature) in &enabled {
+            if !metadata.workspace_members.contains(id) {
+                continue;
+            }
+            assert_ne!(
+                feature, "semantic-observe",
+                "narrow support must not enable capture"
+            );
+            assert_ne!(
+                feature, "test-support",
+                "narrow support must not enable general test seams"
+            );
+        }
+        for owner in ["verter_session", "verter_type_engine", "verter_audit"] {
+            let package = metadata
+                .packages
+                .iter()
+                .find(|package| package.name == owner)
+                .unwrap();
+            assert!(
+                enabled.contains(&(package.id.clone(), "soak-support".into())),
+                "{owner} narrow storage is enabled"
+            );
+        }
+    }
+}
+
 fn write_member(root: &Path, name: &str, manifest: &str) {
     let package = root.join(name);
     fs::create_dir_all(package.join("src")).unwrap();

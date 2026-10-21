@@ -1,0 +1,11 @@
+error[E0599]: no method named `work_snapshot` found for reference `&VerterHost` in the current scope
+ --> tests/cases/compile-fail/work_readers_absent_without_support.rs:4:18
+  |
+4 |     let _ = host.work_snapshot();
+  |                  ^^^^^^^^^^^^^ method not found in `&VerterHost`
+
+error[E0599]: no method named `work_snapshot` found for reference `&Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>` in the current scope
+ --> tests/cases/compile-fail/work_readers_absent_without_support.rs:5:56
+  |
+5 |     let _ = host.project_type_store().semantic_graph().work_snapshot();
+  |                                                        ^^^^^^^^^^^^^ method not found in `&Arc<verter_type_engine::semantic_query_memo::SemanticGraphStore>`

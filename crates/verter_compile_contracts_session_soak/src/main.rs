@@ -10,6 +10,14 @@ fn main() {
         .expect("compile-contract crate must live below the workspace root");
     let fixture_root = root.join("crates/verter_session/tests/cases/compile-fail");
     let tests = trybuild::TestCases::new();
+    tests.pass(fixture_root.join("narrow_work_observations.rs"));
+    tests.pass(fixture_root.join("work_observation_behavior.rs"));
+    if !cfg!(feature = "semantic-observe") {
+        tests.compile_fail(fixture_root.join("full_work_readers_absent_with_narrow_support.rs"));
+    }
+    if std::env::args().any(|arg| arg == "narrow-work") {
+        return;
+    }
     // A positive consumer of the seam through the forwarding alone: the
     // fixture names and arms the rendezvous with `soak-support` as the only
     // enabling feature.

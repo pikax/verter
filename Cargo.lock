@@ -3383,9 +3383,12 @@ name = "verter_compile_contracts_session_soak"
 version = "0.0.1-beta.7"
 dependencies = [
  "trybuild",
+ "verter_audit",
  "verter_session",
+ "verter_session_query",
  "verter_type_engine",
  "verter_type_expr",
+ "verter_workspace",
 ]
 
 [[package]]
