@@ -11151,24 +11151,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &self,
             id: SemanticNodeId,
         ) -> IdentityCarrierUnwrap {
-            self.unwrap_identity_carrier_walk(id, &mut |_| {})
+            self.unwrap_identity_carrier_walk(CarrierWalkPoint { node: id, depth: 0 }, &mut |_| {})
         }
     }
 
-    /// [`Self::unwrap_identity_carrier_for_relation`], reporting each node
-    /// the walk reaches to `on_step` before it reads anything for that node:
-    /// a reached node is where a walk that stopped there resumes.
+    /// [`Self::unwrap_identity_carrier_for_relation`] from `start`, reporting
+    /// each point the walk reaches to `on_step` before it reads anything for
+    /// that node: a reached point is where a walk that stopped there resumes.
+    ///
+    /// Each declaration step instantiates the declaration the carrier names,
+    /// nested in the instantiations of the steps before it, so a walk stops
+    /// at the instantiation budget with the checker's TS2589 recovery: an
+    /// alias that re-applies itself on a growing argument
+    /// (`type Wrap<T> = Grow<T>`, `type Grow<T> = T extends never ? 0 :
+    /// Wrap<[T]>`) mints a fresh application at every step and never meets a
+    /// node it has seen.
     pub(super) fn unwrap_identity_carrier_walk(
         &self,
-        id: SemanticNodeId,
-        on_step: &mut dyn FnMut(SemanticNodeId),
+        start: CarrierWalkPoint,
+        on_step: &mut dyn FnMut(CarrierWalkPoint),
     ) -> IdentityCarrierUnwrap {
         let graph = self.graph();
         let transit = ProjectionReductionContext::structural_transit();
-        let mut current = id;
+        let mut current = start.node;
+        let mut depth = start.depth;
         let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
-            on_step(current);
+            on_step(CarrierWalkPoint {
+                node: current,
+                depth,
+            });
             let Some(data) = graph.node_data(current) else {
                 return IdentityCarrierUnwrap::Unresolvable;
             };
@@ -11380,6 +11392,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // body it does not have.
             if self.string_mapping_of(current).is_some() {
                 return IdentityCarrierUnwrap::Concrete(current);
+            }
+            if self.cancellation.is_cancelled() {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            depth += 1;
+            if let Err(refusal) = crate::semantic_query::checker_policy::instantiation_budget(
+                self.connected_demand.instantiation_within_budget(depth),
+            ) {
+                return IdentityCarrierUnwrap::Concrete(
+                    self.recover_at_operation_budget(refusal, Some(current)),
+                );
             }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
@@ -13277,6 +13300,15 @@ enum FramePop {
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
+}
+
+/// A point an identity-carrier walk reached: the node, and how many
+/// declaration instantiations, each nested in the one before, the walk took
+/// to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CarrierWalkPoint {
+    pub(super) node: SemanticNodeId,
+    pub(super) depth: u32,
 }
 
 /// A PROOF that two nodes have no common inhabitant, carrying the CHECKER'S

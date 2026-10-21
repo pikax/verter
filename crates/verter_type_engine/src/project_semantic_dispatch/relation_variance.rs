@@ -1015,6 +1015,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// `UIMessage<…>` the alias selects, never through its members).
     /// `None` when no wrapper changes the reference or the selected type is
     /// not a declaration reference.
+    ///
+    /// Each alias step is one nested instantiation, so the walk stops at the
+    /// instantiation budget: an alias that re-applies itself on a growing
+    /// argument mints a fresh application at every step, never meets one
+    /// it visited, and selects no reference.
     pub(super) fn declaration_reference_for_relation(
         &self,
         node: SemanticNodeId,
@@ -1032,7 +1037,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let transit = crate::semantic_query::ProjectionReductionContext::structural_transit();
         let mut current = node;
         let mut visited = rustc_hash::FxHashSet::default();
+        let mut depth = 0;
         loop {
+            if self.cancellation.is_cancelled()
+                || !self.connected_demand.instantiation_within_budget(depth)
+            {
+                return None;
+            }
+            depth += 1;
             current = self.reference_operand_for_relation(current)?;
             let (declaration, args) = match self.graph().node_data(current)?.as_ref() {
                 SemanticNodeData::DeclRef { identity } => (identity.clone(), Arc::from([])),

@@ -195,13 +195,33 @@ fn fixed_annotations_are_checked_before_inference() {
     );
 }
 
+/// An alias whose body re-applies itself on a growing argument mints a
+/// fresh application at every step, so a relation unwrapping it never meets
+/// a node it has seen: the walk stops at the instantiation budget with the
+/// checker's TS2589 recovery and the decision reads `any`, as the checker
+/// does, instead of unwrapping the alias forever. The budget is lowered so
+/// the production budget's path is reached quickly.
+#[test]
+fn a_circular_alias_operand_stops_at_the_instantiation_depth() {
+    let _budget = super::connected_demand::InstantiationBudgetForTests::install(64);
+    assert_named_answers(
+        "interface Cell<in out T> { get(): T }\n\
+         type Grow<T> = T extends never ? 0 : Wrap<[T]>;\n\
+         type Wrap<T> = Grow<T>;\n",
+        &[
+            ("Cell<'a'> extends Wrap<'a'> ? 1 : 0", "any"),
+            ("{ x: 1 } extends Wrap<'a'> ? 1 : 0", "any"),
+        ],
+    );
+}
+
 /// Demand aliases through the publication path used by the benchmark. Flow
 /// return probes lower their annotations as carriers and do not exercise the
 /// eager declaration-body lowering used by a named expanded demand.
 #[track_caller]
 fn assert_named_answers(source: &str, rows: &[(&str, &str)]) {
     use std::sync::Arc;
-    use verter_type_expr::{LiteralValue, TypeExpr};
+    use verter_type_expr::{LiteralValue, PrimitiveName, TypeExpr};
 
     const FILE: &str = "/variance/probe.ts";
     for strict_null_checks in [true, false] {
@@ -245,9 +265,12 @@ fn assert_named_answers(source: &str, rows: &[(&str, &str)]) {
                         .project_node_to_type_expr_json_bytes(&node)
                         .expect("variance answer projects");
                     let answer: TypeExpr = serde_json::from_slice(&bytes).expect("typed answer");
+                    let expected = PrimitiveName::parse(expected).map_or_else(
+                        || TypeExpr::Literal(LiteralValue::Number(expected.parse().unwrap())),
+                        TypeExpr::Primitive,
+                    );
                     assert_eq!(
-                        answer,
-                        TypeExpr::Literal(LiteralValue::Number(expected.parse().unwrap())),
+                        answer, expected,
                         "{probe}; strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}; source={source}",
                     );
                 }

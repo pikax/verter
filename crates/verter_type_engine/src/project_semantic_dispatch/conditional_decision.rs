@@ -759,9 +759,32 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // demand observed is the relation's to observe, so it is dropped.
         if self.deciding_on_the_runtime() {
             let demanded = self.observe_read(|| self.demand_relation_operands([check, extends]));
-            let _ = demanded.discard();
             if self.decision_waits() {
+                let _ = demanded.discard();
                 return self.waiting_decision_output();
+            }
+            // An operand whose walk ended at the checker's error type is
+            // that type, and the checker returns it when either operand is
+            // it: the relation, which would walk the operand again, never
+            // runs. The demand's reads are the answer's evidence.
+            let [check_error, extends_error] = *demanded.value();
+            if check_error.is_some() || extends_error.is_some() {
+                if let Err(abort) = demanded.adopt(self) {
+                    return super::walk::QueryBuildOutput::from((
+                        QueryResult::Error(QueryError::ExecutionAborted(abort)),
+                        self.project_generation_signature(),
+                    ));
+                }
+                if let Some(absorbed) = self.absorb_conditional(
+                    check_error.unwrap_or(check),
+                    extends_error.unwrap_or(extends),
+                    distributive,
+                    |take_true| branches.branch(self, take_true),
+                ) {
+                    return absorbed;
+                }
+            } else {
+                let _ = demanded.discard();
             }
         }
         let observation = self.observe_read(|| self.conditional_branch_selection(check, extends));
@@ -1392,7 +1415,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
+    pub(super) fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
         matches!(
             self.graph().node_data(node).as_deref(),
             Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
