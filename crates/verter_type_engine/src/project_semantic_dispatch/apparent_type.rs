@@ -129,7 +129,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// structural transit, which keeps member values carriers: `Array`'s
     /// `[Symbol.unscopables]` member maps over `keyof any[]`, the keys being
     /// read.
-    fn global_wrapper_surface_in(
+    pub(super) fn global_wrapper_surface_in(
         &self,
         name: &str,
         args: &[SemanticNodeId],

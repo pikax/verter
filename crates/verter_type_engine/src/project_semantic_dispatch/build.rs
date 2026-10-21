@@ -15013,7 +15013,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source: SemanticNodeId,
             caller_context: crate::semantic_query::ProjectionReductionContext,
         ) -> Option<(Vec<SurfaceMember>, crate::semantic_query::PartialReasonSet)> {
-            self.source_projection_with_key_domain(source, caller_context)
+            self.source_projection_with_key_domain(source, caller_context, false)
                 .map(|(members, reasons, _, _)| (members, reasons))
         }
     }
@@ -15021,11 +15021,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Keep the shallow surface's finite-domain witness beside its members.
     /// Dropping this witness makes a named dictionary look like a finite map.
     /// The surface's listed index signatures ride beside it: a homomorphic
-    /// mapping maps each one, as it maps each member.
+    /// mapping maps each one, as it maps each member. `keys_only` when the
+    /// caller reads the members' keys and modifiers but never their values
+    /// ([`Self::declared_non_object_projection`]).
     fn source_projection_with_key_domain(
         &self,
         source: SemanticNodeId,
         caller_context: crate::semantic_query::ProjectionReductionContext,
+        keys_only: bool,
     ) -> Option<(
         Vec<SurfaceMember>,
         crate::semantic_query::PartialReasonSet,
@@ -15139,7 +15142,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .as_ref()
             .is_none_or(|(members, _, _, signatures)| members.is_empty() && signatures.is_empty());
         if projected_nothing {
-            if let Some(declared) = self.declared_non_object_projection(source, source_context) {
+            if let Some(declared) =
+                self.declared_non_object_projection(source, source_context, keys_only)
+            {
                 return Some(declared);
             }
         }
@@ -15153,10 +15158,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// maps the properties of its apparent type, a tuple's positions and
     /// `length` over the `Array` wrapper's members and index signature
     /// (`{ [K in keyof [1, 'a'] as …]: … }`). `None` for any other kind.
+    /// `keys_only` reads the wrapper's members as carriers
+    /// ([`Self::array_like_apparent_object`]).
     fn declared_non_object_projection(
         &self,
         source: SemanticNodeId,
         source_context: crate::semantic_query::ProjectionReductionContext,
+        keys_only: bool,
     ) -> Option<(
         Vec<SurfaceMember>,
         crate::semantic_query::PartialReasonSet,
@@ -15174,7 +15182,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ));
             }
             SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
-                self.array_like_apparent_object(declared)?
+                self.array_like_apparent_object(declared, keys_only)?
             }
             _ => return None,
         };
@@ -15201,15 +15209,43 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// project's `Array` / `ReadonlyArray` wrapper, an array that wrapper
     /// alone. `None` when the wrapper read does not settle, or an array's
     /// project declares none.
-    fn array_like_apparent_object(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+    ///
+    /// `keys_only` reads the wrapper under structural transit, its member
+    /// values kept carriers, for a caller that reads the members' keys and
+    /// modifiers alone: the wrapper's own members may map over its keys
+    /// (`Array`'s `[Symbol.unscopables]: { [K in keyof any[]]?: boolean }`),
+    /// so evaluating their values to read those keys would re-enter the
+    /// wrapper's own instantiation.
+    fn array_like_apparent_object(
+        &self,
+        node: SemanticNodeId,
+        keys_only: bool,
+    ) -> Option<SemanticNodeId> {
         let (name, args) = self.apparent_wrapper_of(node)?;
         let canonical = self
             .graph()
             .node_scope(node)
             .and_then(|scope| scope.canonical_file())
             .or_else(|| self.wrapper_demand_canonical())?;
-        let wrapper = match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
-            super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
+        let surface = if keys_only {
+            self.global_wrapper_surface_in(
+                name,
+                &args,
+                canonical.as_ref(),
+                crate::semantic_query::ProjectionReductionContext::structural_transit(),
+            )
+        } else {
+            self.global_wrapper_surface(name, &args, canonical.as_ref())
+        };
+        let wrapper = match surface {
+            super::apparent_type::GlobalWrapper::Surface(surface) => {
+                Some(match self.graph().node_data(surface).as_deref() {
+                    Some(SemanticNodeData::MergedDecl { contributors }) => {
+                        self.reduce_merged_decl(contributors)
+                    }
+                    _ => surface,
+                })
+            }
             super::apparent_type::GlobalWrapper::Absent => None,
             super::apparent_type::GlobalWrapper::Unsettled => return None,
         };
@@ -16052,7 +16088,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }],
             ))
         } else {
-            self.source_projection_with_key_domain(source, context)
+            // Only the identity mapper reads a source member's value; any
+            // other reads the source's keys and modifiers alone.
+            let keys_only = !matches!(mapper.kind, crate::semantic_query::MapperKind::Identity);
+            self.source_projection_with_key_domain(source, context, keys_only)
         };
         // A source that RESOLVED (to any surface, including an EMPTY one)
         // is distinct from a source that did NOT project: only the latter

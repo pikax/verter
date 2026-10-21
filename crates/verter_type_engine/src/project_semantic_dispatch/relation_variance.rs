@@ -250,12 +250,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
                 .collect()
         } else {
-            let DeclarationVariance::Known(variances) =
-                self.parameter_variances(&declaration, source_args.len(), true)?
-            else {
-                return None;
-            };
-            variances
+            match self.parameter_variances(&declaration, source_args.len(), true)? {
+                DeclarationVariance::Known(variances) => variances,
+                // The checker's in-progress `getVariances` is `emptyArray`:
+                // `inferFromTypeArguments` infers every argument
+                // covariantly, and the references relate as the open
+                // measurement answers. Expanding them instead would re-enter
+                // the measured declaration at every level of its own
+                // recursion (`Promise<T>`'s `then` returns `Promise<R>`).
+                DeclarationVariance::InProgress(result) => {
+                    for (&source, &target) in source_args.iter().zip(target_args.iter()) {
+                        let _ =
+                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    }
+                    return Some(result);
+                }
+            }
         };
         if variances
             .iter()
