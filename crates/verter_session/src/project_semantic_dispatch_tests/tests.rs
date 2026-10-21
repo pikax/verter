@@ -375,22 +375,25 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
     assert_ne!(string_key, number_key, "only the pending argument differs");
     assert_eq!(key_for(string), string_key);
     let relation_key = dispatch.relate_key_for(string, string);
-    let mut selection_receipt = None;
+    let relation_query = relation_key.to_query_key();
+    let relation_builds =
+        || verter_type_engine::project_semantic_dispatch::raise::dispatch_cold_for(&relation_query);
+    let builds_before = relation_builds();
     for (key, expected) in [(&string_key, string), (&number_key, number)] {
         let cold = dispatch.execute_read(key.clone());
         assert!(matches!(cold.value().clone(), QueryResult::Value(node) if node == expected));
         assert!(!cold.result_is_partial() && !cold.cache_suppress());
-        let receipt = graph
-            .relation_published_carrier(&relation_key)
-            .expect("the decided relation is published")
-            .admission_seq;
-        if let Some(previous) = selection_receipt {
-            assert_eq!(
-                receipt, previous,
-                "branch-only frames reuse the original relation computation"
-            );
-        }
-        selection_receipt = Some(receipt);
+        // The decision reads its relation nested in its own evaluation: the
+        // relation completes for the request, never the family memo.
+        assert!(
+            graph.relation_published_carrier(&relation_key).is_none(),
+            "the decided relation completes outside the family memo"
+        );
+        assert_eq!(
+            relation_builds() - builds_before,
+            1,
+            "branch-only frames reuse the original relation computation"
+        );
         let count = graph.slot_candidate_count_for_tests(key);
         assert_eq!(count, 1);
         for _ in 0..3 {
@@ -399,6 +402,70 @@ fn conditional_pending_frame_is_family_identity_and_reuses_relation_selection() 
             assert_eq!(graph.slot_candidate_count_for_tests(key), count);
         }
     }
+}
+
+/// Every dispatcher of one request shares what the request completed: a
+/// relation one dispatcher's decision completed for the request answers a
+/// second dispatcher of the same request without being related again, and
+/// is held outside the family memo, so a dispatcher of another request
+/// relates it for itself. The completions are released with the request.
+#[test]
+fn dispatchers_of_one_request_share_its_completed_relations() {
+    let host = host();
+    let reductions = ProjectSemanticDispatch::<crate::resolver_core::HostCapabilities>::relation_reductions_for_tests;
+    let request = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let first = ProjectSemanticDispatch::new(&host);
+    let _builder = first.enter_construction_scope();
+    let graph = first.graph();
+    let string = primitive(graph, PrimitiveKind::String);
+    let number = primitive(graph, PrimitiveKind::Number);
+    let decision = SemanticQueryKey::Conditional {
+        check: string,
+        extends: string,
+        true_branch: string,
+        false_branch: number,
+        distributive: false,
+        pending: None,
+    };
+    let read = first.execute_read(decision);
+    assert!(matches!(read.value().clone(), QueryResult::Value(node) if node == string));
+    let relation_key = first.relate_key_for(string, string);
+    assert!(
+        graph.relation_published_carrier(&relation_key).is_none(),
+        "the decision's relation completes outside the family memo"
+    );
+    assert!(first.request_completions_for_tests() > 0);
+
+    let second = ProjectSemanticDispatch::new(&host);
+    let before = reductions();
+    assert!(matches!(
+        second.execute_relate(relation_key.clone()),
+        RelationStep::Assignable { .. }
+    ));
+    assert_eq!(
+        reductions() - before,
+        0,
+        "a dispatcher of the same request reads the relation the request completed"
+    );
+
+    drop(second);
+    drop(request);
+    let _other = verter_type_engine::request_context::install_test_request_for("/w/shared.ts");
+    let third = ProjectSemanticDispatch::new(&host);
+    assert_eq!(
+        third.request_completions_for_tests(),
+        0,
+        "another request starts with no completions"
+    );
+    let before = reductions();
+    assert!(matches!(
+        third.execute_relate(relation_key),
+        RelationStep::Assignable { .. }
+    ));
+    assert!(
+        reductions() - before > 0,
+        "a dispatcher of another request relates it for itself"
+    );
 }
 
 #[test]

@@ -642,7 +642,7 @@ fn literal_like_members(
 }
 
 /// The primitive a literal widens to.
-fn literal_primitive(literal: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
+pub(super) fn literal_primitive(literal: &crate::semantic_query::LiteralValue) -> PrimitiveKind {
     match literal {
         crate::semantic_query::LiteralValue::String(_) => PrimitiveKind::String,
         crate::semantic_query::LiteralValue::Number(_) => PrimitiveKind::Number,

@@ -542,10 +542,10 @@ fn row_conditional_dead_branch() -> MatrixRow {
             (Counter::ConditionalDecided, 1),
             (Counter::BranchTrue, 1),
             (Counter::BranchFalse, 0),
-            // The conditional's live substitutions: parameters absent from
-            // the winning branch need no rewrite, and the dead branch
-            // contributes none.
-            (Counter::SubstituteMisses, 2),
+            // The conditional's live substitution, probed once: parameters
+            // absent from the winning branch need no rewrite, and the dead
+            // branch contributes none.
+            (Counter::SubstituteMisses, 1),
             // The force family entry itself (authored Instantiate).
             (Counter::Instantiations, 1),
             (Counter::DeferredMisses, 0),
@@ -736,7 +736,7 @@ fn row_remap_dropped_value() -> MatrixRow {
             // The remap key domain and the survivor's value body
             // substitute their binders — the DROPPED keys' value bodies
             // contribute none of these substitutions.
-            (Counter::SubstituteMisses, 9),
+            (Counter::SubstituteMisses, 5),
             (Counter::Instantiations, 2),
             // One memo probe per deferred evaluation that misses; a root
             // the evaluator finishes as itself takes none.

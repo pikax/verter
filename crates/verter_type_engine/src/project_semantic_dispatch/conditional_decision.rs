@@ -994,8 +994,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // distribution (a reference to `type Nv = never` distributes as
         // `never`), while the selected branch binds the check as written
         // (`O extends infer K ? K : 2` is `O`).
+        // A check written as a union is its own declared type: it is
+        // constructed, reduced and read for its extreme once, not once more
+        // as the declared check (each read visits every member).
         let declared_check = self.declared_operand_where_written(check);
-        let declared_check = self.union_as_constructed(declared_check);
+        let declared_is_check = declared_check == check;
+        let declared_check = if declared_is_check {
+            check
+        } else {
+            self.union_as_constructed(declared_check)
+        };
         let extends = self
             .composite_over_resolved_arms(extends)
             .unwrap_or(extends);
@@ -1004,12 +1012,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // `ThisParameterType<F>`'s branch); one still open stays itself.
         let check = self.reduced_conditional_operand(check);
         let extends = self.reduced_conditional_operand(extends);
-        let declared_check = self.reduced_conditional_operand(declared_check);
-        let check = self.conditional_operand_extreme(check).unwrap_or(check);
+        let declared_check = if declared_is_check {
+            check
+        } else {
+            self.reduced_conditional_operand(declared_check)
+        };
+        let check_extreme = self.conditional_operand_extreme(check);
         let extends = self.conditional_operand_extreme(extends).unwrap_or(extends);
-        let declared_check = self
-            .conditional_operand_extreme(declared_check)
-            .unwrap_or(declared_check);
+        let declared_check = if declared_is_check {
+            check_extreme.unwrap_or(check)
+        } else {
+            self.conditional_operand_extreme(declared_check)
+                .unwrap_or(declared_check)
+        };
+        let check = check_extreme.unwrap_or(check);
         let check_tuple = self.conditional_tuple_operand(check);
         let extends_tuple = self.conditional_tuple_operand(extends);
         let recovery = check_tuple.is_some_and(|(_, recovered)| recovered)
@@ -1906,7 +1922,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// infers `1` and takes it too. A pattern that reaches each of its
     /// unconstrained `infer` declarations once infers each from the one
     /// position it occupies, where the inferring relation already related it:
-    /// that relation is the check.
+    /// that relation is the check. So it is when every inference its
+    /// constraint admits stays as inferred: an implied constraint (a
+    /// template literal hole's `string`) fixes nothing a capture already
+    /// satisfies, and the pattern instantiated with the inferences is the
+    /// pattern the inferring relation related. Only a pattern that repeats
+    /// an `infer`, or an inference its constraint replaced, is related
+    /// again.
     fn select_with_inferences(
         &self,
         check: SemanticNodeId,
@@ -1917,16 +1939,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         Option<super::relation::RelationInferBindings>,
     ) {
         let constraints = self.infer_constraints_in(extends);
-        let constrained = !constraints.is_empty();
-        let bindings = if constrained {
+        let (bindings, fixed_to_constraint) = if constraints.is_empty() {
+            (bindings, false)
+        } else {
             match self.infer_bindings_within_constraints(&bindings, &constraints) {
-                Some(bindings) => bindings,
+                Some(fixed) => fixed,
                 None => return (ConditionalBranchSelection::Undecided, None),
             }
-        } else {
-            bindings
         };
-        if !constrained && !self.pattern_repeats_an_infer(extends) {
+        if !fixed_to_constraint && !self.pattern_repeats_an_infer(extends) {
             return (
                 ConditionalBranchSelection::True,
                 Some(super::relation::RelationInferBindings { bindings }),

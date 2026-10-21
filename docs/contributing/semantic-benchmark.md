@@ -34,6 +34,13 @@ work, cold builds, substitutions, key-remap evaluations and flow-obligation
 expansions, since dispatch counts alone can hide repeated domain scans and
 per-member flow planning.
 
+The `mapped-expand-remap` series renames 100, 1,000 and 3,000 keys of an
+imported interface through a recursive template conditional (`Kebab<K>`).
+The Rust guard in the session crate's allocator canaries checks that each further
+key costs one flat, small constant in allocations, live bytes at the peak, cold
+semantic builds and substitution walks, and that keys the template does not
+match, or splits more than once, keep the checker's names.
+
 | Arm | What runs | Enters the head-to-head |
 |---|---|---|
 | `verter` | `semantic_perf_probe`: a release executable linking the production `verter_session` library, host built with the shipped `HostConfig::default()` (no audit, trace, footprint or metrics capture) | yes |

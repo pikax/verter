@@ -136,7 +136,7 @@ pub struct AliasSet {
     /// The distinct owned allocations the measurement reached, each charged
     /// by its own cell and not counted here; `None` when they are counted
     /// in full instead.
-    children: Option<Vec<Arc<dyn super::owned::Node>>>,
+    children: Option<Children>,
     /// Whether this measures an owned cell's value, which reaches no raw
     /// `Arc`: each allocation it keeps is exclusively its own or an owned
     /// handle charged by itself.
@@ -146,18 +146,22 @@ pub struct AliasSet {
 /// Allocations an [`AliasSet`] tracks before it spills to a hash set.
 const ALIAS_INLINE: usize = 8;
 
+/// Owned children an [`AliasSet`] collects inline before it spills.
+const CHILDREN_INLINE: usize = 2;
+
+/// The owned children a measurement reached: inline up to
+/// [`CHILDREN_INLINE`], so handing a small set to its owner allocates
+/// nothing until the owner stores it.
+pub(crate) type Children = smallvec::SmallVec<[Arc<dyn super::owned::Node>; CHILDREN_INLINE]>;
+
 impl Default for AliasSet {
     fn default() -> Self {
-        Self::with(None, Some(Vec::new()), false)
+        Self::with(None, Some(Children::new()), false)
     }
 }
 
 impl AliasSet {
-    fn with(
-        leaves: Option<Vec<Arc<str>>>,
-        children: Option<Vec<Arc<dyn super::owned::Node>>>,
-        in_cell: bool,
-    ) -> Self {
+    fn with(leaves: Option<Vec<Arc<str>>>, children: Option<Children>, in_cell: bool) -> Self {
         Self {
             inline: [0; ALIAS_INLINE],
             inline_len: 0,
@@ -179,12 +183,12 @@ impl AliasSet {
     /// leaves are charged as allocations of their own.
     #[must_use]
     pub fn collecting() -> Self {
-        Self::with(Some(Vec::new()), Some(Vec::new()), false)
+        Self::with(Some(Vec::new()), Some(Children::new()), false)
     }
 
     /// An empty set measuring an owned cell's value.
     pub(crate) fn for_cell() -> Self {
-        Self::with(None, Some(Vec::new()), true)
+        Self::with(None, Some(Children::new()), true)
     }
 
     /// Whether this measures an owned cell's value, which reaches no raw
@@ -234,11 +238,11 @@ impl AliasSet {
     }
 
     /// The owned children the measurement reached, each once.
-    pub(crate) fn take_children(&mut self) -> Vec<Arc<dyn super::owned::Node>> {
-        match self.children.as_mut() {
-            Some(children) => std::mem::take(children),
-            None => Vec::new(),
-        }
+    pub(crate) fn take_children(&mut self) -> Children {
+        self.children
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// The owned allocations the measurement reached, each once, for the
@@ -309,7 +313,7 @@ impl Drop for AliasSet {
     fn drop(&mut self) {
         if !std::thread::panicking() {
             verter_debug_assert::verter_debug_assert!(
-                self.children.as_ref().is_none_or(Vec::is_empty),
+                self.children.as_ref().is_none_or(Children::is_empty),
                 "a measurement reached owned allocations its owner never charged: take them \
                  with `AliasSet::take_handles` and pin or hold them"
             );
