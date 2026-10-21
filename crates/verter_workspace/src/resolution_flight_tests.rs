@@ -275,6 +275,7 @@ fn a_retired_importers_flight_subscribers_stay_admitted() {
         );
         assert_admitted(outcome, "a subscriber");
     }
+    #[cfg(feature = "semantic-observe")]
     assert_eq!(
         producer_runs(&workspace),
         1,
