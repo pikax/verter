@@ -504,6 +504,7 @@ mod golden {
             collect_direct_object_members(body, &mut members);
         }
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: members,
         }))
     }
@@ -1430,6 +1431,7 @@ fn ext(local: &str, specifier: &str, imported: &str, route: RouteDemand) -> Exte
 
 fn obj(props: Vec<(&str, TypeExpr)>) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: props
             .into_iter()
             .map(|(name, ty)| {
@@ -1495,6 +1497,7 @@ fn parity_whole_alias_chain_and_callable_param() {
             TypeExpr::intersection(vec![
                 TypeExpr::named("Base"),
                 TypeExpr::Object(Arc::new(ObjectExpr {
+                    empty_literal: false,
                     properties: vec![method_member("m", vec![("p", TypeExpr::named("Imported"))])],
                 })),
             ]),
@@ -1586,6 +1589,7 @@ fn parity_guarded_emitting_only_carriers() {
         .decl(
             "B",
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![method_member("m", vec![("p", TypeExpr::named("Q"))])],
             })),
         );
@@ -2255,6 +2259,7 @@ fn parity_merged_decl_flattened_walk_and_first_contributor_member_precedence() {
                     obj(vec![("a", TypeExpr::named("Q"))]),
                 ]),
                 TypeExpr::Object(Arc::new(ObjectExpr {
+                    empty_literal: false,
                     properties: vec![method_member("m", vec![("p", TypeExpr::named("Q"))])],
                 })),
             ],

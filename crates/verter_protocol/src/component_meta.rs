@@ -2838,6 +2838,7 @@ fn build_test_meta() -> FfiComponentMeta {
         type_arguments: empty_type_args(),
     };
     let tree_node = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             TypeObjectMember::Property(ObjectProperty::synthetic_public_key(
                 AuthoredPropertyKey::string("label"),

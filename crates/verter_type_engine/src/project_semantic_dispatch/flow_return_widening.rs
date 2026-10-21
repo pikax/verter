@@ -14,16 +14,14 @@
 //!
 //! Where the widening applies is measured on TypeScript 7.0.2: a return
 //! or yield join is widened as a whole; an array is widened through its
-//! element as a whole; a lone object literal widens a union-valued
-//! property as a whole, but not a union two object-literal properties
-//! down (`{ o: { p: c ? { a: 1 } : { a: 1, b: 2 } } }` keeps `p`
-//! un-normalised).
+//! element as a whole; object properties start their own context when
+//! there is no enclosing sibling context, at every nesting depth.
 
 use std::sync::Arc;
 
 use crate::semantic_query::{
-    AuthoredPropertyKey, PrimitiveKind, SemanticNodeData, SemanticNodeId, SurfaceMember,
-    SurfaceView,
+    AuthoredPropertyKey, ObjectConstructionEffect, ObjectSpreadProgram, PrimitiveKind, PropertyKey,
+    SemanticNodeData, SemanticNodeId, SurfaceMember, SurfaceView,
 };
 use verter_session_query::flow::policy::NullabilityPolicy;
 
@@ -40,6 +38,10 @@ enum Widening {
         node: SemanticNodeId,
         siblings: Option<Arc<[SemanticNodeId]>>,
     },
+    /// A spread operand contributes construction alternatives, not an
+    /// independently widened value union. Its own property initializers
+    /// still enter ordinary widening contexts.
+    SpreadOperand { node: SemanticNodeId },
     /// A union rebuilt from its members' widened values.
     Union {
         node: SemanticNodeId,
@@ -51,6 +53,20 @@ enum Widening {
         element: SemanticNodeId,
         readonly: bool,
     },
+    /// A tuple rebuilt from independently widened elements, retaining its
+    /// labels, optional/rest markers and readonly modifier.
+    Tuple { node: SemanticNodeId },
+    /// A literal construction rebuilt after widening its initializer children.
+    /// Only the completed literal participates in the enclosing sibling context.
+    SpreadLiteral {
+        node: SemanticNodeId,
+        program: ObjectSpreadProgram,
+        siblings: Option<Arc<[SemanticNodeId]>>,
+        count: usize,
+    },
+    /// A callable rebuilt from its normalized parameter initializers. Its
+    /// return remains owned by the original header, including any deferral.
+    Parameters { node: SemanticNodeId, count: usize },
     /// A lone literal rebuilt from the widened values of the members
     /// `widened` marks, in member order.
     LoneLiteral {
@@ -90,6 +106,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Widening::Visit { node, siblings } => {
                     self.widening_visit(node, siblings, &mut tasks, &mut values);
                 }
+                Widening::SpreadOperand { node } => {
+                    let data = self.graph().node_data(node);
+                    if let Some(SemanticNodeData::Union(members)) = data.as_deref() {
+                        let members = members.iter().copied().collect::<Vec<_>>();
+                        drop(data);
+                        let visits = members
+                            .iter()
+                            .rev()
+                            .map(|node| Widening::SpreadOperand { node: *node })
+                            .collect::<Vec<_>>();
+                        tasks.push(Widening::Union { node, members });
+                        tasks.extend(visits);
+                    } else {
+                        drop(data);
+                        self.widening_visit(node, None, &mut tasks, &mut values);
+                    }
+                }
                 Widening::Union { node, members } => {
                     let widened = values.split_off(values.len() - members.len());
                     values.push(if widened == members {
@@ -107,10 +140,107 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     values.push(if widened == element {
                         node
                     } else {
-                        self.graph().intern_node(SemanticNodeData::Array {
-                            element: widened,
-                            readonly,
-                        })
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::Array {
+                                element: widened,
+                                readonly,
+                            },
+                        )
+                    });
+                }
+                Widening::Tuple { node } => {
+                    let graph = self.graph();
+                    let original = graph.node_data(node).expect("the tuple being widened");
+                    let SemanticNodeData::Tuple { elements, readonly } = original.as_ref() else {
+                        unreachable!("only tuples schedule tuple widening");
+                    };
+                    let widened = values.split_off(values.len() - elements.len());
+                    values.push(
+                        if elements
+                            .iter()
+                            .map(|element| element.value)
+                            .eq(widened.iter().copied())
+                        {
+                            node
+                        } else {
+                            let elements = elements
+                                .iter()
+                                .zip(widened)
+                                .map(|(element, value)| {
+                                    let mut widened = element.copy();
+                                    widened.value = value;
+                                    widened
+                                })
+                                .collect::<Vec<_>>();
+                            graph.intern_preserving_scope(
+                                node,
+                                SemanticNodeData::Tuple {
+                                    elements: elements.into(),
+                                    readonly: *readonly,
+                                },
+                            )
+                        },
+                    );
+                }
+                Widening::SpreadLiteral {
+                    node,
+                    program,
+                    siblings,
+                    count,
+                } => {
+                    let mut widened = values.split_off(values.len() - count).into_iter();
+                    let rebuilt = program.map_child_nodes(|_| {
+                        widened.next().expect("the widened construction child")
+                    });
+                    let normalized = if rebuilt == program {
+                        node
+                    } else {
+                        self.graph().intern_preserving_scope(
+                            node,
+                            SemanticNodeData::ObjectSpreadProgram(rebuilt.share()),
+                        )
+                    };
+                    let normalized = match siblings {
+                        Some(siblings) => {
+                            self.spread_literal_in_context(normalized, &rebuilt, &siblings)
+                        }
+                        None => normalized,
+                    };
+                    values.push(self.regularized_empty_object_program(normalized));
+                }
+                Widening::Parameters { node, count } => {
+                    let mut parameters = values
+                        .split_off(values.len() - count)
+                        .into_iter()
+                        .map(|ty| self.regularized_source_node_with_policy(ty, nullability));
+                    let graph = self.graph();
+                    let original = graph.node_data(node).expect("the callable being widened");
+                    let mut rebuilt = original.as_ref().clone();
+                    match &mut rebuilt {
+                        SemanticNodeData::Signature { params, .. } => {
+                            *params = params
+                                .iter()
+                                .map(|param| {
+                                    let mut normalized = param.copy();
+                                    normalized.ty =
+                                        parameters.next().expect("the widened parameter");
+                                    normalized
+                                })
+                                .collect::<Vec<_>>()
+                                .into();
+                        }
+                        SemanticNodeData::DeferredCallable(callable) => {
+                            *callable = callable.map_parameter_types(|_| {
+                                parameters.next().expect("the widened parameter")
+                            });
+                        }
+                        _ => unreachable!("only callable headers schedule parameter widening"),
+                    }
+                    values.push(if rebuilt == *original {
+                        node
+                    } else {
+                        graph.intern_preserving_scope(node, rebuilt)
                     });
                 }
                 Widening::LoneLiteral {
@@ -155,10 +285,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
                     for sibling in &context {
                         for candidate in sibling.positive_members() {
-                            if members
-                                .iter()
-                                .any(|member| same_property(&member.key, &candidate.key))
-                            {
+                            if members.iter().any(|member| {
+                                self.same_widening_property(&member.key, &candidate.key)
+                            }) {
                                 continue;
                             }
                             members.push(SurfaceMember {
@@ -183,9 +312,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ///
     /// A union widens each member in the context of its siblings (the
     /// union's own members for a whole value), an array its element as a
-    /// whole value. A lone object literal widens each union- or
-    /// array-valued property as a whole value and keeps a nested literal
-    /// as it is; in a context, a literal widens each property in the
+    /// whole value. An object without literal siblings widens its properties
+    /// independently; in a context, a literal widens each property in the
     /// context of the same property of its siblings and receives the
     /// properties they name and it lacks.
     fn widening_visit(
@@ -225,7 +353,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     siblings: None,
                 });
             }
-            Some(SemanticNodeData::Object(view)) if object_literal_surface(view) => {
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                let children: Vec<_> = elements.iter().map(|element| element.value).collect();
+                drop(data);
+                tasks.push(Widening::Tuple { node });
+                tasks.extend(children.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
+            }
+            Some(SemanticNodeData::Object(view)) if self.object_literal_surface(view) => {
                 let view = view.clone();
                 drop(data);
                 match siblings {
@@ -237,7 +374,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 matches!(
                                     self.graph().node_data(member.value).as_deref(),
                                     Some(
-                                        SemanticNodeData::Union(_) | SemanticNodeData::Array { .. }
+                                        SemanticNodeData::Union(_)
+                                            | SemanticNodeData::Array { .. }
+                                            | SemanticNodeData::Tuple { .. }
+                                            | SemanticNodeData::Object(_)
+                                            | SemanticNodeData::ObjectSpreadProgram(_)
+                                            | SemanticNodeData::Signature { .. }
+                                            | SemanticNodeData::DeferredCallable(_)
                                     )
                                 )
                             })
@@ -266,7 +409,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .filter_map(|sibling| {
                                 match self.graph().node_data(*sibling).as_deref() {
                                     Some(SemanticNodeData::Object(sibling))
-                                        if object_literal_surface(sibling) =>
+                                        if self.object_literal_surface(sibling) =>
                                     {
                                         Some(sibling.clone())
                                     }
@@ -274,24 +417,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 }
                             })
                             .collect();
+                        let property_context = self.widening_property_context(&siblings);
                         let visits: Vec<Widening> = view
                             .positive_members()
                             .iter()
                             .rev()
-                            .map(|member| {
-                                let property_siblings: Vec<SemanticNodeId> = context
-                                    .iter()
-                                    .filter_map(|sibling| {
-                                        sibling.positive_members().iter().find(|candidate| {
-                                            same_property(&candidate.key, &member.key)
-                                        })
-                                    })
-                                    .flat_map(|candidate| self.constituents(candidate.value))
-                                    .collect();
-                                Widening::Visit {
-                                    node: member.value,
-                                    siblings: Some(Arc::from(property_siblings)),
-                                }
+                            .map(|member| Widening::Visit {
+                                node: member.value,
+                                siblings: Some(
+                                    self.widening_property_siblings(&property_context, &member.key),
+                                ),
                             })
                             .collect();
                         tasks.push(Widening::LiteralInContext {
@@ -303,18 +438,82 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     }
                 }
             }
+            Some(SemanticNodeData::Signature { params, .. }) => {
+                let parameters: Vec<_> = params.iter().map(|param| param.ty).collect();
+                drop(data);
+                tasks.push(Widening::Parameters {
+                    node,
+                    count: parameters.len(),
+                });
+                tasks.extend(parameters.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
+            }
+            Some(SemanticNodeData::DeferredCallable(callable)) => {
+                let mut parameters = Vec::new();
+                callable.for_each_parameter_type(|ty| parameters.push(ty));
+                drop(data);
+                tasks.push(Widening::Parameters {
+                    node,
+                    count: parameters.len(),
+                });
+                tasks.extend(parameters.into_iter().rev().map(|node| Widening::Visit {
+                    node,
+                    siblings: None,
+                }));
+            }
             // A spread-built literal names no property to its siblings, but
             // receives the ones it lacks (`c ? { a: 1, q: 1 } : { ...s, a: 2
             // }` gives the spread arm `q?: undefined`): each is one more
-            // direct write after its construction program. As a whole value
-            // it is kept as it is.
-            Some(SemanticNodeData::ObjectSpreadProgram(program)) => {
+            // direct write after its construction program. An effect-free
+            // result is the ordinary empty surface after this normalization.
+            Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
                 let program = program.share();
                 drop(data);
-                values.push(match siblings {
-                    Some(siblings) => self.spread_literal_in_context(node, &program, &siblings),
-                    None => node,
+                let property_context = siblings
+                    .as_deref()
+                    .map(|siblings| self.widening_property_context(siblings));
+                let mut children = Vec::new();
+                let mut cursor = 0;
+                while let Some((slot, child)) = program.child_at_slot(cursor) {
+                    let visit = match program
+                        .effects
+                        .get(slot / 2)
+                        .expect("the construction child's effect")
+                    {
+                        ObjectConstructionEffect::Spread(_) => {
+                            Widening::SpreadOperand { node: child }
+                        }
+                        ObjectConstructionEffect::DirectProperty(effect) if slot % 2 == 1 => {
+                            Widening::Visit {
+                                node: child,
+                                siblings: property_context.as_ref().map(|context| {
+                                    self.widening_property_siblings(context, &effect.key)
+                                }),
+                            }
+                        }
+                        ObjectConstructionEffect::DirectProperty(_)
+                        | ObjectConstructionEffect::DirectMethod(_)
+                        | ObjectConstructionEffect::DirectGet(_)
+                        | ObjectConstructionEffect::DirectSet(_)
+                        | ObjectConstructionEffect::DirectIndex(_)
+                        | ObjectConstructionEffect::DirectCall(_)
+                        | ObjectConstructionEffect::DirectConstruct(_) => Widening::Visit {
+                            node: child,
+                            siblings: None,
+                        },
+                    };
+                    children.push(visit);
+                    cursor = slot + 1;
+                }
+                tasks.push(Widening::SpreadLiteral {
+                    node,
+                    program,
+                    siblings,
+                    count: children.len(),
                 });
+                tasks.extend(children.into_iter().rev());
             }
             _ => {
                 drop(data);
@@ -350,11 +549,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             else {
                 continue;
             };
-            if !object_literal_surface(&sibling) {
+            if !self.object_literal_surface(&sibling) {
                 continue;
             }
             for candidate in sibling.positive_members() {
-                let named = |member: &SurfaceMember| same_property(&member.key, &candidate.key);
+                let named = |member: &SurfaceMember| {
+                    self.same_widening_property(&member.key, &candidate.key)
+                };
                 if surface.positive_members().iter().any(named) || added.iter().any(named) {
                     continue;
                 }
@@ -384,6 +585,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         self.graph()
             .intern_node(SemanticNodeData::ObjectSpreadProgram(
                 crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 },
             ))
@@ -405,40 +607,97 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         view: &SurfaceView,
         members: Vec<SurfaceMember>,
     ) -> SemanticNodeId {
+        let members = members
+            .into_iter()
+            .map(|mut member| {
+                if let Some(key) = self.widening_property_key(&member.key) {
+                    member.key = AuthoredPropertyKey::from_known(key);
+                }
+                member
+            })
+            .collect::<Vec<_>>();
         if members.as_slice() == view.positive_members() {
             return node;
         }
-        self.graph().intern_node(SemanticNodeData::Object(
-            crate::semantic_query::surface_view! {
+        self.graph().intern_preserving_scope(
+            node,
+            SemanticNodeData::Object(crate::semantic_query::surface_view! {
                 members: Arc::from(members.into_boxed_slice()),
                 call_signatures: Arc::clone(&view.call_signatures),
                 construct_signatures: Arc::clone(&view.construct_signatures),
                 index_signatures: Arc::clone(&view.index_signatures),
                 keyspace: view.keyspace,
                 has_index_signature: view.has_known_index_signature(),
-            },
-        ))
+            }),
+        )
     }
-}
+    /// Same-property contexts include spread-built literals, whose outer
+    /// keys still do not contribute missing properties to their siblings.
+    fn widening_property_context(&self, siblings: &[SemanticNodeId]) -> Vec<SurfaceView> {
+        siblings
+            .iter()
+            .filter_map(
+                |sibling| match self.graph().node_data(*sibling).as_deref() {
+                    Some(SemanticNodeData::Object(view)) if self.object_literal_surface(view) => {
+                        Some(view.clone())
+                    }
+                    Some(SemanticNodeData::ObjectSpreadProgram(program)) if program.is_literal => {
+                        self.resolve_typeinfo_surface_view(
+                            *sibling,
+                            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                        )
+                    }
+                    _ => None,
+                },
+            )
+            .collect()
+    }
 
-/// Whether `view` is an object literal's own type: a surface whose every
-/// member the literal wrote directly (`FreshOwn`), with no signature. An
-/// empty surface names no literal member and is not recognised as one.
-fn object_literal_surface(view: &SurfaceView) -> bool {
-    view.call_signatures.is_empty()
-        && view.construct_signatures.is_empty()
-        && view.index_signatures.is_empty()
-        && !view.positive_members().is_empty()
-        && view.positive_members().iter().all(|member| {
-            member.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
-                && member.key.as_known().is_some()
-        })
-}
+    fn widening_property_siblings(
+        &self,
+        context: &[SurfaceView],
+        key: &AuthoredPropertyKey,
+    ) -> Arc<[SemanticNodeId]> {
+        context
+            .iter()
+            .filter_map(|sibling| {
+                sibling
+                    .positive_members()
+                    .iter()
+                    .find(|candidate| self.same_widening_property(&candidate.key, key))
+            })
+            .flat_map(|candidate| self.constituents(candidate.value))
+            .collect()
+    }
 
-/// Whether two member keys name the same property.
-fn same_property(a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
-    match (a.as_known(), b.as_known()) {
-        (Some(a), Some(b)) => a.element_access_collides(&b),
-        _ => false,
+    /// A computed key participates only once the shared index-key resolver
+    /// identifies one property; dynamic key domains remain ineligible.
+    fn widening_property_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
+        match key {
+            AuthoredPropertyKey::Computed(node) => {
+                self.resolve_authored_key(&self.normalized_index_key_node(*node))
+            }
+            _ => key.cloned_known(),
+        }
+    }
+
+    /// Whether every member was written directly by this literal and names
+    /// one resolved property. An empty surface carries no literal provenance.
+    fn object_literal_surface(&self, view: &SurfaceView) -> bool {
+        view.call_signatures.is_empty()
+            && view.construct_signatures.is_empty()
+            && view.index_signatures.is_empty()
+            && !view.positive_members().is_empty()
+            && view.positive_members().iter().all(|member| {
+                member.excess_origin == verter_type_expr::ExcessPropertyOrigin::FreshOwn
+                    && self.widening_property_key(&member.key).is_some()
+            })
+    }
+
+    fn same_widening_property(&self, a: &AuthoredPropertyKey, b: &AuthoredPropertyKey) -> bool {
+        match (self.widening_property_key(a), self.widening_property_key(b)) {
+            (Some(a), Some(b)) => a.element_access_collides(&b),
+            _ => false,
+        }
     }
 }

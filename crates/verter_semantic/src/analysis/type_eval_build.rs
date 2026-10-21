@@ -1982,6 +1982,7 @@ pub fn lower_class_body_selection(
             );
             elements_lowered = selection.lowered;
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: selection.members,
             }))
         }
@@ -2066,6 +2067,7 @@ fn lower_named_interface_parts(
 
     // Handle extends clauses — merge inherited properties
     let mut body = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: members,
     }));
 
@@ -3559,6 +3561,7 @@ fn collect_named_class_selecting(
     // dropped the cross-file heritage. Folding it here gives every terminal
     // projection the same typed-IR declaration shape.
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: members,
     }));
     // A heritage EXPRESSION the facts cannot name reads its value through a
@@ -3684,6 +3687,7 @@ fn collect_named_class_selecting(
         .collect();
     constructor_properties.extend(static_members);
     let constructor_shape = ObjectExpr {
+        empty_literal: false,
         properties: constructor_properties,
     };
 
