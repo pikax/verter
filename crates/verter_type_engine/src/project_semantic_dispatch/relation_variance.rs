@@ -250,12 +250,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
                 .collect()
         } else {
-            let DeclarationVariance::Known(variances) =
-                self.parameter_variances(&declaration, source_args.len(), true)?
-            else {
-                return None;
-            };
-            variances
+            match self.parameter_variances(&declaration, source_args.len(), true)? {
+                DeclarationVariance::Known(variances) => variances,
+                // While the declaration's variance is measured, the checker's
+                // `inferFromTypeArguments` reads every argument as covariant
+                // and the relation answers the in-progress `Unknown`: the
+                // pair infers from its arguments and never relates the two
+                // references structurally, which would instantiate each
+                // member's methods in the other's context again, one more
+                // level per member (`PL<R1 | R2>` against `PL<R1' | R2'>`
+                // over a `then` returning `PL<TResult1 | TResult2>`).
+                DeclarationVariance::InProgress(result) => {
+                    for (&source, &target) in source_args.iter().zip(target_args.iter()) {
+                        let _ =
+                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    }
+                    return Some(result_and(assignable(bindings), result));
+                }
+            }
         };
         if variances
             .iter()
@@ -541,7 +553,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// One marker relation of a measurement, assignability as the
     /// checker's `isTypeAssignableTo` asks it (`None` when undecided),
     /// and whether it reported an unreliable marker — computed, or replayed
-    /// from the memo, where its footprint carries the report.
+    /// from the memo, where its footprint carries the report. It relates
+    /// behind a binding barrier: a measurement is a function of the
+    /// declaration alone, so an inference session open where it was first
+    /// needed neither steers it nor receives its deposits (a method's own
+    /// type parameter the session infers is the one the marker
+    /// instantiations' methods declare).
     fn variance_marker_relation(
         &self,
         source: SemanticNodeId,
@@ -552,7 +569,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .relation
             .last_relation_unreliable = false;
         let observation = self.observe_read(|| {
-            let step = self.execute_relate(self.relate_key_for(source, target));
+            let step = self.execute_relate_without_binding(self.relate_key_for(source, target));
             let unreliable = self.dispatch_txn.borrow().relation.last_relation_unreliable;
             (step, unreliable)
         });

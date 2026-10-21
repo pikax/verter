@@ -8389,7 +8389,7 @@ impl Default for FreshnessKey {
 /// A binding-producing relation runs inside the enclosing transaction's active
 /// `InferenceSession`; a judgement discharged under one session's setup must NOT
 /// warm-hit a judgement discharged under a different setup, so this projection
-/// is part of relation identity. The seven axes are exactly the fields the active
+/// is part of relation identity. The eight axes are exactly the fields the active
 /// session carries (§4.2), projected content-free onto the cache key.
 ///
 /// **Content-free (R6).** Every axis is a node-set interning identity, a closed
@@ -8417,6 +8417,9 @@ pub struct InferenceContextKey {
     /// Whether / how a contextual target drives inference in this session
     /// (§4.2).
     pub contextual_inference_mode: ContextualInferenceMode,
+    /// Whether the session's relation verdicts decide anything, or only its
+    /// candidates are read.
+    pub verdict_use: InferenceVerdictUse,
 }
 
 /// Inference algorithm selected from the relation pattern before a session
@@ -8429,6 +8432,21 @@ pub enum InferencePassKind {
     Ordinary,
     /// Candidate-local inference while deciding call applicability.
     CallApplicability,
+}
+
+/// What an inference session reads of the relations it runs. Part of
+/// relation identity: a relation run for its candidates alone relates a
+/// generic signature pair otherwise than one whose verdict is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum InferenceVerdictUse {
+    /// The verdict decides the read the session serves: a conditional
+    /// type's `extends` check, a call's applicability.
+    #[default]
+    Decides,
+    /// Only the deposited candidates are read, as the checker's
+    /// `inferTypes` (which never fails) infers one signature's positions
+    /// into another's type parameters (`instantiateSignatureInContextOf`).
+    CandidatesOnly,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an

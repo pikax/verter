@@ -605,11 +605,11 @@ fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A thenable interface whose `then` mirrors the library `Promise`'s: its
-/// callback parameters are unions with `undefined` and `null` whose returns
-/// name the interface again under the method's own defaulted type
+/// Two thenable interfaces whose `then` mirrors the library `Promise`'s:
+/// its callback parameters are unions with `undefined` and `null` whose
+/// returns name the interface again under the method's own defaulted type
 /// parameters.
-const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\n";
+const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\ninterface PP2<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PP2<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PP2<TResult2>) | undefined | null): PP2<TResult1 | TResult2>; }\n";
 
 /// Relating the library `Promise<1>` to a thenable interface of its own
 /// shape infers each `then` in the other's context: `TResult1 |
@@ -618,32 +618,40 @@ const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 =
 /// `TResult1` alone, as the checker's `inferToMultipleTypes` does. The
 /// read finishes: no level instantiates the next with a candidate holding
 /// the previous level's reference (`TResult1 | PL<TResult1>` nesting once
-/// more per `then`, past the lane's deadline).
+/// more per `then`, past the lane's deadline). The inference that
+/// instantiates one `then` in the other's context reads its candidates
+/// alone, so it infers from each nested `then` at its base signature, as
+/// the checker's `inferFromSignatures` does, never by instantiating it in
+/// turn: each such instantiation opens one more inference, one native
+/// level deeper per `then`, past the lane thread's stack before the
+/// checker's depth limit stops it. Two user-declared thenables of that
+/// shape relate as the checker relates them (`[PP2<1>] extends [PL<1>]` is
+/// `0`). The library read is held to termination only: the lane reads it
+/// `0`.
 ///
 /// Mutation: inferring a reference to another declaration into the naked
-/// variable exhausts the deadline.
-///
-/// Ignored while the relation recurses natively through each `then`'s
-/// call-applicability inference (`instantiate_signature_in_context_of`
-/// relating its callback unions, references to one declaration related by
-/// structure under the session) up to the checker's depth limit, which
-/// overflows the lane's stack first: two user-declared thenables of this
-/// shape (`[PP2<1>] extends [PL<1>]`) overflow it alike.
+/// variable exhausts the deadline; instantiating a generic `then` in the
+/// other's context inside that inference overflows the lane's stack.
 #[test]
-#[ignore = "the relation recurses natively through each then's call-applicability inference past the lane thread's stack before the checker's depth limit stops it"]
 fn a_mirrored_thenable_relation_terminates() {
-    let rows = [(
-        Read::Type("Promise<1> extends PL<infer U> ? U : 0"),
-        vec!["1"],
-    )];
+    let rows = [
+        (
+            Read::Type("Promise<1> extends PL<infer U> ? U : 0"),
+            vec!["1"],
+        ),
+        (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), vec!["0"]),
+    ];
     let matrix = Matrix::new(MIRRORED_THENABLE)
         .lib(GLOBALS_LIB)
         .settings(&[STRICT]);
-    let verdict = &matrix.verdicts(&rows)[0][0];
+    let verdicts = matrix.verdicts(&rows);
+    let library = &verdicts[0][0];
     assert!(
-        !matches!(verdict.class, "HANG" | "PANIC"),
+        !matches!(library.class, "HANG" | "PANIC"),
         "{}: {}",
-        verdict.class,
-        verdict.lane
+        library.class,
+        library.lane
     );
+    let user = &verdicts[1][0];
+    assert!(user.matched, "{}: {}", user.class, user.lane);
 }

@@ -561,7 +561,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// [`Self::execute_relate`] behind a binding barrier: no session open
     /// before it accepts a deposit.
-    fn execute_relate_without_binding(&self, key: RelateMemoKey) -> RelationStep {
+    pub(super) fn execute_relate_without_binding(&self, key: RelateMemoKey) -> RelationStep {
         self.dispatch_txn.borrow_mut().begin_binding_disabled();
         let step = self.execute_relate(key);
         self.dispatch_txn.borrow_mut().end_binding_disabled();
@@ -5373,10 +5373,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Under an inference session a generic source infers as its base
     /// signature (`inferFromSignatures` reads `getBaseSignature`: `<T>(x:
     /// T) => T` against `(...a: infer A) => infer R` infers `[x: unknown]`
-    /// and `unknown`) — unless the target is generic itself: its own type
-    /// parameters are no inference site of the session, so the pair relates
-    /// as it does outside one (`callWith(id, 3)` over `callWith<T>(f: <U>(x:
-    /// U) => U, x: T)`). `None` when the base signature cannot be read.
+    /// and `unknown`) — unless the target is generic itself and the
+    /// session's verdict is read: the target's own type parameters are no
+    /// inference site of the session, so the pair relates as it does outside
+    /// one (`callWith(id, 3)` over `callWith<T>(f: <U>(x: U) => U, x: T)`).
+    /// A session read for its candidates alone (`inferTypes` inside
+    /// `instantiateSignatureInContextOf`) reads the base signature against
+    /// a generic target too, as `inferFromSignatures` does: instantiating
+    /// the source in the target's context would open one more inference per
+    /// generic method the pair's members hold — a thenable's `then` over
+    /// another's, each callback's return naming the thenable again — one
+    /// native level deeper each. `None` when the base signature cannot be
+    /// read.
     fn signature_relation_source(
         &self,
         source: SemanticNodeId,
@@ -5386,7 +5394,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if self.current_relation_kind() == RelationKind::Comparable {
             return Some(source);
         }
-        if !self.relation_session_active() || self.signature_is_generic(target) {
+        if !self.relation_session_active()
+            || (self.signature_is_generic(target) && !self.relation_session_reads_candidates_only())
+        {
             return Some(
                 self.instantiate_signature_in_context_of(source, target, kind)
                     .unwrap_or(source),
@@ -5396,6 +5406,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return self.base_signature(source);
         }
         Some(source)
+    }
+
+    /// Whether the active inference session reads its relations for their
+    /// candidates alone ([`InferenceVerdictUse::CandidatesOnly`]).
+    ///
+    /// [`InferenceVerdictUse::CandidatesOnly`]: crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+    fn relation_session_reads_candidates_only(&self) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| {
+                session.context_key().verdict_use
+                    == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+            })
     }
 
     /// Whether `signature` declares type parameters of its own.
@@ -12686,7 +12710,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 bindings,
                 InferPosition::ContravariantParam,
             );
-            let pair = if bivariant && !matches!(contravariant, RelationResult::Assignable { .. }) {
+            let pair = if bivariant
+                && !matches!(contravariant, RelationResult::Assignable { .. })
+                && !self.parameters_relate_as_callbacks(s_param, t_param)
+            {
                 self.relation_session_rollback(&checkpoint);
                 bindings.truncate(bindings_len);
                 let fallback_checkpoint = self.relation_session_checkpoint();
@@ -12757,6 +12784,54 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             InferPosition::Return,
         );
         result_and(acc, r)
+    }
+
+    /// Whether a signature pair's parameters `source` and `target` relate as
+    /// callbacks (`compareSignaturesRelated`'s callback check): each is one
+    /// call signature declaring no type predicate, `null` and `undefined`
+    /// aside, and under `strictNullChecks` both admit `null` alike and
+    /// `undefined` alike (without it neither is a member of a type). Such a
+    /// pair relates the target's callback to the source's alone, never the
+    /// reverse, under a method target or without `strictFunctionTypes` too:
+    /// `then`'s `onfulfilled` callback makes `PromiseLike` covariant in `T`,
+    /// never bivariant.
+    fn parameters_relate_as_callbacks(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> bool {
+        let callback = |node: SemanticNodeId| -> Option<(bool, bool)> {
+            let graph = self.graph();
+            let members: Arc<[SemanticNodeId]> = match graph.node_data(node).as_deref() {
+                Some(SemanticNodeData::Union(members)) => members.members_arc(),
+                _ => Arc::from([node]),
+            };
+            let (mut null, mut undefined, mut signature) = (false, false, None);
+            for member in members.iter() {
+                match graph.node_data(*member).as_deref()? {
+                    SemanticNodeData::Primitive(PrimitiveKind::Null) => null = true,
+                    SemanticNodeData::Primitive(PrimitiveKind::Undefined) => undefined = true,
+                    SemanticNodeData::Signature {
+                        kind: crate::semantic_query::SignatureKind::Call,
+                        predicate: None,
+                        ..
+                    } if signature.is_none() => signature = Some(*member),
+                    _ => return None,
+                }
+            }
+            signature.map(|_| (null, undefined))
+        };
+        let strict_null_checks = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .strict
+            .unwrap_or(StrictFamilyConfig::TS_STRICT)
+            .strict_null_checks;
+        matches!(
+            (callback(source), callback(target)),
+            (Some(a), Some(b)) if a == b || !strict_null_checks
+        )
     }
 
     /// When the active session infers through `target`'s rest parameter —

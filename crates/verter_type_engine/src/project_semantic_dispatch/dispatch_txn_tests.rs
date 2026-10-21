@@ -67,6 +67,7 @@ fn inference_context_key_projects_every_session_setup_axis() {
         no_infer_mask: _,
         const_param_policy: _,
         contextual_inference_mode: _,
+        verdict_use: _,
     } = baseline_key.clone();
 
     let variants = [
@@ -124,6 +125,16 @@ fn inference_context_key_projects_every_session_setup_axis() {
             ConstParamPolicy::NonConst,
             ContextualInferenceMode::Contextual,
         ),
+        setup(
+            active_param,
+            VariancePhase::Covariant,
+            InferencePassKind::Ordinary,
+            InferenceCandidatePriority::Argument,
+            NoInferMask::empty(),
+            ConstParamPolicy::NonConst,
+            ContextualInferenceMode::None,
+        )
+        .reading_candidates_only(),
     ];
     for variant in &variants {
         assert_ne!(

@@ -43,7 +43,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
             _ => return None,
         };
-        let target_return = match graph.node_data(target).as_deref() {
+        let (target_return, source_tps) = match graph.node_data(target).as_deref() {
             Some(SemanticNodeData::Signature {
                 return_type,
                 type_parameters,
@@ -53,7 +53,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .map(|tp| tp.param)
                 .ne(source_tps.iter().map(|tp| tp.param)) =>
             {
-                *return_type
+                // A type parameter both clauses declare — the same
+                // declaration's method read through two instantiations of
+                // its owner, one parameter's default naming the owner's
+                // argument and the other's not — is the target's own: the
+                // checker instantiates each with fresh type parameters and
+                // infers the source's from the target's, which is this one.
+                let own: Arc<[TypeParamDecl]> = source_tps
+                    .iter()
+                    .filter(|decl| {
+                        type_parameters
+                            .iter()
+                            .all(|other| other.param != decl.param)
+                    })
+                    .map(TypeParamDecl::copy)
+                    .collect();
+                (*return_type, own)
             }
             _ => return None,
         };
@@ -147,7 +162,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             NoInferMask::empty(),
             ConstParamPolicy::NonConst,
             ContextualInferenceMode::None,
-        );
+        )
+        .reading_candidates_only();
         let session_id = self
             .dispatch_txn
             .borrow_mut()

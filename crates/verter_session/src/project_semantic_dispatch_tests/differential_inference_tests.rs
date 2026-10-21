@@ -3165,7 +3165,7 @@ fn pinned_key_remapped_mapped_type_relations() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// The library's `Promise` relates to `PromiseLike`, its `then` infers a callback's return and `Promise.resolve` unwraps a nested promise.
+/// The library's `Promise` relates to `PromiseLike` and, covariantly, to itself, as `PromiseLike` does to itself, its `then` infers a callback's return and `Promise.resolve` unwraps a nested promise.
 #[test]
 fn pinned_library_promise_relations_and_calls() {
     let failures = Matrix::new(AWAITED_AND_PROMISES).lib(GLOBALS_LIB).four(&[
@@ -3182,6 +3182,20 @@ fn pinned_library_promise_relations_and_calls() {
             r#"2"#,
             r#"2"#,
             r#"2"#,
+        ),
+        (
+            Read::Type(r#"[Promise<1>] extends [Promise<number>] ? 1 : 2"#),
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+        ),
+        (
+            Read::Type(r#"[PromiseLike<1>] extends [PromiseLike<number>] ? 1 : 2"#),
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
+            r#"1"#,
         ),
         (
             Read::Return(r#"a7"#),
@@ -3323,6 +3337,49 @@ fn generic_method_interfaces_relate_and_infer_structurally() {
         (
             Read::Type(r#"Map1<Map1<1>> extends Map2<infer U> ? U : 0"#),
             r#"Map1<1>"#,
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Methods taking a callback, optional or not.
+const CALLBACK_METHOD_INTERFACES: &str = r##"
+interface Read<T> { m(f: (v: T) => void): Read<T> }
+interface Peek<T> { m(f: (v: T) => void): Peek<T> }
+interface Opt<T> { m(f?: ((v: T) => void) | null): void }
+interface Opt2<T> { m(f?: ((v: T) => void) | null): void }
+interface Mix<T> { m(f?: ((v: T) => void) | undefined): void }
+"##;
+
+/// A method's callback parameter relates contravariantly alone, though the
+/// method's parameters are otherwise bivariant (`compareSignaturesRelated`'s
+/// callback check), so an interface whose method takes a callback over `T`
+/// is covariant in `T`: `Read<number>` relates to neither `Peek<1>` nor
+/// `Read<1>`, while `Read<1>` relates to `Peek<number>`. A parameter that
+/// admits `null` against one that admits only `undefined` is no callback
+/// pair. TypeScript 7.0.2, all four settings alike.
+#[test]
+fn method_callback_parameters_relate_contravariantly() {
+    let failures = Matrix::new(CALLBACK_METHOD_INTERFACES).same(&[
+        (
+            Read::Type(r#"[Read<number>] extends [Peek<1>] ? 1 : 2"#),
+            r#"2"#,
+        ),
+        (
+            Read::Type(r#"[Read<1>] extends [Peek<number>] ? 1 : 2"#),
+            r#"1"#,
+        ),
+        (
+            Read::Type(r#"[Opt<number>] extends [Opt2<1>] ? 1 : 2"#),
+            r#"2"#,
+        ),
+        (
+            Read::Type(r#"[Opt<number>] extends [Mix<1>] ? 1 : 2"#),
+            r#"2"#,
+        ),
+        (
+            Read::Type(r#"[Read<number>] extends [Read<1>] ? 1 : 2"#),
+            r#"2"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));

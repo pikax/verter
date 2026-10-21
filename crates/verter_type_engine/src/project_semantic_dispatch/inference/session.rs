@@ -12,8 +12,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::super::dispatch_txn::SessionId;
 use crate::semantic_query::{
     ConstParamPolicy, ContextualInferenceMode, IndexSignature, InferBinding, InferableParamSetId,
-    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, NoInferMask,
-    SemanticNodeId, SurfaceMember, TupleElement, VariancePhase,
+    InferenceCandidatePriority, InferenceContextKey, InferencePassKind, InferenceVerdictUse,
+    NoInferMask, SemanticNodeId, SurfaceMember, TupleElement, VariancePhase,
 };
 
 /// Lifecycle of an in-flight inference session.
@@ -227,9 +227,18 @@ impl InferenceSessionSetup {
                 no_infer_mask,
                 const_param_policy,
                 contextual_inference_mode,
+                verdict_use: InferenceVerdictUse::Decides,
             },
             infos,
         }
+    }
+
+    /// The same setup for a session whose relations are run for their
+    /// candidates alone ([`InferenceVerdictUse::CandidatesOnly`]).
+    #[must_use]
+    pub fn reading_candidates_only(mut self) -> Self {
+        self.context_key.verdict_use = InferenceVerdictUse::CandidatesOnly;
+        self
     }
 
     pub(crate) fn context_key(&self) -> &InferenceContextKey {
