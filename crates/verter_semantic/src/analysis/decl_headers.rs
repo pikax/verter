@@ -345,7 +345,7 @@ fn index_top_level_statement(
             );
         }
         Statement::TSImportEqualsDeclaration(import) => {
-            index_namespace_alias(import, ctx, index);
+            index_namespace_alias(import, import.id.name.as_str(), ctx, index);
         }
         Statement::ExportDeclaration(export) => {
             let decl = &export.declaration;
@@ -438,17 +438,19 @@ fn index_declaration(
             );
         }
         Declaration::TSImportEqualsDeclaration(import) => {
-            index_namespace_alias(import, ctx, index);
+            index_namespace_alias(import, import.id.name.as_str(), ctx, index);
         }
     }
 }
 
-/// Index a file-scope `import X = N.M` alias of an entity name: `X` names
+/// Index an `import X = N.M` alias of an entity name under `name` — `X`
+/// at file scope, the qualified `Ns.X` in a namespace body: `X` names
 /// whatever `N.M` names, in type, value and namespace position. An
 /// `import X = require("…")` is a module import, recorded by the import
 /// inventory instead.
 fn index_namespace_alias(
     import: &oxc_ast::ast::TSImportEqualsDeclaration<'_>,
+    name: &str,
     ctx: HeaderStatementContext<'_>,
     index: &mut DeclHeaderIndex,
 ) {
@@ -465,10 +467,9 @@ fn index_namespace_alias(
     let Some(target) = target else {
         return;
     };
-    index.namespace_aliases.insert(
-        ctx.key(import.id.name.as_str()),
-        std::sync::Arc::from(target),
-    );
+    index
+        .namespace_aliases
+        .insert(ctx.key(name), std::sync::Arc::from(target));
 }
 
 /// Index one `enum` declaration's HEADER facts: the member-name inventory
@@ -804,6 +805,10 @@ fn index_namespaced_statement(
         Statement::TSExternalModuleDeclaration(module) => {
             index_external_module_declaration(module, ctx, index);
         }
+        Statement::TSImportEqualsDeclaration(import) => {
+            let name = format!("{namespace}.{}", import.id.name);
+            index_namespace_alias(import, &name, ctx, index);
+        }
         // Export-only: a DIRECT (non-exported) value declaration is private to
         // a non-ambient namespace body and is NOT indexed. The exported path
         // below (`export const VERSION = …` → `index_namespaced_declaration`)
@@ -869,6 +874,10 @@ fn index_namespaced_declaration(
         }
         Declaration::FunctionDeclaration(func) => {
             index_function_in(func, ctx, &mut index.value_headers, Some(namespace));
+        }
+        Declaration::TSImportEqualsDeclaration(import) => {
+            let name = format!("{namespace}.{}", import.id.name);
+            index_namespace_alias(import, &name, ctx, index);
         }
         _ => {}
     }

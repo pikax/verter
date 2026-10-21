@@ -6453,10 +6453,12 @@ pub(super) fn namespace_of_member<'a>(qualified: &'a str, name: &str) -> Option<
 /// The namespace member a `typeof` path written in a namespaced declaration's
 /// body heads, as the qualified root it reads from and the number of path
 /// segments that root consumes. `name_resolution` binds each name relative to
-/// an enclosing namespace (`C.v` inside `namespace A.B` to `A.B.C.v`); the
-/// longest bound prefix of the path names the member. `None` when no prefix
-/// is such a namespace-scope binding of `canonical`'s `owner` (a file-scope
-/// name, an import), so the path reads from its written root.
+/// an enclosing namespace (`C.v` inside `namespace A.B` to `A.B.C.v`), or
+/// through an `import X = N.M` the namespace body declares (`X.v` to
+/// `N.M.v`); the longest bound prefix of the path names the member. `None`
+/// when no prefix is such a namespace-scope binding of `canonical`'s `owner`
+/// to another qualified member (a file-scope name, an import), so the path
+/// reads from its written root.
 pub(super) fn namespace_scoped_typeof_root(
     name_resolution: &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
     canonical: &str,
@@ -6481,9 +6483,8 @@ pub(super) fn namespace_scoped_typeof_root(
             let qualified = identity.symbol_name.as_ref();
             (identity.canonical_id.as_ref() == canonical
                 && identity.owner == owner
-                && qualified.len() > prefix.len()
-                && qualified.ends_with(prefix.as_str())
-                && qualified.as_bytes()[qualified.len() - prefix.len() - 1] == b'.')
-                .then(|| (identity.symbol_name.clone(), index + 1))
+                && qualified != prefix.as_str()
+                && qualified.contains('.'))
+            .then(|| (identity.symbol_name.clone(), index + 1))
         })
 }

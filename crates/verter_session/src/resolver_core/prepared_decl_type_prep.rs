@@ -536,7 +536,67 @@ fn add_namespace_sibling_resolutions(
                 ),
             );
         }
+        // An `import X = N.M` this namespace's body declares binds `X` to the
+        // entity `N.M` names, resolved from this namespace outward (`N`
+        // relative to each enclosing namespace, innermost first, then the
+        // file): `X.T` is bound to that entity's member `T`.
+        for (key, target) in &state.headers.namespace_aliases {
+            if key.owner != owner {
+                continue;
+            }
+            let Some(alias) = key.name.as_ref().strip_prefix(&dotted_prefix) else {
+                continue;
+            };
+            if alias.contains('.') || shadowed.contains(alias) {
+                continue;
+            }
+            let Some(entity) = alias_entity(&names, current, target) else {
+                continue;
+            };
+            let entity_prefix = format!("{entity}.");
+            for name in &names {
+                let bound_name = if *name == entity {
+                    alias.to_string()
+                } else if let Some(member) = name.strip_prefix(&entity_prefix) {
+                    format!("{alias}.{member}")
+                } else {
+                    continue;
+                };
+                name_resolution.insert(
+                    interner.intern(&bound_name),
+                    ResolvedRootIdentity::new_in_owner(
+                        canonical_id.clone(),
+                        owner,
+                        interner.intern(name),
+                    ),
+                );
+            }
+            bound.push(alias);
+        }
         shadowed.extend(bound);
         namespace = current.rsplit_once('.').map(|(outer, _)| outer);
     }
+}
+
+/// The qualified entity the target `N.M` of an `import X = N.M` declared in
+/// the namespace `namespace` names: `N.M` read as a member of `namespace`,
+/// then of each namespace enclosing it, then at file scope — the first
+/// under which `names` declares the entity itself or a member of it. `None`
+/// when none does.
+fn alias_entity(names: &[&str], namespace: &str, target: &str) -> Option<String> {
+    let declares = |entity: &str| {
+        let prefix = format!("{entity}.");
+        names
+            .iter()
+            .any(|name| *name == entity || name.starts_with(&prefix))
+    };
+    let mut scope = Some(namespace);
+    while let Some(current) = scope {
+        let entity = format!("{current}.{target}");
+        if declares(&entity) {
+            return Some(entity);
+        }
+        scope = current.rsplit_once('.').map(|(outer, _)| outer);
+    }
+    declares(target).then(|| target.to_owned())
 }

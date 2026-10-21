@@ -964,10 +964,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .flatten()
                 })
                 // A qualified name whose head nothing in scope declares or
-                // imports reads through the GLOBAL namespace of that name.
+                // imports reads through the GLOBAL namespace of that name —
+                // through the entity an `import X = N.M` alias heading it
+                // names (`X.T` reads the global `N.M.T`).
                 .or_else(|| {
-                    let (head, _) = name.split_once('.')?;
-                    (!self.unresolved_head_is_authored_import(scope, name.as_ref())
+                    let expanded = self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical_id.as_ref())
+                        .and_then(|serve| {
+                            serve
+                                .indexed
+                                .shallow_state
+                                .headers
+                                .expand_namespace_alias(*owner, name.as_ref())
+                        });
+                    let qualified = expanded.as_deref().unwrap_or(name.as_ref());
+                    let (head, _) = qualified.split_once('.')?;
+                    (!self.unresolved_head_is_authored_import(scope, qualified)
                         && resolve_bare_name_in_scope(
                             self.ctx,
                             self,
@@ -978,7 +991,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         )
                         .is_none())
                     .then(|| {
-                        self.global_namespace_type_declaration(canonical_id.as_ref(), name.as_ref())
+                        self.global_namespace_type_declaration(canonical_id.as_ref(), qualified)
                     })
                     .flatten()
                 })
