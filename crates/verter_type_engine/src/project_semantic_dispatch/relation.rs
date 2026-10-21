@@ -2394,20 +2394,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// A pair of literal types relates, under every relation kind and
     /// policy, exactly when the two are one value (`"a"` to `"a"`, never
-    /// `"a"` to `"b"` or `1` to `"1"`). A literal and one of the four
+    /// `"a"` to `"b"` or `1` to `"1"`). A literal against one of the four
     /// primitives literals belong to (`string`, `number`, `bigint`,
-    /// `boolean`) are decided as plainly under every directional relation
-    /// and comparability: a literal relates to its own primitive (`"a"` to
-    /// `string`) and to no other (`"a"` to `number`); a primitive is
-    /// comparable to a literal of its own and assignable to none. Deciding
-    /// any of them reads nothing and cannot re-enter itself — the checker's
-    /// `isSimpleTypeRelatedTo` answers them from the two types' flags. So
-    /// they are decided before the reentry intercept, the memo and the cold
-    /// build, whose query machinery a guard filtering a wide literal union
-    /// otherwise paid twice per remaining arm, and a template capture
-    /// checked against its implied `string` constraint once per capture.
-    /// The operands' file roots are deposited as the cold build's read
-    /// would record them. `None` for any other pair — a literal against a
+    /// `boolean`) is decided as plainly under every directional relation and
+    /// comparability: it relates to its own primitive (`"a"` to `string`)
+    /// and to no other (`"a"` to `number`). Deciding either reads nothing
+    /// and cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
+    /// answers both from the two types' flags. So they are decided before
+    /// the reentry intercept, the memo and the cold build, whose query
+    /// machinery a guard filtering a wide literal union otherwise paid twice
+    /// per remaining arm, and a template capture checked against its implied
+    /// `string` constraint once per capture. The operands' file roots are
+    /// deposited as the cold build's read would record them. `None` for any
+    /// other pair — a primitive against a literal, and a literal against a
     /// primitive under [`RelationKind::Identity`], whose structural axis the
     /// relation leaves undecided, included — and while an inference session
     /// collects (its candidate bookkeeping runs the ordinary path).
@@ -2442,12 +2441,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(SemanticNodeData::Primitive(primitive)),
             ) if relation != RelationKind::Identity && holds_literals(*primitive) => {
                 literal_primitive(literal) == *primitive
-            }
-            (
-                Some(SemanticNodeData::Primitive(primitive)),
-                Some(SemanticNodeData::Literal(literal)),
-            ) if relation != RelationKind::Identity && holds_literals(*primitive) => {
-                relation == RelationKind::Comparable && literal_primitive(literal) == *primitive
             }
             _ => return None,
         };
