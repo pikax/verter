@@ -57,6 +57,11 @@ use verter_session_query::inputs::prepared::TypeParamBinding;
 pub struct DeclarationScopePayload {
     bundle: verter_session_query::inputs::prepared::PreparedInputRef,
     owner: verter_type_expr::TopLevelOwnerId,
+    /// The global namespace whose block declares the declaration being
+    /// lowered (`A.B` for a script's `namespace A.B { type V = … }`): the
+    /// innermost of the namespace scopes its body's names resolve in
+    /// before the file's. `None` outside such a block.
+    enclosing_global_namespace: Option<verter_type_expr::OwnedStr>,
 }
 
 impl std::fmt::Debug for DeclarationScopePayload {
@@ -68,6 +73,10 @@ impl std::fmt::Debug for DeclarationScopePayload {
             .field("scope_value_names", self.scope_value_names())
             .field("scope_type_bindings", self.scope_type_bindings())
             .field("import_bindings", self.import_bindings())
+            .field(
+                "enclosing_global_namespace",
+                &self.enclosing_global_namespace,
+            )
             .finish()
     }
 }
@@ -91,7 +100,25 @@ impl DeclarationScopePayload {
         Self {
             bundle: bundle.scope_inputs(),
             owner,
+            enclosing_global_namespace: None,
         }
+    }
+
+    /// The payload of a declaration a block of the global namespace
+    /// `namespace` declares: its body's names resolve against every block
+    /// of that namespace (and of each namespace enclosing it), whichever
+    /// script declares the block.
+    #[must_use]
+    pub fn within_global_namespace(mut self, namespace: verter_type_expr::OwnedStr) -> Self {
+        self.enclosing_global_namespace = Some(namespace);
+        self
+    }
+
+    /// The global namespace whose block declares the declaration, innermost
+    /// first when nested; see [`Self::within_global_namespace`].
+    #[must_use]
+    pub fn enclosing_global_namespace(&self) -> Option<&str> {
+        self.enclosing_global_namespace.as_deref()
     }
 
     #[must_use]

@@ -159,3 +159,158 @@ type PlainValue = typeof P.v;
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A script's dotted namespace block names a member another script's block
+/// of the same global namespace contributes, by its short name, in type and
+/// `typeof` position: global namespaces merge across scripts. A member of
+/// the inner namespace shadows the outer namespace's member of that name,
+/// whichever file declares it, and an edit to the contributing block
+/// reaches a warm read.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the two
+/// scripts and a probe module, each read off a TS2322 against `never`):
+/// `A.B.V` is `1`, `A.B.U[0]` `1`,
+/// `A.B.U[1]` `2`, `A.B.W` `"outer"`, `A.B.Y` `"inner"`; with `T = 3` in
+/// `b.ts`, `A.B.V` is `3`.
+///
+/// Mutation: binding only the declaring file's own blocks leaves `C.T`
+/// unresolved inside `namespace A.B` and reads `X` as `A.X`.
+#[test]
+fn a_dotted_block_reads_a_member_another_scripts_block_contributes() {
+    use super::checker_probe_lane_tests::{
+        mismatches_in, mismatches_on_host, probe_host, ProbeProject,
+    };
+    let declaring = "namespace A.B { export type V = C.T; export type U = [C.T, typeof C.v]; \
+        export type W = O; }\n\
+        namespace A { export type X = \"outer\"; }\n\
+        namespace A.B { export type Y = X; }\n";
+    let contributing = |t: &'static str| -> String {
+        format!(
+            "namespace A.B.C {{ export type T = {t}; export const v = 2 as const; }}\n\
+             namespace A {{ export type O = \"outer\"; }}\n\
+             namespace A.B {{ export type X = \"inner\"; }}\n"
+        )
+    };
+    let before = contributing("1");
+    let after = contributing("3");
+    let files = [("a.ts", declaring), ("b.ts", before.as_str())];
+    let edited_files = [("a.ts", declaring), ("b.ts", after.as_str())];
+    let project = |files| ProbeProject {
+        files,
+        compiler_options: None,
+        ambient_lib: None,
+    };
+    let mut failures = mismatches_in(
+        project(&files),
+        "export {};\n",
+        &[
+            ("A.B.V", "1"),
+            ("A.B.U[0]", "1"),
+            ("A.B.U[1]", "2"),
+            ("A.B.W", "\"outer\""),
+            ("A.B.Y", "\"inner\""),
+        ],
+    );
+    let warm = probe_host(project(&files));
+    failures.extend(mismatches_on_host(
+        &warm,
+        project(&files),
+        "export {};\n",
+        &[("A.B.V", "1")],
+    ));
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &warm,
+        "/wb/b.ts",
+        &after,
+        crate::FileLanguage::script_ts(),
+    );
+    failures.extend(
+        mismatches_on_host(
+            &warm,
+            project(&edited_files),
+            "export {};\n",
+            &[("A.B.V", "3")],
+        )
+        .into_iter()
+        .map(|failure| format!("after the edit, warm: {failure}")),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A class merged with another script's namespace that exports no value
+/// still depends on that namespace: once an edit makes it export a value
+/// (a new exported value, or `export` on a declared one), a warm host
+/// answers the class's static keys as a cold build does.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the
+/// two scripts): before each edit `ClassKeys` is `"prototype"`, after it
+/// `"make" | "prototype"`.
+///
+/// Mutation: a warm read that keeps no dependency on the namespace's file
+/// when the namespace merges nothing answers `"prototype"` after the edit.
+#[test]
+fn a_namespace_starting_to_export_a_value_misses_the_warm_class_read() {
+    use super::checker_probe_lane_tests::{probe_host, ProbeProject};
+    let class_script = "type __D<T> = T extends unknown ? T : never;\n\
+        declare class K {}\n\
+        type ClassKeys = __D<keyof typeof K>;\n";
+    let edits = [
+        (
+            "declare namespace K { type T = 0 }\n",
+            "declare namespace K { const make: 1 }\n",
+        ),
+        (
+            "namespace K { const hidden = 1; }\n",
+            "namespace K { const hidden = 1; export const make = 1; }\n",
+        ),
+        (
+            "namespace K { const make = 1; }\n",
+            "namespace K { export const make = 1; }\n",
+        ),
+    ];
+    let read = |host: &Arc<crate::VerterHost>, expected: &str| {
+        let node = host
+            .resolve_named_symbol_with_audit("/wb/a.ts", "ClassKeys", None)
+            .into_result()
+            .expect("the named demand does not fault")
+            .expect("`ClassKeys` resolves");
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+        let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+        let expected = checker_syntax::parse(expected).expect("the checker print parses");
+        (
+            render_node(&dispatch, node.id(), 0),
+            checker_syntax::matches_node(&dispatch, node.id(), &expected, 0),
+        )
+    };
+    let after = "\"make\" | \"prototype\"";
+    let project = |files| ProbeProject {
+        files,
+        compiler_options: None,
+        ambient_lib: None,
+    };
+    let mut failures = Vec::new();
+    for (namespace, edited) in edits {
+        let files = [("a.ts", class_script), ("b.ts", namespace)];
+        let edited_files = [("a.ts", class_script), ("b.ts", edited)];
+        let warm = probe_host(project(&files));
+        let (before, matched) = read(&warm, "\"prototype\"");
+        assert!(matched, "before editing `{namespace}`: {before}");
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &warm,
+            "/wb/b.ts",
+            edited,
+            crate::FileLanguage::script_ts(),
+        );
+        let (cold, matched) = read(&probe_host(project(&edited_files)), after);
+        assert!(matched, "a cold build of `{edited}`: {cold}");
+        let (warm_after, matched) = read(&warm, after);
+        if !matched {
+            failures.push(format!(
+                "after editing `{namespace}` to `{edited}`, the warm host answers `{warm_after}`"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

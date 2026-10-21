@@ -829,6 +829,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
     }
 
+    /// The member of an enclosing global namespace a name written in a
+    /// declaration body of a script's namespace block names
+    /// ([`DeclarationScopePayload::enclosing_global_namespace`]), whichever
+    /// script's block of that namespace declares it: a namespace scope
+    /// precedes the file's. `bound` is what the declaration's own
+    /// `name_resolution` binds the name to: a binding outside the file's
+    /// namespace members stands, and one to a member of an enclosing
+    /// namespace stands unless a more inner namespace declares the name.
+    /// `None` when the body is no such block's or no enclosing namespace
+    /// shadows the binding.
+    pub(super) fn enclosing_namespace_binding(
+        &self,
+        scope: &NodeScopeId,
+        scope_payload: Option<&DeclarationScopePayload>,
+        name: &str,
+        bound: Option<&ResolvedRootIdentity>,
+    ) -> Option<ResolvedRootIdentity> {
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return None;
+        };
+        let namespace = scope_payload?.enclosing_global_namespace()?;
+        let outer_bound = match bound {
+            None => None,
+            Some(bound) => {
+                let member_of = bound
+                    .symbol_name
+                    .as_ref()
+                    .strip_suffix(name)
+                    .and_then(|prefix| prefix.strip_suffix('.'))
+                    .filter(|_| bound.canonical_id.as_ref() == canonical_id.as_ref())?;
+                Some(member_of)
+            }
+        };
+        self.enclosing_namespace_type_member(canonical_id.as_ref(), namespace, name, outer_bound)
+    }
+
     pub(super) fn plan_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
@@ -902,51 +938,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the map does not carry (the carrier-subject entry rehydrates an EMPTY
         // map + the scope payload, so the fallback is the whole resolver there).
         let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
-            Some(direct.clone())
+            Some(
+                self.enclosing_namespace_binding(scope, scope_payload, name.as_ref(), Some(direct))
+                    .unwrap_or_else(|| direct.clone()),
+            )
         } else if let NodeScopeId::File {
             canonical_id,
             owner,
             ..
         } = scope
         {
-            resolve_bare_name_in_scope(
-                self.ctx,
-                self,
-                canonical_id.as_ref(),
-                *owner,
-                scope_payload,
-                name.as_ref(),
-            )
-            // A bare name nothing in scope declares or imports is a GLOBAL
-            // name: it names the merged global declaration of the project's
-            // library and the program, whose identity is its first
-            // declaration in declaration precedence order (the
-            // declaration's `Instantiate` folds in the rest).
-            .or_else(|| {
-                (!name.contains('.')
-                    && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
-                .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
-                .flatten()
-            })
-            // A qualified name whose head nothing in scope declares or
-            // imports reads through the GLOBAL namespace of that name.
-            .or_else(|| {
-                let (head, _) = name.split_once('.')?;
-                (!self.unresolved_head_is_authored_import(scope, name.as_ref())
-                    && resolve_bare_name_in_scope(
+            self.enclosing_namespace_binding(scope, scope_payload, name.as_ref(), None)
+                .or_else(|| {
+                    resolve_bare_name_in_scope(
                         self.ctx,
                         self,
                         canonical_id.as_ref(),
                         *owner,
                         scope_payload,
-                        head,
+                        name.as_ref(),
                     )
-                    .is_none())
-                .then(|| {
-                    self.global_namespace_type_declaration(canonical_id.as_ref(), name.as_ref())
                 })
-                .flatten()
-            })
+                // A bare name nothing in scope declares or imports is a GLOBAL
+                // name: it names the merged global declaration of the project's
+                // library and the program, whose identity is its first
+                // declaration in declaration precedence order (the
+                // declaration's `Instantiate` folds in the rest).
+                .or_else(|| {
+                    (!name.contains('.')
+                        && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
+                    .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
+                    .flatten()
+                })
+                // A qualified name whose head nothing in scope declares or
+                // imports reads through the GLOBAL namespace of that name.
+                .or_else(|| {
+                    let (head, _) = name.split_once('.')?;
+                    (!self.unresolved_head_is_authored_import(scope, name.as_ref())
+                        && resolve_bare_name_in_scope(
+                            self.ctx,
+                            self,
+                            canonical_id.as_ref(),
+                            *owner,
+                            scope_payload,
+                            head,
+                        )
+                        .is_none())
+                    .then(|| {
+                        self.global_namespace_type_declaration(canonical_id.as_ref(), name.as_ref())
+                    })
+                    .flatten()
+                })
         } else {
             None
         };

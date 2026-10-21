@@ -390,9 +390,24 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<ModuleObject> {
+        let (object, roots) =
+            self.global_namespace_object_observed(demand_canonical, name, context);
+        object.map(|object| (object, roots))
+    }
+
+    /// [`Self::global_namespace_object`] with the file of every script
+    /// declaring a namespace of the name it read, its object or not: an
+    /// edit making a type-only namespace declare a value misses a read
+    /// that found none.
+    fn global_namespace_object_observed(
+        &self,
+        demand_canonical: &str,
+        name: &str,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
         use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if name.contains('.') {
-            return None;
+            return (None, Vec::new());
         }
         let population = self.global_contributors_in(
             demand_canonical,
@@ -415,7 +430,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             |entry| entry.artifact_key.canonical.as_ref(),
             |_, _| std::cmp::Ordering::Equal,
         );
-        let first = declarations.first()?;
+        let Some(first) = declarations.first() else {
+            return (None, Vec::new());
+        };
         let mut roots: Vec<ObservedGraphSelfRoot> = Vec::new();
         let mut members: Vec<(Arc<str>, ValueRootKey)> = Vec::new();
         let mut seen: FxHashSet<String> = FxHashSet::default();
@@ -449,49 +466,69 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             }
         }
         if !instantiated {
-            return None;
+            return (None, roots);
         }
         members.sort_by(|left, right| left.0.cmp(&right.0));
         let first_canonical: Arc<str> = Arc::clone(&first.artifact_key.canonical);
-        let hash = self
+        let Some(hash) = self
             .ctx
-            .ensure_indexed_ready_serve(first_canonical.as_ref())?
-            .indexed
-            .whole_hash;
+            .ensure_indexed_ready_serve(first_canonical.as_ref())
+            .map(|serve| serve.indexed.whole_hash)
+        else {
+            return (None, roots);
+        };
         let scope = NodeScopeId::File {
             canonical_id: verter_type_expr::OwnedStr::from(first_canonical.clone()),
             owner: first.owner,
             whole_hash: hash,
             local_scope: None,
         };
-        Some((
-            self.value_object(members, scope, first_canonical.as_ref(), context),
+        (
+            Some(self.value_object(members, scope, first_canonical.as_ref(), context)),
             roots,
-        ))
+        )
     }
 
     /// The object of the namespace a function or a class named `name` in
     /// `canonical` merges with, when that namespace exports a value: its own
     /// file's namespace, or for a script's global every script's namespace of
     /// that name. `None` when no such namespace exports a value, so the value
-    /// stays a single declaration.
+    /// stays a single declaration. The roots are every file whose namespace
+    /// of the name was read, whether or not it merges: a read that merged
+    /// nothing still depends on those namespaces exporting no value.
     pub(super) fn namespace_merged_into_value(
         &self,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
-    ) -> Option<ModuleObject> {
-        let object = if !name.contains('.') && !self.canonical_is_module(canonical) {
-            self.global_namespace_object(canonical, name, context)
+    ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
+        let (object, roots) = if !name.contains('.') && !self.canonical_is_module(canonical) {
+            self.global_namespace_object_observed(canonical, name, context)
         } else {
-            self.namespace_object(canonical, owner, None, name, context)
-        }?;
-        let has_members = matches!(
-            self.graph().node_data(object.0).as_deref(),
-            Some(SemanticNodeData::Object(surface)) if !surface.positive_members().is_empty()
-        );
-        has_members.then_some(object)
+            match self.namespace_object(canonical, owner, None, name, context) {
+                Some((object, roots)) => (Some(object), roots),
+                None => (
+                    None,
+                    self.ctx
+                        .ensure_indexed_ready_serve(canonical)
+                        .map(|serve| {
+                            vec![(
+                                verter_type_expr::OwnedStr::from(canonical),
+                                serve.indexed.whole_hash,
+                            )]
+                        })
+                        .unwrap_or_default(),
+                ),
+            }
+        };
+        let object = object.filter(|object| {
+            matches!(
+                self.graph().node_data(*object).as_deref(),
+                Some(SemanticNodeData::Object(surface)) if !surface.positive_members().is_empty()
+            )
+        });
+        (object, roots)
     }
 
     /// The object of the namespace `name` declared in `canonical` (in its

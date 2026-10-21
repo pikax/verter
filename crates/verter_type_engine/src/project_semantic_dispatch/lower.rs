@@ -2812,6 +2812,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     canonical_id,
                     *owner,
                     Some(name_resolution),
+                    scope_payload,
                     value_ref,
                     reduction_context,
                 ) else {

@@ -1701,9 +1701,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .prepared_decl_bundle(value_root.scope.canonical_id.as_ref())
             .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                self.declaration_scope_payload(
                     &bundle,
+                    value_root.scope.canonical_id.as_ref(),
                     value_root.scope.owner,
+                    value_root.name.as_ref(),
                 )
             });
         // R15/F11 — capture the scope-shadowing context
@@ -2272,25 +2274,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node_id = if synthesised_default.is_none()
             && prepared.kind == verter_session_query::declarations::ValueDeclKind::Class
         {
-            match self.namespace_merged_into_value(
+            let (object, roots) = self.namespace_merged_into_value(
                 effective_canonical.as_ref(),
                 effective_owner,
                 effective_symbol.as_ref(),
                 context,
-            ) {
-                Some((object, roots)) => {
-                    augmentation_roots.extend(roots);
-                    self.merged_value_and_namespace(
-                        node_id,
-                        object,
-                        NodeScopeId::File {
-                            canonical_id: value_root.scope.canonical_id.clone(),
-                            owner: value_root.scope.owner,
-                            whole_hash: observed_hash,
-                            local_scope: value_root.scope.local_scope,
-                        },
-                    )
-                }
+            );
+            augmentation_roots.extend(roots);
+            match object {
+                Some(object) => self.merged_value_and_namespace(
+                    node_id,
+                    object,
+                    NodeScopeId::File {
+                        canonical_id: value_root.scope.canonical_id.clone(),
+                        owner: value_root.scope.owner,
+                        whole_hash: observed_hash,
+                        local_scope: value_root.scope.local_scope,
+                    },
+                ),
                 None => node_id,
             }
         } else {
@@ -2569,22 +2570,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 verter_session_query::declarations::ValueDeclKind::Function
                     | verter_session_query::declarations::ValueDeclKind::AsyncFunction
             );
-            match is_function
-                .then(|| {
-                    self.namespace_merged_into_value(
-                        identity.canonical_id.as_ref(),
-                        identity.owner,
-                        identity.symbol_name.as_ref(),
-                        context,
-                    )
-                })
-                .flatten()
-            {
-                Some((object, roots)) => {
-                    augmentation_roots.extend(roots);
-                    self.merged_value_and_namespace(surface, object, scope.clone())
+            if is_function {
+                let (object, roots) = self.namespace_merged_into_value(
+                    identity.canonical_id.as_ref(),
+                    identity.owner,
+                    identity.symbol_name.as_ref(),
+                    context,
+                );
+                augmentation_roots.extend(roots);
+                match object {
+                    Some(object) => self.merged_value_and_namespace(surface, object, scope.clone()),
+                    None => surface,
                 }
-                None => surface,
+            } else {
+                surface
             }
         };
         (node, augmentation_roots, augmentation_unobservable)
@@ -5769,8 +5768,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .ctx
             .prepared_decl_bundle(decl_canonical.as_ref())
             .map(|bundle| {
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle, decl_owner,
+                self.declaration_scope_payload(
+                    &bundle,
+                    decl_canonical.as_ref(),
+                    decl_owner,
+                    decl_name.as_ref(),
                 )
             });
         // R15/F11 — capture the scope-shadowing context
@@ -7703,12 +7705,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         whole_hash: indexed.whole_hash,
                         local_scope: None,
                     };
-                    let aug_scope_payload = Some(
-                crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                    &bundle,
-                    entry.owner,
-                ),
-            );
+                    let aug_scope_payload = Some(self.declaration_scope_payload(
+                        &bundle,
+                        canonical,
+                        entry.owner,
+                        decl_name,
+                    ));
                     let aug_shadowing =
                         crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
                             aug_scope_payload.as_ref(),
@@ -8434,6 +8436,102 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> bool {
         name == "ThisType"
             && self.is_global_type_declaration(demand_canonical, canonical, owner, name)
+    }
+
+    /// The declaration-scope payload the body of the declaration
+    /// `decl_name` of `canonical`'s `owner` resolves its names in. A
+    /// script's namespace block is a block of the GLOBAL namespace, so a
+    /// declaration it declares also reads the members other scripts'
+    /// blocks of its enclosing namespaces contribute
+    /// ([`DeclarationScopePayload::within_global_namespace`]).
+    pub(super) fn declaration_scope_payload(
+        &self,
+        bundle: &impl crate::resolver_core::bare_name_resolve::PreparedInputSource,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        decl_name: &str,
+    ) -> crate::resolver_core::bare_name_resolve::DeclarationScopePayload {
+        let payload = crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+            bundle, owner,
+        );
+        match decl_name.rsplit_once('.') {
+            Some((namespace, _))
+                if owner == verter_type_expr::TopLevelOwnerId::ordinary_file()
+                    && !self.canonical_is_module(canonical) =>
+            {
+                payload.within_global_namespace(verter_type_expr::OwnedStr::from(namespace))
+            }
+            _ => payload,
+        }
+    }
+
+    /// The type a name written in a block of the global namespace
+    /// `namespace` names as a member of an enclosing namespace:
+    /// `{N}.{name}` for each namespace `N` enclosing the block, innermost
+    /// first (`A.B`, then `A`), whichever script's block of `N` exports it
+    /// ([`Self::global_namespace_type_declaration`], which observes the
+    /// namespace's contributors). The walk stops before `outer_bound`, the
+    /// namespace whose member the declaration's own scope already binds the
+    /// name to, so only a more inner namespace's member shadows it. `None`
+    /// when no enclosing namespace declares the name.
+    pub(super) fn enclosing_namespace_type_member(
+        &self,
+        demand_canonical: &str,
+        namespace: &str,
+        name: &str,
+        outer_bound: Option<&str>,
+    ) -> Option<ResolvedRootIdentity> {
+        let mut current = Some(namespace);
+        while let Some(prefix) = current {
+            if outer_bound == Some(prefix) {
+                return None;
+            }
+            if let Some(member) = self
+                .global_namespace_type_declaration(demand_canonical, &format!("{prefix}.{name}"))
+            {
+                return Some(member);
+            }
+            current = prefix.rsplit_once('.').map(|(outer, _)| outer);
+        }
+        None
+    }
+
+    /// The qualified value a `typeof` path written in a block of the global
+    /// namespace `namespace` heads as a member of an enclosing namespace,
+    /// with the number of path segments it consumes: for each namespace
+    /// `N` enclosing the block, innermost first, the longest prefix of the
+    /// path that `{N}.{prefix}` names a global value of
+    /// ([`Self::global_value_declarations`]). `None` when no enclosing
+    /// namespace declares such a value.
+    pub(super) fn enclosing_namespace_value_root(
+        &self,
+        demand_canonical: &str,
+        namespace: &str,
+        path: &[String],
+    ) -> Option<(verter_type_expr::OwnedStr, usize)> {
+        let mut current = Some(namespace);
+        while let Some(prefix) = current {
+            let mut qualified = String::from(prefix);
+            let mut candidates = Vec::with_capacity(path.len());
+            for segment in path {
+                qualified.push('.');
+                qualified.push_str(segment);
+                candidates.push(qualified.clone());
+            }
+            for (index, candidate) in candidates.iter().enumerate().rev() {
+                if self
+                    .global_value_declarations(demand_canonical, candidate)
+                    .is_some_and(|declarations| !declarations.is_empty())
+                {
+                    return Some((
+                        verter_type_expr::OwnedStr::from(candidate.as_str()),
+                        index + 1,
+                    ));
+                }
+            }
+            current = prefix.rsplit_once('.').map(|(outer, _)| outer);
+        }
+        None
     }
 
     /// The declaration the qualified type name `name` (`Ns.T`,

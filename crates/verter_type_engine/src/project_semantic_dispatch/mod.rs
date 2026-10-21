@@ -2891,13 +2891,42 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value_ref: &verter_type_expr::ValueRef,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticQueryKey> {
-        self.typeof_reference_key_in_scope(canonical, owner, None, value_ref, prc)
+        self.typeof_reference_key_in_scope(canonical, owner, None, None, value_ref, prc)
+    }
+
+    /// The qualified value a `typeof` path written in a declaration body
+    /// heads, with the number of path segments it consumes, when its head
+    /// names a member of an enclosing namespace: the member the body's
+    /// `name_resolution` binds in the file's own blocks
+    /// ([`namespace_scoped_typeof_root`]), else, in a block of a global
+    /// namespace, the member any script's block of an enclosing namespace
+    /// declares ([`Self::enclosing_namespace_value_root`]). `None` when the
+    /// path reads from its written root.
+    pub(super) fn namespace_scoped_value_root(
+        &self,
+        name_resolution: Option<
+            &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        >,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        path: &[String],
+    ) -> Option<(verter_type_expr::OwnedStr, usize)> {
+        name_resolution
+            .and_then(|names| namespace_scoped_typeof_root(names, canonical, owner, path))
+            .or_else(|| {
+                let namespace = scope_payload?.enclosing_global_namespace()?;
+                self.enclosing_namespace_value_root(canonical, namespace, path)
+            })
     }
 
     /// [`Self::typeof_reference_key`] for a reference written in a
     /// declaration body whose `name_resolution` binds the names its
     /// enclosing namespaces declare: a path such a name heads reads from the
-    /// namespace member it names ([`namespace_scoped_typeof_root`]).
+    /// namespace member it names ([`namespace_scoped_typeof_root`]), or, in
+    /// a block of a global namespace (`scope_payload`), from the member
+    /// another script's block of an enclosing namespace declares
+    /// ([`Self::namespace_scoped_value_root`]).
     pub(super) fn typeof_reference_key_in_scope(
         &self,
         canonical: &verter_type_expr::OwnedStr,
@@ -2905,12 +2934,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name_resolution: Option<
             &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         >,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
         value_ref: &verter_type_expr::ValueRef,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticQueryKey> {
-        if let Some((root, consumed)) = name_resolution.and_then(|names| {
-            namespace_scoped_typeof_root(names, canonical.as_ref(), owner, &value_ref.path)
-        }) {
+        if let Some((root, consumed)) = self.namespace_scoped_value_root(
+            name_resolution,
+            scope_payload,
+            canonical.as_ref(),
+            owner,
+            &value_ref.path,
+        ) {
             let root_key = crate::semantic_query::ValueRootKey {
                 scope: crate::semantic_query::ScopeId {
                     canonical_id: canonical.clone(),
