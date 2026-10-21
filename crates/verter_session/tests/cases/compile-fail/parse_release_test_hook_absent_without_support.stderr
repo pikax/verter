@@ -1,0 +1,5 @@
+error[E0599]: no method named `release_retained_snapshot_for_test` found for reference `&DeclLoweringService` in the current scope
+ --> tests/cases/compile-fail/parse_release_test_hook_absent_without_support.rs:9:13
+  |
+9 |     service.release_retained_snapshot_for_test(key);
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&DeclLoweringService`
