@@ -239,6 +239,7 @@ inline_only!(
     super::MacroOwnBodyStamp,
     super::MergeRoleStamp,
     super::BinderScopeId,
+    super::NodeLocalScopeId,
     super::PartialReasonSet,
     super::SemanticQueryValueTag,
     super::CheckerDiagnostic,

@@ -16,6 +16,8 @@
 //! it applies TypeScript 7's interop when X can be called or constructed:
 //! the object carries X's own properties and `default`, X itself.
 
+use crate::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 
 use rustc_hash::FxHashSet;
@@ -644,7 +646,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             canonical_id: root.scope.canonical_id.clone(),
             owner: root.scope.owner,
             whole_hash: indexed.whole_hash,
-            local_scope: root.scope.local_scope,
+            local_scope: root
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         Some(self.graph().intern_node_with_scope(
             SemanticNodeData::new_typeof(

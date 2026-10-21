@@ -925,9 +925,9 @@ pub enum NodeScopeId {
         /// Exact authored top-level owner within `canonical_id`.
         owner: verter_type_expr::TopLevelOwnerId,
         whole_hash: HashValue,
-        /// For an ambient namespace body, the ordinal of its retained
-        /// `augmentation_namespace_blocks` record in this file generation.
-        local_scope: Option<u32>,
+        /// A typed address into the owning file generation's lexical-scope
+        /// table or retained ambient namespace-block inventory.
+        local_scope: Option<NodeLocalScopeId>,
     },
 }
 
@@ -959,14 +959,25 @@ impl NodeScopeId {
     }
 }
 
-/// The typed local-scope id that [`NodeScopeId::File::local_scope`] indexes.
+/// The inventory addressed by a declaration-bound node's inner scope.
+/// Equal ordinals in different inventories never name the same scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeLocalScopeId {
+    /// An index into the owning file's lowered local-scope table.
+    Lexical(LocalScopeId),
+    /// An index into the owning file generation's retained
+    /// `augmentation_namespace_blocks` inventory.
+    AugmentationNamespace(u32),
+}
+
+/// The typed index into the owning file's lexical local-scope table.
 ///
-/// `NodeScopeId::File` carries a `local_scope: Option<u32>` to disambiguate an
+/// `NodeScopeId::File` carries a [`NodeLocalScopeId::Lexical`] to disambiguate an
 /// inner lexical scope (a namespace body, a block, a lambda body, a type-param
 /// scope) from the file's top-level scope. `LocalScopeId` is the typed index
 /// into the owning file's [`IndexedReady`](crate::project_type_store::IndexedReady)
 /// / [`ShallowFileState`](crate::resolver_core::ShallowFileState) local-scope
-/// table that the raw `u32` denotes — a CONTENT-FREE id (an index, never a
+/// table — a CONTENT-FREE id (an index, never a
 /// sibling map), so a carrier that stores it stays compact and the resolver
 /// reconstructs the scope's sibling visibility from shallow file state on
 /// demand.
@@ -974,8 +985,7 @@ impl NodeScopeId {
 pub struct LocalScopeId(pub u32);
 
 impl LocalScopeId {
-    /// The raw `u32` index this id wraps — the value stored in
-    /// [`NodeScopeId::File::local_scope`].
+    /// The raw index within the lexical-scope table.
     #[must_use]
     pub fn index(self) -> u32 {
         self.0

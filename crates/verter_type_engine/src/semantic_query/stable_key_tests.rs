@@ -841,6 +841,35 @@ fn raw_fallbacks_key_their_raw_text_not_their_provenance() {
     );
 }
 
+#[test]
+fn lexical_and_ambient_namespace_scope_ordinals_key_apart() {
+    use crate::semantic_query::{LocalScopeId, NodeLocalScopeId, NodeScopeId};
+
+    let graph = SemanticGraphStore::new();
+    let _build = graph.enter_node_root_scope();
+    let nodes = [
+        NodeLocalScopeId::Lexical(LocalScopeId(0)),
+        NodeLocalScopeId::AugmentationNamespace(0),
+    ]
+    .map(|address| {
+        let scope = NodeScopeId::File {
+            canonical_id: "/scopes.ts".into(),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: [0; 16],
+            local_scope: Some(address),
+        };
+        graph.intern_node_with_scope(
+            SemanticNodeData::new_bare_ref(Arc::from("Foo"), scope.clone(), Arc::from([])),
+            scope,
+        )
+    });
+    assert_ne!(nodes[0], nodes[1], "distinct inventories must intern apart");
+    assert!(
+        stable_key_for_node(&graph, nodes[0]) != stable_key_for_node(&graph, nodes[1]),
+        "stable keys must include the inventory discriminator",
+    );
+}
+
 fn import_type(graph: &SemanticGraphStore, importer: Option<&str>) -> SemanticNodeId {
     use crate::semantic_query::NodeScopeId;
     let data = SemanticNodeData::new_import_type(

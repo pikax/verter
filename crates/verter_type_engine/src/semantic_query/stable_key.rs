@@ -303,9 +303,13 @@ fn encode_scope(enc: &mut Recipe, scope: &NodeScopeId) {
             encode_owner(enc, *owner);
             match local_scope {
                 None => enc.u8(0),
-                Some(id) => {
+                Some(super::NodeLocalScopeId::Lexical(id)) => {
                     enc.u8(1);
-                    enc.u32(*id);
+                    enc.u32(id.index());
+                }
+                Some(super::NodeLocalScopeId::AugmentationNamespace(ordinal)) => {
+                    enc.u8(2);
+                    enc.u32(*ordinal);
                 }
             }
         }

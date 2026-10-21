@@ -1,3 +1,5 @@
+use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use super::dispatch_txn::RelationStep;
 use super::*;
 use crate::output_sinks::DispatchOutputTestExt;
@@ -6215,7 +6217,7 @@ fn dispatch_host_adapter_routes_per_base_scope() {
         canonical_id: verter_type_expr::OwnedStr::from("/w/scope_b.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
-        local_scope: Some(5),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(5))),
     };
 
     let anchor_a = graph.intern_node_with_scope(

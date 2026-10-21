@@ -61,8 +61,12 @@ aggregate retention account. A newly added consumer must observe augmenter
 edits and additions even when its declaration subject was already evaluated.
 
 **Ambient namespace body context.** A module-scoped namespace body keeps its
-source-ordered `augmentation_namespace_blocks` ordinal in `NodeScopeId::File`
-`local_scope`, pinned by the canonical file, exact owner and whole-file hash.
+source-ordered `augmentation_namespace_blocks` ordinal as
+`NodeLocalScopeId::AugmentationNamespace` in `NodeScopeId::File.local_scope`,
+pinned by the canonical file, exact owner and whole-file hash. Lexical table
+indices use the distinct `NodeLocalScopeId::Lexical(LocalScopeId)` variant;
+an equal ordinal never selects the ambient namespace inventory. Scope hashing
+and stable-key encoding preserve this discriminator.
 Both locator-shape lowering and contribution projection use that scope. Lexical
 references consult the exact module inventory, walking enclosing namespace
 prefixes before the module root, before file/import/global lookup. They stay

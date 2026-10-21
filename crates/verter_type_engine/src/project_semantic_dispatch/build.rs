@@ -5,6 +5,8 @@
 //! (`graph`, `opaque`, `dep_signature_for`, etc.) without widening their
 //! visibility beyond `pub(super)`.
 
+use crate::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 use verter_type_expr::OwnedStr;
 
@@ -900,7 +902,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id: key.scope.canonical_id.clone(),
             owner: key.scope.owner,
             whole_hash: observed_hash,
-            local_scope: key.scope.local_scope,
+            local_scope: key
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         let signature = self.dep_signature_for(&key.scope.canonical_id, observed_hash);
         // Return a DeclPlaceholder that carries enough identity for
@@ -1243,17 +1248,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 (*root == redirect.declaring && head_path.is_empty()).then(|| identity.clone())
             });
             if let Some(identity) = authored {
-                output.result = QueryResult::Value(self.intern_nominal_typeof(
-                    redirect.authored.clone(),
-                    redirect.path.clone(),
-                    identity,
-                    NodeScopeId::File {
-                        canonical_id: redirect.authored.scope.canonical_id.clone(),
-                        owner: redirect.authored.scope.owner,
-                        whole_hash: redirect.observed_hash,
-                        local_scope: redirect.authored.scope.local_scope,
-                    },
-                ));
+                output.result =
+                    QueryResult::Value(
+                        self.intern_nominal_typeof(
+                            redirect.authored.clone(),
+                            redirect.path.clone(),
+                            identity,
+                            NodeScopeId::File {
+                                canonical_id: redirect.authored.scope.canonical_id.clone(),
+                                owner: redirect.authored.scope.owner,
+                                whole_hash: redirect.observed_hash,
+                                local_scope: redirect.authored.scope.local_scope.map(|ordinal| {
+                                    NodeLocalScopeId::Lexical(LocalScopeId(ordinal))
+                                }),
+                            },
+                        ),
+                    );
             }
         }
         // A member read through an import also depends on this file's
@@ -1683,7 +1693,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     canonical_id: value_root.scope.canonical_id.clone(),
                     owner: value_root.scope.owner,
                     whole_hash: observed_hash,
-                    local_scope: value_root.scope.local_scope,
+                    local_scope: value_root
+                        .scope
+                        .local_scope
+                        .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
                 };
                 let carrier = self.graph().intern_node_with_scope(
                     SemanticNodeData::new_typeof(
@@ -1767,7 +1780,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id: value_root.scope.canonical_id.clone(),
             owner: value_root.scope.owner,
             whole_hash: observed_hash,
-            local_scope: value_root.scope.local_scope,
+            local_scope: value_root
+                .scope
+                .local_scope
+                .map(|ordinal| NodeLocalScopeId::Lexical(LocalScopeId(ordinal))),
         };
         let scope_payload = self
             .ctx
@@ -8191,7 +8207,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Preserve the retained namespace block addressing an ambient body.
-    /// The local scope is an ordinal in `augmentation_namespace_blocks`,
+    /// The namespace address is an ordinal in `augmentation_namespace_blocks`,
     /// pinned by the scope's owner and whole-file hash; it holds no siblings.
     pub(super) fn augmentation_body_scope(
         mut scope: NodeScopeId,
@@ -8233,7 +8249,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         block.span.start <= span.start && span.end <= block.span.end
                     })
             })
-            .and_then(|ordinal| u32::try_from(ordinal).ok());
+            .and_then(|ordinal| u32::try_from(ordinal).ok())
+            .map(NodeLocalScopeId::AugmentationNamespace);
         scope
     }
 
@@ -8259,7 +8276,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id,
             owner,
             whole_hash,
-            local_scope: Some(ordinal),
+            local_scope: Some(NodeLocalScopeId::AugmentationNamespace(ordinal)),
         } = scope
         else {
             return None;

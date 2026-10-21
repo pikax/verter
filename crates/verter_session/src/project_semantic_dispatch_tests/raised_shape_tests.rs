@@ -37,6 +37,8 @@
 //! the fact values (so an always-true / always-false classifier could not pass
 //! the suite).
 
+use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use crate::output_sinks::DispatchOutputTestExt;
 use std::sync::Arc;
 
@@ -1315,13 +1317,13 @@ fn parity_equality_pairs_different_nodes_raise_equal() {
         canonical_id: verter_type_expr::OwnedStr::from("/w/a.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [1u8; 16],
-        local_scope: Some(1),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(1))),
     };
     let scope_b = NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from("/w/b.ts"),
         owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         whole_hash: [2u8; 16],
-        local_scope: Some(2),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(2))),
     };
     let bare_a = graph.intern_node_with_scope(
         SemanticNodeData::new_bare_ref(

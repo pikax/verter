@@ -205,8 +205,16 @@ impl StructuralEncoder<'_> {
                 self.buf.extend_from_slice(&owner.ordinal().to_le_bytes());
                 self.buf.extend_from_slice(whole_hash);
                 match local_scope {
-                    Some(s) => {
+                    Some(verter_type_engine::semantic_query::NodeLocalScopeId::Lexical(s)) => {
                         self.push_present(true);
+                        self.buf.extend_from_slice(&s.index().to_le_bytes());
+                    }
+                    Some(
+                        verter_type_engine::semantic_query::NodeLocalScopeId::AugmentationNamespace(
+                            s,
+                        ),
+                    ) => {
+                        self.buf.push(2);
                         self.buf.extend_from_slice(&s.to_le_bytes());
                     }
                     None => self.push_present(false),
