@@ -2631,7 +2631,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // The check consumes its value at the caller's demand; the
                 // target pattern stays structural. The selected branch keeps
                 // the caller's publication context.
-                let check_context = Self::conditional_operand_context(reduction_context);
+                let mut check_head = check.as_ref();
+                while let TypeExpr::Parenthesized(inner) = check_head {
+                    check_head = inner;
+                }
+                let check_context = if matches!(check_head, TypeExpr::TypeOf { .. }) {
+                    // A value-root lookup names no generic declaration whose
+                    // variance could apply. Navigation would leave its module
+                    // object's member values unread, and the relation compares
+                    // those values.
+                    reduction_context
+                } else {
+                    Self::conditional_operand_context(reduction_context)
+                };
                 let extends_context = Self::conditional_target_context(reduction_context);
                 let check_id = self.lower_type_expr_with_infer_factory(
                     infer_binders,
