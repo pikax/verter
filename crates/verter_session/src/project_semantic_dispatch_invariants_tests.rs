@@ -3942,7 +3942,16 @@ export interface RecB { next: RecB }
             verter_execution::cancellation::CancellationToken::new(),
         ),
     );
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // A captured request runs a dispatcher compiled for captured execution,
+    // bound to a request context of the captured family.
+    let view = crate::VerterHost::resolver_store_view(&host).into_owned_view();
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            &host,
+            &view,
+            Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let graph = host.project_type_store().semantic_graph();
 
     let cold = dispatch.execute_relate_pair_as_result_for_tests(a, b);

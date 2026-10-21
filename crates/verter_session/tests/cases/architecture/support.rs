@@ -629,9 +629,11 @@ pub(super) fn audit_counter_helper_violations(src: &str) -> Vec<String> {
     // at top-level — match their `fn` signature, then walk forward
     // to the next top-level `}\n` (i.e. a `}` followed by a newline,
     // appearing at column 0).
+    // A helper may be generic over the recording unit's capture mode, so the
+    // signature is matched up to its name.
     let helper_signatures = [
-        "fn record_inflight_aborted_retry(",
-        "fn record_cold_abort_swept(",
+        "fn record_inflight_aborted_retry",
+        "fn record_cold_abort_swept",
     ];
     let mut helper_ranges: Vec<(usize, usize)> = Vec::new();
     for sig in &helper_signatures {

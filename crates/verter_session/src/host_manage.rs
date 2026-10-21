@@ -437,17 +437,19 @@ impl FallthroughRequestHost for VerterHost {
             base_is_current,
         )
         .into_cold_seed_view();
-        let host_ctx =
-            crate::resolver_core::HostResolverContext::from_cold_seed(self, &cold_seed, overlay);
-        let ctx: &dyn crate::resolver_core::HostRequestContext = &host_ctx;
-        VerterHost::compute_fallthrough_surface_uncached(
-            self,
-            canonical_id,
-            prop_type_overrides,
-            visiting,
-            ctx,
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
+            let ctx: &dyn crate::resolver_core::HostRequestContext<M> = &host_ctx;
+            VerterHost::compute_fallthrough_surface_uncached(
+                self,
+                canonical_id,
+                prop_type_overrides,
+                visiting,
+                ctx,
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx),
+            )
+        })
     }
 
     fn store_fallthrough_result<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>(

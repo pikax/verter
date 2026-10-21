@@ -1099,13 +1099,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A dispatcher runs compiled for its context family's capture mode;
         // the host selects that family from the mode the installed request
         // carries, so a mismatch is a dispatcher that would drop (or invent)
-        // its request's observations.
+        // its request's observations. The bare-host test seam is not
+        // request-bound and always runs uncaptured; a fixture context that
+        // no root entry selected carries no selection to check.
         #[cfg(all(feature = "semantic-observe", debug_assertions))]
-        assert_eq!(
-            <C::Observe as verter_audit::observe::ObserveExec>::MODE,
-            crate::request_context::installed_observe_mode(),
-            "a dispatcher's capture execution must be the installed request's selected mode",
-        );
+        if ctx.is_request_bound() {
+            if let Some(selected) = crate::request_context::installed_root_selected_mode() {
+                assert_eq!(
+                    <C::Observe as verter_audit::observe::ObserveExec>::MODE,
+                    selected,
+                    "a dispatcher's capture execution must be the installed request's selected mode",
+                );
+            }
+        }
         let snapshot =
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {

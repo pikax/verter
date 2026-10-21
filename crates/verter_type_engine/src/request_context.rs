@@ -894,6 +894,12 @@ pub struct RequestContext {
     /// once at entry and carried, never re-selected per operation.
     #[cfg(feature = "semantic-observe")]
     pub observe_mode: verter_audit::observe::ObserveMode,
+    /// Whether an audited root entry selected [`Self::observe_mode`]
+    /// ([`Self::for_root_entry`]) rather than a fixture constructor taking
+    /// the build's compiled mode. Every execution unit started under a
+    /// root-selected context must run compiled for that mode.
+    #[cfg(feature = "semantic-observe")]
+    pub selected_at_root: bool,
     /// Whether the request is capturing its semantic footprint. When
     /// `true`, `audit_accumulator` is populated.
     #[cfg(feature = "semantic-observe")]
@@ -1572,6 +1578,7 @@ impl RequestContext {
             audit_accumulator,
             projection_op_budget,
             CancellationToken::new(),
+            false,
         )
     }
 
@@ -1618,6 +1625,7 @@ impl RequestContext {
             audit_accumulator.filter(|_| captured),
             projection_op_budget,
             cancellation,
+            true,
         )
     }
 
@@ -1659,6 +1667,7 @@ impl RequestContext {
             audit_accumulator,
             0,
             cancellation,
+            false,
         )
     }
 
@@ -1673,6 +1682,7 @@ impl RequestContext {
         audit_accumulator: Option<Arc<RequestFootprintAccumulator>>,
         projection_op_budget: usize,
         cancellation: CancellationToken,
+        selected_at_root: bool,
     ) -> Arc<Self> {
         // Without `semantic-observe` the capture selection carries nothing:
         // there is no record to attribute, no accumulator to feed and no
@@ -1684,6 +1694,7 @@ impl RequestContext {
             footprint_capture,
             timing_capture,
             audit_accumulator,
+            selected_at_root,
         );
         // With capture compiled in, a sub-request created inside another
         // request's TLS context records the parent's id (read from the
@@ -1699,6 +1710,8 @@ impl RequestContext {
             kind,
             #[cfg(feature = "semantic-observe")]
             observe_mode,
+            #[cfg(feature = "semantic-observe")]
+            selected_at_root,
             #[cfg(feature = "semantic-observe")]
             footprint_capture,
             #[cfg(feature = "semantic-observe")]
@@ -2774,6 +2787,20 @@ pub fn installed_observe_mode() -> verter_audit::observe::ObserveMode {
     }
 }
 
+/// The capture mode an audited root entry selected for the request installed
+/// on this thread; `None` when none is installed or its context came from a
+/// fixture constructor rather than a root entry's selection.
+#[cfg(all(feature = "semantic-observe", debug_assertions))]
+#[must_use]
+pub fn installed_root_selected_mode() -> Option<verter_audit::observe::ObserveMode> {
+    CURRENT_REQUEST_CONTEXT.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|ctx| ctx.selected_at_root)
+            .map(|ctx| ctx.observe_mode)
+    })
+}
+
 /// Record optional capture into the request context installed on this
 /// thread.
 ///
@@ -2846,11 +2873,18 @@ pub(crate) fn current_request_canonical() -> Option<Arc<str>> {
 pub fn install_test_request_for(canonical: &str) -> RequestContextGuard {
     static NEXT_TEST_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
     let request_id = NEXT_TEST_REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    RequestContextGuard::install(RequestContext::new(
+    // A configuration-only request: it captures nothing, so dispatchers the
+    // test builds run uncaptured.
+    RequestContextGuard::install(RequestContext::for_root_entry(
         request_id,
         Arc::from(canonical),
+        || verter_audit::RequestKind::ComponentMeta,
+        verter_audit::observe::ObserveMode::Uncaptured,
+        false,
         false,
         None,
+        0,
+        CancellationToken::new(),
     ))
 }
 

@@ -547,28 +547,30 @@ impl VerterHost {
         store_view: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-            self,
-            view,
-            store_view,
-            std::sync::Arc::clone(overlay),
-        );
-        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &session_ctx;
-        let dispatch =
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            whole_hash,
-            None,
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            ctx,
-            dispatch,
-            Some(view),
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                self,
+                view,
+                store_view,
+                std::sync::Arc::clone(overlay),
+            );
+            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                crate::resolver_core::HostCapabilities<M>,
+            > = &session_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            self.compute_component_meta_state_inner(
+                canonical,
+                mode,
+                whole_hash,
+                None,
+                crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+                RegistryMaterialization::Full,
+                ctx,
+                dispatch,
+                Some(view),
+            )
+        })
     }
 
     /// Captured-inputs variant of
@@ -587,28 +589,30 @@ impl VerterHost {
         store_view: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-            self,
-            view,
-            store_view,
-            std::sync::Arc::clone(overlay),
-        );
-        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &session_ctx;
-        let dispatch =
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            captured.whole_hash,
-            Some(captured),
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            ctx,
-            dispatch,
-            Some(view),
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                self,
+                view,
+                store_view,
+                std::sync::Arc::clone(overlay),
+            );
+            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                crate::resolver_core::HostCapabilities<M>,
+            > = &session_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            self.compute_component_meta_state_inner(
+                canonical,
+                mode,
+                captured.whole_hash,
+                Some(captured),
+                crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+                RegistryMaterialization::Full,
+                ctx,
+                dispatch,
+                Some(view),
+            )
+        })
     }
 
     /// Compute cold-compute body with a caller-supplied executor-snapshot
@@ -652,27 +656,29 @@ impl VerterHost {
         cold_seed: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            self,
-            cold_seed,
-            std::sync::Arc::clone(overlay),
-        );
-        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &host_ctx;
-        let dispatch =
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            whole_hash,
-            None,
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            ctx,
-            dispatch,
-            None,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                cold_seed,
+                std::sync::Arc::clone(overlay),
+            );
+            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                crate::resolver_core::HostCapabilities<M>,
+            > = &host_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            self.compute_component_meta_state_inner(
+                canonical,
+                mode,
+                whole_hash,
+                None,
+                crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+                RegistryMaterialization::Full,
+                ctx,
+                dispatch,
+                None,
+            )
+        })
     }
 
     /// View-bearing captured-inputs cold-compute entry.
@@ -712,27 +718,29 @@ impl VerterHost {
         cold_seed: &crate::resolver_store::ColdSeedHostStoreView,
         overlay: &std::sync::Arc<crate::resolver_core::CanonicalCompletionOverlay>,
     ) -> Option<ResolvedComponentMetaState> {
-        let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-            self,
-            cold_seed,
-            std::sync::Arc::clone(overlay),
-        );
-        let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
-        > = &host_ctx;
-        let dispatch =
-            &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
-        self.compute_component_meta_state_inner(
-            canonical,
-            mode,
-            captured.whole_hash,
-            Some(captured),
-            crate::resolver_core::ComponentMetaResolutionPurpose::Full,
-            RegistryMaterialization::Full,
-            ctx,
-            dispatch,
-            None,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                cold_seed,
+                std::sync::Arc::clone(overlay),
+            );
+            let ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                crate::resolver_core::HostCapabilities<M>,
+            > = &host_ctx;
+            let dispatch =
+                &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            self.compute_component_meta_state_inner(
+                canonical,
+                mode,
+                captured.whole_hash,
+                Some(captured),
+                crate::resolver_core::ComponentMetaResolutionPurpose::Full,
+                RegistryMaterialization::Full,
+                ctx,
+                dispatch,
+                None,
+            )
+        })
     }
 
     /// Overlay-aware variant of

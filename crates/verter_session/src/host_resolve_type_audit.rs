@@ -305,17 +305,19 @@ impl VerterHost {
                 // dispatch chain inherit the overlay-aware view instead of
                 // paying a fresh workspace-sweep cost per call.
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx = crate::resolver_core::HostResolverContext::from_current(
-                    self,
-                    &current_view,
-                    overlay,
-                );
-                let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                    crate::resolver_core::HostCapabilities,
-                > = &host_ctx;
-                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
-                let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
-                dispatch.execute_type_node(query)
+                verter_audit::specialise!(ctx.observe_mode() => M, {
+                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
+                        self,
+                        &current_view,
+                        overlay,
+                    );
+                    let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
+                        crate::resolver_core::HostCapabilities<M>,
+                    > = &host_ctx;
+                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
+                    let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
+                    dispatch.execute_type_node(query)
+                })
             }
             None => verter_type_engine::semantic_query::QueryResult::Error(
                 verter_type_engine::semantic_query::QueryError::UnstableState {
