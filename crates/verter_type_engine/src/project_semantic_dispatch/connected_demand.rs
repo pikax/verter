@@ -42,18 +42,23 @@ use crate::semantic_query::PartialReasonSet;
 pub const RELATION_UNITS_PER_COMPARISON: usize = 2;
 
 /// The construction bytes one structured comparison reserves: what a pair
-/// the relation relates holds live at its peak — its frame, its memo entry
-/// and its proof (measured: 1.9 KB per pair relating 200 reversed object
-/// arms). Provisional: the per-pair footprint and this charge are sized
-/// together in the combined performance phase.
+/// the relation relates holds live at its peak — its queued member and the
+/// index its answer is read back through, its relation flight and prepared
+/// identity, its interned key — with the frames, bindings, receipts and
+/// connected-demand state the relation holds beside them. No proof or
+/// explanation is held per pair. The allocator canary
+/// `a_relation_holds_no_more_than_it_charges` measures that working state
+/// independently of this figure and fails when the charge understates it.
+/// The allowance it sizes is calibrated with the other operation and
+/// retention limits.
 pub const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes one arm of a constructed union reserves while the
 /// union is canonicalized: its place in the member lists the passes build,
 /// its ordering key and its entries in the dedup and literal tables
 /// (measured: about 175 bytes an arm canonicalizing the 99,999 string
-/// literals a two-span template forms). Provisional, like
-/// [`RELATION_PAIR_BYTES`].
+/// literals a two-span template forms). Provisional: calibrated with the
+/// other operation and retention limits.
 pub const UNION_ARM_BYTES: usize = 256;
 
 /// The construction bytes interning one derived node reserves: its payload

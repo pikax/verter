@@ -1331,8 +1331,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .dispatch_txn
             .borrow()
             .relation
-            .settled
-            .get(key)
+            .completed_members
+            .settled(key)
             .cloned();
         if let Some(payload) = settled {
             if self.relation_replays_cold(&payload.recursion) {
@@ -3867,14 +3867,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 for (session, _) in deferred_relation_sessions {
                     let _ = txn.relation.session_admission.drain(session);
                 }
-                for (member, settles) in completed.iter().zip(settles) {
-                    if settles && member.key.inference_context.is_none() {
-                        txn.relation
-                            .settled
-                            .insert(member.key.clone(), member.payload.clone());
-                    }
+                for (member, settles) in completed.into_iter().zip(settles) {
+                    let settles = settles && member.key.inference_context.is_none();
+                    txn.relation.completed_members.push(member, settles);
                 }
-                txn.relation.completed_members.extend(completed);
                 txn.flow.completed_members.extend(proven_flow_members);
                 for (key, state, result) in call_members {
                     // Incomplete proof stays transaction-local. Origin is
@@ -4282,10 +4278,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -4323,10 +4316,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
@@ -4405,13 +4395,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn relation_publication_roots(
         &self,
         root_key: &RelateMemoKey,
-        member_keys: impl IntoIterator<Item = RelateMemoKey>,
+        member_pairs: impl IntoIterator<Item = [SemanticNodeId; 2]>,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
         let mut nodes = vec![root_key.source, root_key.target];
-        for member in member_keys {
-            nodes.push(member.source);
-            nodes.push(member.target);
-        }
+        nodes.extend(member_pairs.into_iter().flatten());
         self.observed_self_roots_from_nodes(nodes)
     }
 
@@ -4419,13 +4406,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         root_key: &RelateMemoKey,
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        let (member_keys, flow_self_roots, call_self_roots) = {
+        let (member_pairs, flow_self_roots, call_self_roots) = {
             let txn = self.dispatch_txn.borrow();
             (
                 txn.relation
                     .completed_members
                     .iter()
-                    .map(|member| member.key.clone())
+                    .map(|member| [member.key.source, member.key.target])
                     .collect::<Vec<_>>(),
                 txn.flow
                     .completed_members
@@ -4443,7 +4430,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // drained member's roots across BOTH domains: a flow member's file
         // roots ride the relation-rooted carrier, so a cross-file edit
         // invalidates the whole component.
-        let mut roots = self.relation_publication_roots(root_key, member_keys);
+        let mut roots = self.relation_publication_roots(root_key, member_pairs);
         for root in flow_self_roots {
             if !roots.iter().any(|(canonical, _)| canonical == &root.0) {
                 roots.push(root);
@@ -4463,7 +4450,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         root_key: &RelateMemoKey,
         member_keys: &[RelateMemoKey],
     ) -> Vec<crate::semantic_query_memo::ObservedGraphSelfRoot> {
-        self.relation_publication_roots(root_key, member_keys.iter().cloned())
+        self.relation_publication_roots(
+            root_key,
+            member_keys.iter().map(|key| [key.source, key.target]),
+        )
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -4491,6 +4481,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     inline_flight: Some(inline_flight),
                 }
                 .held(self.graph()),
+                false,
             );
         self.execute_relate_root(root_key)
     }
@@ -4512,10 +4503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut txn = self.dispatch_txn.borrow_mut();
             txn.flow.closed_values.clear();
             (
-                {
-                    txn.relation.settled.clear();
-                    std::mem::take(&mut txn.relation.completed_members)
-                },
+                txn.relation.completed_members.take(),
                 std::mem::take(&mut txn.flow.completed_members),
                 std::mem::take(&mut txn.call.completed_members),
             )
