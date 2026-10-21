@@ -28,7 +28,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::Mutex;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use verter_execution::tasks::ProducerIdentity;
 use verter_session_query::retention::{
     ChargeClass, RetentionAdmission, RetentionCharge, RetentionRefusal, SemanticRetentionAccount,
@@ -384,15 +384,17 @@ impl DemandCostReceipt {
                 }
             }
         } else {
-            let mut positions: FxHashMap<CostIdentity, usize> = FxHashMap::default();
+            // A long list keeps its identities in a set whose insertion
+            // positions are the kept list's.
+            let mut positions = CostIdentitySet::default();
             for dependency in prerequisites {
-                match positions.get(&dependency.receipt.identity) {
-                    Some(&position) => {
+                match positions.position(&dependency.receipt.identity) {
+                    Some(position) => {
                         let kept = &mut unique[position];
                         kept.nesting = kept.nesting.deeper(dependency.nesting);
                     }
                     None => {
-                        positions.insert(dependency.receipt.identity.clone(), unique.len());
+                        positions.insert(dependency.receipt.identity.clone());
                         unique.push(dependency);
                     }
                 }
@@ -564,7 +566,7 @@ impl DemandCostReceipt {
                 RetentionAdmission::Refused(refusal) => Err(refusal),
             };
         }
-        let mut visited: FxHashSet<*const Self> = FxHashSet::default();
+        let mut visited = verter_retention::word_set::WordSet::new();
         let mut stack: Vec<(&Self, bool)> = vec![(self.as_ref(), false)];
         while let Some((next, expanded)) = stack.pop() {
             if next.retention.get().is_some() {
@@ -585,7 +587,7 @@ impl DemandCostReceipt {
                 }
                 continue;
             }
-            if !visited.insert(std::ptr::from_ref(next)) {
+            if !visited.insert(std::ptr::from_ref(next) as u64) {
                 continue;
             }
             stack.push((next, true));
@@ -616,6 +618,132 @@ impl DemandCostReceipt {
             );
         }
         total
+    }
+}
+
+/// A set of computation identities, kept in insertion order and found by
+/// open addressing over the hash each identity already stores.
+///
+/// The paid sets a demand and its request keep are probed on every replay
+/// and charge, and a general hash set re-hashes the stored hash and probes
+/// through several calls a debug build makes for each; this table probes
+/// with a multiply and the identity's own equality. Equality is the
+/// identity's exact comparison, so two computations never share a member
+/// by hash collision.
+#[derive(Default)]
+pub(crate) struct CostIdentitySet {
+    members: Vec<CostIdentity>,
+    /// Each slot holds the index of its member plus one; `0` marks an
+    /// empty slot. Empty until the first insert; kept at most half full.
+    slots: Box<[u32]>,
+    /// `64 - log2(slots.len())`: the shift that maps a mixed hash onto a
+    /// slot.
+    shift: u32,
+}
+
+/// Fibonacci-hashing multiplier spreading an identity hash over a slot.
+const SLOT_MIX: u64 = 0x9E37_79B9_7F4A_7C15;
+
+impl CostIdentitySet {
+    /// Whether `identity` is a member.
+    pub(crate) fn contains(&self, identity: &CostIdentity) -> bool {
+        !self.slots.is_empty() && self.probe(identity).is_ok()
+    }
+
+    /// The position `identity` was inserted at, if it is a member.
+    pub(crate) fn position(&self, identity: &CostIdentity) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
+        }
+        self.probe(identity).ok()
+    }
+
+    /// Add `identity`: `true` when it was not a member.
+    pub(crate) fn insert(&mut self, identity: CostIdentity) -> bool {
+        if (self.members.len() + 1) * 2 > self.slots.len() {
+            self.grow();
+        }
+        match self.probe(&identity) {
+            Ok(_) => false,
+            Err(slot) => {
+                self.members.push(identity);
+                self.slots[slot] =
+                    u32::try_from(self.members.len()).expect("a paid set fits u32 positions");
+                true
+            }
+        }
+    }
+
+    /// The members, in insertion order.
+    pub(crate) fn members(&self) -> &[CostIdentity] {
+        &self.members
+    }
+
+    /// How many identities are members.
+    pub(crate) fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Remove every member.
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// `Ok(member position)` when `identity` is a member, else
+    /// `Err(empty slot)` where it would go. The table is non-empty.
+    fn probe(&self, identity: &CostIdentity) -> Result<usize, usize> {
+        let mask = self.slots.len() - 1;
+        let mut slot = self.slot_of(identity.hash);
+        loop {
+            let held = self.slots[slot];
+            if held == 0 {
+                return Err(slot);
+            }
+            let position = (held - 1) as usize;
+            if self.members[position] == *identity {
+                return Ok(position);
+            }
+            slot = (slot + 1) & mask;
+        }
+    }
+
+    fn slot_of(&self, hash: u64) -> usize {
+        (hash.wrapping_mul(SLOT_MIX) >> self.shift) as usize
+    }
+
+    /// Double the table (or allocate the first) and re-place every member.
+    fn grow(&mut self) {
+        let capacity = if self.slots.is_empty() {
+            16
+        } else {
+            self.slots.len() * 2
+        };
+        self.slots = vec![0; capacity].into_boxed_slice();
+        self.shift = 64 - capacity.trailing_zeros();
+        let mask = capacity - 1;
+        let mut position = 0;
+        while position < self.members.len() {
+            let mut slot = self.slot_of(self.members[position].hash);
+            while self.slots[slot] != 0 {
+                slot = (slot + 1) & mask;
+            }
+            position += 1;
+            self.slots[slot] = u32::try_from(position).expect("a paid set fits u32 positions");
+        }
+    }
+}
+
+impl Extend<CostIdentity> for CostIdentitySet {
+    fn extend<I: IntoIterator<Item = CostIdentity>>(&mut self, identities: I) {
+        for identity in identities {
+            self.insert(identity);
+        }
+    }
+}
+
+impl std::fmt::Debug for CostIdentitySet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(&self.members).finish()
     }
 }
 
@@ -908,3 +1036,57 @@ impl Hash for BudgetProfile {
 #[cfg(test)]
 #[path = "cost_receipt_retention_tests.rs"]
 mod cost_receipt_retention_tests;
+
+#[cfg(test)]
+mod cost_identity_set_tests {
+    use std::sync::Arc;
+
+    use verter_execution::tasks::ProducerIdentity;
+
+    use super::{CostIdentity, CostIdentitySet};
+
+    /// A producer whose every instance hashes alike: membership must then
+    /// rest on the identity's exact comparison alone.
+    struct Colliding(u32);
+
+    impl ProducerIdentity for Colliding {
+        fn producer_hash(&self) -> u64 {
+            7
+        }
+
+        fn same_producer(&self, other: &dyn ProducerIdentity) -> bool {
+            other
+                .downcast_ref::<Self>()
+                .is_some_and(|other| other.0 == self.0)
+        }
+    }
+
+    /// Each identity is a member once, at the position it was first
+    /// inserted, across colliding hashes and every growth of the table;
+    /// an equal identity built separately is the same member.
+    #[test]
+    fn members_keep_insertion_order_across_collisions_and_growth() {
+        let mut set = CostIdentitySet::default();
+        let encoded = |index: u32| CostIdentity::new(index.to_le_bytes().to_vec());
+        let colliding = |index: u32| CostIdentity::of_producer(Arc::new(Colliding(index)));
+        let identities: Vec<CostIdentity> = (0..200u32)
+            .flat_map(|index| [encoded(index), colliding(index)])
+            .collect();
+        for (position, identity) in identities.iter().enumerate() {
+            assert!(!set.contains(identity));
+            assert!(set.insert(identity.clone()), "first insert at {position}");
+            assert_eq!(set.position(identity), Some(position));
+        }
+        for (position, index) in (0..200u32).enumerate() {
+            assert!(!set.insert(encoded(index)), "an equal encoded identity");
+            assert!(!set.insert(colliding(index)), "an equal colliding identity");
+            assert_eq!(set.position(&colliding(index)), Some(position * 2 + 1));
+        }
+        assert_eq!(set.len(), identities.len());
+        assert!(set.members() == identities.as_slice());
+        assert!(!set.contains(&colliding(200)));
+        set.clear();
+        assert!(!set.contains(&identities[0]));
+        assert_eq!(set.len(), 0);
+    }
+}

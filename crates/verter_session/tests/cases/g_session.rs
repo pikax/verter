@@ -1,11 +1,14 @@
 //! Consolidated integration-test group `session`: each module below was
 //! a separate top-level tests/*.rs binary, merged to cut test-link count.
+#[path = "g_session/active_occupancy_window.rs"]
+mod active_occupancy_window;
 #[path = "g_session/committed_input_basis.rs"]
 mod committed_input_basis;
 #[path = "g_session/cooperative_drive_seam.rs"]
 mod cooperative_drive_seam;
 #[path = "g_session/flight_rendezvous.rs"]
 mod flight_rendezvous;
+mod host_close_reuse;
 #[path = "g_session/inline_execute_clears_all_install_tls_slots.rs"]
 mod inline_execute_clears_all_install_tls_slots;
 #[path = "g_session/module_augmentation_body_rekey.rs"]

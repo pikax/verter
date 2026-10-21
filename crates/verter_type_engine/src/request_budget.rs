@@ -12,9 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use parking_lot::{Mutex, MutexGuard};
-use rustc_hash::FxHashSet;
 
-use crate::project_semantic_dispatch::cost_receipt::CostIdentity;
+use crate::project_semantic_dispatch::cost_receipt::{CostIdentity, CostIdentitySet};
 
 /// Request-scoped projection-operation fuse.
 ///
@@ -102,8 +101,8 @@ pub const DEFAULT_PROJECTION_OP_BUDGET: usize =
 /// of that order.
 #[derive(Debug, Default)]
 pub(crate) struct PaidOperations {
-    set: FxHashSet<CostIdentity>,
-    order: Vec<CostIdentity>,
+    /// The paid computations, in the order they were paid.
+    set: CostIdentitySet,
     digest: u64,
 }
 
@@ -115,14 +114,14 @@ impl PaidOperations {
     /// Add `identity`: `true` when it was not paid yet.
     pub(crate) fn insert(&mut self, identity: CostIdentity) -> bool {
         let hash = identity.hash_value();
-        if self.set.insert(identity.clone()) {
-            self.order.push(identity.clone());
-            self.digest = self.digest.wrapping_add(spread(hash));
-            attribute_paid(&identity);
-            true
-        } else {
-            false
+        if !self.set.insert(identity) {
+            return false;
         }
+        self.digest = self.digest.wrapping_add(spread(hash));
+        if let Some(paid) = self.set.members().last() {
+            attribute_paid(paid);
+        }
+        true
     }
 
     /// Add `identities`: how many were not paid yet.
@@ -448,7 +447,7 @@ impl RequestBudget {
                 paid_len: paid.set.len(),
                 paid_digest: paid.digest,
             },
-            paid: paid.order.clone().into_boxed_slice(),
+            paid: paid.set.members().to_vec().into_boxed_slice(),
         }
     }
 
@@ -464,8 +463,8 @@ impl RequestBudget {
         snapshot: &RequestEntrySnapshot,
     ) -> Option<RequestSpent> {
         let paid = self.operations_paid.lock();
-        if paid.order.len() < snapshot.paid.len()
-            || paid.order[..snapshot.paid.len()] != snapshot.paid[..]
+        if paid.set.members().len() < snapshot.paid.len()
+            || paid.set.members()[..snapshot.paid.len()] != snapshot.paid[..]
         {
             return None;
         }
@@ -475,7 +474,7 @@ impl RequestBudget {
             entry: snapshot.state.clone(),
             entry_paid: snapshot.paid.clone(),
             operations,
-            paid: paid.order[snapshot.paid.len()..]
+            paid: paid.set.members()[snapshot.paid.len()..]
                 .to_vec()
                 .into_boxed_slice(),
         })
@@ -505,10 +504,16 @@ impl RequestBudget {
         let paid = self.operations_paid.lock();
         let alone = self.projection_ops_executed.load(Ordering::Relaxed)
             == entry.operations.checked_add(effects.operations)?
-            && paid.order.len() == entry.paid_len.checked_add(effects.paid)?;
+            && paid.set.members().len() == entry.paid_len.checked_add(effects.paid)?;
         alone.then(|| RequestSpent {
-            entry_paid: paid.order[..entry.paid_len].iter().cloned().collect(),
-            paid: paid.order[entry.paid_len..].iter().cloned().collect(),
+            entry_paid: paid.set.members()[..entry.paid_len]
+                .iter()
+                .cloned()
+                .collect(),
+            paid: paid.set.members()[entry.paid_len..]
+                .iter()
+                .cloned()
+                .collect(),
             entry,
             operations: effects.operations,
         })

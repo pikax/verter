@@ -11585,7 +11585,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // query build's taint frame (refusing warm admission) instead of
         // silently returning an intermediate carrier the signature-utility
         // caller would classify as settled.
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
@@ -16206,7 +16206,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         resolved_source: SemanticNodeId,
     ) -> Result<Vec<SemanticNodeId>, crate::semantic_query::PartialReasonSet> {
         let mut reads = Vec::new();
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut pending = vec![mapper.value_expr];
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
@@ -17323,7 +17323,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut current = self
             .evaluate_deferred_semantic_node_with_context(node, context)
             .into_active_query_build_node(self);

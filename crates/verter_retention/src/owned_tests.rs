@@ -483,3 +483,90 @@ fn a_string_identity_names_one_allocation_and_keeps_nothing() {
     let later = OwnedStr::new("/w/a.ts");
     assert_ne!(OwnedStr::identity(&later), identity, "never reused");
 }
+
+/// A leaf whose first charging measurement runs `on_measure` first: the
+/// moment its parent's pin is still reaching it.
+struct Interrupting {
+    on_measure: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    pad: Vec<u8>,
+}
+
+impl Measured for Interrupting {
+    fn heap_bytes(&self, _aliases: &mut AliasSet) -> usize {
+        let hook = self.on_measure.lock().expect("hook").take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        vec_bytes(&self.pad)
+    }
+}
+
+struct Parent {
+    child: Owned<Interrupting>,
+}
+
+impl Measured for Parent {
+    fn heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.child.offer(aliases)
+    }
+}
+
+/// A second caller pinning a parent another caller is still pinning
+/// returns only once the child the parent reaches is charged too: a
+/// delivered value never exposes an uncharged allocation.
+#[test]
+fn a_concurrent_pin_returns_only_once_every_reached_child_is_charged() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+
+    let account = account(1 << 30);
+    let child = Owned::new(Interrupting {
+        on_measure: Mutex::new(None),
+        pad: vec![0; 1 << 20],
+    });
+    let parent = Owned::new(Parent {
+        child: child.clone(),
+    });
+    // Pinned bytes the second caller sees once its pin returns.
+    let observed = Arc::new(Mutex::new(None));
+    let second = Arc::new(Mutex::new(None));
+    {
+        let parent = parent.clone();
+        let account = Arc::clone(&account);
+        let observed = Arc::clone(&observed);
+        let second = Arc::clone(&second);
+        *child.on_measure.lock().expect("hook") = Some(Box::new(move || {
+            // The first pin holds the parent's lock here, the child not yet
+            // charged. A second pin of the parent starts now.
+            let (started_tx, started_rx) = mpsc::channel();
+            let (returned_tx, returned_rx) = mpsc::channel();
+            *second.lock().expect("second") = Some(std::thread::spawn(move || {
+                started_tx.send(()).expect("started");
+                parent.pin(ChargeCtx::new(&account));
+                *observed.lock().expect("observed") = Some(occupancy(&account).1);
+                let _ = returned_tx.send(());
+            }));
+            started_rx.recv().expect("second pin started");
+            // A pin that does not wait for this one returns within the
+            // window; one that waits returns after this hook does.
+            let _ = returned_rx.recv_timeout(Duration::from_millis(200));
+        }));
+    }
+    parent.pin(ChargeCtx::new(&account));
+    second
+        .lock()
+        .expect("second")
+        .take()
+        .expect("the child's measurement started a second pin")
+        .join()
+        .expect("second pin");
+    let pinned = occupancy(&account).1;
+    assert!(pinned > 1 << 20, "the child is pinned with its parent");
+    assert_eq!(
+        *observed.lock().expect("observed"),
+        Some(pinned),
+        "the second pin returned before the child its parent reaches was charged"
+    );
+    drop((parent, child));
+    assert_eq!(occupancy(&account), (0, 0));
+}
