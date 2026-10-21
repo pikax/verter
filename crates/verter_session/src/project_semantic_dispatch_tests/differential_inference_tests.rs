@@ -3062,16 +3062,41 @@ export const sameSpelling = dup<1 | "1">({ 1: "1" }, 1);
 declare function req<T>(x: { [K in keyof T]-?: T[K] | null }, t: T): "first";
 declare function req<T>(x: unknown, t: T): "second";
 export const required = req<{ a?: number }>({ a: undefined }, {});
+type Spelled = { [P in 1 | "1"]: P };
+declare function spelled(x: Spelled): "first";
+declare function spelled(x: unknown): "second";
+export const spelledAlias = spelled({ 1: "1" });
+type Optional = { a?: number };
+type NotOptional = { [K in keyof Optional]-?: Optional[K] | null };
+declare function notOptional(x: NotOptional): "first";
+declare function notOptional(x: unknown): "second";
+export const requiredAlias = notOptional({ a: undefined });
 "##;
 
-/// A mapped parameter over a closed key domain relates the argument to the
-/// members the mapped type has: `-?` drops the `undefined` an optional
-/// source member adds under `strictNullChecks`, and keys of one spelling
-/// (`1` and `"1"`) are one member holding both productions, so the lane
-/// never answers that call with the overload the checker rejects.
+/// A mapped type over a closed key domain, as an alias or as a parameter
+/// once its type arguments are given, relates the argument to the members
+/// the mapped type has: `-?` drops the `undefined` an optional source
+/// member adds under `strictNullChecks`, and keys of one spelling (`1` and
+/// `"1"`) are one member holding both productions. The explicitly
+/// instantiated same-spelling call is not answered yet, but never with the
+/// overload the checker rejects.
 #[test]
 fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
     let failures = Matrix::new(MAPPED_PARAMETER_MEMBERS).four(&[
+        (
+            Read::Type("typeof spelledAlias"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof requiredAlias"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
         (
             Read::Type("typeof required"),
             "\"second\"",
@@ -3089,7 +3114,9 @@ fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
     ]);
     let wrong: Vec<&String> = failures
         .iter()
-        .filter(|failure| failure.contains("`typeof required`") || !failure.starts_with("GAP "))
+        .filter(|failure| {
+            !failure.contains("`typeof sameSpelling`") || !failure.starts_with("GAP ")
+        })
         .collect();
     assert!(
         wrong.is_empty(),
