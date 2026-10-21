@@ -2492,7 +2492,8 @@ mod arena_intern_tests {
         let arena = NodeArena::default();
         let payload =
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("forced".into()));
-        let forced_fp = 0x00C0_FFEE_u64;
+        // Select another shard under every per-process fingerprint seed.
+        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ SHARD_MASK;
         assert_ne!(
             forced_fp & SHARD_MASK,
             structural_fingerprint(&payload, &NodeScopeId::Global) & SHARD_MASK,
