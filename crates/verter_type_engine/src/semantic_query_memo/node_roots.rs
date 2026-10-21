@@ -304,6 +304,16 @@ impl NodeRoot {
     pub fn roots(&self) -> &NodeRootSet {
         &self.roots
     }
+    /// Bytes the root set's own allocation is charged, and its class; `None`
+    /// while no owner has charged it. An observation that retains nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn root_charge_for_tests(
+        &self,
+    ) -> Option<(usize, verter_session_query::retention::ChargeClass)> {
+        let owned = self.roots.0.as_ref()?;
+        owned.charge_bytes().zip(owned.charge_class())
+    }
     /// Borrow the rooted node as a read capability.
     pub fn node_ref(&self) -> Result<NodeRef<'_>, QueryError> {
         self.roots.node_ref(self.id)

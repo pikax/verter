@@ -139,6 +139,20 @@ optimization. The public delivery regression
 checks that repeated discovery does not accumulate roots, records or charged
 backing, and that both release orders restore the declared baseline.
 
+**Host close reclaims drained storage, never live nodes.** A host close
+(`VerterHost::close`) invalidates the whole memo, then calls
+`SemanticGraphStore::release_drained_storage`: it drains the destroyed-node
+sidecar log, sweeps the dependency-rail interner, and releases the dedup table
+(and its granule charge) of every arena shard that indexes no node
+(`NodeArenaCore::release_idle_dedup_tables`) — a shard table otherwise keeps the
+capacity of its busiest moment and one charged granule after its candidates are
+gone. A shard still indexing a live node keeps its table, and no step destroys
+or revokes a node: a result a caller holds across the close keeps reading it.
+The same reclamation runs when the host release boundary completes, so readers
+dropped after the close leave no sidecar or table history behind. Its rows are
+classified in
+[`SKR-OWN-CLOSE.md`](../../../../crates/verter_session/observe-inventory/SKR-OWN-CLOSE.md).
+
 The retired-symbol guard rejects activity barriers, ordinal-watermark sweeps
 and inactive ownership modes. Public compile contracts hold the capability
 boundary; a canonical close remains available solely to evict cache owners.
