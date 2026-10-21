@@ -36,6 +36,38 @@ pub(crate) fn projection_fact<T>(
     }
 }
 
+/// A declaration lookup that missed after its own work stopped early. The
+/// miss is the stop, not evidence that a dependency is missing.
+fn lookup_cut_short(
+    key: &SemanticQueryKey,
+    error: &QueryError,
+    observed: ResultCompleteness,
+) -> bool {
+    observed.is_partial()
+        && matches!(error, QueryError::Miss | QueryError::RaiseMiss)
+        && matches!(
+            key,
+            SemanticQueryKey::ResolveDecl(_) | SemanticQueryKey::Instantiate(_)
+        )
+}
+
+/// The causes of an unavailable `error` result. A cut-short lookup names
+/// only the causes its work observed: a query-depth stop stays that stop,
+/// and a real missing dependency is still delivered by the build that
+/// observed it.
+fn unavailable_causes(
+    key: &SemanticQueryKey,
+    error: &QueryError,
+    observed: ResultCompleteness,
+) -> NonEmptyReasons {
+    let observed_causes = NonEmptyReasons::new(observed.reasons());
+    if lookup_cut_short(key, error, observed) {
+        return observed_causes.unwrap_or_else(|| NonEmptyReasons::of(PartialReason::Propagated));
+    }
+    let causes = NonEmptyReasons::from_query_error(error);
+    observed_causes.map_or(causes, |more| causes.union(more))
+}
+
 /// Adopt once, before either the owner or a follower receives the result.
 /// The compatibility summary is derived from this disposition by the read.
 pub(crate) fn adopt_projection_result(
@@ -132,9 +164,7 @@ pub(crate) fn adopt_projection_result(
                                 | super::query_error_disposition::QueryErrorDisposition::Failure
                         ) =>
                     {
-                        FactResult::unavailable(
-                            NonEmptyReasons::from_query_error(error).with(observed.reasons()),
-                        )
+                        FactResult::unavailable(unavailable_causes(key, error, observed))
                     }
                     _ => projection_fact(
                         Some(SemanticQueryValue::TypeNode(node)),
@@ -158,18 +188,11 @@ pub(crate) fn adopt_projection_result(
             (result, status)
         }
         QueryResult::Error(error) => {
-            let causes = NonEmptyReasons::from_query_error(&error);
-            let causes =
-                NonEmptyReasons::new(observed.reasons()).map_or(causes, |more| causes.union(more));
+            let causes = unavailable_causes(key, &error, observed);
             // A miss after incomplete work is not a stable negative lookup.
             // Consumers may retain their authored carrier after a genuine
             // miss, but cannot discard an unfinished producer's observations.
-            let error = if observed.is_partial()
-                && matches!(error, QueryError::Miss | QueryError::RaiseMiss)
-                && matches!(
-                    key,
-                    SemanticQueryKey::ResolveDecl(_) | SemanticQueryKey::Instantiate(_)
-                ) {
+            let error = if lookup_cut_short(key, &error, observed) {
                 QueryError::IncompleteSemanticOperand {
                     reasons: causes.get(),
                 }

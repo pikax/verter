@@ -222,6 +222,10 @@ pub enum DisplayFacet {
     IncludeReadonlyModifier,
     TruncateLargeUnions,
     QualifyNames,
+    /// Spell the type as the checker's `typeToString` does in a diagnostic
+    /// message: string literals double-quoted, every object member
+    /// `;`-terminated.
+    CheckerSpelling,
 }
 
 impl DisplayFacet {
@@ -231,10 +235,11 @@ impl DisplayFacet {
             DisplayFacet::IncludeReadonlyModifier => 1 << 1,
             DisplayFacet::TruncateLargeUnions => 1 << 2,
             DisplayFacet::QualifyNames => 1 << 3,
+            DisplayFacet::CheckerSpelling => 1 << 4,
         }
     }
 
-    const ALL: u32 = (1 << 4) - 1;
+    const ALL: u32 = (1 << 5) - 1;
 }
 
 /// A `BitSet<DisplayFacet>` ordered by subset inclusion. DISPLAY-ONLY: never

@@ -1366,3 +1366,30 @@ enum Two { B, C }
 enum Bad { R = Math.random(), S }
 ";
 pub const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
+
+/// The status refuses at the connected query-depth bound and names no
+/// missing dependency beside it.
+pub fn status_is_depth_refusal(status: verter_type_engine::semantic_query::FactStatus) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Unavailable(reasons) => {
+            let reasons = reasons.get();
+            reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+                && !reasons.contains(PartialReasonSet::MISSING_DEPENDENCY)
+        }
+        _ => false,
+    }
+}
+
+/// The status carries `MISSING_DEPENDENCY` among its partial reasons.
+pub fn status_has_missing_dependency(
+    status: verter_type_engine::semantic_query::FactStatus,
+) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Complete => false,
+        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => {
+            reasons.get().contains(PartialReasonSet::MISSING_DEPENDENCY)
+        }
+    }
+}
