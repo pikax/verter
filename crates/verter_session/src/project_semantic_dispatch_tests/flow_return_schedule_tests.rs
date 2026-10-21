@@ -2232,10 +2232,11 @@ fn discriminated_switch_narrowing_work_grows_linearly() {
 
 /// Each return site the slice plans is one unit of connected work, paid
 /// before the body evaluates: the work grows linearly with the returns (one
-/// unit per site, the two relation steps that compare its case with the
-/// operand, and one for the evaluation), a budget one unit short ends
-/// on the work rail, and no fixed ceiling on return sites refuses a body the
-/// budget can pay for.
+/// unit per site, the relation step that compares the operand with its
+/// case, and one for the evaluation; relating the case's literal to the
+/// `number` operand reads nothing and costs no unit), a budget one unit
+/// short ends on the work rail, and no fixed ceiling on return sites
+/// refuses a body the budget can pay for.
 #[test]
 fn each_return_site_is_connected_work_the_demand_pays_for() {
     for cases in [100, 200, 400, 800] {
@@ -2257,7 +2258,7 @@ fn each_return_site_is_connected_work_the_demand_pays_for() {
         );
         assert_eq!(
             used,
-            3 * cases + 2,
+            2 * cases + 2,
             "{cases} cases and the default, each case's comparison, and the evaluation"
         );
 

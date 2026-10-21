@@ -2265,6 +2265,84 @@ impl CompletedSccMember {
     }
 }
 
+/// The relations this transaction decided and queued for the root's batched
+/// publish (completed SCC members and inline SCC roots), with the cold
+/// answers among them indexed by key: a relation met again before the batch
+/// publishes reads its answer here, as the checker's relation cache serves a
+/// pair it already related, instead of relating it again — without it, a
+/// pair reached along every one of `2ⁿ` paths was related `2ⁿ` times. Only
+/// cold answers are indexed (no overflow or deeply-nested answer, no
+/// session-local delta, no binding key), each read through its recursion
+/// footprint like a memo entry.
+///
+/// Request-scoped working state, one queued member per decided pair: the
+/// index holds a member's position, never a second copy of its key or
+/// payload, so a pair costs its member and one index slot. The index is
+/// cleared with the batch it mirrors — at its publish or its abort.
+#[derive(Debug, Default)]
+pub struct CompletedRelations {
+    members: Vec<CompletedSccMember>,
+    /// Positions in `members` of the indexed cold answers, hashed by key.
+    settled: hashbrown::HashTable<u32>,
+}
+
+impl CompletedRelations {
+    fn key_hash(key: &RelateMemoKey) -> u64 {
+        std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, key)
+    }
+
+    /// Whether no member is queued.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// The queued members, in the order they completed.
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CompletedSccMember> {
+        self.members.iter()
+    }
+
+    /// The member queued last.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn last(&self) -> Option<&CompletedSccMember> {
+        self.members.last()
+    }
+
+    /// Queue `member`; when `settles`, its answer becomes the cold answer
+    /// later reads of its key take, in place of an earlier one.
+    pub(crate) fn push(&mut self, member: CompletedSccMember, settles: bool) {
+        let position = u32::try_from(self.members.len())
+            .expect("a transaction queues fewer than 2^32 relation members");
+        if settles {
+            let members = &self.members;
+            match self.settled.entry(
+                Self::key_hash(&member.key),
+                |&slot| members[slot as usize].key == member.key,
+                |&slot| Self::key_hash(&members[slot as usize].key),
+            ) {
+                hashbrown::hash_table::Entry::Occupied(mut slot) => *slot.get_mut() = position,
+                hashbrown::hash_table::Entry::Vacant(slot) => {
+                    slot.insert(position);
+                }
+            }
+        }
+        self.members.push(member);
+    }
+
+    /// The cold answer queued for `key`.
+    pub(crate) fn settled(&self, key: &RelateMemoKey) -> Option<&RelationPayload> {
+        let position = self.settled.find(Self::key_hash(key), |&slot| {
+            self.members[slot as usize].key == *key
+        })?;
+        Some(&self.members[*position as usize].payload)
+    }
+
+    /// Take every queued member, clearing the index with them.
+    pub(crate) fn take(&mut self) -> Vec<CompletedSccMember> {
+        self.settled = hashbrown::HashTable::new();
+        std::mem::take(&mut self.members)
+    }
+}
+
 impl RelationDomainRuntime {
     /// The session `id`. Sessions are appended in the order their ids are
     /// allocated and never reordered, so the stack is sorted by id and a
@@ -2345,8 +2423,9 @@ pub struct RelationDomainRuntime {
     )>,
     /// Per-session deferred-admission ledger.
     pub session_admission: SessionAdmissionLedger,
-    /// SCC-closed members queued for the root's batched publish drain.
-    pub completed_members: Vec<CompletedSccMember>,
+    /// SCC-closed members queued for the root's batched publish drain, and
+    /// the cold answers among them by key.
+    pub completed_members: CompletedRelations,
     /// The normalized strict-family configuration in force (RI-10).
     pub(crate) strict: Option<StrictFamilyConfig>,
     /// Virtual root occurrence used while an SCC member re-discharges after
@@ -2387,18 +2466,6 @@ pub struct RelationDomainRuntime {
     /// variance marker — read by the variance measurement that asked for
     /// it, right after asking. Transient: overwritten at every close.
     pub(crate) last_relation_unreliable: bool,
-    /// The relations this transaction decided and queued for publication
-    /// (completed SCC members and inline SCC roots), by key: a relation
-    /// met again before the batch publishes reads its answer here, as the
-    /// checker's relation cache serves a pair it already related, instead
-    /// of relating it again — without it, a pair reached along every one
-    /// of `2ⁿ` paths was related `2ⁿ` times. Only cold answers enter (no
-    /// overflow or deeply-nested answer, no session-local delta, no binding
-    /// key), each read through its recursion footprint like a memo entry.
-    /// Request-scoped: it lives on the transaction, and is cleared with the
-    /// member batch it mirrors — at its publish or its abort — so one entry
-    /// per queued member at most.
-    pub(crate) settled: FxHashMap<RelateMemoKey, RelationPayload>,
     next_session_id: u64,
 }
 

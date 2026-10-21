@@ -1042,6 +1042,13 @@ impl FamilyKey {
                                 .copied()
                                 .for_each(&mut visit);
                         }
+                        for read in literal_provenance.iter().flat_map(|p| p.fresh_reads.iter()) {
+                            for step in read.iter() {
+                                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                                    visit(*key);
+                                }
+                            }
+                        }
                         if let Some(const_view) = const_view {
                             visit(*const_view);
                         }

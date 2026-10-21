@@ -250,12 +250,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
                 .collect()
         } else {
-            let DeclarationVariance::Known(variances) =
-                self.parameter_variances(&declaration, source_args.len(), true)?
-            else {
-                return None;
-            };
-            variances
+            match self.parameter_variances(&declaration, source_args.len(), true)? {
+                DeclarationVariance::Known(variances) => variances,
+                // The checker's in-progress `getVariances` is `emptyArray`:
+                // `inferFromTypeArguments` infers every argument
+                // covariantly, and the references relate as the open
+                // measurement answers. Expanding them instead would re-enter
+                // the measured declaration at every level of its own
+                // recursion (`Promise<T>`'s `then` returns `Promise<R>`).
+                DeclarationVariance::InProgress(result) => {
+                    for (&source, &target) in source_args.iter().zip(target_args.iter()) {
+                        let _ =
+                            self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    }
+                    return Some(result);
+                }
+            }
         };
         if variances
             .iter()
@@ -880,15 +890,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 _ => break,
             }
         }
-        if let Some(SemanticNodeData::DeclRef { identity }) =
-            self.graph().node_data(node).as_deref()
-        {
-            return Some((
-                identity.clone(),
-                self.declared_application_arguments(identity, &[], context)?,
-            ));
+        // A runtime nominal's builtin carrier reads as the project's global
+        // interface it stands for, so it relates by that interface's
+        // variances to another reference to it.
+        let declared_ref = match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::DeclRef { identity }) => Some(identity.clone()),
+            _ => None,
+        };
+        if let Some(identity) = declared_ref {
+            let identity = self.relation_declaration_identity(identity, node);
+            let args = self.declared_application_arguments(&identity, &[], context)?;
+            return Some((identity, args));
         }
         let (declaration, args) = self.raw_generic_reference(node)?;
+        let declaration = self.relation_declaration_identity(declaration, node);
         let args = self.declared_application_arguments(&declaration, &args, context)?;
         Some((declaration, args))
     }
@@ -976,7 +991,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         None
     }
 
-    fn raw_generic_reference(
+    pub(super) fn raw_generic_reference(
         &self,
         node: SemanticNodeId,
     ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {
@@ -1029,7 +1044,7 @@ pub fn declaration_scope(declaration: &DeclIdentity) -> NodeScopeId {
 }
 
 /// Whether two declaration identities name one declaration.
-fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
+pub(super) fn same_declaration(a: &DeclIdentity, b: &DeclIdentity) -> bool {
     a.canonical_id == b.canonical_id && a.owner == b.owner && a.decl_name == b.decl_name
 }
 

@@ -1644,8 +1644,14 @@ fn discover_variable_declaration<'ast>(
                 if site.args.iter().any(|argument| argument.is_function_value))
                 || matches!(unwrap_program_expression(init), Expression::CallExpression(call)
                     if call.arguments.iter().any(|argument|
-                        super::type_eval_build::indexed_context_sensitive(argument.as_expression())));
-            let contextual_literal = super::type_eval_build::contextual_object_initializer(init);
+                        super::type_eval_build::indexed_context_sensitive(argument.as_expression())
+                            || argument.as_expression().is_some_and(
+                                super::type_eval_build::literal_holds_block_bodied_function)));
+            // A literal holding a block-bodied function value is typed by the
+            // flow evaluator, which owns that function's body-derived return.
+            let contextual_literal = super::type_eval_build::contextual_object_initializer(init)
+                || (super::type_eval_build::literal_holds_block_bodied_function(init)
+                    && !super::type_eval_build::has_authoritative_value_assertion(init));
             // An object or array literal holding a call is typed by the
             // flow evaluator, which evaluates each call where the literal
             // holds it, so the literal is a served expression body too.
