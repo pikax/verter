@@ -256,8 +256,14 @@ mod tests {
             assert!(memory.read_file("/missing.ts").is_none());
         }
         let filesystem = crate::FilesystemWorkspace::new(crate::FilesystemOptions::default());
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory
+            .path()
+            .join("missing.ts")
+            .to_string_lossy()
+            .replace('\\', "/");
         for _ in 0..3 {
-            assert!(filesystem.read_file("/missing.ts").is_none());
+            assert!(filesystem.read_file(&missing).is_none());
         }
         assert_eq!(
             ctx.0.load(Relaxed),
@@ -278,6 +284,12 @@ mod tests {
         }
         let ctx = Arc::new(UncapturedContext(AtomicUsize::new(0)));
         let _guard = OpaqueContextGuard::install(OpaqueRequestContext(ctx.clone()));
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory
+            .path()
+            .join("missing.ts")
+            .to_string_lossy()
+            .replace('\\', "/");
         let workspaces: Vec<Arc<dyn WorkspaceAccess>> = vec![
             Arc::new(crate::MemoryWorkspace::new(crate::MemoryOptions::default())),
             Arc::new(crate::FilesystemWorkspace::new(
@@ -301,7 +313,7 @@ mod tests {
             );
             assert!(workspace
                 .read_file_captured(
-                    "/missing.ts",
+                    &missing,
                     &VfsReadCapture {
                         timing: true,
                         ..capture
