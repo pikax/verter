@@ -71,14 +71,17 @@ that do not read the source value do not force the getter's inferred return.
 
 Class `accessor` fields contribute property headers and lazy property bodies on
 their instance or static surface. Their read type is the annotation, otherwise
-the widened initializer, otherwise `any`; normal visibility rules apply. The
+the widened initializer, otherwise the implicit type a property declaration
+without either has (`any`, or the typed missing-member marker where the checker
+reads constructor or static-block flow); normal visibility rules apply. The
 initializer is typed exactly as a mutable property definition's is, through the
 one `ClassField` view (`analysis::class_field_value`): a function value is a
 served class-member position, and a call-derived or `this`-reading initializer
 reads its synthetic `C:field:x` / `C:static:x` value declaration. Accessor
 grouping keys on the property spelling, so `get 1` / `set "1"` is one mutable
 property; `Pick` and `Omit` select that pair by its `keyof` key, the key of its
-first declaration (`AccessorSelectionKeys`). Under heritage shadowing the own
+first declaration (`AccessorSelectionKeys`), and the collapsed property retains
+that key even when the getter comes later. Under heritage shadowing the own
 member's form wins: the heritage merge (`MergedMemberAccum`) takes the
 shadowing own-body contributors' method kind, so an own property over an
 inherited getter maps mutable and an own getter over an inherited property

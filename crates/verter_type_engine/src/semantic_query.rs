@@ -4783,7 +4783,8 @@ pub(crate) fn accessor_property_slots(
                     .and_then(|accessor| accessor.property_member(graph, &materialize))
             });
             match property {
-                Some(property) => {
+                Some(mut property) => {
+                    property.key = member.key.clone();
                     collapsed.insert(key);
                     Some(property)
                 }

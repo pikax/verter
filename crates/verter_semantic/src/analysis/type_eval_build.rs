@@ -3185,7 +3185,16 @@ fn collect_named_class_selecting(
                                 )
                             })
                         })
-                        .unwrap_or_else(|| implicit_property_type(decl, prop, source))
+                        .unwrap_or_else(|| {
+                            implicit_property_type(
+                                decl,
+                                &prop.key,
+                                prop.r#static,
+                                prop.declare,
+                                prop.span,
+                                source,
+                            )
+                        })
                 });
                 let spans = MemberSpans {
                     declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
@@ -3442,7 +3451,8 @@ fn collect_named_class_selecting(
                 // An `accessor` field declares a get / set pair over private
                 // storage: to every reader it is one mutable PROPERTY of its
                 // annotated type, else its initializer's widened type, else
-                // `any`, its initializer typed as a mutable field's is.
+                // the implicit type a property without either has, its
+                // initializer typed as a mutable field's is.
                 // `static` selects the constructor shape; a `#private` one
                 // is a private member, never a static one.
                 if property.r#static && matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
@@ -3473,7 +3483,17 @@ fn collect_named_class_selecting(
                         )
                     })
                 })
-                .unwrap_or(TypeExpr::Primitive(PrimitiveName::Any));
+                .unwrap_or_else(|| {
+                    implicit_property_type(
+                        decl,
+                        &property.key,
+                        property.r#static,
+                        // An `accessor` field cannot be `declare`.
+                        false,
+                        property.span,
+                        source,
+                    )
+                });
                 let spans = MemberSpans {
                     declaration: Some(verter_span::Span::new(
                         property.span.start,
@@ -4967,21 +4987,25 @@ fn lower_identifier_variable_parts(
 /// of a class with a static block (`getFlowTypeInStaticBlocks`). That flow
 /// type is not modelled here, so the property is the unrepresented
 /// authored type there, never a guessed one. An ambient (`declare`)
-/// property is the implicit `any`.
+/// property is the implicit `any`. An `accessor` field is a property
+/// declaration to the checker, typed the same way.
 fn implicit_property_type(
     class: &Class<'_>,
-    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    key: &PropertyKey<'_>,
+    is_static: bool,
+    declare: bool,
+    span: oxc_span::Span,
     source: &str,
 ) -> TypeExpr {
-    let flow_typed = !prop.declare
-        && if prop.r#static {
+    let flow_typed = !declare
+        && if is_static {
             class
                 .body
                 .body
                 .iter()
                 .any(|element| matches!(element, ClassElement::StaticBlock(_)))
         } else {
-            static_property_key_name(&prop.key).is_some_and(|name| {
+            static_property_key_name(key).is_some_and(|name| {
                 class.body.body.iter().any(|element| match element {
                     ClassElement::MethodDefinition(method)
                         if method.kind == MethodDefinitionKind::Constructor =>
@@ -4996,7 +5020,7 @@ fn implicit_property_type(
         };
     if flow_typed {
         TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
-            &source[prop.span.start as usize..prop.span.end as usize],
+            &source[span.start as usize..span.end as usize],
         ))
     } else {
         TypeExpr::Primitive(PrimitiveName::Any)

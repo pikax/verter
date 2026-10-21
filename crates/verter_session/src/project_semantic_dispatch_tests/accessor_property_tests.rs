@@ -151,8 +151,15 @@ fn equivalent_accessor_key_spellings_map_as_one_mutable_property() {
             "`{probe}`: `get 1` / `set \"1\"` map as one mutable `\"s\"` property, (readonly, value matches) per member"
         );
     }
-    let failures =
-        evaluated_mismatches(FIXTURE, &[("Omit<N, 1>", "{}"), ("Omit<N2, \"1\">", "{}")]);
+    let failures = evaluated_mismatches(
+        FIXTURE,
+        &[
+            ("Omit<N, 1>", "{}"),
+            ("Omit<N2, \"1\">", "{}"),
+            ("keyof Pick<N2, \"1\">", "\"1\""),
+            ("keyof Omit<N2, 1>", "\"1\""),
+        ],
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
