@@ -50,7 +50,7 @@ pub(super) struct Answer {
 /// decodes it: with no depth limit, since a deep answer (a heritage chain's
 /// tuple nested a hundred levels) nests deeper than a default decoder
 /// allows.
-fn named_answer(source: &str, probe: &str) -> Answer {
+pub(super) fn named_answer(source: &str, probe: &str) -> Answer {
     named_answer_in_mode(source, probe, None)
 }
 

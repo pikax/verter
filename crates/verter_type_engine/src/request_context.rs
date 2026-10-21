@@ -979,6 +979,12 @@ pub struct RequestContext {
     /// ([`crate::request_route_memo::NormalizedCanonicalMemo`]):
     /// request-scoped, dropped with the context.
     pub normalized_canonicals: crate::request_route_memo::NormalizedCanonicalMemo,
+    /// The results the request's semantic dispatchers completed and may
+    /// serve again, shared by every dispatcher of the request
+    /// ([`crate::project_semantic_dispatch::request_completions`]):
+    /// request-scoped, dropped with the context, which releases them.
+    pub(crate) semantic_completions:
+        crate::project_semantic_dispatch::request_completions::RequestCompletions,
 
     // ─────── Type-resolution counters ───────
     //
@@ -1594,6 +1600,7 @@ impl RequestContext {
             process_rss_peak_bytes: Arc::new(AtomicU64::new(0)),
             import_route_observations: Default::default(),
             normalized_canonicals: Default::default(),
+            semantic_completions: Default::default(),
             type_resolution_hops: AtomicU64::new(0),
             type_resolution_navigations: AtomicU64::new(0),
             type_resolution_expansions: AtomicU64::new(0),

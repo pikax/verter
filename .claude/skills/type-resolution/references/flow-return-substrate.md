@@ -202,6 +202,60 @@ absorbing it would delete the `n` member the checker publishes. The gate is scop
 to surfaces whose key domain is the member list — a call, construct or index
 signature on either side goes to the relation.
 
+Inferred value declarations also run the shared
+`normalize_widened_object_literals` owner before publishing their `typeof`
+answer, on both the located-body and expression-source paths. Array element
+unions and conditional results therefore receive the same optional `undefined`
+properties as return/yield joins, including nested literal siblings. Authored
+computed keys use shared index-key resolution before literal eligibility and
+matching. Spread-built siblings supply same-property nested contexts without
+contributing their outer keys to missing-property padding. Authored
+annotations and non-literal object types keep their own shapes. Nonempty
+literals carry provenance on their members; the transient `ObjectExpr` carries
+`empty_literal` for an empty source literal, which lowers to a zero-effect
+object construction program. An authored empty object type has no such marker.
+Rebuilt unions continue through `ReduceUnion` and canonical kernel ordering.
+Locator lowering preserves expression-origin facts until that normalization
+finishes. The existing source regularizer then consumes freshness across object,
+array, tuple and union nodes with a memoized postorder walk. Spread construction
+programs record whether they still denote a literal expression; regularization
+clears that bit and their direct-member origins without expanding spread operands.
+An effect-free construction program becomes an ordinary empty object surface at
+publication. Relation checks, subtype-reduction views and call-diagnostic
+structural readers use that same empty surface, so a fresh `{}` still absorbs
+a primitive sibling and reports required missing properties where the checker
+does, without losing its literal provenance before object normalization.
+The empty construction and its regular surface both display as `{}`.
+Const-context spread readers also regularize effect-free operands before
+copying their readonly members, so an empty literal contributes no properties
+without degrading the result. Strict-subtype object comparisons retain a fresh
+empty program through correlated projection: its empty domain satisfies an
+inferable index signature, while a declared `{}` keeps the ordinary surface
+rules and does not acquire literal status.
+Thus separately declared object values do not normalize against later siblings.
+Member-granular and whole-value publication apply the same rule through nested
+object properties, without a depth cutoff. Class fields normalize as independent
+initializers on selected-member, instance and constructor-object publication
+paths, without forcing deferred sibling fields. Inferred default-parameter types
+normalize for standalone functions, arrow functions and object methods;
+authored parameter types keep their own shapes. Signature normalization preserves
+the callable header's occurrence, return carrier and scope, including a deferred
+callable whose return has not been demanded.
+
+Tuple elements enter independent widening contexts before publication consumes
+their initializer freshness; tuple labels, optional/rest markers and readonly
+modifiers survive rebuilding. Literal spread programs likewise normalize their
+initializer children before receiving missing sibling properties, without
+flattening the construction or changing write order. A spread operand union
+retains its construction alternatives: it does not introduce a sibling-widening
+context of its own. Property initializers inside an inline spread source still
+normalize independently, including arrays of object literals. Constructor headers use
+the same parameter normalization as function headers; authored parameter types
+remain unchanged. For nested literals, TypeScript 7.0.2 diagnostic messages can
+omit inferred optional properties that its native API and `keyof` expose. Use
+the actual checker type and key assertions to distinguish that abbreviated
+diagnostic print from a semantic normalization cutoff.
+
 The call value carries a matching reduction on the intersection side: a callee's
 INSTANTIATED return that pairs the empty object type `{}` with a definitely
 non-nullish constituent drops the `{}` arm (`andD<T>(x: T): T & {}` called at

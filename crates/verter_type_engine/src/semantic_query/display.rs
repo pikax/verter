@@ -679,7 +679,11 @@ fn display_resolved_type_node(
                 };
                 parts.push(part);
             }
-            format!("{{ {} }}", parts.join("; "))
+            if parts.is_empty() {
+                "{}".to_string()
+            } else {
+                format!("{{ {} }}", parts.join("; "))
+            }
         }
         SemanticNodeData::Union(arms) => {
             // A union arm only parenthesises a LOOSER binder (Conditional /

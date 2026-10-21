@@ -1086,9 +1086,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 crate::semantic_query::ProjectionMode::Navigate,
             );
         match self.normalize_node_for_structural_fact_demand(node, transit) {
-            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
-                self.graph().node_data(node)
-            }
+            super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => self
+                .graph()
+                .node_data(self.regularized_empty_object_program(node)),
             _ => None,
         }
     }

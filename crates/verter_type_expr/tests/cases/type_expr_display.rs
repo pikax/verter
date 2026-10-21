@@ -97,6 +97,7 @@ fn renders_every_object_and_function_shape_as_valid_type_syntax() {
     );
 
     let expression = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "dash-key".into(),
@@ -428,6 +429,7 @@ fn an_infer_bound_by_an_enclosing_clause_renders_as_a_reference() {
     };
     let object = |name: &str, value: TypeExpr| {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(name.into(), value, false, false),
             )],

@@ -656,7 +656,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             let id = self
                 .dispatch_txn
                 .borrow_mut()
-                .push_collecting_session(setup, None);
+                .push_collecting_session(setup);
             let session = self.take_collecting_session(id);
             (
                 ContextualCandidate {

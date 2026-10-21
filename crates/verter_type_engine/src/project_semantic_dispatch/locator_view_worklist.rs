@@ -1278,8 +1278,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 Self::conditional_check_context(context),
                             ),
                             extends: projected(memo, *extends, extends_context),
-                            true_branch: projected(memo, *true_branch_ref, context),
-                            false_branch: projected(memo, *false_branch_ref, context),
+                            true_branch: self.answer_member(
+                                projected(memo, *true_branch_ref, context),
+                                context,
+                                inputs,
+                            ),
+                            false_branch: self.answer_member(
+                                projected(memo, *false_branch_ref, context),
+                                context,
+                                inputs,
+                            ),
                             distributive: *distributive,
                             pending: pending.clone(),
                         },
@@ -1398,24 +1406,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             context: argument_context,
                         });
                     } else {
+                        // Reading a closed argument may dispatch.
+                        work_credit.settle();
                         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
                             state
                                 .args
                                 .iter()
                                 .map(|argument| {
-                                    self.canonical_argument_carrier(projected(
-                                        memo,
+                                    let operand_context = self.argument_operand_context(
                                         *argument,
-                                        self.argument_operand_context(
-                                            *argument,
-                                            state.argument_context,
-                                        ),
+                                        state.argument_context,
+                                    );
+                                    self.canonical_argument_carrier(self.answer_argument(
+                                        projected(memo, *argument, operand_context),
+                                        context,
+                                        state.argument_context,
+                                        operand_context,
+                                        inputs,
                                     ))
                                 })
                                 .collect::<Vec<_>>()
                                 .into_boxed_slice(),
                         );
-                        work_credit.settle();
                         let deferred = || self.in_deferred_position(frames);
                         let result = match self.plan_carrier_finish(
                             state.continuation,
@@ -2284,17 +2296,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 }
 
 mod finish;
+#[cfg(any(test, feature = "test-support"))]
+pub use finish::count_answer_member_reads_for_tests;
+pub(super) use finish::AnswerReads;
 fn projection_finish_may_dispatch(
     data: &SemanticNodeData,
     context: ProjectionReductionContext,
 ) -> bool {
-    let _ = context;
+    // A published `Expanded` answer reads the closed operators its
+    // composites hold when it finishes them (`answer_member`).
     matches!(
         data,
         SemanticNodeData::KeyOf { .. }
             | SemanticNodeData::IndexedAccess { .. }
             | SemanticNodeData::InstantiationRef { .. }
-    )
+    ) || (context.mode == ProjectionMode::Expanded && may_reduce_operator(context))
 }
 
 fn projected(

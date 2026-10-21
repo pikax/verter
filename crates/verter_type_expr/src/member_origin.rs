@@ -10,7 +10,8 @@ use crate::TypeExpr;
 ///
 /// This is a property of the TYPE, not of a request: it participates in node
 /// interning identity (Eq / Hash) on every member carrier, and it is
-/// semantically read ONLY by excess-property candidate selection. Ordinary
+/// read by excess-property candidate selection and fresh object-literal
+/// normalization. Ordinary
 /// property matching, value assignability, optionality, index-signature
 /// checking, union relation, and signature relation ignore it.
 ///
