@@ -167,6 +167,44 @@ component's co-resident members). A charge stored beside a cache entry
 outlives an eviction for as long as a reader snapshot holds the entry —
 which is correct, because the bytes are still resident.
 
+**ACTIVE-occupancy windows** (`verter_retention/src/active_window.rs`,
+optional test/tooling state compiled only under `test`, `test-support` or
+the default-off `soak-support` — forwarded by
+`verter_session_query/soak-support` and `verter_session/soak-support`;
+`ACTIVE_OCCUPANCY_WINDOW_AVAILABLE` reports the build). The snapshot's
+`peak_total_bytes` mixes every class over the account's lifetime, so it
+cannot say how much ACTIVE a given workload held. A window measures ONE
+explicit `ActiveOwner` (`mint_active_owner()`, account-bound); the workload
+reserves through `reserve_as(&owner, ..)` (`ChargeCtx::owned_by` for holds
+backing) and `open_active_window(&owner)` (host route:
+`VerterHost::mint_active_occupancy_owner` + `open_active_occupancy_window`)
+registers the window under the admission lock. The owner travels with the
+charge through sharing, `split_off`, `absorb`, holding adoption, release and
+class transfers; a charge merging two different owners, and every
+`reserve(..)` charge, is UNKNOWN. A holding adoption settles its provenance
+change and class change in ONE account-locked transaction (`adopt_backing`):
+the held bytes move between ACTIVE balances with the total unchanged, and no
+window observes the adoption half-applied. `absorb` merges settled
+(non-ACTIVE) charges only. The account keeps each identified owner's ACTIVE
+bytes AND the UNKNOWN balance exactly (they sum to the account's ACTIVE bytes). Every ACTIVE transition — ACTIVE reserve and
+release, `commit_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
+joining an ACTIVE charge through `holding` — is noted under that same lock:
+the account keeps each owner's ACTIVE bytes exactly, so opening or finishing
+races lose nothing and overlapping windows never reset each other.
+`finish()` / `observe()` return an `ActiveWindowReport`: the interval on the
+account's ACTIVE transition sequence, the owner's ACTIVE at open and close, its
+peak (starting at the ACTIVE held at open, never a lifetime maximum), rise and
+fall bytes (`open + rise − fall == close`), and the `foreign_transitions`
+(identified other owners, excluded) and `unknown_transitions` counts.
+`attributed()` yields a peak a crossing check may read unless unknown
+transitions occurred in the interval, UNKNOWN ACTIVE bytes were already charged
+when the window opened (occupancy spanning the window makes no transition, yet
+could be the owner's work), or the owner's own ACTIVE bytes were held at open or
+still held at close. A window
+changes no admission decision. Production builds carry no registry, sequence
+or provenance (`Provenance` is zero-sized there); current occupancy stays in the
+snapshot.
+
 **What a charge measures.** A charge covers the allocations its owner
 keeps reachable, by CAPACITY, under the declared conventions of
 `verter_retention/src/allocation.rs` (heap block = payload rounded to 16 B plus a
@@ -329,7 +367,10 @@ quota): `IdentityInterner` (each pooled `OwnedStr` is held by the pool and
 charged by its own cell, its map slot is a separate charge,
 `pooled_entry_bytes`; sheds pool-only entries and retries once on refusal,
 else returns the string un-pooled; when the pool lets go, the string's
-charge passes to the identities still holding it),
+charge passes to the identities still holding it; a host close and a
+completed host release boundary also shed its pool-only entries
+(`shed_pool_only`), so a closed host keeps pooled only the identities a live
+reader still holds),
 `ComponentMetaResultDb` via `BoundedCandidateMap` (the charge rides the
 `RetentionCandidate`), the `SemanticGraphStore` family memo (the charges
 ride `MemoEntry::retention`; `warm_publish_one` refusal returns

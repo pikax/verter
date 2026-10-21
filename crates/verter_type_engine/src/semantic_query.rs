@@ -6002,6 +6002,8 @@ impl<T> CacheRead<T> {
 
 mod retained_nodes;
 
+pub(crate) mod small_node_set;
+
 // ──────────────────────────────────────────────────────────────────────────
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)
 // ──────────────────────────────────────────────────────────────────────────

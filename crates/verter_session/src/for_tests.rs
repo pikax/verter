@@ -392,15 +392,15 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
 
 /// Relate the type named `source` to the type named `target`, both declared
 /// in `scope_canonical_id`, as one connected demand under
-/// `construction_byte_limit` when given: whether the source is assignable,
-/// and the work units and construction bytes the demand charged.
+/// `construction_byte_limit` when given: how the relation ended, and what
+/// the demand charged.
 pub fn relate_named_types_for_tests(
     host: &crate::VerterHost,
     scope_canonical_id: &str,
     source: &str,
     target: &str,
     construction_byte_limit: Option<u64>,
-) -> (bool, usize, u64) {
+) -> RelationDemand {
     let dispatch =
         verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
     if let Some(limit) = construction_byte_limit {
@@ -421,14 +421,45 @@ pub fn relate_named_types_for_tests(
     let (source, target) = (lower(source), lower(target));
     let step = dispatch.execute_relate(dispatch.relate_key_for(source, target));
     let usage = dispatch.connected_demand_usage();
-    (
-        matches!(
-            step,
-            verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep::Assignable { .. }
-        ),
-        usage.work,
-        usage.bytes,
-    )
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep;
+    RelationDemand {
+        outcome: match step {
+            RelationStep::Assignable { .. } => RelationDemandOutcome::Assignable,
+            RelationStep::NotAssignable => RelationDemandOutcome::NotAssignable,
+            RelationStep::BudgetExceeded(_) => RelationDemandOutcome::BudgetExceeded,
+            RelationStep::Unknown | RelationStep::Assumed(_) => RelationDemandOutcome::Undecided,
+        },
+        work: usage.work,
+        bytes: usage.bytes,
+        memory_limit_tripped: dispatch.connected_demand().memory_limit_tripped(),
+    }
+}
+
+/// How a relation demand ended, as the relation reported it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationDemandOutcome {
+    /// The source provably relates to the target.
+    Assignable,
+    /// The source provably does not relate to the target.
+    NotAssignable,
+    /// A budget cap stopped the relation: neither verdict was reached.
+    BudgetExceeded,
+    /// The relation was deferred or assumed, never settled.
+    Undecided,
+}
+
+/// What one relation demand answered and charged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelationDemand {
+    /// How the relation ended.
+    pub outcome: RelationDemandOutcome,
+    /// Work units the demand charged.
+    pub work: usize,
+    /// Construction bytes the demand charged (logical credits, not
+    /// allocator bytes).
+    pub bytes: u64,
+    /// Whether the construction-byte allowance tripped the demand.
+    pub memory_limit_tripped: bool,
 }
 
 /// Reduce the template literal type named `name` in `scope_canonical_id` as
@@ -1366,3 +1397,30 @@ enum Two { B, C }
 enum Bad { R = Math.random(), S }
 ";
 pub const MERGED_C: &str = "enum NE { B = NE.A + 1 }\n";
+
+/// The status refuses at the connected query-depth bound and names no
+/// missing dependency beside it.
+pub fn status_is_depth_refusal(status: verter_type_engine::semantic_query::FactStatus) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Unavailable(reasons) => {
+            let reasons = reasons.get();
+            reasons.contains(PartialReasonSet::CONNECTED_QUERY_DEPTH_LIMIT)
+                && !reasons.contains(PartialReasonSet::MISSING_DEPENDENCY)
+        }
+        _ => false,
+    }
+}
+
+/// The status carries `MISSING_DEPENDENCY` among its partial reasons.
+pub fn status_has_missing_dependency(
+    status: verter_type_engine::semantic_query::FactStatus,
+) -> bool {
+    use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet};
+    match status {
+        FactStatus::Complete => false,
+        FactStatus::Approximate(reasons, _) | FactStatus::Unavailable(reasons) => {
+            reasons.get().contains(PartialReasonSet::MISSING_DEPENDENCY)
+        }
+    }
+}

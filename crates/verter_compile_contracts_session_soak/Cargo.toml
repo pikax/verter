@@ -17,9 +17,9 @@ bench = false
 
 [dependencies]
 trybuild = "1.0"
-# The soak/tooling runner's own profile: the flight rendezvous reaches a
-# plain consumer only through verter_session's default-off `soak-support`
-# forwarding — never through `test-support` unification. verter_type_engine
+# The soak/tooling runner's own profile: the flight rendezvous and the
+# retention account's ACTIVE-occupancy window reach a plain consumer only
+# through verter_session's default-off `soak-support` forwarding — never through `test-support` unification. verter_type_engine
 # stays feature-less here so the fixture's engine access rides that
 # forwarding alone.
 verter_session = { path = "../verter_session", features = ["soak-support"] }

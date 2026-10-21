@@ -468,6 +468,18 @@ pub(super) const CHECKER_RELATION_DEPTH_LIMIT: u16 = 100;
 /// this many instantiations of its recursion identity are on its stack.
 const CHECKER_DEEPLY_NESTED_DEPTH: usize = 3;
 
+/// The required methods of TypeScript's lib `interface Function`
+/// (`lib.es5.d.ts`: `apply(this: Function, thisArg: any, argArray?: any)`,
+/// `call(…)`, `bind(…)`): a source with no call or construct signature is a
+/// `Function` only if it declares all three, each callable.
+const FUNCTION_REQUIRED_METHODS: [&str; 3] = ["apply", "call", "bind"];
+
+/// The required properties the same `lib.es5.d.ts` `interface Function`
+/// declares beside those methods (`prototype: any`, `readonly length:
+/// number`, `arguments: any`, `caller: Function`); `toString` is every
+/// object's. A signature-less source lacking one is no `Function`.
+const FUNCTION_REQUIRED_PROPERTIES: [&str; 4] = ["prototype", "length", "arguments", "caller"];
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How many relations this thread reduced structurally; test-only.
@@ -5167,9 +5179,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         self.relation_session_rollback(&checkpoint);
         bindings.truncate(bindings_len);
+        // Inference reads the last signature whatever its assignability, as
+        // the checker's `inferFromSignature` does before assignability is
+        // checked: `callS(o)` over `callS<R>(f: (x: string) => R)` with `o`
+        // overloaded `(x: string): 1; (x: number): 0` infers `R` as `0`,
+        // and the call then fails with that inference. A conditional type's
+        // `infer` then relates the other overloads to its `extends` type
+        // instantiated with that inference: over `f` overloaded `(x:
+        // string): 1; (x: number): 2`, `typeof f extends (x: string) =>
+        // infer R ? R : 0` infers `R` as `2`, no overload is assignable to
+        // `(x: string) => 2`, and the false branch answers `0`.
+        // A parameter the last signature binds several times keeps the
+        // relation's own verdict: its fixation is the session's.
+        let inferred_from = bindings.len();
+        let before_inference = self.relation_session_checkpoint();
+        self.infer_from_signature_parts(*last_source, *last_target, bindings);
+        let instantiated = if self.call_session_active() {
+            None
+        } else {
+            let single = self.single_deposit_bindings(&bindings[inferred_from..]);
+            if single.is_none() {
+                self.relation_session_rollback(&before_inference);
+                bindings.truncate(inferred_from);
+            }
+            single
+        };
+        let bindings_len = bindings.len();
         for (source, target) in rest {
+            let target = match &instantiated {
+                Some(inferred) => self.substitute_bindings(*target, inferred),
+                None => *target,
+            };
             let checkpoint = self.relation_session_checkpoint();
-            let result = self.relate_member(*source, *target, bindings, position);
+            let result = self.relate_member(*source, target, bindings, position);
             self.relation_session_rollback(&checkpoint);
             bindings.truncate(bindings_len);
             match result {
@@ -5183,6 +5225,73 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             RelationResult::NotAssignable
         }
+    }
+
+    /// `deposits` when they bind each parameter once, the instantiation a
+    /// conditional type's `extends` type is then read under; `None` when a
+    /// parameter holds several candidates, whose fixation is the session's.
+    fn single_deposit_bindings(&self, deposits: &[InferBinding]) -> Option<Vec<InferBinding>> {
+        let mut seen = FxHashSet::default();
+        deposits
+            .iter()
+            .all(|binding| seen.insert(binding.param))
+            .then(|| deposits.to_vec())
+    }
+
+    /// Whether the active inference session infers a call's type
+    /// parameters.
+    fn call_session_active(&self) -> bool {
+        self.dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| {
+                session.context_key().pass_kind
+                    == crate::semantic_query::InferencePassKind::CallApplicability
+            })
+    }
+
+    /// Infer from a non-generic `source` signature to the signature
+    /// `target` position by position, keeping every deposit whatever each
+    /// position's relation answers (`inferFromSignature`: the parameters
+    /// contravariantly, then the return).
+    fn infer_from_signature_parts(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) {
+        let returns = |signature: SemanticNodeId| match self.graph().node_data(signature).as_deref()
+        {
+            Some(SemanticNodeData::Signature {
+                kind,
+                type_parameters,
+                return_type,
+                ..
+            }) => Some((*kind, type_parameters.is_empty(), *return_type)),
+            _ => None,
+        };
+        let (Some((_, true, source_return)), Some((kind, _, target_return))) =
+            (returns(source), returns(target))
+        else {
+            return;
+        };
+        let Ok(plan) = self.signature_comparison_plan(source, target, kind, false) else {
+            return;
+        };
+        for (source_param, target_param) in plan.positions {
+            let _ = self.relate_member(
+                target_param,
+                source_param,
+                bindings,
+                InferPosition::ContravariantParam,
+            );
+        }
+        let _ = self.relate_member(
+            source_return,
+            target_return,
+            bindings,
+            InferPosition::Return,
+        );
     }
 
     /// The source signature a relation of `source` to the signature
@@ -7588,7 +7697,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn follow_relation_aliases(&self, node: SemanticNodeId) -> SemanticNodeId {
         let graph = self.graph();
         let mut current = node;
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
             match graph.node_data(current).as_deref() {
                 Some(SemanticNodeData::Alias(inner)) => current = *inner,
@@ -10560,7 +10669,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             == Some(crate::intrinsic_registry::RuntimeNominal::Function)
     }
 
-    /// The two relation judgements the lib `Function` global's TERMINAL
+    /// The relation judgements the lib `Function` global's TERMINAL
     /// carrier has to answer by tag, because it has no declaration body
     /// the `Instantiate` dispatch could expand into an object surface:
     ///
@@ -10568,7 +10677,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///   non-primitive (and to another spelling of the same global);
     /// * every CALLABLE source inhabits the global `Function` surface —
     ///   a bare signature, or an object surface carrying a call or
-    ///   construct signature.
+    ///   construct signature;
+    /// * no string, number, boolean, bigint or symbol (nor a literal of
+    ///   one) does: its wrapper lacks `Function`'s `apply` / `call` /
+    ///   `bind`;
+    /// * neither does an array, a tuple, or an object surface with no
+    ///   signature that lacks a required `Function` member or whose method
+    ///   of that name cannot be called (`{ x: 1 }`, `{ [k: string]: 1 }`).
     ///
     /// `None` for every other pair, which then takes the ordinary arms:
     /// the deferred gate's `Unknown` is the honest answer for a carrier
@@ -10594,13 +10709,81 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if target_is_function {
             return match source_data {
                 SemanticNodeData::Signature { .. } => Some(assignable(bindings)),
-                SemanticNodeData::Object(surface) => (!surface.call_signatures.is_empty()
-                    || !surface.construct_signatures.is_empty())
-                .then(|| assignable(bindings)),
+                SemanticNodeData::Object(surface) => {
+                    if !surface.call_signatures.is_empty()
+                        || !surface.construct_signatures.is_empty()
+                    {
+                        return Some(assignable(bindings));
+                    }
+                    // A surface's members are its complete domain, and an
+                    // index signature supplies no required property: one
+                    // with no signature that lacks a required member of
+                    // `Function` (`{ x: 1 }`, `{ [k: string]: any }`), or
+                    // whose method of that name cannot be called
+                    // (`{ apply: 1; call: 1; bind: 1 }`), is no `Function`.
+                    let members = surface.positive_members();
+                    let member = |name: &str| {
+                        members
+                            .iter()
+                            .find(|member| member.string_name() == Some(name))
+                    };
+                    let lacks_member = FUNCTION_REQUIRED_METHODS.iter().any(|name| {
+                        member(name).is_none_or(|member| self.is_never_callable(member.value))
+                    }) || FUNCTION_REQUIRED_PROPERTIES
+                        .iter()
+                        .any(|name| member(name).is_none());
+                    lacks_member.then_some(RelationResult::NotAssignable)
+                }
+                // An array or a tuple reads through `Array` / `ReadonlyArray`,
+                // which declare none of `apply` / `call` / `bind`.
+                SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. } => {
+                    Some(RelationResult::NotAssignable)
+                }
+                // A primitive reads through its wrapper (`Number`, `String`,
+                // …), which declares none of `Function`'s `apply` / `call` /
+                // `bind`: `1 extends Function` is false.
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+                )
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::TypeOfNominal(_) => Some(RelationResult::NotAssignable),
                 _ => None,
             };
         }
         None
+    }
+
+    /// Whether a member value is a type no call can be made through: a
+    /// primitive or literal, an array or tuple, or an object surface with no
+    /// call or construct signature. Every other value (a signature, a
+    /// carrier, a composite) is not known to be uncallable.
+    fn is_never_callable(&self, value: SemanticNodeId) -> bool {
+        match self.graph().node_data(value).as_deref() {
+            Some(SemanticNodeData::Object(surface)) => {
+                surface.call_signatures.is_empty() && surface.construct_signatures.is_empty()
+            }
+            Some(
+                SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Symbol,
+                )
+                | SemanticNodeData::Literal(_)
+                | SemanticNodeData::TemplateLiteral { .. }
+                | SemanticNodeData::EnumLiteral(_)
+                | SemanticNodeData::Array { .. }
+                | SemanticNodeData::Tuple { .. },
+            ) => true,
+            _ => false,
+        }
     }
 
     construction_ordinal_seam! {
@@ -10624,7 +10807,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let graph = self.graph();
         let transit = ProjectionReductionContext::structural_transit();
         let mut current = id;
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
             on_step(current);
             let Some(data) = graph.node_data(current) else {
