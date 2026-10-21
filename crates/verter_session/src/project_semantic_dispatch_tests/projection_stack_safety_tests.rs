@@ -711,8 +711,12 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             input_id: "/runaway.ts".to_string(),
             // Through its own conditional type the self-application is the
             // checker's tail loop over ever-new arguments; applied directly it
-            // would be a circular declaration (TS2456), not growth.
-            source: Arc::from("export type Runaway<T> = T extends never ? never : Runaway<[T]>;\n"),
+            // would be a circular declaration (TS2456), not growth. Its check
+            // wraps the parameter (`[T]`), so no uniform-growth certificate
+            // covers it and the run falls back to the work rail.
+            source: Arc::from(
+                "export type Runaway<T> = [T] extends [never] ? never : Runaway<[T]>;\n",
+            ),
             file_language: crate::LanguageRegistry::global()
                 .classify_static("/runaway.ts")
                 .static_resolution(),

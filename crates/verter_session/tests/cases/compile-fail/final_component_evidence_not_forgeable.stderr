@@ -10,4 +10,4 @@ error: cannot construct `ComponentMetaEvidence` with struct literal syntax due t
 7 |         external_fingerprint: 0,
   |         ----------------------- private field
   |
-  = note: ...and other private fields `effects`, `spent_alone`, `divergence_certificate` and `schedule_cut` that were not provided
+  = note: ...and other private fields `effects`, `spent_alone` and `schedule_cut` that were not provided

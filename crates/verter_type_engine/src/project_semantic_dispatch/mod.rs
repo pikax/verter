@@ -820,6 +820,18 @@ pub struct BuildLocalTaint {
     /// build reports them with its own diagnostics, so a refusal reaches
     /// every read composed over the refused operation.
     pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+    /// The identity of the instantiation this frame builds, when it builds
+    /// one ([`instantiation_frame_identity`]): a same-path claim finds the
+    /// frame producing the claimed instantiation by it.
+    pub(super) produces: Option<u64>,
+}
+
+/// The identity a frame building `key` records in
+/// [`BuildLocalTaint::produces`]: the hash of an `Instantiate` key, `None`
+/// for any other key.
+pub(super) fn instantiation_frame_identity(key: &SemanticQueryKey) -> Option<u64> {
+    use std::hash::BuildHasher;
+    matches!(key, SemanticQueryKey::Instantiate(_)).then(|| rustc_hash::FxBuildHasher.hash_one(key))
 }
 
 /// Append each of `roots` to `into` unless it is already there, keeping
@@ -4957,6 +4969,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
+            if let Some(frame) = self.build_local_taint.borrow_mut().last_mut() {
+                frame.produces = instantiation_frame_identity(key);
+            }
             // The build's carrier — every fact it traced, its fence and
             // prelude facts and its self-roots — is delivered to the tracers
             // active when it completes (`complete` bubbles it whether or not
@@ -5021,7 +5036,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
-            self.connected_demand.note_divergence_certificate();
             graph.recursion_read(
                 crate::semantic_query_memo::Recursion::SamePath,
                 (sentinel.take().expect("the completion runs once"))(),
@@ -5119,10 +5133,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                     Acquired::Recursive(recursion) => {
+                        // A same-path carrier is a typed partial, never a
+                        // divergence certificate: a deferred position meets
+                        // itself on its path too.
                         if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
                             self.connected_demand.note_schedule_cut();
-                        } else {
-                            self.connected_demand.note_divergence_certificate();
                         }
                         self.graph().recursion_read(
                             recursion,
