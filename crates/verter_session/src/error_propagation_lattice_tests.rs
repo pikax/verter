@@ -178,7 +178,9 @@ fn error_any_never_propagation_lattice() {
     use verter_type_engine::project_semantic_dispatch::canonical_algebra;
     // union: X | never = X (the `never` arm is dropped, singleton folds).
     let u = canonical_algebra::intern_ordered_union(
-        graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
         &[string, never],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
@@ -190,7 +192,9 @@ fn error_any_never_propagation_lattice() {
     );
     // union: X | any = any.
     let u = canonical_algebra::intern_ordered_union(
-        graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
         &[string, any],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
@@ -202,7 +206,9 @@ fn error_any_never_propagation_lattice() {
     );
     // union: X | unknown = unknown.
     let u = canonical_algebra::intern_ordered_union(
-        graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
         &[string, unknown],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
@@ -215,7 +221,9 @@ fn error_any_never_propagation_lattice() {
     // union: NO absorption for a plain union of ordinary types — the
     // canonical form keeps both arms.
     let u = canonical_algebra::intern_ordered_union(
-        graph,
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
         &[string, number],
         verter_session_query::flow::policy::NullabilityPolicy::Strict,
     )
@@ -226,19 +234,37 @@ fn error_any_never_propagation_lattice() {
     );
 
     // intersection: X & never = never; X & unknown = X; X & any = any.
-    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, never]).node;
+    let i = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
+        &[string, never],
+    )
+    .node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Never)),
         "X & never = never"
     );
-    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, unknown]).node;
+    let i = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
+        &[string, unknown],
+    )
+    .node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::String)),
         "X & unknown = X"
     );
-    let i = canonical_algebra::intern_ordered_intersection(graph, &[string, any]).node;
+    let i = canonical_algebra::intern_ordered_intersection(
+        verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+            graph,
+        ),
+        &[string, any],
+    )
+    .node;
     assert_eq!(
         kind(i),
         Some(SemanticNodeData::Primitive(PrimitiveKind::Any)),

@@ -7,21 +7,29 @@
 
 use super::*;
 
-/// Record a derivation/origin edge through
-/// `SemanticGraphStore::record_origin_edge`, building its arguments only where
-/// the derivation layer records them: `record_origin_edge!(graph, result,
-/// kind, sources, meta, fence)`.
+/// Record a derivation/origin edge through the execution unit's
+/// [`GraphIn`] handle, building its arguments only where the derivation layer
+/// records them: `record_origin_edge!(graph, result, kind, sources, meta,
+/// fence)`.
 ///
 /// Origin edges are optional provenance. In a shipped build (no `test`,
 /// `test-support` or `semantic-observe`) the arguments are type-checked inside
 /// a closure that is never built or called, so a derivation site allocates no
 /// source slice, interns no placeholder and clones no fence for an edge that
-/// would be discarded. Build every edge-only value inside the macro's
-/// arguments, never before it.
+/// would be discarded. In a build with `semantic-observe` the arguments are
+/// built only when the unit's capture mode records edges
+/// ([`GraphIn::records_origin_edges`]): an uncaptured execution tests a
+/// constant and builds nothing. Build every edge-only value inside the
+/// macro's arguments, never before it.
 macro_rules! record_origin_edge {
     ($graph:expr, $result:expr, $kind:expr, $sources:expr, $meta:expr, $fence:expr $(,)?) => {{
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        $graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+        {
+            let graph = $graph;
+            if graph.records_origin_edges() {
+                graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+            }
+        }
         #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {
@@ -63,7 +71,7 @@ impl SemanticGraphStore {
         /// [`request_context::current_accumulator`] push remains
         /// unconditional so the footprint miner observes every derivation hop
         /// the production hot path would have emitted.
-        fn record_origin_edge(
+        fn record_origin_edge_in<M: verter_audit::observe::ObserveExec>(
             &self,
             result: SemanticNodeId,
             kind: OriginEdgeKind,
@@ -172,8 +180,10 @@ impl SemanticGraphStore {
                 // intentionally unconditional — it runs even on the dedup path
                 // so dropped ledger writes still surface in the audit trace.
                 #[cfg(feature = "semantic-observe")]
-                if let Some(acc) = crate::request_context::current_accumulator() {
-                    acc.push_derivation_edge(result, kind, edge.clone());
+                if M::CAPTURED {
+                    if let Some(acc) = crate::request_context::current_accumulator() {
+                        acc.push_derivation_edge(result, kind, edge.clone());
+                    }
                 }
                 // Test harness hook: when a CaptureToken is bound on the current
                 // thread, record the edge identity tuple in the per-request
@@ -213,6 +223,26 @@ impl SemanticGraphStore {
                 });
             }
         }
+    }
+
+    /// [`Self::record_origin_edge_in`] for an uncaptured fixture; the
+    /// derivation-layer tests record edges directly.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_origin_edge(
+        &self,
+        result: SemanticNodeId,
+        kind: OriginEdgeKind,
+        sources: Arc<[SemanticNodeId]>,
+        meta: crate::semantic_query::OriginMeta,
+        builder_fence: DepSignature,
+    ) {
+        self.record_origin_edge_in::<verter_audit::observe::Uncaptured>(
+            result,
+            kind,
+            sources,
+            meta,
+            builder_fence,
+        );
     }
 
     /// Read-only origin walk for a result node — yields every edge

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use verter_type_engine::request_context::{ObserveExec, Uncaptured};
+
 use verter_session_query::type_solver::{PreparedTypeDecl, PreparedValueDecl};
 
 use crate::resolver_core::prepared_decl::PreparedDeclBundle;
@@ -10,7 +12,8 @@ use crate::resolver_core::request_store_view::{CanonicalCompletionOverlay, Reque
 use crate::resolver_store::HostStoreView;
 use verter_type_engine::resolver_core::resolver_context::ResolverContext;
 
-pub struct HostRequestLifecycle<'a> {
+pub struct HostRequestLifecycle<'a, M: ObserveExec = Uncaptured> {
+    mode: std::marker::PhantomData<M>,
     inner: &'a crate::VerterHost,
     view: RequestStoreView<'a>,
     snapshot: verter_type_engine::resolver_core::RequestSnapshot<
@@ -23,9 +26,9 @@ pub struct HostRequestLifecycle<'a> {
 /// Both base and session requests use the single `ResolverContext`
 /// implementation on `RequestBoundAdapter`; this type supplies only the
 /// lifecycle-specific construction and observation hooks.
-pub type HostResolverContext<'a> = RequestBoundAdapter<HostRequestLifecycle<'a>>;
+pub type HostResolverContext<'a, M = Uncaptured> = RequestBoundAdapter<HostRequestLifecycle<'a, M>>;
 
-impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
+impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
     #[must_use]
     #[cfg(any(test, feature = "test-support", feature = "oracle-gen"))]
     pub(crate) fn new(
@@ -34,6 +37,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
         overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self(HostRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
             snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new(base, overlay),
@@ -47,6 +51,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
         overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self(HostRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
             snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new(base.view(), overlay),
@@ -60,6 +65,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
         overlay: Arc<CanonicalCompletionOverlay>,
     ) -> Self {
         Self(HostRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
             snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
@@ -75,6 +81,7 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
         is_current: bool,
     ) -> Self {
         Self(HostRequestLifecycle {
+            mode: std::marker::PhantomData,
             inner,
             snapshot: inner.capture_request_snapshot(),
             view: RequestStoreView::new_cold_seed(base, overlay, is_current),
@@ -82,7 +89,9 @@ impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a>> {
     }
 }
 
-impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
+impl<M: ObserveExec> RequestBoundLifecycle for HostRequestLifecycle<'_, M> {
+    type Observe = M;
+
     fn host(&self) -> &crate::VerterHost {
         self.inner
     }
@@ -111,10 +120,10 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_decl_bundle(
         &self,
-        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
     ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>> {
-        self.inner.prepared_decl_bundle_with_store_view(
+        self.inner.prepared_decl_bundle_with_store_view_in::<M>(
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,
@@ -123,7 +132,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_type_decl(
         &self,
-        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -131,7 +140,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        self.inner.prepared_type_decl_in_with_store_view(
+        self.inner.prepared_type_decl_in_with_store_view::<M>(
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,
@@ -142,7 +151,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
 
     fn prepared_value_decl(
         &self,
-        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+        _ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
         canonical_id: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         symbol_name: &str,
@@ -150,7 +159,7 @@ impl RequestBoundLifecycle for HostRequestLifecycle<'_> {
         Option<verter_retention::heap_size::OwnedValue<PreparedValueDecl>>,
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
-        self.inner.prepared_value_decl_in_with_store_view(
+        self.inner.prepared_value_decl_in_with_store_view::<M>(
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,

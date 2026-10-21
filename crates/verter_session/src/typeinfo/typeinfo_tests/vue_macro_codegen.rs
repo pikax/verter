@@ -407,7 +407,9 @@ defineProps<Props>()
             .macro_type_arg_hot_ref(canonical, macro_index)
             .expect("macro payload carrier must be present");
     let data = verter_type_engine::project_semantic_dispatch::node_data_for(
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host).graph(),
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&host)
+            .graph()
+            .store(),
         product.hot.node(),
     )
     .expect("macro payload carrier node must be interned");
@@ -435,7 +437,8 @@ defineProps<Props>()
         );
         let data = verter_type_engine::project_semantic_dispatch::node_data_for(
             verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx)
-                .graph(),
+                .graph()
+                .store(),
             resolved,
         )
         .expect("direct carrier resolution must preserve exact declaration identity");

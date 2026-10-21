@@ -958,11 +958,11 @@ impl VerterHost {
     }
 
     /// Run one base-lane operation through a sealed request-bound context.
-    pub(crate) fn with_base_resolver_context<R>(
+    pub(crate) fn with_base_resolver_context<R, M: verter_audit::observe::ObserveExec>(
         &self,
         operation: impl FnOnce(
             &dyn verter_type_engine::resolver_core::ResolverContext<
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
         ) -> R,
     ) -> R {

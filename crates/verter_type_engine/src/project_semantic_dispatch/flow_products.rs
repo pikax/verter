@@ -1146,7 +1146,7 @@ impl FlowSemanticAlgebra for GraphSemanticAlgebra<'_> {
     }
     fn union(&self, members: &[SemanticNodeId]) -> FlowAlgebraComposite {
         let composite = super::canonical_algebra::intern_ordered_union(
-            self.0,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(self.0),
             members,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );

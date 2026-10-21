@@ -112,7 +112,7 @@ fn stopped_demands_never_offer_unevaluated_subjects_as_positional_values() {
     let string = dispatch
         .graph()
         .intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
-    let object = super::tests::simple_object(dispatch.graph(), &[("x", number)]);
+    let object = super::tests::simple_object(dispatch.graph_arc(), &[("x", number)]);
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
     let keys = [
         SemanticQueryKey::ProjectPath {

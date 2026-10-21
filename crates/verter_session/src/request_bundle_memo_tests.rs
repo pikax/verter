@@ -122,7 +122,12 @@ fn overlay_bundle_computes_once_sequentially_per_request_world() {
         .overlay_content_hash_for(OWNER)
         .expect("view must report an overlay content hash for the masked owner");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -168,7 +173,12 @@ fn memo_only_population_remains_empty() {
         .overlay_content_hash_for(OWNER)
         .expect("session overlay hash");
     let (store_view, producer_overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&producer_overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&producer_overlay),
+    );
     let bundle =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
@@ -206,7 +216,12 @@ fn fresh_request_observes_new_overlay_content() {
     let hash_a = view_a.overlay_content_hash_for(OWNER).unwrap();
     let (store_view_a, overlay_a) = request_pieces(&host, &view_a);
     let bundle_a = {
-        let ctx = SessionResolverContext::new(&host, &view_a, &store_view_a, overlay_a);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_a,
+            &store_view_a,
+            overlay_a,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -220,7 +235,12 @@ fn fresh_request_observes_new_overlay_content() {
     let hash_b = view_b.overlay_content_hash_for(OWNER).unwrap();
     assert_ne!(hash_a, hash_b, "fixture invariant: contents A and B differ");
     let (store_view_b, overlay_b) = request_pieces(&host, &view_b);
-    let ctx_b = SessionResolverContext::new(&host, &view_b, &store_view_b, overlay_b);
+    let ctx_b = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view_b,
+        &store_view_b,
+        overlay_b,
+    );
     let bundle_b =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx_b, OWNER,
@@ -269,7 +289,12 @@ fn fresh_request_same_overlay_content_rematerializes() {
     let view_1 = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
     let (store_view_1, overlay_1) = request_pieces(&host, &view_1);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view_1, &store_view_1, overlay_1);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_1,
+            &store_view_1,
+            overlay_1,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -279,7 +304,12 @@ fn fresh_request_same_overlay_content_rematerializes() {
     let view_2 = overlaid_view(&host, OWNER, OVERLAY_OWNER_A);
     let (store_view_2, overlay_2) = request_pieces(&host, &view_2);
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view_2, &store_view_2, overlay_2);
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view_2,
+            &store_view_2,
+            overlay_2,
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -309,7 +339,12 @@ fn base_and_overlay_bundle_memos_are_isolated() {
         .overlay_content_hash_for(OWNER)
         .expect("the view must report an overlay content hash for the masked owner");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let dep_first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -390,7 +425,12 @@ fn tombstoned_canonical_is_not_memoized() {
         .into_owned_view()
         .with_session_overlay(&host, &view);
     let overlay = Arc::new(CanonicalCompletionOverlay::new());
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let bundle =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
@@ -424,7 +464,12 @@ fn external_supersession_between_snapshots_misses_memo() {
     // Attempt 1.
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_1,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -451,7 +496,12 @@ fn external_supersession_between_snapshots_misses_memo() {
         );
     }
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_2,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -483,7 +533,12 @@ fn resolution_retarget_between_snapshots_misses_memo() {
 
     let (store_view_1, overlay) = request_pieces(&host, &view);
     let bundle_1 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_1, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_1,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -547,7 +602,12 @@ fn resolution_retarget_between_snapshots_misses_memo() {
     }
 
     let bundle_2 = {
-        let ctx = SessionResolverContext::new(&host, &view, &store_view_2, Arc::clone(&overlay));
+        let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view_2,
+            Arc::clone(&overlay),
+        );
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(
             &ctx, OWNER,
         )
@@ -580,7 +640,12 @@ fn unattributed_refusal_is_not_memoized() {
         .overlay_content_hash_for(OWNER)
         .expect("session overlay hash");
     let (store_view, overlay) = request_pieces(&host, &view);
-    let ctx = SessionResolverContext::new(&host, &view, &store_view, Arc::clone(&overlay));
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        &host,
+        &view,
+        &store_view,
+        Arc::clone(&overlay),
+    );
 
     let first =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::prepared_decl_bundle(

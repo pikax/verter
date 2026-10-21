@@ -274,7 +274,12 @@ fn connected_work_of(source: &str, function: &str, checker: &str) -> usize {
     );
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
     let identity = verter_type_expr::facts::FlowFunctionReturnIdentity {
         anchor: verter_type_expr::locators::AuthoredAnchor {
@@ -478,7 +483,10 @@ fn an_independent_return_type_is_exact_beside_its_refused_flow_proof() {
     ));
     let view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(&host, &view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host, &view, overlay,
+        );
     let dispatch = super::ProjectSemanticDispatch::new(&ctx);
     let _builder = dispatch.enter_construction_scope();
     let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
@@ -630,7 +638,7 @@ fn arrays(depth: usize) -> String {
 /// checker-print comparison descends a bounded depth of its own.
 fn array_nest_of(source: &str, probe: &str) -> (usize, bool) {
     super::checker_probe_lane_tests::with_probe(source, probe, |dispatch, node| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let mut node = node;
         let mut depth = 0;
         while let Some(verter_type_engine::semantic_query::SemanticNodeData::Array {

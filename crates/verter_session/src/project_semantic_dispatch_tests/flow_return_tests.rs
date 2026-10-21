@@ -351,7 +351,7 @@ fn flow_superseded_evaluation_cannot_deliver_a_value() {
     with_dispatch(&host, |dispatch| {
         let key = dispatch.flow_return_key_for(&identity);
         {
-            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let _sweep = dispatch.graph().store().test_force_cold_abort_sweep();
             assert!(matches!(
                 dispatch.execute_flow_return(key.clone()),
                 FlowReturnStep::Aborted(ExecutionAbort::Superseded)
@@ -364,7 +364,7 @@ fn flow_superseded_evaluation_cannot_deliver_a_value() {
             0
         );
         {
-            let _sweep = dispatch.graph().test_force_cold_abort_sweep();
+            let _sweep = dispatch.graph().store().test_force_cold_abort_sweep();
             let public = host
                 .get_flow_return_type_with_audit(&identity, ReturnProjectionDemand::whole_return());
             assert!(matches!(
@@ -534,9 +534,10 @@ fn assert_exhausted_follower_abort(
                             .recv_timeout(std::time::Duration::from_secs(10));
                     }
                 })));
-            let hook = ProduceHookGuard(dispatch.graph());
+            let hook = ProduceHookGuard(dispatch.graph().store());
             let fault = dispatch
                 .graph()
+                .store()
                 .test_exhausted_join_abort(inner_key.clone(), completion);
             std::thread::scope(|threads| {
                 let producer = threads.spawn(|| {
@@ -864,7 +865,12 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -1389,7 +1395,7 @@ fn flow_return_key_carries_no_value_environment() {
         let mut typed = key.clone();
         typed.context.type_substitution =
             verter_type_engine::semantic_query::CanonicalTypeSubstitution::new(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 vec![(
                     verter_type_engine::semantic_query::SemanticNodeId(7),
                     verter_type_engine::semantic_query::SemanticNodeId(8),
@@ -3724,7 +3730,7 @@ fn static_return_keys_are_exact_beside_an_unfinished_member_value() {
     use verter_type_engine::semantic_query::{FactStatus, ScopeId, ValueRootKey};
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let callee = graph.intern_node(SemanticNodeData::new_typeof(
             ValueRootKey {
                 scope: ScopeId::file(
@@ -5375,7 +5381,7 @@ fn flow_scc_members_never_publish_onto_a_superseded_root() {
         assert_eq!(root_candidates, 1, "the root must warm before the drain");
 
         with_dispatch(&host, |dispatch| {
-            let graph = dispatch.graph();
+            let graph = dispatch.graph_arc();
             let root_key = scc_key(dispatch, "scRingX");
             let root_query = SemanticQueryKey::FlowReturn(Box::new(root_key.clone()));
             let carrier = graph
@@ -7498,7 +7504,7 @@ fn deferred_scc_member_finalizes_after_per_key_substitution() {
         use super::dispatch_txn::flow_obligation_state::{
             FlowDischargeEntry, FlowDischargeReport, FlowSuboperationEvidence, ObligationState,
         };
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         // The binder exactly as the member frame's own clause interns it.
         let whole_hash = dispatch
@@ -8282,7 +8288,7 @@ fn a_call_to_an_augmented_export_resolves_through_the_merged_overloads() {
         let QueryResult::Value(node) = read.value() else {
             panic!("the exported function has a type: {:?}", read.value());
         };
-        let store = dispatch.graph().signature_store();
+        let store = dispatch.graph().store().signature_store();
         let QueryOutcome::Ready(Ready { value: set, .. }) = dispatch.signatures_of_type(
             store,
             *node,
@@ -10556,7 +10562,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let member_key = flow_key(
             dispatch,
@@ -10651,7 +10657,7 @@ fn unproven_flow_member_poisons_mixed_machinery_root() {
     // Control: a PROVEN member batch keeps the root admissible.
     let control = make_host();
     with_dispatch(&control, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let relate_key = dispatch.relate_key_for(number, number);
         let outcome = dispatch
@@ -10726,7 +10732,7 @@ fn refused_member_cause_reaches_the_root_that_consumed_its_value() {
         for armed in [true, false] {
             let host = make_host();
             with_dispatch(&host, |dispatch| {
-                let graph = dispatch.graph();
+                let graph = dispatch.graph_arc();
                 let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
                 let member = flow_key(
                     dispatch,
@@ -10953,7 +10959,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
     use verter_type_engine::semantic_query::{FactStatus, PartialReasonSet, RelationOutcome};
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
         let source = super::tests::simple_object(graph, &[("value", number)]);
@@ -11017,7 +11023,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
     });
     let control_host = make_host();
     with_dispatch(&control_host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let key = dispatch.relate_key_for(number, number).to_query_key();
         let control = dispatch.execute_via_cold_build_helper(key.clone());
@@ -11034,7 +11040,7 @@ fn an_inherited_comparison_refusal_cannot_certify_an_unproven_relation() {
 fn unproven_flow_member_makes_relation_root_decided_return_only() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let query_key = dispatch.relate_key_for(number, number).to_query_key();
         let member = flow_key(
@@ -11109,7 +11115,7 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
 
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let declared = super::call_resolve_tests::signature(
             dispatch,
@@ -11224,7 +11230,7 @@ fn unproven_flow_member_makes_call_root_complete_return_only() {
 fn unproven_flow_member_withholds_flow_root_verdict() {
     let host = make_host();
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let root = flow_key(
             dispatch,
             "subLiteral",
@@ -11411,7 +11417,7 @@ fn provenance_distinguishes_first_demands_of_two_runtimes() {
         );
         // The functional leg: runtime A's first-demand token presented as
         // runtime B's evaluation evidence is foreign, never a proof.
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
         let result = verter_type_engine::semantic_query::FlowReturnResult::new(
             graph,
@@ -12490,7 +12496,7 @@ fn flow_return_reunion_absorbs_a_subtype_arm_but_the_canonical_union_keeps_both(
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let string = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Primitive(
                 verter_type_engine::semantic_query::PrimitiveKind::String,
@@ -12834,7 +12840,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
 
     let host = Arc::new(VerterHost::new_standalone(HostConfig::default()));
     with_dispatch(&host, |dispatch| {
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let literal = graph.intern_node(
             verter_type_engine::semantic_query::SemanticNodeData::Literal(
                 verter_type_expr::LiteralValue::String("x".to_owned()),
@@ -12877,7 +12883,7 @@ fn flow_return_call_value_reduces_a_literal_intersected_with_the_empty_object() 
         );
         assert_eq!(
             super::canonical_algebra::reduced_authored_intersection(
-                graph,
+                verter_type_engine::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
                 written,
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
             ),

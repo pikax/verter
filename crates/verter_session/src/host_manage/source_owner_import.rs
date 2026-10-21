@@ -33,7 +33,24 @@ impl<'a> OwnerImportRequestDriver<'a> {
         Self { db }
     }
     #[must_use]
+    /// [`Self::get_with_view_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_with_view<V>(
+        &self,
+        host: &crate::VerterHost,
+        owner_canonical: &str,
+        expected_owner_whole_hash: Hash16,
+        view: &V,
+    ) -> Option<Arc<OwnerImportSurface>>
+    where
+        V: verter_session_query::facts::store_view::StoreView + ?Sized,
+    {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_with_view_in::<_, M>(host, owner_canonical, expected_owner_whole_hash, view)
+        })
+    }
+
+    pub fn get_with_view_in<V, M: verter_audit::observe::ObserveExec>(
         &self,
         host: &crate::VerterHost,
         owner_canonical: &str,
@@ -45,7 +62,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
     {
         let candidate = self
             .db
-            .lookup_owner_hash_candidate(owner_canonical, expected_owner_whole_hash)?;
+            .lookup_owner_hash_candidate::<M>(owner_canonical, expected_owner_whole_hash)?;
         if candidate.validated_at_generation
             != host.project_type_store().current_project_generation()
         {
@@ -61,7 +78,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
     /// warm lookup, atomically cleans only the stale content version, invokes
     /// the cold closure, and directs the sole production write. A valid but
     /// non-cacheable result is served from `ReturnOnly` without mutation.
-    pub(crate) fn get_or_compute<V, F>(
+    pub(crate) fn get_or_compute<V, F, M: verter_audit::observe::ObserveExec>(
         &self,
         host: &crate::VerterHost,
         owner_canonical: &str,
@@ -76,7 +93,9 @@ impl<'a> OwnerImportRequestDriver<'a> {
             Arc<OwnerImportSurface>,
         >,
     {
-        if let Some(cached) = self.get_with_view(host, owner_canonical, owner_whole_hash, view) {
+        if let Some(cached) =
+            self.get_with_view_in::<_, M>(host, owner_canonical, owner_whole_hash, view)
+        {
             // R28 fact-bubble-up on the WARM path — mirror of
             // `RouteDb::get_or_resolve_route_observing_facts`'s warm-hit
             // branch. Re-observe the surface's recorded chain deps (owner

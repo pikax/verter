@@ -270,14 +270,14 @@ pub(crate) struct AugmentationContributions {
 /// audit schema. This is emitted only after at least one augmenter contributed
 /// and after the exact augmenter-set fingerprint has been observed by the
 /// consumer's fact tracer.
-fn emit_module_augmentation_stitched_event(
+fn emit_module_augmentation_stitched_event<M: verter_audit::observe::ObserveExec>(
     target: &verter_session_query::resolution::AugmentationTargetKind,
     augmenter_count: u32,
     fingerprint: crate::semantic_query::HashValue,
 ) {
     // Optional capture: the event and its payload are built only when an
     // accumulator is installed, and never in a default build.
-    crate::component_meta_trace_structured!({
+    crate::component_meta_trace_structured!(M => {
         use verter_audit::AugmentationTargetKindTag;
         use verter_session_query::resolution::AugmentationTargetKind;
 
@@ -1419,7 +1419,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut suspend: Option<&mut Option<Box<TypeofBuild>>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
-        verter_audit::observe!(|observer| {
+        verter_audit::observe!(C::Observe => |observer| {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
         });
         // Self-version rooting: observe the value-root scope
@@ -1438,7 +1438,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(indexed) => indexed,
             None => {
                 // Telemetry: prepared-value miss site.
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
                 });
                 return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
@@ -5328,7 +5328,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::observe_request!(|ctx| {
+            crate::observe_request!(C::Observe => |ctx| {
                 ctx.expanded_instantiate_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             });
@@ -5340,7 +5340,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // "an Expanded Instantiate fired INSIDE slot-binding synthesis"
             // — the eagerness defect `enrich_does_not_eagerly_instantiate_carrier`
             // gates on (must stay zero).
-            crate::request_context::note_expanded_instantiate_for_synthesis_scope();
+            crate::request_context::note_expanded_instantiate_for_synthesis_scope::<C::Observe>();
         }
 
         let decl_canonical = &base.defining_canonical;
@@ -5667,7 +5667,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // behaviour at solve.rs:2580.
         // Instrumentation: callsite attribution for
         // `prepared_decl_bundle_warm` reads from `build_instantiate`.
-        verter_audit::observe!(|obs| {
+        verter_audit::observe!(C::Observe => |obs| {
             obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
         });
         let scope_payload = self
@@ -6806,7 +6806,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         if let Some((target, fingerprint)) = &plan.stitched {
-            emit_module_augmentation_stitched_event(
+            emit_module_augmentation_stitched_event::<C::Observe>(
                 target,
                 plan.contributor_roots.len() as u32,
                 *fingerprint,
@@ -7781,7 +7781,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 context_free,
             }));
         }
-        emit_module_augmentation_stitched_event(
+        emit_module_augmentation_stitched_event::<C::Observe>(
             &target,
             contributor_roots.len() as u32,
             augmenter_set.fingerprint,
@@ -13236,7 +13236,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (start_base, start_index) = if path.len() < 2 {
             (base, 0usize)
         } else {
-            find_longest_warm_prefix(self.graph(), self.ctx, base, path, |receipt| {
+            find_longest_warm_prefix(self.graph().store(), self.ctx, base, path, |receipt| {
                 self.admits_served(receipt)
             })
             .unwrap_or((base, 0))
@@ -15426,7 +15426,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value_reads_modifiers_member = modifiers_member_index.is_some()
             && mapper.modifiers_type.is_some_and(|modifiers| {
                 crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    graph.store(),
                     mapper.value_expr,
                     modifiers,
                     mapper.parameter_node,
@@ -15937,7 +15937,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // mapped-member materialization cache would key on. The
         // classifier records the tuple in the per-request observed
         // set and bumps the matching unique/repeated counter pair.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -16055,7 +16055,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -19036,7 +19036,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // An enum member interpolates as its value; a member whose
             // value is not a constant is no literal and spells any string.
             Some(SemanticNodeData::EnumLiteral(literal)) => {
-                if super::canonical_algebra::enum_literal_is_unit(graph, literal) {
+                if super::canonical_algebra::enum_literal_is_unit(graph.store(), literal) {
                     let base = literal.base;
                     drop(data);
                     // The member is its own constituent, whatever its value.
@@ -19349,7 +19349,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     QueryResult::Value(type_args[0])
                 } else {
                     let read = self.execute_read(SemanticQueryKey::reduce_intersection_operands(
-                        self.graph(),
+                        self.graph().store(),
                         Arc::clone(type_args),
                     ));
                     crate::fact_signature_helpers::merge_dep_signature_into_local_fence(
@@ -19553,7 +19553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match self
                     .execute_read(
                         crate::semantic_query::SemanticQueryKey::reduce_intersection_operands(
-                            self.graph(),
+                            self.graph().store(),
                             std::sync::Arc::from(members.to_vec().into_boxed_slice()),
                         ),
                     )
@@ -19648,7 +19648,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         derived
             && (is_union
                 || !rebuilt.iter().any(|&arm| {
-                    super::walk::value_may_contribute_call_signatures(self.graph(), arm)
+                    super::walk::value_may_contribute_call_signatures(self.graph().store(), arm)
                 }))
     }
 }

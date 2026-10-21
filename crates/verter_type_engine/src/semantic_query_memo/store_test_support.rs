@@ -323,6 +323,7 @@ impl SemanticGraphStore {
         let outcome = slots.publish(slot, entry, &requested_path, cap, eviction);
         let populated_slots = outcome.populated;
         reverse_index::register_published(
+            verter_audit::observe::Uncaptured,
             &self.canonical_to_entries,
             &family,
             &populated_slots,

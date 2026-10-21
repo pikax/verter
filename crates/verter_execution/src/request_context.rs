@@ -125,6 +125,17 @@ pub trait RequestContextLike: Send + Sync + 'static {
         false
     }
 
+    /// Whether this request's root entry selected captured execution. A
+    /// scheduler job carries its submitting request's context, so a worker
+    /// reads the job's selection from the context it was handed, never from
+    /// a thread-local slot.
+    ///
+    /// Optional capture: compiled only with `semantic-observe`.
+    #[cfg(feature = "semantic-observe")]
+    fn captured(&self) -> bool {
+        false
+    }
+
     /// Whether per-file timing capture is enabled for this request.
     /// Producers gate `Instant::now()` calls and other timing-only
     /// instrumentation behind this flag. Default is `false` so adapters

@@ -838,7 +838,12 @@ fn drive_flow(row: &Row, function: &str) -> MeasuredFlow {
 
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
 
@@ -2516,8 +2521,10 @@ mod corpus_suite {
 
             let store_view = host.resolver_store_view_read().into_owned_view();
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                verter_audit::observe::Uncaptured,
+            >::new(host, &store_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let key = FlowReturnKey {
                 function: dispatch.flow_function_slot_for(
@@ -2658,8 +2665,10 @@ mod corpus_suite {
             {
                 let store_view = host.resolver_store_view_read().into_owned_view();
                 let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                let host_ctx =
-                    crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+                let host_ctx = crate::resolver_core::HostResolverContext::<
+                    '_,
+                    verter_audit::observe::Uncaptured,
+                >::new(&host, &store_view, overlay);
                 let dispatch = ProjectSemanticDispatch::new(&host_ctx);
                 assert_eq!(
                     node_shape(dispatch.graph().node_data(first_node).as_deref()),

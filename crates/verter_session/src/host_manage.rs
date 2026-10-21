@@ -461,7 +461,10 @@ impl FallthroughRequestHost for VerterHost {
     }
 }
 
-pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
+pub(in crate::host_manage) struct HostFallthroughResolver<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     pub(in crate::host_manage) host: &'a VerterHost,
     pub(in crate::host_manage) parent_canonical_id: &'a str,
     pub(in crate::host_manage) parent_snapshot: &'a FileAnalysisSnapshot,
@@ -492,12 +495,12 @@ pub(in crate::host_manage) struct HostFallthroughResolver<'a> {
     /// off-path callers go through `with_bare_host_ctx_for_test`.
     pub(in crate::host_manage) ctx:
         &'a dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     pub(in crate::host_manage) dispatch:
         &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             'a,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
 }
 
@@ -543,7 +546,9 @@ fn fire_intrinsic_retirement_pause(
     }
 }
 
-impl FallthroughResolverHost for HostFallthroughResolver<'_> {
+impl<M: verter_audit::observe::ObserveExec> FallthroughResolverHost
+    for HostFallthroughResolver<'_, M>
+{
     type ChildResolution = crate::types::FallthroughResolution;
 
     fn intrinsic_members_for_tag(
@@ -779,7 +784,9 @@ impl FallthroughResolverHost for HostFallthroughResolver<'_> {
     }
 }
 
-impl FallthroughComputeHost for HostFallthroughResolver<'_> {
+impl<M: verter_audit::observe::ObserveExec> FallthroughComputeHost
+    for HostFallthroughResolver<'_, M>
+{
     type Snapshot = FileAnalysisSnapshot;
     // Arc-shared: the no-hydration fallthrough env is the memo-owned
     // whole-env handle itself; every consumer reads it immutably.

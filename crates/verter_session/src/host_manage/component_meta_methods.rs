@@ -751,7 +751,21 @@ impl VerterHost {
     /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
     /// observe the overlay candidate via
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
+    /// [`Self::capture_component_meta_inputs_with_view_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn capture_component_meta_inputs_with_view(
+        &self,
+        canonical: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<CapturedComponentMetaInputs> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.capture_component_meta_inputs_with_view_in::<M>(canonical, view)
+        })
+    }
+
+    pub(crate) fn capture_component_meta_inputs_with_view_in<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         canonical: &str,
         view: &dyn crate::session_view::SessionView,
@@ -788,7 +802,7 @@ impl VerterHost {
             // shallow state for canonicals the overlay does not cover.
             let store_read_started = audit_enabled.then(Instant::now);
             let mut snapshot = (*facts.snapshot).clone();
-            self.resolve_snapshot_imports(canonical, &mut snapshot);
+            self.resolve_snapshot_imports::<M>(canonical, &mut snapshot);
             self.enrich_destructured_bindings(&mut snapshot);
             if self.template_analysis_required() {
                 // Template inputs from the overlay artifact's OWN
@@ -858,16 +872,18 @@ impl VerterHost {
         )
     }
 
-    pub(crate) fn compute_component_meta_state_for_fallthrough(
+    pub(crate) fn compute_component_meta_state_for_fallthrough<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         canonical: &str,
         whole_hash: Hash16,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
     ) -> Option<ResolvedComponentMetaState> {
         self.compute_component_meta_state_inner(
@@ -884,7 +900,7 @@ impl VerterHost {
     }
 
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub(crate) fn compute_component_meta_state_inner(
+    pub(crate) fn compute_component_meta_state_inner<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,
         mode: ProjectionMode,
@@ -893,11 +909,11 @@ impl VerterHost {
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
         registry_materialization: RegistryMaterialization,
         ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<ResolvedComponentMetaState> {
@@ -917,7 +933,7 @@ impl VerterHost {
         } else {
             crate::component_meta_audit::RequestTimingAudit::default()
         };
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M =>
             "compute_component_meta_state",
             format!(
                 "owner={} mode={mode:?} captured={} store_view={} whole_hash={whole_hash:?}",
@@ -932,8 +948,8 @@ impl VerterHost {
 
         let snapshot = captured
             .map(|captured| captured.snapshot.clone())
-            .or_else(|| self.get_raw_analysis_snapshot(canonical))?;
-        component_meta_trace_custom!(
+            .or_else(|| self.get_raw_analysis_snapshot_in::<M>(canonical))?;
+        component_meta_trace_custom!(M =>
             "component_meta_snapshot",
             format!(
                 "owner={} imports={} macros={} bindings={} has_template={} script_flags={}",
@@ -959,7 +975,7 @@ impl VerterHost {
         };
         let parts_started = audit_enabled.then(Instant::now);
         let parts = {
-            component_meta_trace_custom!(
+            component_meta_trace_custom!(M =>
                 "resolve_component_meta_parts",
                 format!(
                     "owner={} expanded={} captured={} purpose={:?}",
@@ -1035,7 +1051,7 @@ impl VerterHost {
             let mut query_engine =
                 crate::resolver_core::ComponentMetaQueryEngine::new(ctx, dispatch);
             if should_materialize_registry {
-                component_meta_trace_custom!(
+                component_meta_trace_custom!(M =>
                     "append_component_meta_registry_entries",
                     format!(
                         "owner={} evaluated_types={} existing_registry={}",
@@ -1057,7 +1073,7 @@ impl VerterHost {
             if should_produce_macro_object_shapes {
                 let mut evaluated_types = parts.evaluated_types.take().unwrap_or_default();
                 {
-                    component_meta_trace_custom!(
+                    component_meta_trace_custom!(M =>
                         "project_evaluated_types",
                         format!(
                             "owner={} props={} slot_bindings={} define_props={} define_slots={}",
@@ -1088,7 +1104,7 @@ impl VerterHost {
                     );
                 }
                 {
-                    component_meta_trace_custom!(
+                    component_meta_trace_custom!(M =>
                         "project_define_macro_shapes",
                         format!(
                             "owner={} props={} emits={}",
@@ -1141,14 +1157,14 @@ impl VerterHost {
                 parts.evaluated_types = Some(evaluated_types);
             }
             {
-                verter_type_engine::component_meta_trace_custom!(
+                verter_type_engine::component_meta_trace_custom!(M =>
                     "semantic_graph_stats",
                     format!("owner={} dispatch_authority=true", canonical),
                 );
             }
             if query_engine.has_fuse_tripped() {
                 for trip in query_engine.fuse_trips() {
-                    verter_type_engine::component_meta_trace_custom!(
+                    verter_type_engine::component_meta_trace_custom!(M =>
                         "fuse_tripped",
                         format!(
                             "owner={} fuse={} budget={} actual={}",
@@ -1163,7 +1179,7 @@ impl VerterHost {
                 ..Default::default()
             }
         } else {
-            verter_type_engine::component_meta_trace_custom!(
+            verter_type_engine::component_meta_trace_custom!(M =>
                 "semantic_graph_stats",
                 format!(
                     "owner={} registry_materialization=skipped macro_shapes=skipped",
@@ -1205,7 +1221,7 @@ impl VerterHost {
                 append_elapsed.as_secs_f64() * 1000.0,
             ));
         }
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M =>
             "component_meta_parts",
             format!(
                 "owner={} resolved_macros={} resolved_type_registry={} has_evaluated_types={} fact_versions={}",
@@ -1310,7 +1326,7 @@ impl VerterHost {
     }
 
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub(crate) fn append_component_meta_registry_entries(
+    pub(crate) fn append_component_meta_registry_entries<M: verter_audit::observe::ObserveExec>(
         &self,
         owner_canonical: &str,
         snapshot: &FileAnalysisSnapshot,
@@ -1322,7 +1338,7 @@ impl VerterHost {
         >,
         resolved_type_registry_meta: &mut Vec<ResolvedTypeRegistryMeta>,
         tracked_dependencies: &mut BTreeSet<String>,
-        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_>,
+        query_engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'_, M>,
     ) {
         let dispatch = query_engine.dispatch;
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
@@ -1357,10 +1373,10 @@ impl VerterHost {
         // `node_root_should_stay_symbolic`. An unraisable body (evicted /
         // unloaded producing canonical) conservatively stays symbolic — the
         // consumer re-resolves the named root on demand.
-        fn imported_registry_alias_should_stay_symbolic(
+        fn imported_registry_alias_should_stay_symbolic<M: verter_audit::observe::ObserveExec>(
             dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
             body: &verter_type_expr::facts::PreparedTypeBodyFacts,
         ) -> bool {
@@ -1408,13 +1424,15 @@ impl VerterHost {
         /// imports. Top-level object member VALUES collect as roots (a bare
         /// reference member value enqueues `Whole`), matching the registry
         /// seed-scan contract.
-        fn collect_imported_component_meta_registry_seed_refs_node(
+        fn collect_imported_component_meta_registry_seed_refs_node<
+            M: verter_audit::observe::ObserveExec,
+        >(
             ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
             dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
             graph: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
             node: verter_type_engine::semantic_query::SemanticNodeId,
@@ -1424,13 +1442,13 @@ impl VerterHost {
             producer_scope: &RegistryProducerScope,
             cursor: crate::meta_resolve::projection_demand::ProjectionCursor<'_>,
         ) {
-            fn collect_one_filtered_node(
+            fn collect_one_filtered_node<M: verter_audit::observe::ObserveExec>(
                 ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-                    crate::resolver_core::HostCapabilities,
+                    crate::resolver_core::HostCapabilities<M>,
                 >,
                 dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                     '_,
-                    crate::resolver_core::HostCapabilities,
+                    crate::resolver_core::HostCapabilities<M>,
                 >,
                 node: verter_type_engine::semantic_query::SemanticNodeId,
                 published_names: &rustc_hash::FxHashSet<String>,
@@ -1765,7 +1783,7 @@ impl VerterHost {
         let raise_seed_source =
             |dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
                 '_,
-                crate::resolver_core::HostCapabilities,
+                crate::resolver_core::HostCapabilities<M>,
             >,
              producer_scope: &RegistryProducerScope,
              source: &verter_type_expr::facts::SemanticTypeSource| {
@@ -1884,7 +1902,7 @@ impl VerterHost {
                     collect_imported_component_meta_registry_seed_refs_node(
                         query_engine.ctx,
                         seed_dispatch,
-                        seed_dispatch.graph(),
+                        seed_dispatch.graph().store(),
                         node,
                         &published_names,
                         &mut queued_names,
@@ -2469,11 +2487,22 @@ impl VerterHost {
     /// files, reads from `FileArtifactStore` (materializing on miss). Both paths enrich
     /// the snapshot with resolved imports, destructured bindings, and template
     /// analysis.
+    /// [`Self::get_raw_analysis_snapshot_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn get_raw_analysis_snapshot(
         &self,
         canonical: &str,
     ) -> Option<FileAnalysisSnapshot> {
-        component_meta_trace_custom!(
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_raw_analysis_snapshot_in::<M>(canonical)
+        })
+    }
+
+    pub(crate) fn get_raw_analysis_snapshot_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        canonical: &str,
+    ) -> Option<FileAnalysisSnapshot> {
+        component_meta_trace_custom!(M =>
             "get_raw_analysis_snapshot",
             format!("owner={} store_view={}", canonical, false),
         );
@@ -2500,7 +2529,7 @@ impl VerterHost {
                     return None;
                 }
                 let mut snapshot = snapshot;
-                self.resolve_snapshot_imports(canonical, &mut snapshot);
+                self.resolve_snapshot_imports::<M>(canonical, &mut snapshot);
                 self.enrich_destructured_bindings(&mut snapshot);
                 if self.template_analysis_required() {
                     // Thread the inputs joined at the snapshot's own
@@ -2515,7 +2544,7 @@ impl VerterHost {
                         self.compute_template_analysis_if_missing(canonical, &mut snapshot, inputs);
                     }
                 }
-                component_meta_trace_custom!(
+                component_meta_trace_custom!(M =>
                     "get_raw_analysis_snapshot_result",
                     format!(
                         "owner={} imports={} macros={} bindings={} has_template={} source=scheduler",
@@ -2531,10 +2560,10 @@ impl VerterHost {
         }
 
         // FileArtifactStore path: covers imported deps and non-scheduler files.
-        let serve = self.ensure_indexed_ready_serve(canonical)?;
+        let serve = self.ensure_indexed_ready_serve_in::<M>(canonical)?;
         let facts = serve.indexed;
         let mut snapshot = (*facts.snapshot).clone();
-        self.resolve_snapshot_imports(canonical, &mut snapshot);
+        self.resolve_snapshot_imports::<M>(canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if self.template_analysis_required() {
             // Thread the artifact's own base-authoritative source +
@@ -2565,7 +2594,7 @@ impl VerterHost {
             };
             self.compute_template_analysis_if_missing(canonical, &mut snapshot, template_inputs);
         }
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M =>
             "get_raw_analysis_snapshot_result",
             format!(
                 "owner={} imports={} macros={} bindings={} has_template={} source=indexed_ready",

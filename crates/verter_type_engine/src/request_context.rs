@@ -610,12 +610,17 @@ pub struct SynthesisScopeGuard {
 
 impl SynthesisScopeGuard {
     /// Enter the synthesis phase: raise the active depth on the current
-    /// request context (if any).
+    /// request context (if any). `M` is the entering unit's capture
+    /// execution; the uncaptured one reads no request context.
     #[inline(always)]
-    pub fn enter() -> Self {
+    pub fn enter<M: verter_audit::observe::ObserveExec>() -> Self {
         #[cfg(feature = "semantic-observe")]
         {
-            let ctx = current_captured_request_context();
+            let ctx = if M::CAPTURED {
+                current_captured_request_context()
+            } else {
+                None
+            };
             if let Some(ctx) = ctx.as_ref() {
                 ctx.synthesis_active_depth.fetch_add(1, Ordering::Relaxed);
             }
@@ -641,8 +646,15 @@ impl Drop for SynthesisScopeGuard {
 /// `build_instantiate` alongside the request-wide
 /// [`RequestContext::expanded_instantiate_calls`] bump. No-op when no
 /// context is installed or synthesis is not active.
+///
+/// `M` is the instantiating dispatcher's capture execution; the uncaptured
+/// one reads no request context.
 #[inline(always)]
-pub fn note_expanded_instantiate_for_synthesis_scope() {
+pub fn note_expanded_instantiate_for_synthesis_scope<M: verter_audit::observe::ObserveExec>() {
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = current_captured_request_context() {
         if ctx.synthesis_active_depth.load(Ordering::Relaxed) > 0 {
@@ -2077,6 +2089,10 @@ impl RequestContextLike for RequestContext {
         self.footprint_capture
     }
     #[cfg(feature = "semantic-observe")]
+    fn captured(&self) -> bool {
+        self.observe_mode.is_captured()
+    }
+    #[cfg(feature = "semantic-observe")]
     fn timing_enabled(&self) -> bool {
         self.timing_capture
     }
@@ -2497,6 +2513,8 @@ thread_local! {
         Cell<u32> = const { Cell::new(0) };
 }
 
+pub use verter_audit::observe::{Captured, ObserveExec, ObserveMode, Uncaptured};
+
 /// RAII guard that installs a `RequestContext` (and its accumulator,
 /// if present) into TLS and restores the previous slots on drop. Both
 /// the `CURRENT_REQUEST_CONTEXT` and `CURRENT_ACCUMULATOR` TLS slots
@@ -2727,8 +2745,46 @@ pub fn with_current_request_context<R>(read: impl FnOnce(&RequestContext) -> R) 
     CURRENT_REQUEST_CONTEXT.with(|c| c.borrow().as_deref().map(read))
 }
 
+/// The capture execution mode carried on this thread: the installed request
+/// context's selected mode; with no request context, captured exactly when
+/// an audit observer is planted (an audited LSP handler window plants only
+/// the observer). Always [`verter_audit::observe::ObserveMode::Uncaptured`]
+/// in a build without `semantic-observe`.
+///
+/// An execution unit reads it once, where it starts, and specialises on it
+/// ([`verter_audit::specialise!`]); its per-operation paths never read it.
+#[inline]
+#[must_use]
+pub fn installed_observe_mode() -> verter_audit::observe::ObserveMode {
+    #[cfg(feature = "semantic-observe")]
+    {
+        CURRENT_REQUEST_CONTEXT
+            .with(|c| c.borrow().as_ref().map(|ctx| ctx.observe_mode))
+            .unwrap_or_else(|| {
+                if verter_audit::observer::current_observer().is_some() {
+                    verter_audit::observe::ObserveMode::Captured
+                } else {
+                    verter_audit::observe::ObserveMode::Uncaptured
+                }
+            })
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        verter_audit::observe::ObserveMode::Uncaptured
+    }
+}
+
 /// Record optional capture into the request context installed on this
-/// thread: `observe_request!(|ctx| ctx.counter.fetch_add(1, Relaxed))`.
+/// thread.
+///
+/// Two forms:
+///
+/// - `observe_request!(M => |ctx| body)` records from execution compiled
+///   for the mode type `M` ([`verter_audit::observe::ObserveExec`]); the
+///   uncaptured expansion is a constant-false branch that reads no
+///   request-context slot. Per-operation paths use this form.
+/// - `observe_request!(|ctx| body)` reads the slot directly and belongs only
+///   at once-per-request boundaries.
 ///
 /// With `semantic-observe` the body runs against the installed context when
 /// its root entry selected captured execution (and not at all when none is
@@ -2745,6 +2801,11 @@ macro_rules! observe_request {
             }
         });
     }};
+    ($M:ty => |$ctx:ident| $body:expr) => {{
+        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
+            $crate::observe_request!(|$ctx| $body);
+        }
+    }};
 }
 
 /// Record optional capture into the request context installed on this
@@ -2760,6 +2821,10 @@ macro_rules! observe_request {
                 $body;
             };
         }
+    }};
+    ($M:ty => |$ctx:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe_request!(|$ctx| $body);
     }};
 }
 

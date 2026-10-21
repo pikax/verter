@@ -752,7 +752,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
             let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
             let equal = super::canonical_algebra::compare_structural(
-                self.graph(),
+                self.graph().store(),
                 pattern_index,
                 pattern_constraint,
                 &mut evidence,

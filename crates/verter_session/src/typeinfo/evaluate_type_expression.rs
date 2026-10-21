@@ -443,160 +443,162 @@ fn evaluate_inner(
         return (Ok(None), false);
     };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
-    let Some(shallow) = host.shallow_file_state(scratch_uri) else {
-        // Same orphan contract as the non-current branch above: this
-        // request's scratch is upserted but unowned, so drop it
-        // (ownership-aware; a non-fault miss rides `Ok(None)`).
-        remove_scratch(host, scratch_uri);
-        return (Ok(None), false);
-    };
-    let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
-        canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
-        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        whole_hash: shallow.whole_hash,
-        local_scope: None,
-    };
-    let _ = &scope_node;
-    let base = dispatch.type_slot_for(
-        Arc::clone(&scratch_canonical),
-        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-        Arc::from(SCRATCH_ALIAS_NAME),
-    );
-    let instantiate_key =
-        SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
-            base,
-            Arc::from(Vec::new().into_boxed_slice()),
-            dispatch.instantiate_context_for(
-                &scratch_canonical,
-                verter_type_engine::semantic_query::ProjectionReductionContext::published(req.mode),
-            ),
-        ));
-    let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
-        QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
-        QueryResult::Recursive(node) => node,
-        QueryResult::Error(err) => {
-            // A genuine dispatch fault is a request fault — surface it.
-            // A non-fault miss falls back to the bare-decl path so the
-            // caller sees a node id even when the body could not
-            // materialise (the audit record still emits with the
-            // chosen mode).
-            if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
-                // Fault before the cache write: this request's upserted
-                // scratch is unowned — drop it (ownership-aware).
-                remove_scratch(host, scratch_uri);
-                return (Err(fault), false);
-            }
-            let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
-                scope: ScopeId {
-                    canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
-                    owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    local_scope: None,
-                    binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
-                        verter_type_expr::TopLevelOwnerId::ordinary_file(),
-                    ),
-                },
-                name: verter_type_expr::OwnedStr::from(SCRATCH_ALIAS_NAME),
-            });
-            match dispatch.execute_type_node(resolve_decl_key) {
-                QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
-                QueryResult::Recursive(n) => n,
-                QueryResult::Error(err) => {
-                    // Resolution failed before the cache write, so this
-                    // request's upserted scratch is unowned — drop it
-                    // (ownership-aware).
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current(host, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
+        let Some(shallow) = host.shallow_file_state(scratch_uri) else {
+            // Same orphan contract as the non-current branch above: this
+            // request's scratch is upserted but unowned, so drop it
+            // (ownership-aware; a non-fault miss rides `Ok(None)`).
+            remove_scratch(host, scratch_uri);
+            return (Ok(None), false);
+        };
+        let scope_node = verter_type_engine::semantic_query::NodeScopeId::File {
+            canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
+            owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            whole_hash: shallow.whole_hash,
+            local_scope: None,
+        };
+        let _ = &scope_node;
+        let base = dispatch.type_slot_for(
+            Arc::clone(&scratch_canonical),
+            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+            Arc::from(SCRATCH_ALIAS_NAME),
+        );
+        let instantiate_key =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                base,
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    &scratch_canonical,
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(req.mode),
+                ),
+            ));
+        let resolved_alias_node = match dispatch.execute_type_node(instantiate_key) {
+            QueryResult::Value(SemanticQueryOutput { value: node, .. }) => node,
+            QueryResult::Recursive(node) => node,
+            QueryResult::Error(err) => {
+                // A genuine dispatch fault is a request fault — surface it.
+                // A non-fault miss falls back to the bare-decl path so the
+                // caller sees a node id even when the body could not
+                // materialise (the audit record still emits with the
+                // chosen mode).
+                if let Some(fault) = TypeResolutionRequestError::from_query_error(&err) {
+                    // Fault before the cache write: this request's upserted
+                    // scratch is unowned — drop it (ownership-aware).
                     remove_scratch(host, scratch_uri);
-                    // A genuine dispatch fault rides `Err`; a non-fault
-                    // miss rides `Ok(None)`.
-                    return (
-                        super::resolve_named_symbol::classify_dispatch_error(&err, None),
-                        false,
-                    );
+                    return (Err(fault), false);
+                }
+                let resolve_decl_key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
+                    scope: ScopeId {
+                        canonical_id: verter_type_expr::OwnedStr::from(scratch_canonical.clone()),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        local_scope: None,
+                        binder_scope_id: verter_type_engine::semantic_query::BinderScopeId::file_scope(
+                            verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        ),
+                    },
+                    name: verter_type_expr::OwnedStr::from(SCRATCH_ALIAS_NAME),
+                });
+                match dispatch.execute_type_node(resolve_decl_key) {
+                    QueryResult::Value(SemanticQueryOutput { value: n, .. }) => n,
+                    QueryResult::Recursive(n) => n,
+                    QueryResult::Error(err) => {
+                        // Resolution failed before the cache write, so this
+                        // request's upserted scratch is unowned — drop it
+                        // (ownership-aware).
+                        remove_scratch(host, scratch_uri);
+                        // A genuine dispatch fault rides `Err`; a non-fault
+                        // miss rides `Ok(None)`.
+                        return (
+                            super::resolve_named_symbol::classify_dispatch_error(&err, None),
+                            false,
+                        );
+                    }
                 }
             }
-        }
-    };
+        };
 
-    // Apply the requested terminal mode. `Identity` returns the
-    // alias node verbatim. Everything else routes through the SINGLE
-    // canonical materializer in `resolve_named_symbol` — the same helper
-    // the named-resolve path uses — so an operator-bodied alias
-    // (`type X = Y[K]` / `keyof Y`) reduces IDENTICALLY on this FFI path
-    // and the named-resolve path (the one-resolver mandate). There is no
-    // evaluate-local materialiser fork.
-    let final_node = match req.mode {
-        ProjectionMode::Identity => resolved_alias_node,
-        _ => match super::resolve_named_symbol::materialize_through_aliases(
-            host,
-            &dispatch,
-            resolved_alias_node,
-            req.mode,
-        ) {
-            Ok(materialized) => materialized,
-            // A hard dispatch fault during nested materialization
-            // propagates as `Err` rather than silently degrading to the
-            // un-materialised placeholder.
-            Err(fault) => {
-                // Fault before the cache write: this request's upserted
-                // scratch is unowned — drop it (ownership-aware).
-                remove_scratch(host, scratch_uri);
-                return (Err(fault), false);
+        // Apply the requested terminal mode. `Identity` returns the
+        // alias node verbatim. Everything else routes through the SINGLE
+        // canonical materializer in `resolve_named_symbol` — the same helper
+        // the named-resolve path uses — so an operator-bodied alias
+        // (`type X = Y[K]` / `keyof Y`) reduces IDENTICALLY on this FFI path
+        // and the named-resolve path (the one-resolver mandate). There is no
+        // evaluate-local materialiser fork.
+        let final_node = match req.mode {
+            ProjectionMode::Identity => resolved_alias_node,
+            _ => match super::resolve_named_symbol::materialize_through_aliases(
+                host,
+                &dispatch,
+                resolved_alias_node,
+                req.mode,
+            ) {
+                Ok(materialized) => materialized,
+                // A hard dispatch fault during nested materialization
+                // propagates as `Err` rather than silently degrading to the
+                // un-materialised placeholder.
+                Err(fault) => {
+                    // Fault before the cache write: this request's upserted
+                    // scratch is unowned — drop it (ownership-aware).
+                    remove_scratch(host, scratch_uri);
+                    return (Err(fault), false);
+                }
+            },
+        };
+
+        // Publish to cache if asked. The cached node id is the one we
+        // return so a later cache hit and a fresh request produce the
+        // same value.
+        if req.cacheable {
+            let mut guard = host.scratch_cache().lock();
+            let roots = dispatch
+                .construction_grant()
+                .root_nodes([final_node])
+                .expect("evaluated scratch node is live");
+            let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);
+            drop(guard);
+            if let Some(evicted_uri) = evicted {
+                // The LRU dropped an older scratch entry — fully remove its
+                // host file so memory does not grow unbounded. Uses the same
+                // synthetic-file removal as the unowned paths (a scratch has
+                // no workspace backing, so `evict`'s reload-pending semantics
+                // are wrong here). The removal is ownership-aware: between
+                // dropping the guard above and re-locking inside
+                // `remove_scratch`, a concurrent request could cold-resolve
+                // and re-insert the SAME evicted URI (it re-upserts its host
+                // file first); `remove_scratch` re-checks ownership under the
+                // lock and skips removal in that case, so the re-inserted
+                // entry keeps backing a live file.
+                remove_scratch(host, &evicted_uri);
             }
-        },
-    };
-
-    // Publish to cache if asked. The cached node id is the one we
-    // return so a later cache hit and a fresh request produce the
-    // same value.
-    if req.cacheable {
-        let mut guard = host.scratch_cache().lock();
-        let roots = dispatch
-            .construction_grant()
-            .root_nodes([final_node])
-            .expect("evaluated scratch node is live");
-        let evicted = guard.insert_rooted(scratch_uri.to_string(), final_node, roots);
-        drop(guard);
-        if let Some(evicted_uri) = evicted {
-            // The LRU dropped an older scratch entry — fully remove its
-            // host file so memory does not grow unbounded. Uses the same
-            // synthetic-file removal as the unowned paths (a scratch has
-            // no workspace backing, so `evict`'s reload-pending semantics
-            // are wrong here). The removal is ownership-aware: between
-            // dropping the guard above and re-locking inside
-            // `remove_scratch`, a concurrent request could cold-resolve
-            // and re-insert the SAME evicted URI (it re-upserts its host
-            // file first); `remove_scratch` re-checks ownership under the
-            // lock and skips removal in that case, so the re-inserted
-            // entry keeps backing a live file.
-            remove_scratch(host, &evicted_uri);
+        } else {
+            // Non-cacheable success: this request deliberately kept its
+            // scratch out of `scratch_cache`, so it holds no LRU owner.
+            // EVICT (not full-remove) on this path: a successful resolution
+            // admitted scratch-rooted entries into the semantic-graph memo,
+            // and the typeinfo mode contract pins cross-mode materialized-
+            // point satisfaction over them — a repeat evaluate of the SAME
+            // expression in another publication mode must warm-satisfy from
+            // this resolution's recorded materializations (the
+            // `operator_reduction` evaluate-parity tests pin it). A full
+            // `host.remove` purges the scratch's semantic-graph state and
+            // forces every repeat cold, breaking that pinned equivalence.
+            // `evict` reclaims the compile/derived state while preserving
+            // the memo; the miss/fault terminals below keep FULL removal
+            // (a failed resolution admitted nothing worth preserving —
+            // `cache_suppress` covers the memo side).
+            // Ownership-aware like the removal paths: a concurrent CACHEABLE
+            // request for the same content-addressed URI may own it in
+            // `scratch_cache`; evicting under it would clear that owner's
+            // live compile state.
+            evict_scratch(host, scratch_uri);
         }
-    } else {
-        // Non-cacheable success: this request deliberately kept its
-        // scratch out of `scratch_cache`, so it holds no LRU owner.
-        // EVICT (not full-remove) on this path: a successful resolution
-        // admitted scratch-rooted entries into the semantic-graph memo,
-        // and the typeinfo mode contract pins cross-mode materialized-
-        // point satisfaction over them — a repeat evaluate of the SAME
-        // expression in another publication mode must warm-satisfy from
-        // this resolution's recorded materializations (the
-        // `operator_reduction` evaluate-parity tests pin it). A full
-        // `host.remove` purges the scratch's semantic-graph state and
-        // forces every repeat cold, breaking that pinned equivalence.
-        // `evict` reclaims the compile/derived state while preserving
-        // the memo; the miss/fault terminals below keep FULL removal
-        // (a failed resolution admitted nothing worth preserving —
-        // `cache_suppress` covers the memo side).
-        // Ownership-aware like the removal paths: a concurrent CACHEABLE
-        // request for the same content-addressed URI may own it in
-        // `scratch_cache`; evicting under it would clear that owner's
-        // live compile state.
-        evict_scratch(host, scratch_uri);
-    }
 
-    (Ok(Some(final_node)), false)
+        (Ok(Some(final_node)), false)
+    })
 }
 
 /// Drop a scratch file iff no concurrent request owns it in

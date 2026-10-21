@@ -31,8 +31,10 @@ impl CaptureAvailability {
 /// A root entry selects its mode once with [`ObserveMode::select`] (the
 /// session's `capture::select_mode`); the request context carries the
 /// choice, and every scheduler resumption and background job reinstalls that
-/// context, so its captured observer, accumulator and counters exist only for
-/// a captured request.
+/// context. An execution unit — a semantic dispatcher and the request
+/// context it resolves through — adopts the carried choice once, as a type
+/// ([`specialise!`](crate::specialise)): its hot paths are compiled for
+/// [`Captured`] or [`Uncaptured`] and never test the mode per emission.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObserveMode {
     /// Execute without optional observations.
@@ -75,6 +77,83 @@ impl ObserveMode {
             Self::Uncaptured
         }
     }
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Captured {}
+    impl Sealed for super::Uncaptured {}
+}
+
+/// An execution mode as a type: the code an execution unit runs is compiled
+/// once per mode, so an emission site tests a constant, never a runtime flag
+/// or a thread-local slot.
+///
+/// Sealed: exactly [`Captured`] and [`Uncaptured`] exist, so specialisation is
+/// bounded to the two modes.
+pub trait ObserveExec: sealed::Sealed + Copy + Default + Send + Sync + 'static {
+    /// The runtime mode this type stands for.
+    const MODE: ObserveMode;
+    /// `true` only for [`Captured`] in a build with `semantic-observe`: the
+    /// constant every typed emission branches on. A default build never
+    /// selects [`Captured`] and compiles no captured emission either way.
+    const CAPTURED: bool;
+}
+
+/// Captured execution: optional observations are recorded.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Captured;
+
+/// Uncaptured execution: optional observations compile to nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Uncaptured;
+
+impl ObserveExec for Captured {
+    const MODE: ObserveMode = ObserveMode::Captured;
+    const CAPTURED: bool = cfg!(feature = "semantic-observe");
+}
+
+impl ObserveExec for Uncaptured {
+    const MODE: ObserveMode = ObserveMode::Uncaptured;
+    const CAPTURED: bool = false;
+}
+
+/// Run `body` compiled for the execution mode `mode` selects, with `$M`
+/// naming that mode's type inside it:
+/// `specialise!(mode => M, { run::<M>(...) })`.
+///
+/// The body is expanded once per mode, so everything it reaches through
+/// `M` is the concrete captured or uncaptured execution; this one match on
+/// the carried mode is the only test of it. Without `semantic-observe` only
+/// the [`Uncaptured`] expansion exists and `mode` is not read.
+#[cfg(feature = "semantic-observe")]
+#[macro_export]
+macro_rules! specialise {
+    ($mode:expr => $M:ident, $body:block) => {
+        match $mode {
+            $crate::observe::ObserveMode::Captured => {
+                type $M = $crate::observe::Captured;
+                $body
+            }
+            $crate::observe::ObserveMode::Uncaptured => {
+                type $M = $crate::observe::Uncaptured;
+                $body
+            }
+        }
+    };
+}
+
+/// Run `body` compiled for the execution mode `mode` selects. See the
+/// `semantic-observe` form; this default build expands only the
+/// [`Uncaptured`] body.
+#[cfg(not(feature = "semantic-observe"))]
+#[macro_export]
+macro_rules! specialise {
+    ($mode:expr => $M:ident, $body:block) => {{
+        let _ = || $mode;
+        type $M = $crate::observe::Uncaptured;
+        $body
+    }};
 }
 
 /// Collect a capture payload only when optional capture is compiled in.
@@ -272,6 +351,17 @@ impl Stopwatch {
         Self {
             #[cfg(feature = "semantic-observe")]
             started: mode.is_captured().then(crate::instant::Instant::now),
+        }
+    }
+
+    /// Start the clock for execution compiled for `M`: the uncaptured
+    /// execution never reads the clock and carries no mode test.
+    #[inline(always)]
+    #[must_use]
+    pub fn start_in<M: ObserveExec>() -> Self {
+        Self {
+            #[cfg(feature = "semantic-observe")]
+            started: M::CAPTURED.then(crate::instant::Instant::now),
         }
     }
 

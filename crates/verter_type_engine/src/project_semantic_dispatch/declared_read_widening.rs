@@ -235,7 +235,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             ) else {
                 return Vec::new();
             };
-            literal_like_members(graph, read_type)
+            literal_like_members(graph.store(), read_type)
         };
         let mut widen = Vec::new();
         for position in group {
@@ -262,7 +262,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let listed = |nodes: &[SemanticNodeId]| {
                     nodes
                         .iter()
-                        .any(|&node| same_literal(graph, node, candidate))
+                        .any(|&node| same_literal(graph.store(), node, candidate))
                 };
                 if !listed(&regular) && !listed(&widen) {
                     widen.push(candidate);
@@ -286,7 +286,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .map(|&member| {
                 if widen
                     .iter()
-                    .any(|&literal| same_literal(graph, literal, member))
+                    .any(|&literal| same_literal(graph.store(), literal, member))
                 {
                     self.widened_literal(member)
                 } else {

@@ -39,6 +39,24 @@ pub(crate) fn select_mode(host: &VerterHost, kind: &RequestKind) -> ObserveMode 
     )
 }
 
+/// The capture execution an audited root entry of `kind` selects, for an
+/// entry that must specialise on it before it builds its request context
+/// (one whose body arrives as a closure). Always
+/// [`ObserveMode::Uncaptured`] in a build without `semantic-observe`, where
+/// `kind` is never built.
+#[must_use]
+pub(crate) fn entry_mode(host: &VerterHost, kind: impl FnOnce() -> RequestKind) -> ObserveMode {
+    #[cfg(feature = "semantic-observe")]
+    {
+        select_mode(host, &kind())
+    }
+    #[cfg(not(feature = "semantic-observe"))]
+    {
+        let _ = (host, kind);
+        ObserveMode::Uncaptured
+    }
+}
+
 /// The request context an audited root entry installs whichever mode it
 /// selects: the same canonical, the host's projection-operation budget and
 /// `cancellation`, so a captured and an uncaptured run answer, refuse and
@@ -65,6 +83,34 @@ pub(crate) fn root_entry_context(
     };
     #[cfg(not(feature = "semantic-observe"))]
     let mode = ObserveMode::Uncaptured;
+    root_entry_context_in_mode(
+        host,
+        request_id,
+        canonical_id,
+        kind,
+        mode,
+        footprint_capture,
+        timing_capture,
+        accumulator,
+        cancellation,
+    )
+}
+
+/// [`root_entry_context`] for an entry that already selected `mode` with
+/// [`entry_mode`]: the context carries that one selection.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub(crate) fn root_entry_context_in_mode(
+    host: &VerterHost,
+    request_id: u64,
+    canonical_id: Arc<str>,
+    kind: impl FnOnce() -> RequestKind,
+    mode: ObserveMode,
+    footprint_capture: bool,
+    timing_capture: bool,
+    accumulator: Option<Arc<RequestFootprintAccumulator>>,
+    cancellation: CancellationToken,
+) -> Arc<RequestContext> {
     RequestContext::for_root_entry(
         request_id,
         canonical_id,
@@ -76,6 +122,17 @@ pub(crate) fn root_entry_context(
         host.config.projection_op_budget,
         cancellation,
     )
+}
+
+/// The capture execution mode an execution unit starting on this thread
+/// adopts: the mode the installed request carries
+/// ([`verter_type_engine::request_context::installed_observe_mode`]). The
+/// unit reads it once, where it starts, and specialises on it with
+/// [`verter_audit::specialise!`]; nothing it runs re-reads it.
+#[inline]
+#[must_use]
+pub(crate) fn installed_mode() -> ObserveMode {
+    verter_type_engine::request_context::installed_observe_mode()
 }
 
 /// `true` when this build compiles audit capture in (`semantic-observe`).

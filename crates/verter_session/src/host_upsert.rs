@@ -146,11 +146,16 @@ impl UpsertBatchTxn {
                 #[cfg(not(target_arch = "wasm32"))]
                 let canonical_id = prepared.canonical_id.clone();
                 let (result, workspace_commit) = match state {
-                    CompletionState::Ready(ready) => match host.finish_upsert_post_commit(
-                        prepared,
-                        ready,
-                        defer_workspace_commit,
-                        result_demand,
+                    CompletionState::Ready(ready) => match verter_audit::specialise!(
+                        crate::capture::installed_mode() => M,
+                        {
+                            host.finish_upsert_post_commit::<M>(
+                                prepared,
+                                ready,
+                                defer_workspace_commit,
+                                result_demand,
+                            )
+                        }
                     ) {
                         Ok((result, workspace_commit)) => (Ok(result), workspace_commit),
                         Err(error) => (Err(error), None),
@@ -600,7 +605,10 @@ impl VerterHost {
     /// eager cascade fired here. The only cache work here is the
     /// parse-domain producer contract (`register_facts_for_new_content`)
     /// plus the upserted file's own-cache drain.
-    fn finish_upsert_post_commit(
+    ///
+    /// `M` is the capture execution of the upsert: only a captured one
+    /// traces its cache drains.
+    fn finish_upsert_post_commit<M: verter_audit::observe::ObserveExec>(
         &self,
         prepared: PreparedUpsertCommit,
         ready: verter_scheduler::job::RequestResult,
@@ -843,7 +851,7 @@ impl VerterHost {
                 .or_default();
             let profile = profile_ref.value_mut();
             if whole_hash_changed {
-                verter_type_engine::request_observers::push_cache_drained_at_upsert(
+                verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
                     "compile_cache_overrides",
                     &canonical_id,
                 );
@@ -854,7 +862,7 @@ impl VerterHost {
                 session_node.clear_compile_outputs_for_file(profile);
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
-                verter_type_engine::request_observers::push_cache_drained_at_upsert(
+                verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
                     "compile_slots",
                     &canonical_id,
                 );
@@ -880,7 +888,7 @@ impl VerterHost {
         if whole_hash_changed {
             self.compile_output_pure_content()
                 .remove_canonical(&canonical_id);
-            verter_type_engine::request_observers::push_cache_drained_at_upsert(
+            verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
                 "compile_output_pure_content",
                 &canonical_id,
             );
@@ -938,7 +946,7 @@ impl VerterHost {
             derived.import_routes.clear();
             derived.evicted = false;
             if drained_derived {
-                verter_type_engine::request_observers::push_cache_drained_at_upsert(
+                verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
                     "derived_raw_cache",
                     &canonical_id,
                 );
@@ -960,7 +968,7 @@ impl VerterHost {
             dep.aliases = alias_set.clone();
             dep.generation = dep.generation.saturating_add(1);
         }
-        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+        verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
             "dependency_cache",
             &canonical_id,
         );
@@ -979,7 +987,7 @@ impl VerterHost {
         // read path; a cross-file consumer's warm entry is revalidated
         // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
-        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+        verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
             "semantic_invalidate",
             &canonical_id,
         );
@@ -1007,7 +1015,7 @@ impl VerterHost {
         if !defer_workspace_commit {
             self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
         }
-        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+        verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
             "workspace_parsed_edges",
             &canonical_id,
         );
@@ -1086,7 +1094,7 @@ impl VerterHost {
         }
         self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
-        verter_type_engine::request_observers::push_cache_drained_at_upsert(
+        verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
             "store_view_epoch",
             &canonical_id,
         );

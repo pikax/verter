@@ -958,7 +958,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // it, so a destroyed one is an ownership defect: loud in
                 // checked builds, a typed no-value failure in shipped ones.
                 crate::semantic_query::FlowReturnStep::Complete(result) => {
-                    match result.delivered(self.graph()) {
+                    match result.delivered(self.graph().store()) {
                         Ok(result) => crate::semantic_query::FlowReturnStep::Complete(result),
                         Err(error) => {
                             verter_debug_assert!(
@@ -1096,6 +1096,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ctx: &'a dyn ResolverContext<C>,
         binding: EngineBinding<C::MacroMirrors>,
     ) -> Self {
+        // A dispatcher runs compiled for its context family's capture mode;
+        // the host selects that family from the mode the installed request
+        // carries, so a mismatch is a dispatcher that would drop (or invent)
+        // its request's observations.
+        #[cfg(all(feature = "semantic-observe", debug_assertions))]
+        assert_eq!(
+            <C::Observe as verter_audit::observe::ObserveExec>::MODE,
+            crate::request_context::installed_observe_mode(),
+            "a dispatcher's capture execution must be the installed request's selected mode",
+        );
         let snapshot =
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {
@@ -1125,11 +1135,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "semantic-observe")]
-            relation_explanations: crate::request_context::with_current_request_context(|ctx| {
-                ctx.observe_mode.is_captured()
-            })
-            .unwrap_or(false)
-            .then(|| std::cell::RefCell::new(Vec::new())),
+            relation_explanations: <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+                .then(|| std::cell::RefCell::new(Vec::new())),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             checking_site: std::cell::Cell::new(Default::default()),
             operation_budget_epoch: std::cell::Cell::new(0),
@@ -2416,12 +2423,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     #[cfg(feature = "semantic-observe")]
     fn record_dispatch_intent_counters_captured(&self, key: &SemanticQueryKey) {
-        let Some(ctx) = crate::request_context::current_request_context() else {
-            return;
-        };
-        if !ctx.observe_mode.is_captured() {
+        if !<C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
             return;
         }
+        let Some(ctx) = crate::request_context::current_captured_request_context() else {
+            return;
+        };
         let depth = self.instantiate_active.borrow().len();
         ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
         match key {
@@ -2995,7 +3002,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
-    pub fn graph(&self) -> &Arc<SemanticGraphStore> {
+    /// The semantic graph store, compiled for this dispatcher's capture
+    /// mode (`C::Observe`): every intern and cache operation the
+    /// dispatcher performs through it records optional capture only in the
+    /// captured instantiation.
+    pub fn graph(&self) -> crate::semantic_query_memo::GraphIn<'_, C::Observe> {
+        crate::semantic_query_memo::GraphIn::of(&self.binding.graph)
+    }
+
+    /// The shared handle of the semantic graph store this dispatcher
+    /// resolves through.
+    #[must_use]
+    pub fn graph_arc(&self) -> &Arc<SemanticGraphStore> {
         &self.binding.graph
     }
 
@@ -3987,7 +4005,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             verter_audit::attribute!(SemanticWarmHit);
         }
-        verter_audit::observe!(|observer| {
+        verter_audit::observe!(C::Observe => |observer| {
             use verter_audit::AuditEvent;
             let event = match key {
                 SemanticQueryKey::TypeOf { .. } => {
@@ -4274,7 +4292,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // under-count post-trip dispatches once the
                     // early-exit lands, and bench attribution would lose
                     // the runaway signal.
-                    verter_audit::observe!(|observer| {
+                    verter_audit::observe!(C::Observe => |observer| {
                         use verter_audit::AuditEvent;
                         // The early-exit attribution must mirror EVERY kind
                         // the aggregate work-budget gate counts — including
@@ -4466,7 +4484,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        crate::observe_request!(|ctx| { ctx.record_dispatched_query_tag(key.tag()) });
+        crate::observe_request!(C::Observe => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
@@ -4525,7 +4543,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 members,
                 nullability,
             } => SemanticQueryKey::ReduceUnion {
-                members: canonicalize_node_list(self.graph(), &members),
+                members: canonicalize_node_list(self.graph().store(), &members),
                 nullability,
             },
             SemanticQueryKey::ReduceIntersection {
@@ -6003,7 +6021,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Hop 2: the slot value's first-parameter type holds the bindings.
         // CALL kind only — a construct-signature slot value is not a
         // callable slot shape and holds no bindings.
-        let param0_ty = match node_data_for(self.graph(), slot_node).as_deref() {
+        let param0_ty = match node_data_for(self.graph().store(), slot_node).as_deref() {
             Some(SemanticNodeData::Signature {
                 kind: crate::semantic_query::SignatureKind::Call,
                 params,
@@ -6232,7 +6250,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
                 // (`resolve_prepared_type_decl`, `resolve_builtin_utility`)
                 // route through this helper — dominant expected source of
                 // the warm-read pressure.
-                verter_audit::observe!(|obs| {
+                verter_audit::observe!(C::Observe => |obs| {
                     obs.record_event(
                         verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
                     );
@@ -6301,7 +6319,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
         let identity = BuiltinUtility::from_name(name);
         if identity.is_some()
             || matches!(
-                self.resources.intrinsics.lookup(name),
+                self.resources.intrinsics.lookup::<C::Observe>(name),
                 crate::intrinsic_registry::IntrinsicLookup::Found(_)
             )
         {

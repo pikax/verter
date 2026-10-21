@@ -74,10 +74,10 @@ impl VerterHost {
     /// export-route reads all the way through the cold closure; reducing the
     /// context to a `StoreView` would retain validation identity while losing
     /// the overlay's semantic inputs.
-    pub(crate) fn resolve_imported_type_root_with_context(
+    pub(crate) fn resolve_imported_type_root_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
@@ -94,10 +94,12 @@ impl VerterHost {
 
     /// Facts-returning sibling of
     /// [`Self::resolve_imported_type_root_with_context`].
-    pub(crate) fn resolve_imported_type_root_with_facts_with_context(
+    pub(crate) fn resolve_imported_type_root_with_facts_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         dep_canonical: &str,
@@ -163,10 +165,12 @@ impl VerterHost {
     /// request-bound view; eliminates the per-call full-workspace
     /// snapshot the pre-6.c rail performed at this site (the diagnostic's
     /// named hot-path site at `imported_type_root.rs:49`).
-    pub(crate) fn resolve_imported_type_root_with_facts_with_store_view(
+    pub(crate) fn resolve_imported_type_root_with_facts_with_store_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -185,10 +189,12 @@ impl VerterHost {
         )
     }
 
-    pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view(
+    pub(in crate::host_manage) fn resolve_imported_type_root_with_facts_with_context_and_store_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         session_view: Option<&dyn crate::session_view::SessionView>,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -224,7 +230,7 @@ impl VerterHost {
                 // Trace inside the closure: the closure runs only on
                 // cache miss, so the trace event records actual
                 // resolution work — not redundant lookups.
-                component_meta_trace_custom!("resolve_imported_type_root", {
+                component_meta_trace_custom!(M => "resolve_imported_type_root", {
                     use std::fmt::Write as _;
                     let mut detail =
                         String::with_capacity(24 + dep_canonical.len() + imported_name.len());
@@ -292,7 +298,7 @@ impl VerterHost {
             ),
         };
 
-        component_meta_trace_custom!("resolve_imported_type_root_result", {
+        component_meta_trace_custom!(M => "resolve_imported_type_root_result", {
             // Audit-gated (the macro skips this block without an active
             // accumulator). Pre-size the detail so the per-call build is
             // ONE exact allocation instead of the `format!` grow chain —

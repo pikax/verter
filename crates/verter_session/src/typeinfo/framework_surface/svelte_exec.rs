@@ -109,11 +109,11 @@ fn store_kind_for_source(source: SvelteSurfaceSource) -> FrameworkSurfaceKind {
 /// - [`ResolvedOutcome::Missing`] — the component has NO declaration site for
 ///   this family (no `$props()`, no dispatcher, no legacy slots, …).
 #[must_use]
-pub(crate) fn resolve_svelte_surface(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+pub(crate) fn resolve_svelte_surface<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     source: SvelteSurfaceSource,
@@ -234,11 +234,11 @@ pub(crate) fn resolve_svelte_surface(
 
 /// The cold per-source resolution (no caching) — dispatched under the fact
 /// tracer by [`resolve_svelte_surface`].
-fn compute_svelte_surface(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+fn compute_svelte_surface<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     source: SvelteSurfaceSource,
@@ -638,11 +638,11 @@ fn runes_props_from_destructure_geometry(
 
 /// PROPS from the runes `$props()` type: navigate the captured props type to its
 /// one-level object surface through the shared engine and normalize as props.
-fn resolve_runes_props(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn resolve_runes_props<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
@@ -912,11 +912,11 @@ fn legacy_prop_field(
 /// `$props()`-typed member. The model name is the member name; the binding's
 /// prop type is the member's value type (resolved shallow through the shared
 /// engine via the runes-props surface).
-fn resolve_bindable(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn resolve_bindable<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
@@ -994,11 +994,11 @@ fn resolve_bindable(
 /// retain only members whose exact symbol identity proves the typed
 /// [`verter_type_expr::PropCallableRole::SvelteSnippet`] role, then normalize
 /// those members as slots.
-fn resolve_snippet_props(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn resolve_snippet_props<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
@@ -1081,10 +1081,10 @@ fn snippet_claim_outcome(
 /// The ordered `bindings` vector IS the positional order (no explicit position
 /// field). The binding type is the typed-IR element type (typed-IR only — no
 /// source slicing).
-fn svelte_snippet_slots_from_typeinfo_surface(
+fn svelte_snippet_slots_from_typeinfo_surface<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     resolved: &impl ResolvedSurfaceAccess,
     return_base: Option<&verter_type_expr::locators::AuthoredBodyLocator>,
@@ -1206,10 +1206,10 @@ fn svelte_snippet_slots_from_typeinfo_surface(
 }
 
 #[cfg(test)]
-fn svelte_snippet_slot_fields_from_typeinfo_surface(
+fn svelte_snippet_slot_fields_from_typeinfo_surface<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     resolved: &impl ResolvedSurfaceAccess,
 ) -> Vec<AnalyzedSlotField> {
@@ -1219,10 +1219,10 @@ fn svelte_snippet_slot_fields_from_typeinfo_surface(
         .collect()
 }
 
-fn materialize_snippet_slot_return(
+fn materialize_snippet_slot_return<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     return_node: SemanticNodeId,
 ) -> TypeExpr {
@@ -1253,10 +1253,12 @@ fn materialize_snippet_slot_return(
 /// `ctx`). The mint cap is constructed INTERNALLY from `ctx` (the
 /// `raise_member_value` pattern) — a cap is a mint AUTHORITY and must not cross
 /// the boundary from the non-terminal caller.
-pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_slot_bindings(
+pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_snippet_slot_bindings<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     member_scope: &verter_type_expr::TypeExprScope,
     params: &[PositionalParamNode],
@@ -1347,8 +1349,8 @@ fn retain_svelte_snippet_members(
 /// the typed [`ParsedSvelte`] template tree. Each `<slot>` element contributes a
 /// slot named by its `name` attribute (default `"default"`); the forwarded prop
 /// attributes (every plain attribute other than `name`) become its bindings.
-fn resolve_legacy_slot_inventory(
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+fn resolve_legacy_slot_inventory<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     owner: &str,
 ) -> ResolvedMacroPayload {
     // Resolve the owner's `IndexedReady` through the request view `ctx` ONCE and
@@ -1554,11 +1556,11 @@ fn slice_attr_value(
 /// emits (the event-map property keys are the events; the property value is the
 /// payload). Present only when provenance-validated (`dispatcher_events` is
 /// `Some` only for a `svelte`-resolved dispatcher).
-fn resolve_dispatcher(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn resolve_dispatcher<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
@@ -1607,11 +1609,11 @@ fn resolve_dispatcher(
 /// component with no `$props` type, or no `on*` function members, yields a
 /// present-but-empty EMITS surface (the runes-event compatibility surface is
 /// supported, even when no callback events exist).
-fn resolve_callback_prop_events(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+fn resolve_callback_prop_events<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,
@@ -1659,10 +1661,10 @@ fn resolve_callback_prop_events(
 ///   arm and pulls out the single callable. A nullish INTERSECTION
 ///   (`Fn & undefined` = `never`) is deliberately REFUSED, matching the shared
 ///   `realize_callable_member`.
-fn callback_events_from_props_surface(
+fn callback_events_from_props_surface<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     surface: &TypeInfoSurface,
     return_base: &verter_type_expr::locators::AuthoredBodyLocator,
@@ -1824,10 +1826,12 @@ fn callback_events_from_props_surface(
 /// subsequent payload elements. This does not arise in practice — the realized
 /// signature's param nodes ARE the callback's own declared parameter types, which
 /// all materialize — so the fallback is position-safety robustness only.
-pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_tuple(
+pub(in crate::typeinfo::framework_surface::svelte_exec) fn materialize_payload_tuple<
+    M: verter_audit::observe::ObserveExec,
+>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     params: &[verter_type_engine::semantic_query::FunctionParam],
 ) -> TypeExpr {
@@ -1921,10 +1925,10 @@ fn instance_export_display_node(
 /// member DTO. Instance-surface and module-declaration projectors use this
 /// single resolver so aliases preserve their public name while `typeof`
 /// targets the captured local [`verter_type_expr::DeclBindingKey`].
-pub(crate) fn resolve_svelte_value_export_member(
+pub(crate) fn resolve_svelte_value_export_member<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     exported_name: &str,
@@ -2027,12 +2031,12 @@ pub(crate) fn resolve_svelte_value_export_member(
         {
             reduced.node_id()
         } else {
-            instance_export_display_node(graph, member_node)
+            instance_export_display_node(graph.store(), member_node)
         };
         // The dispatcher holds this graph's construction lane.
         let type_annotation: Option<String> =
             verter_type_engine::semantic_query::display::display_in_scope(
-                graph,
+                graph.store(),
                 &SemanticQueryValue::TypeNode(display_node),
                 DisplayNeeds::empty(),
             )
@@ -2061,10 +2065,10 @@ pub(crate) fn resolve_svelte_value_export_member(
 /// EXPOSE from the exported instance-script members. Each export is a named
 /// member of the public instance; the member type stays a shallow `Ref` to the
 /// exported binding (shallow-by-default — the consumer re-resolves on demand).
-fn resolve_instance_exports(
+fn resolve_instance_exports<M: verter_audit::observe::ObserveExec>(
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner: &str,
     facts: Option<&SvelteFactObservations<'_>>,

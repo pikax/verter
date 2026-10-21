@@ -363,8 +363,8 @@ pub fn instantiate_key_for_tests(
 /// `Intersection`). Exposed so display guards can assert the read-only display
 /// projection renders byte-identically to this canonical reduced surface — the
 /// two paths share one peer-merge engine, so any divergence is a regression.
-pub fn reduce_merged_decl_to_graph_node(
-    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+pub fn reduce_merged_decl_to_graph_node<M: verter_audit::observe::ObserveExec>(
+    store: verter_type_engine::semantic_query_memo::GraphIn<'_, M>,
     contributors: &[verter_type_engine::semantic_query::SemanticNodeId],
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
     verter_type_engine::project_semantic_dispatch::walk::reduce_merged_decl_with_graph(
@@ -555,11 +555,12 @@ pub fn dispatch_evaluate_deferred_for_tests(
 /// The lifecycle stays behind the request ports even in integration tests.
 pub fn active_session_view_is_none_for_tests(host: &crate::VerterHost) -> bool {
     let view = host.resolver_store_view().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
     !ctx.has_session_view_for_tests()
 }
 
@@ -570,11 +571,12 @@ pub fn with_host_resolver_context_for_tests<R>(
     f: impl FnOnce(&crate::resolver_core::HostResolverContext<'_>) -> R,
 ) -> R {
     let view = host.resolver_store_view().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
     f(&ctx)
 }
 
@@ -865,9 +867,14 @@ pub mod signature_kernel_bench_support {
         host: &VerterHost,
         function: &FlowFunctionReturnIdentity,
     ) {
-        let _ = host.flow_return_request(function, None, |_| {
-            Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        let _ = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(function, None, |_| {
+                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                })
+            }
+        );
     }
 
     /// Every function of `functions` answered through the dispatch's
@@ -882,19 +889,24 @@ pub mod signature_kernel_bench_support {
         let Some(&first) = functions.peek() else {
             return;
         };
-        let outcome = host.flow_return_request(first, None, |dispatch| {
-            let mut last = None;
-            for function in functions {
-                let key = dispatch
-                    .flow_return_key_with_demand(function, ReturnProjectionDemand::whole_return());
-                match dispatch.execute_flow_return(key) {
-                    FlowReturnStep::Complete(result) => last = Some(result),
-                    other => panic!("a warm flow-return query completes, got {other:?}"),
-                }
+        let outcome = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(first, None, |dispatch| {
+                    let mut last = None;
+                    for function in functions {
+                        let key = dispatch
+                            .flow_return_key_with_demand(function, ReturnProjectionDemand::whole_return());
+                        match dispatch.execute_flow_return(key) {
+                            FlowReturnStep::Complete(result) => last = Some(result),
+                            other => panic!("a warm flow-return query completes, got {other:?}"),
+                        }
+                    }
+                    last.map(Arc::new)
+                        .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                })
             }
-            last.map(Arc::new)
-                .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        );
         assert!(outcome.as_result().is_ok(), "the request completes");
     }
 
@@ -908,26 +920,31 @@ pub mod signature_kernel_bench_support {
         functions: &[FlowFunctionReturnIdentity],
         reads: impl IntoIterator<Item = usize>,
     ) {
-        let outcome = host.flow_return_request(&functions[0], None, |dispatch| {
-            let keys: Vec<_> = functions
-                .iter()
-                .map(|function| {
-                    dispatch.flow_return_key_with_demand(
-                        function,
-                        ReturnProjectionDemand::whole_return(),
-                    )
+        let outcome = verter_audit::specialise!(
+            crate::capture::entry_mode(host, || verter_audit::RequestKind::FlowReturnInference) => M,
+            {
+                host.flow_return_request::<M>(&functions[0], None, |dispatch| {
+                    let keys: Vec<_> = functions
+                        .iter()
+                        .map(|function| {
+                            dispatch.flow_return_key_with_demand(
+                                function,
+                                ReturnProjectionDemand::whole_return(),
+                            )
+                        })
+                        .collect();
+                    let mut last = None;
+                    for index in reads {
+                        let result = dispatch
+                            .warm_flow_return_read(&keys[index % keys.len()])
+                            .expect("a warm memo read hits");
+                        last = Some(result);
+                    }
+                    last.map(Arc::new)
+                        .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
                 })
-                .collect();
-            let mut last = None;
-            for index in reads {
-                let result = dispatch
-                    .warm_flow_return_read(&keys[index % keys.len()])
-                    .expect("a warm memo read hits");
-                last = Some(result);
             }
-            last.map(Arc::new)
-                .ok_or(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-        });
+        );
         assert!(outcome.as_result().is_ok(), "the request completes");
     }
 }

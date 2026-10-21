@@ -152,18 +152,20 @@ pub(crate) fn prewarm_view_overlays(host: &VerterHost, view: &dyn SessionView) {
         .into_cold_seed_view()
         .with_session_overlay(host, view);
     let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-        host,
-        view,
-        &store_view,
-        overlay,
-    );
-    for canonical in view.overlay_canonicals() {
-        let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
-            &session_ctx,
-            canonical.as_str(),
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+            host,
+            view,
+            &store_view,
+            overlay,
         );
-    }
+        for canonical in view.overlay_canonicals() {
+            let _ = verter_type_engine::resolver_core::request_ports::IndexedInputs::ensure_indexed_ready_serve(
+                &session_ctx,
+                canonical.as_str(),
+            );
+        }
+    })
 }
 
 #[cfg(test)]

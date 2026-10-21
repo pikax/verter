@@ -80,12 +80,17 @@ impl FuseState {
         !self.trips.is_empty()
     }
 
-    pub fn check_wildcard_route_fanout(&mut self, budgets: &FuseBudgets) -> bool {
+    /// `M` is the checking unit's capture execution: only a captured one
+    /// records the fanout into its request.
+    pub fn check_wildcard_route_fanout<M: verter_audit::observe::ObserveExec>(
+        &mut self,
+        budgets: &FuseBudgets,
+    ) -> bool {
         self.wildcard_sources_processed += 1;
         // Per-request audit attribution: one wildcard-route fanout
         // expansion observed. Bumped before the budget check so the
         // counter reflects total expansions even when the fuse trips.
-        verter_audit::observe!(|obs| {
+        verter_audit::observe!(M => |obs| {
             obs.record_event(verter_audit::AuditEvent::RouteDbWildcardFanout);
         });
         if self.wildcard_sources_processed > budgets.wildcard_route_fanout {
@@ -204,10 +209,10 @@ mod tests {
         };
         let mut state = FuseState::new();
 
-        assert!(!state.check_wildcard_route_fanout(&budgets));
-        assert!(!state.check_wildcard_route_fanout(&budgets));
-        assert!(!state.check_wildcard_route_fanout(&budgets));
-        assert!(state.check_wildcard_route_fanout(&budgets)); // 4th call trips
+        assert!(!state.check_wildcard_route_fanout::<verter_audit::observe::Uncaptured>(&budgets));
+        assert!(!state.check_wildcard_route_fanout::<verter_audit::observe::Uncaptured>(&budgets));
+        assert!(!state.check_wildcard_route_fanout::<verter_audit::observe::Uncaptured>(&budgets));
+        assert!(state.check_wildcard_route_fanout::<verter_audit::observe::Uncaptured>(&budgets)); // 4th call trips
         assert!(state.has_tripped());
         assert_eq!(state.trips.len(), 1);
         assert_eq!(state.trips[0].fuse_name, "wildcard_route_fanout");

@@ -1663,7 +1663,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mapper_decl = DeclIdentity::from_scope(
             scope,
             crate::mapper_binder_registry::mapper_binder_decl_name_in(
-                graph,
+                graph.store(),
                 source,
                 value,
                 *optional,
@@ -1740,11 +1740,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             _ => None,
                         };
                         let over_type_variable =
-                            crate::semantic_query::keyof_operand_is_type_variable(graph, inner_id);
+                            crate::semantic_query::keyof_operand_is_type_variable(
+                                graph.store(),
+                                inner_id,
+                            );
                         (inner_id, key_space, base_infer, over_type_variable, None)
                     } else {
-                        let modifiers_type =
-                            crate::semantic_query::modifiers_type_of_key_parameter(graph, value);
+                        let modifiers_type = crate::semantic_query::modifiers_type_of_key_parameter(
+                            graph.store(),
+                            value,
+                        );
                         (value, value, None, false, modifiers_type)
                     };
                 // Bind only the exact `Infer` declaration selected by the
@@ -1830,7 +1835,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             MappedModifier::None => ReadonlyMod::Keep,
         };
         let kind = MapperKind::classify_value_expr(
-            graph,
+            graph.store(),
             value_expr,
             head.source_node,
             head.parameter_node,

@@ -961,6 +961,7 @@ impl Scheduler {
             let identity_for_path = identity.clone();
             caller_kind::with_active_path(identity_for_path, || {
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     inline_pool_tag,
                     inbox_depth,
                     queue_depth_pre_dequeue,
@@ -1015,8 +1016,11 @@ impl Scheduler {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
-                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                > = winner_ctx
+                    .as_ref()
+                    .map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     audit_publish::WorkerPoolTag::Io,
                     inbox_depth,
                     queue_depth_pre_dequeue,
@@ -1075,8 +1079,11 @@ impl Scheduler {
                 let job = job.started(&inbox_sender);
                 let _guard: Option<
                     Box<dyn verter_execution::request_context::TlsUninstall + Send>,
-                > = winner_ctx.map(|opaque| Arc::clone(&opaque.0).install_tls());
+                > = winner_ctx
+                    .as_ref()
+                    .map(|opaque| Arc::clone(&opaque.0).install_tls());
                 Self::publish_scheduler_dispatch(
+                    winner_ctx.as_ref(),
                     audit_publish::WorkerPoolTag::Cpu,
                     inbox_depth,
                     queue_depth_pre_dequeue,
@@ -1308,12 +1315,24 @@ impl Scheduler {
     /// Optional capture: without `semantic-observe` this compiles to
     /// nothing and the samples are never read.
     #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// `job_context` is the request context the job carries from its
+    /// submission: only a job whose submitting request selected captured
+    /// execution publishes, and the decision reads that carried context,
+    /// not a thread-local slot.
     pub(super) fn publish_scheduler_dispatch(
+        job_context: Option<&verter_execution::request_context::OpaqueRequestContext>,
         pool: audit_publish::WorkerPoolTag,
         inbox_depth: verter_audit::observe::Sample<u32>,
         queue_depth: verter_audit::observe::Sample<u32>,
         queue_dwell_ms: verter_audit::observe::Sample<f64>,
     ) {
+        #[cfg(feature = "semantic-observe")]
+        if !job_context.is_some_and(|context| context.0.captured()) {
+            return;
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = job_context;
         verter_audit::observe!(|observer| {
             let audit = verter_audit::SchedulerAudit {
                 worker_thread_id: format!("{:?}", std::thread::current().id()),

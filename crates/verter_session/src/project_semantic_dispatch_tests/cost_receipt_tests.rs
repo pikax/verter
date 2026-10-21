@@ -1256,7 +1256,12 @@ fn root_read_configured(
     use verter_type_engine::semantic_query::{QueryResult, SemanticQueryValue};
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&ctx);
     configure(&dispatch);
     let _connected = (preceding != 0).then(|| dispatch.enter_connected_demand(false).0);
@@ -2406,7 +2411,7 @@ fn intersection_root_key(
                 other => panic!("the probe reads a pair of unions, got {other:?}"),
             };
             verter_type_engine::semantic_query::SemanticQueryKey::reduce_intersection_operands(
-                dispatch.graph(),
+                dispatch.graph().store(),
                 Arc::from(arms),
             )
         },

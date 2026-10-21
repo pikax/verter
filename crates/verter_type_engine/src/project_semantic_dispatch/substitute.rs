@@ -143,7 +143,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // recursive `substitute_with_change_tracking` walks. Paired
             // with `SubstituteMemoHit` (next line) to expose the
             // hit-rate of the hash-cons memo.
-            verter_audit::observe!(|observer| {
+            verter_audit::observe!(C::Observe => |observer| {
                 observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
             });
             self.enter_substitution_walk();
@@ -164,7 +164,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // refusal never publishes. Fact-bearing canonical work advances the
             // separate evidence fence below.
             if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMemoHit);
                 });
                 return cached;
@@ -778,7 +778,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // structurally correct: visiting the binder twice in
         // `Foo<K, K>`-style fixtures IS the recursive memo's hit
         // case at the boundary.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => |ctx| {
             ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
                 node: node.0,
                 parameter_node: parameter_node.0,
@@ -793,7 +793,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return (arg, true);
         }
         if let Some(cached) = self.priced_substitution_read(node, parameter_node, arg) {
-            verter_audit::observe!(|observer| {
+            verter_audit::observe!(C::Observe => |observer| {
                 observer.record_event(verter_audit::AuditEvent::RecursiveSubstituteMemoHit);
             });
             // The memo stores the substitution RESULT. `changed` is
@@ -975,7 +975,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     == crate::semantic_query::composite::CompositeOriginCategory::Heritage
                     || new_members.iter().any(|member| {
                         crate::project_semantic_dispatch::walk::value_may_contribute_call_signatures(
-                            self.graph(),
+                            self.graph().store(),
                             *member,
                         )
                     }) {
@@ -1367,7 +1367,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             SemanticNodeData::Mapped { source, mapper } => {
                 // "mapped descents" counter.
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedTypeDescend);
                 });
                 // Exact node identity is the sole shadowing axis. A mapped
@@ -1409,7 +1409,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Distinct from `SubstituteMappedTypeDescend` (every
                 // visit) — fires only on the rebuild branch after at
                 // least one descendant sub-tree changed.
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteMappedRebuild);
                 });
                 (
@@ -1468,7 +1468,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
                 if !any_changed {
                     // "opaque TypeOf returns" counter.
-                    verter_audit::observe!(|observer| {
+                    verter_audit::observe!(C::Observe => |observer| {
                         observer.record_event(verter_audit::AuditEvent::SubstituteTypeOfOpaque);
                     });
                     return (node, false);
@@ -1490,7 +1490,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // substitution is deferred onto the sealed pending frame
                 // so an undemanded loser is never traversed. Selection
                 // does not run here.
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalDescend);
                 });
                 // Capture-avoidance for an `Infer` binder — the same
@@ -1553,7 +1553,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !cc && !ec && next_pending == *pending {
                     return (node, false);
                 }
-                verter_audit::observe!(|observer| {
+                verter_audit::observe!(C::Observe => |observer| {
                     observer.record_event(verter_audit::AuditEvent::SubstituteConditionalRebuild);
                 });
                 (

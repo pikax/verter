@@ -228,7 +228,9 @@ impl SemanticGraphStore {
         if relation_members.is_empty() && flow_members.is_empty() && call_members.is_empty() {
             return true;
         }
-        let dispatch_dep_signature = self.dep_signature_interner.intern(&empty_signature());
+        let dispatch_dep_signature = self
+            .dep_signature_interner
+            .intern_in::<C::Observe>(&empty_signature());
 
         // WHOLE-BATCH ADMISSIBILITY. Every gate here is release-active
         // and every one is evaluated BEFORE any staging: a batched
@@ -499,7 +501,7 @@ impl SemanticGraphStore {
         let any_aborted = staged.iter().any(|member| member.flight.is_aborted());
         if !root_is_published || any_aborted {
             drop(entries);
-            record_cold_abort_swept(&self.stats);
+            record_cold_abort_swept::<C::Observe>(&self.stats);
             for member in staged {
                 self.abort_inline_member_flight(&member.flight);
             }
@@ -531,6 +533,7 @@ impl SemanticGraphStore {
         for member in staged {
             let lease = member.entry.lease.clone();
             let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
+                C::Observe::default(),
                 &mut entries,
                 &member.family,
                 member.family_charge,
@@ -784,8 +787,9 @@ impl SemanticGraphStore {
     /// the answer is returned and the caller settles every newly-keyed
     /// family in one exempting step.
     #[allow(clippy::too_many_arguments)]
-    fn publish_staged_locked(
+    fn publish_staged_locked<M: verter_audit::observe::ObserveExec>(
         &self,
+        mode: M,
         entries: &mut FxHashMap<FamilyKey, FamilySlots>,
         family: &FamilyKey,
         family_charge: Option<verter_session_query::retention::RetentionCharge>,
@@ -813,6 +817,7 @@ impl SemanticGraphStore {
         // the candidates it displaced are unregistered; see
         // `warm_publish_one`.
         reverse_index::register_published(
+            mode,
             &self.canonical_to_entries,
             family,
             &populated_slots,
@@ -880,8 +885,14 @@ impl SemanticGraphStore {
         };
         entry.retention = Some(retention);
         let mut entries = self.entries_lock_diagnosed();
-        let NewlyKeyedFamily(is_new) =
-            self.publish_staged_locked(&mut entries, &family, None, entry, eviction);
+        let NewlyKeyedFamily(is_new) = self.publish_staged_locked(
+            verter_audit::observe::Uncaptured,
+            &mut entries,
+            &family,
+            None,
+            entry,
+            eviction,
+        );
         // A seeded ROOT is a lone family, not a component: it takes the
         // ordinary unexempted admission, exactly like `warm_publish_one`.
         if is_new {

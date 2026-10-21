@@ -152,6 +152,46 @@ pub struct CodeTransform<'a> {
     /// replacements so transforms that only use the positional insertion API
     /// keep their historical code path with zero extra work.
     pub(super) anchored_present: bool,
+    /// Optional audit tally of this transform's public operations, published
+    /// once when the transform is dropped (see [`AuditOpTally`]).
+    audit_ops: AuditOpTally,
+}
+
+/// Optional per-transform count of `CodeTransform` operations.
+///
+/// An operation bumps a plain counter — no observer slot read, no capture
+/// test and no atomic — and the transform publishes the count to the
+/// running request's observer once, when it is dropped. The observer slot
+/// is planted only for a request whose root entry selected captured
+/// execution, so an uncaptured compile publishes nothing. Without
+/// `semantic-observe` the tally is zero-size and has no drop glue.
+#[derive(Debug, Default)]
+struct AuditOpTally {
+    #[cfg(feature = "semantic-observe")]
+    ops: std::cell::Cell<u32>,
+}
+
+impl AuditOpTally {
+    #[inline(always)]
+    fn bump(&self) {
+        #[cfg(feature = "semantic-observe")]
+        self.ops.set(self.ops.get().saturating_add(1));
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+impl Drop for AuditOpTally {
+    fn drop(&mut self) {
+        let ops = self.ops.get();
+        if ops == 0 {
+            return;
+        }
+        verter_audit::observe!(|observer| {
+            for _ in 0..ops {
+                observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp);
+            }
+        });
+    }
 }
 
 /// One source-bearing output range from a [`CodeTransform`]. This projection
@@ -275,6 +315,7 @@ impl<'a> CodeTransform<'a> {
             helper_preamble_content: None,
             helper_preamble_carrier_anchor: None,
             anchored_present: false,
+            audit_ops: AuditOpTally::default(),
         }
     }
 
@@ -357,19 +398,17 @@ impl<'a> CodeTransform<'a> {
         self.allocator.alloc_str(s)
     }
 
-    /// Single audit-emit point for one `CodeTransform` operation. Called
+    /// Single audit-count point for one `CodeTransform` operation. Called
     /// at the entry of every public op (prepend / append / overwrite /
     /// remove / move / batch) to populate
     /// [`verter_audit::payloads::compile::CompilePayload::code_transform_ops`].
     /// Optional capture: without `semantic-observe` this compiles to
-    /// nothing; with it, it reads the observer slot once per op. Callers
-    /// stay off the per-element / per-attribute inner loops; this method
-    /// itself is the boundary that satisfies the per-op contract.
-    #[inline]
+    /// nothing; with it, it bumps a per-transform counter the transform
+    /// publishes once, when dropped — an operation never reads the observer
+    /// slot.
+    #[inline(always)]
     pub(super) fn record_audit_op(&self) {
-        verter_audit::observe!(
-            |observer| observer.record_event(verter_audit::AuditEvent::CompileCodeTransformOp)
-        );
+        self.audit_ops.bump();
     }
 
     /// Prepend content to the very start

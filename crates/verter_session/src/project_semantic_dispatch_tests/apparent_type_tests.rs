@@ -155,7 +155,7 @@ fn no_ambient_host() -> Arc<VerterHost> {
 fn rootless_signature(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
 ) -> SemanticNodeId {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
     let return_type = graph.intern_node(SemanticNodeData::Literal(
         verter_type_expr::LiteralValue::String("rootless".into()),
@@ -251,7 +251,12 @@ fn rootless_apparent_surface_is_project_scoped_and_never_cached() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -307,7 +312,12 @@ fn rootless_apparent_taint_propagates_through_enclosing_member_projection() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -381,7 +391,12 @@ fn rootless_apparent_without_registered_ambient_fails_closed() {
     let host = no_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     let base = rootless_signature(&dispatch);
@@ -406,7 +421,12 @@ fn rootless_apparent_without_demand_site_fails_closed() {
     let host = two_project_ambient_host();
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let base = rootless_signature(&dispatch);
 
@@ -592,7 +612,12 @@ fn with_fresh_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     f(&ProjectSemanticDispatch::new(&host_ctx))
 }
 

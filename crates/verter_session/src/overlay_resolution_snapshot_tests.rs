@@ -80,7 +80,7 @@ fn with_session_under<T>(
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         host,
         &view,
         &store_view,
@@ -120,11 +120,12 @@ fn resolve_through_host(
     name: &str,
 ) -> Option<(String, String)> {
     let store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &store_view,
-        Arc::new(CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            Arc::new(CanonicalCompletionOverlay::new()),
+        );
     ctx.resolve_named_type_export_target_shallow(barrel, name)
 }
 
@@ -145,11 +146,12 @@ fn type_route_through_session(
 /// host's own context.
 fn type_route_through_host(host: &Arc<VerterHost>, owner: &str, specifier: &str) -> Option<String> {
     let store_view = host.resolver_store_view_read().into_owned_view();
-    let ctx = crate::resolver_core::HostResolverContext::new(
-        host,
-        &store_view,
-        Arc::new(CanonicalCompletionOverlay::new()),
-    );
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            Arc::new(CanonicalCompletionOverlay::new()),
+        );
     ctx.resolve_type_dependency_canonical(owner, specifier)
 }
 
@@ -498,7 +500,7 @@ fn a_pinned_session_request_outlives_overlay_churn() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let ctx = SessionResolverContext::new(
+    let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &pinned,
@@ -743,7 +745,7 @@ fn a_thousand_overlay_sessions_open_edit_and_close_to_a_plateau() {
                     .resolver_store_view_read()
                     .into_owned_view()
                     .with_session_overlay(project.host(), view);
-                let ctx = SessionResolverContext::new(
+                let ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
                     project.host(),
                     view,
                     &store_view,

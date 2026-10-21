@@ -187,7 +187,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         } else {
             self.dispatch.substitute_canonical(
                 na,
-                &CanonicalTypeSubstitution::new(self.dispatch.graph(), moving),
+                &CanonicalTypeSubstitution::new(self.dispatch.graph().store(), moving),
             )
         };
         if self.semantic_identity {
@@ -197,8 +197,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
             return Some(true);
         }
         let graph = self.dispatch.graph();
-        let ka = crate::semantic_query::stable_key::stable_key_for_node(graph, na);
-        let kb = crate::semantic_query::stable_key::stable_key_for_node(graph, nb);
+        let ka = crate::semantic_query::stable_key::stable_key_for_node(graph.store(), na);
+        let kb = crate::semantic_query::stable_key::stable_key_for_node(graph.store(), nb);
         Some(ka == kb)
     }
 
@@ -218,7 +218,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> DiscoveryTypes for GraphType
         let node = self.node(ty)?;
         let mapped = self.dispatch.substitute_canonical(
             node,
-            &CanonicalTypeSubstitution::new(self.dispatch.graph(), map.to_vec()),
+            &CanonicalTypeSubstitution::new(self.dispatch.graph().store(), map.to_vec()),
         );
         self.token(mapped)
     }
@@ -439,7 +439,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
             SemanticNodeData::Union(_) => {
                 drop(data);
                 let arms = crate::semantic_query::stable_key::semantic_union_members(
-                    graph,
+                    graph.store(),
                     node,
                     self.context.context(),
                 );
@@ -693,7 +693,7 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
         for contributor in contributors {
             let mut surfaces = Vec::new();
             super::walk::collect_merged_contributor_arms(
-                graph,
+                graph.store(),
                 *contributor,
                 &mut surfaces,
                 &mut bases,
@@ -874,7 +874,8 @@ impl<'w, 'a, 'd, C: crate::resolver_core::ResolverCapabilities> Walk<'w, 'a, 'd,
                 occ.signature_ordinal,
             ),
             None => {
-                let key = crate::semantic_query::stable_key::stable_key_for_node(graph, node);
+                let key =
+                    crate::semantic_query::stable_key::stable_key_for_node(graph.store(), node);
                 let space = RootlessSpace::of(&key);
                 (space.key, space.identity, space.group, 0, ordinal)
             }
@@ -1008,7 +1009,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         match published {
             Ok((set, nodes_of, version)) => QueryOutcome::Ready(Ready {
                 value: crate::signature_kernel::SignatureSetValue::new(
-                    self.graph(),
+                    self.graph().store(),
                     version,
                     set,
                     nodes_of,
@@ -1379,7 +1380,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .copied()
             .filter(|(_, image)| !SignatureStore::is_binder_token(*image))
             .collect();
-        Ok(CanonicalTypeSubstitution::new(self.graph(), kept))
+        Ok(CanonicalTypeSubstitution::new(self.graph().store(), kept))
     }
 
     fn recipe_return(
@@ -1737,7 +1738,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         resolution: bool,
     ) -> Result<Vec<SemanticNodeId>, SignatureSetReadFailure> {
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
-        let store = self.graph().signature_store();
+        let store = self.graph().store().signature_store();
         let (candidates, order): (Vec<SignatureCandidate>, Vec<usize>) = {
             let view = SemanticReadView::pin(store);
             if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
@@ -1854,7 +1855,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             use crate::signature_kernel::{PositionalShape, TypeAt};
 
             let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
-            let store = self.graph().signature_store();
+            let store = self.graph().store().signature_store();
             let raw: Result<Vec<RawPositional>, ()> = {
                 let view = SemanticReadView::pin(store);
                 if value.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
@@ -1947,7 +1948,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         target: SemanticNodeId,
         kind: GraphSignatureKind,
     ) -> Option<bool> {
-        let store = self.graph().signature_store();
+        let store = self.graph().store().signature_store();
         for attempt in 0..2 {
             let source = self.signature_set_value(source, kind).ok()?;
             let target = self.signature_set_value(target, kind).ok()?;
@@ -2136,7 +2137,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         };
 
         let unsettled = SignatureSetReadFailure::Incomplete(IncompleteReason::UnsettledInput);
-        let store = self.graph().signature_store();
+        let store = self.graph().store().signature_store();
         let view = SemanticReadView::pin(store);
         for set in [source, target] {
             if set.set.epoch().is_some_and(|epoch| epoch != view.epoch()) {
@@ -2434,7 +2435,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let call = store.intern_substitution(
             crate::signature_kernel::CallSubstitution::map(
                 desc.residual_binders,
-                CanonicalTypeSubstitution::new(self.graph(), naming),
+                CanonicalTypeSubstitution::new(self.graph().store(), naming),
             ),
             None,
         )?;
@@ -2551,7 +2552,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
-        let store = self.graph().signature_store();
+        let store = self.graph().store().signature_store();
         let began = store.epoch();
         let mut outcome =
             self.signatures_of_type_with_authored(store, subject, kind, context.clone());
@@ -2589,7 +2590,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
         use crate::semantic_query::{QueryError, QueryResult, SemanticQueryValue};
         let fence = self.project_generation_signature();
-        let store = self.graph().signature_store();
+        let store = self.graph().store().signature_store();
         let version = match store.lease_epoch(key.descriptor.epoch()) {
             Ok(lease) => crate::signature_kernel::SignatureVersion(Some(lease)),
             Err(_) => {

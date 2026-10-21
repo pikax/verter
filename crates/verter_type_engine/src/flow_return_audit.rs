@@ -47,11 +47,16 @@ fn accumulator_installed() -> bool {
 /// COLD-PATH ONLY caller contract — the warm family hit must return
 /// before reaching this helper.
 #[inline(always)]
-pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
+pub fn record_flow_return_started<M: verter_audit::observe::ObserveExec>(
+    canonical_id: &str,
+    function_symbol: &str,
+) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = (canonical_id, function_symbol);
     #[cfg(feature = "semantic-observe")]
-    record_flow_return_started_captured(canonical_id, function_symbol);
+    if M::CAPTURED {
+        record_flow_return_started_captured(canonical_id, function_symbol);
+    }
 }
 
 #[cfg(feature = "semantic-observe")]
@@ -74,11 +79,15 @@ fn record_flow_return_started_captured(canonical_id: &str, function_symbol: &str
 /// installed, push a
 /// [`StructuredAuditEvent::FlowSliceBudgetExceeded`].
 #[inline(always)]
-pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
+pub fn record_flow_slice_budget_exceeded<M: verter_audit::observe::ObserveExec>(
+    exceeded: &FlowSliceBudgetExceeded,
+) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = exceeded;
     #[cfg(feature = "semantic-observe")]
-    record_flow_slice_budget_exceeded_captured(exceeded);
+    if M::CAPTURED {
+        record_flow_slice_budget_exceeded_captured(exceeded);
+    }
 }
 
 #[cfg(feature = "semantic-observe")]
@@ -114,11 +123,16 @@ fn record_flow_slice_budget_exceeded_captured(exceeded: &FlowSliceBudgetExceeded
 /// `cycle_id` is the request-scoped in-flight obligation frame index
 /// the re-entry targeted.
 #[inline(always)]
-pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &str) {
+pub fn record_flow_cycle_reentry<M: verter_audit::observe::ObserveExec>(
+    cycle_id: u32,
+    function_symbol: &str,
+) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = (cycle_id, function_symbol);
     #[cfg(feature = "semantic-observe")]
-    record_flow_cycle_reentry_captured(cycle_id, function_symbol);
+    if M::CAPTURED {
+        record_flow_cycle_reentry_captured(cycle_id, function_symbol);
+    }
 }
 
 #[cfg(feature = "semantic-observe")]

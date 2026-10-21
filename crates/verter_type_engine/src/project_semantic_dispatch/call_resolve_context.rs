@@ -358,7 +358,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     // type, and every parameter the argument deposits into
                     // takes it as it is.
                     if matches!(regular_here, Some(None)) && !position.root {
-                        for literal in std::iter::once(node).chain(literal_members(graph, node)) {
+                        for literal in
+                            std::iter::once(node).chain(literal_members(graph.store(), node))
+                        {
                             keeps.extend(
                                 reached
                                     .iter()
@@ -588,7 +590,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Vec<SemanticNodeId> {
         let (node, contexts) = (position.node, &position.contexts);
         let (regular, fresh): (Vec<SemanticNodeId>, Vec<SemanticNodeId>) =
-            literal_members(self.graph(), node)
+            literal_members(self.graph().store(), node)
                 .into_iter()
                 .partition(|literal| regular.is_some_and(|regular| regular.contains(literal)));
         for &literal in &regular {
@@ -773,7 +775,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 mixed = true;
                                 if separate {
                                     if let Some(node) = type_of(&contributor) {
-                                        fresh.extend(literal_members(graph, node));
+                                        fresh.extend(literal_members(graph.store(), node));
                                     }
                                 }
                             } else {
@@ -791,13 +793,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 let mut literals = Vec::new();
                 for (index, (regular, _)) in arms.iter().enumerate() {
                     for node in regular.iter().filter_map(&type_of) {
-                        for literal in literal_members(graph, node) {
+                        for literal in literal_members(graph.store(), node) {
                             let fresh_elsewhere = arms.iter().enumerate().any(|(other, arm)| {
                                 other != index
                                     && arm
                                         .1
                                         .iter()
-                                        .any(|&fresh| same_literal(graph, fresh, literal))
+                                        .any(|&fresh| same_literal(graph.store(), fresh, literal))
                             });
                             if !fresh_elsewhere && !literals.contains(&literal) {
                                 literals.push(literal);
@@ -1030,7 +1032,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .iter()
             .filter(|signature| {
                 super::super::relation_predicates::index_signature_applies_to_property(
-                    graph,
+                    graph.store(),
                     signature.key_type,
                     &known,
                 )
@@ -1135,14 +1137,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         declared: &[TypeParamDecl],
     ) -> LiteralContext {
         let graph = self.graph();
-        let held = literal_members(graph, candidate)
-            .into_iter()
-            .fold(0u8, |held, literal| {
-                match graph.node_data(literal).as_deref() {
-                    Some(SemanticNodeData::Literal(value)) => held | LiteralKind::of(value).bit(),
-                    _ => held,
-                }
-            });
+        let held =
+            literal_members(graph.store(), candidate)
+                .into_iter()
+                .fold(0u8, |held, literal| {
+                    match graph.node_data(literal).as_deref() {
+                        Some(SemanticNodeData::Literal(value)) => {
+                            held | LiteralKind::of(value).bit()
+                        }
+                        _ => held,
+                    }
+                });
         if held == 0 {
             return LiteralContext::Widen;
         }
@@ -1765,7 +1770,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     fn print_diagnostic_type_text(&self, node: SemanticNodeId) -> String {
         crate::semantic_query::display::display_type_node(
-            self.graph(),
+            self.graph().store(),
             node,
             crate::semantic_query::DisplayNeeds::single(
                 crate::semantic_query::DisplayFacet::CheckerSpelling,

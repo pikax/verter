@@ -142,56 +142,64 @@ impl VerterHost {
         demand: ReturnProjectionDemand,
         cancellation: Option<verter_execution::cancellation::CancellationToken>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
-        self.flow_return_request(function, cancellation, |dispatch| {
-            let key = dispatch.flow_return_key_with_demand(function, demand);
-            // Typed incompleteness never publishes clean: an answer composed
-            // from a degraded member return carries a typed degradation.
-            let delivered = dispatch
-                .owning()
-                .execute_flow_return_observing_degraded_read(key);
-            let (step, partial) = delivered.value().clone();
-            #[cfg(feature = "test-support")]
-            verter_type_engine::cancel_trace::mark("evaluated");
-            match step {
-                verter_type_engine::semantic_query::FlowReturnStep::Aborted(abort) => {
-                    Err(match abort {
-                        verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
-                            FlowReturnError::Cancelled
+        // The root entry selects its capture execution once, here, and the
+        // whole request — context, dispatcher and the body below — runs
+        // compiled for it.
+        verter_audit::specialise!(
+            crate::capture::entry_mode(self, || RequestKind::FlowReturnInference) => M,
+            {
+                self.flow_return_request::<M>(function, cancellation, |dispatch| {
+                    let key = dispatch.flow_return_key_with_demand(function, demand);
+                    // Typed incompleteness never publishes clean: an answer composed
+                    // from a degraded member return carries a typed degradation.
+                    let delivered = dispatch
+                        .owning()
+                        .execute_flow_return_observing_degraded_read(key);
+                    let (step, partial) = delivered.value().clone();
+                    #[cfg(feature = "test-support")]
+                    verter_type_engine::cancel_trace::mark("evaluated");
+                    match step {
+                        verter_type_engine::semantic_query::FlowReturnStep::Aborted(abort) => {
+                            Err(match abort {
+                                verter_type_engine::semantic_query::ExecutionAbort::Cancelled => {
+                                    FlowReturnError::Cancelled
+                                }
+                                other => FlowReturnError::Aborted(other),
+                            })
                         }
-                        other => FlowReturnError::Aborted(other),
-                    })
-                }
-                verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
-                    Ok(Arc::new(if partial {
-                        result.with_partial_interior()
-                    } else {
-                        result
-                    }))
-                }
-                verter_type_engine::semantic_query::FlowReturnStep::NoValue(failure) => {
-                    Err(FlowReturnError::Failure(failure))
-                }
-                // A hold cannot surface at a fresh top-level
-                // transaction (no in-flight frame exists to
-                // re-enter); treat a torn surfacing as
-                // undecided, never a fabricated value.
-                verter_type_engine::semantic_query::FlowReturnStep::Hold(_) => {
-                    Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
-                }
+                        verter_type_engine::semantic_query::FlowReturnStep::Complete(result) => {
+                            Ok(Arc::new(if partial {
+                                result.with_partial_interior()
+                            } else {
+                                result
+                            }))
+                        }
+                        verter_type_engine::semantic_query::FlowReturnStep::NoValue(failure) => {
+                            Err(FlowReturnError::Failure(failure))
+                        }
+                        // A hold cannot surface at a fresh top-level
+                        // transaction (no in-flight frame exists to
+                        // re-enter); treat a torn surfacing as
+                        // undecided, never a fabricated value.
+                        verter_type_engine::semantic_query::FlowReturnStep::Hold(_) => {
+                            Err(FlowReturnError::Failure(FlowReturnFailure::Unresolved))
+                        }
+                    }
+                })
             }
-        })
+        )
     }
 
     /// One audited flow-return request for `function` around `run`: the
     /// request id, context, audit registration, proven-current store view
     /// and dispatch every flow-return request builds, `run` over that
     /// dispatch, then the cancellation mapping and the audit record.
-    pub(crate) fn flow_return_request(
+    pub(crate) fn flow_return_request<M: verter_audit::observe::ObserveExec>(
         &self,
         function: &verter_type_expr::facts::FlowFunctionReturnIdentity,
         cancellation: Option<verter_execution::cancellation::CancellationToken>,
         run: impl FnOnce(
-            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
         ) -> Result<Arc<FlowReturnResult>, FlowReturnError>,
     ) -> AuditedResult<Arc<FlowReturnResult>, FlowReturnError> {
         let canonical_id: &str = function.anchor.canonical_id.as_ref();
@@ -219,11 +227,12 @@ impl VerterHost {
         let accumulator = footprint_scope.accumulator();
         #[cfg(not(feature = "semantic-observe"))]
         let accumulator = None;
-        let ctx = crate::capture::root_entry_context(
+        let ctx = crate::capture::root_entry_context_in_mode(
             self,
             request_id,
             Arc::<str>::from(canonical_id),
             || RequestKind::FlowReturnInference,
+            <M as verter_audit::observe::ObserveExec>::MODE,
             footprint_capture,
             timing_capture,
             accumulator,
@@ -256,13 +265,13 @@ impl VerterHost {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                    let host_ctx = crate::resolver_core::HostResolverContext::from_current(
+                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
                         self,
                         &current_view,
                         overlay,
                     );
                     let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-                        crate::resolver_core::HostCapabilities,
+                        crate::resolver_core::HostCapabilities<M>,
                     > = &host_ctx;
                     // The request runs under its context whether or not it
                     // captures: the dispatch reads cancellation and budget

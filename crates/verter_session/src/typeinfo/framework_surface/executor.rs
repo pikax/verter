@@ -374,21 +374,23 @@ impl VerterHost {
                     Some(current_view) => {
                         let overlay =
                             Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                        let host_ctx = crate::resolver_core::HostResolverContext::from_current(
-                            self,
-                            &current_view,
-                            overlay,
-                        );
-                        let dispatch =
-                            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
-                                &host_ctx,
+                        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
+                                self,
+                                &current_view,
+                                overlay,
                             );
-                        let resolve_ctx = ExecutorResolveCtx {
-                            ctx: &host_ctx,
-                            dispatch: &dispatch,
-                        };
-                        let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
-                        adapter.normalize(&ctx, resolved)
+                            let dispatch =
+                                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(
+                                    &host_ctx,
+                                );
+                            let resolve_ctx = ExecutorResolveCtx {
+                                ctx: &host_ctx,
+                                dispatch: &dispatch,
+                            };
+                            let resolved = resolve_ctx.resolve_plan(&resolved_selector, plan);
+                            adapter.normalize(&ctx, resolved)
+                        })
                     }
                     None => NormalizedSurfaces::default(),
                 }
@@ -459,17 +461,20 @@ impl VerterHost {
 /// relocated Vue delegates and the shared shallow-surface / path-projection
 /// dispatch). It is not a second resolver: every arm dispatches to existing
 /// shared resolution.
-struct ExecutorResolveCtx<'a> {
+struct ExecutorResolveCtx<
+    'a,
+    M: verter_audit::observe::ObserveExec = verter_audit::observe::Uncaptured,
+> {
     /// The ONE proven-current request view every demand resolves against, so a
     /// single response never mixes owner versions under churn.
-    ctx: &'a dyn crate::resolver_core::HostRequestContext,
+    ctx: &'a dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &'a verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'a,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 }
 
-impl ExecutorResolveCtx<'_> {
+impl<M: verter_audit::observe::ObserveExec> ExecutorResolveCtx<'_, M> {
     /// Resolve every planned demand into a [`ResolvedSurfaces`] set.
     fn resolve_plan(
         &self,

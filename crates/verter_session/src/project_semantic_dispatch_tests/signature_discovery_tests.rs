@@ -323,7 +323,7 @@ fn read_return(
     candidate: verter_type_engine::signature_kernel::SignatureCandidate,
     call: verter_type_engine::signature_kernel::CallSubstitutionId,
 ) -> Result<SemanticNodeId, IncompleteReason> {
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     match d.read_signature_result(
         store,
         candidate.signature,
@@ -360,7 +360,7 @@ fn direct_signature_matches_only_its_own_kind() {
         string,
     );
     let construct = signature(&d, "C", 0, SignatureKind::Construct, vec![], vec![], string);
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
 
     assert_eq!(
         count(ready(discover(&d, call, SignatureKind::Call)), store),
@@ -453,7 +453,7 @@ fn object_surface_keeps_authored_order_and_overload_ordinals() {
         boolean,
     );
     let object = callable(&d, vec![b, c, a], vec![]);
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let list = candidates(ready(discover(&d, object, SignatureKind::Call)), store);
     assert_eq!(list.len(), 3);
     let view = SemanticReadView::pin(store);
@@ -499,7 +499,7 @@ fn alias_and_constraint_settle_to_the_signature_shape() {
         default: None,
         display_name: verter_type_expr::OwnedStr::from("Fn"),
     });
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     assert_eq!(
         count(ready(discover(&d, alias, SignatureKind::Call)), store),
         1
@@ -552,7 +552,7 @@ fn optionality_and_tuple_rest_flatten_under_the_active_context() {
         vec![],
         string,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let layout_of = |context: SemanticContextId| {
         let set = ready(d.signatures_of_type(store, sig, SignatureKind::Call, context));
         let candidate = candidates(set, store).remove(0);
@@ -608,7 +608,7 @@ fn enumeration_forces_no_body_and_an_unrecoverable_body_effect_forces_none() {
         is_abstract: false,
     });
     let object = callable(&d, vec![node], vec![]);
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let set = ready(discover(&d, object, SignatureKind::Call));
     let candidate = candidates(set, store).remove(0);
     assert!(matches!(
@@ -679,7 +679,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
         }],
         ret,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let candidate = candidates(ready(discover(&d, sig, SignatureKind::Call)), store).remove(0);
     let view = SemanticReadView::pin(store);
     let space = view
@@ -693,7 +693,7 @@ fn declared_result_applies_the_call_map_once_and_leaks_no_binder_token() {
         .intern_substitution(
             CallSubstitution::map(
                 space,
-                CanonicalTypeSubstitution::new(d.graph(), vec![(token, number)]),
+                CanonicalTypeSubstitution::new(d.graph().store(), vec![(token, number)]),
             ),
             None,
         )
@@ -749,7 +749,7 @@ fn union_common_match_builds_one_candidate_with_mapped_constituents() {
         &[callable(&d, vec![a], vec![]), callable(&d, vec![b], vec![])],
         true,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let set = ready(discover(&d, union, SignatureKind::Call));
     let list = candidates(set, store);
     assert_eq!(list.len(), 1);
@@ -798,7 +798,7 @@ fn union_synthesis_is_restricted_and_absent_arm_yields_no_signatures() {
         &[callable(&d, vec![a], vec![]), callable(&d, vec![b], vec![])],
         true,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let list = candidates(ready(discover(&d, union, SignatureKind::Call)), store);
     assert_eq!(list.len(), 1);
     assert!(matches!(
@@ -870,7 +870,7 @@ fn intersection_dedups_by_signature_equivalence_in_authored_order() {
             members.to_vec().into_boxed_slice(),
         )),
     ));
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let list = candidates(
         ready(discover(&d, intersection, SignatureKind::Call)),
         store,
@@ -962,7 +962,7 @@ fn mixin_construct_intersections_follow_the_checker_mixin_rule() {
     let m2 = mixin("M2", instance_b);
     let context =
         verter_type_engine::semantic_query::ProjectionReductionContext::structural_transit();
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     for (label, members, instances, rest_only) in [
         (
             "CtorB & MixA",
@@ -1145,7 +1145,7 @@ fn signatures_of_type_do_not_warm_hit_across_semantic_contexts() {
         vec![],
         string,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let production = SemanticContextId::production();
     let mut options = SemanticContext::production();
     options.effective_semantic_options.strict_null_checks = false;
@@ -1202,7 +1202,7 @@ fn read_signature_result_distinct_demands_do_not_alias() {
         vec![],
         string,
     );
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let candidate = candidates(ready(discover(&d, sig, SignatureKind::Call)), store).remove(0);
     let call = identity_substitution(store, candidate);
     let key = |projection| verter_type_engine::signature_kernel::ReadSignatureResultKey {
@@ -1271,7 +1271,7 @@ fn generic_union_members_match_exactly_under_binder_correspondence() {
     let d = ProjectSemanticDispatch::new(host.as_ref());
     let _builder = d.enter_construction_scope();
     let string = prim(&d, PrimitiveKind::String);
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
 
     let t = generic_identity(&d, "T", None);
     let u = generic_identity(&d, "U", None);
@@ -1390,12 +1390,17 @@ fn apparent_primitives_read_the_resolved_global_population() {
     let with_lib = project_host(Some(AMBIENT_LIB));
     let store_view = with_lib.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(&with_lib, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &with_lib,
+            &store_view,
+            overlay,
+        );
     let d = ProjectSemanticDispatch::new(&ctx);
     let _builder = d.enter_construction_scope();
     let _scope =
         super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let string = prim(&d, PrimitiveKind::String);
     let number = prim(&d, PrimitiveKind::Number);
     let literal = d.graph().intern_node(SemanticNodeData::Literal(
@@ -1422,7 +1427,12 @@ fn apparent_primitives_read_the_resolved_global_population() {
     let without_lib = project_host(None);
     let store_view = without_lib.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let ctx = crate::resolver_core::HostResolverContext::new(&without_lib, &store_view, overlay);
+    let ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &without_lib,
+            &store_view,
+            overlay,
+        );
     let d = ProjectSemanticDispatch::new(&ctx);
     let _scope =
         super::LexicalDemandScopeGuard::push(&d.lexical_demand_scope, Arc::from("/ws/main.ts"));
@@ -1490,7 +1500,7 @@ fn candidate_identity_is_independent_of_intern_order() {
             string,
         );
         let object = callable(&d, vec![a, b], vec![]);
-        let store = d.graph().signature_store();
+        let store = d.graph().store().signature_store();
         let list = candidates(ready(discover(&d, object, SignatureKind::Call)), store);
         let view = SemanticReadView::pin(store);
         list.iter()
@@ -1544,7 +1554,7 @@ fn untyped_javascript_signatures_publish_the_untyped_flag() {
             predicate: None,
             is_abstract: false,
         });
-        let store = d.graph().signature_store();
+        let store = d.graph().store().signature_store();
         let list = candidates(ready(discover(&d, node, SignatureKind::Call)), store);
         let view = SemanticReadView::pin(store);
         let descriptor = view.descriptor(list[0].signature).unwrap();
@@ -1593,7 +1603,7 @@ fn each_read_reports_the_authored_node_its_own_subject_carries() {
     let second = authored_at(Some(verter_span::Span::new(7, 9)), string);
     assert_ne!(first, second, "two authored positions are two nodes");
 
-    let store = d.graph().signature_store();
+    let store = d.graph().store().signature_store();
     let read = |subject| match d.signatures_of_type_with_authored(
         store,
         subject,

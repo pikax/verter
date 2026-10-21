@@ -1670,24 +1670,32 @@ impl NodeArena {
     /// Intern `data` with the `Global` scope tag. Helper intermediates and
     /// purely structural nodes use this path — most existing interning
     /// sites fall into this bucket.
+    #[cfg(test)]
     pub(super) fn push(&self, data: SemanticNodeData) -> SemanticNodeId {
-        self.push_with_scope(data, NodeScopeId::Global)
+        self.push_with_scope::<verter_audit::observe::Uncaptured>(data, NodeScopeId::Global)
     }
 
     /// Intern `data` and record `scope` in the origin sidecar. Called by
     /// builders that know the declaration origin — `build_resolve_decl`,
     /// `build_typeof`, `build_instantiate`, etc.
-    pub(super) fn push_with_scope(
+    ///
+    /// `M` is the capture execution of the unit interning: only a captured
+    /// one times or counts its shard-lock acquisitions.
+    pub(super) fn push_with_scope<M: verter_audit::observe::ObserveExec>(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        let id = self.push_impl(data, scope);
+        let id = self.push_impl::<M>(data, scope);
         super::node_roots::NodeRootScope::capture_constructed(&self.core, id);
         id
     }
 
-    fn push_impl(&self, mut data: SemanticNodeData, scope: NodeScopeId) -> SemanticNodeId {
+    fn push_impl<M: verter_audit::observe::ObserveExec>(
+        &self,
+        mut data: SemanticNodeData,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
         // TS literal-type identity boundary: the checker interns numeric
         // literal types by SameValueZero, so `-0` IS the literal type `0`
         // (verified against the pinned checker: `0 & -0` is `0`, `0 | -0`
@@ -1707,7 +1715,7 @@ impl NodeArena {
         // routing and the bucket key derive from this single hash of the
         // payload; the map probe then only hashes a `u64`.
         let fingerprint = structural_fingerprint(&data, &scope);
-        self.intern_with_fingerprint(data, scope, fingerprint)
+        self.intern_with_fingerprint::<M>(data, scope, fingerprint)
     }
 
     /// Core intern path. `fingerprint` narrows to a shard + bucket; the
@@ -1715,19 +1723,19 @@ impl NodeArena {
     /// authority. Split out from [`push_impl`] so tests can force a
     /// fingerprint — driving two distinct payloads into one bucket — and
     /// assert the content-`Eq` split (collision safety).
-    fn intern_with_fingerprint(
+    fn intern_with_fingerprint<M: verter_audit::observe::ObserveExec>(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
         fingerprint: u64,
     ) -> SemanticNodeId {
-        match self.try_intern_with_fingerprint(data, scope.clone(), fingerprint) {
+        match self.try_intern_with_fingerprint::<M>(data, scope.clone(), fingerprint) {
             Ok(id) => id,
-            Err(error) => self.push_impl(SemanticNodeData::Opaque(error), scope),
+            Err(error) => self.push_impl::<M>(SemanticNodeData::Opaque(error), scope),
         }
     }
 
-    fn try_intern_with_fingerprint(
+    fn try_intern_with_fingerprint<M: verter_audit::observe::ObserveExec>(
         &self,
         data: SemanticNodeData,
         scope: NodeScopeId,
@@ -1743,7 +1751,7 @@ impl NodeArena {
         // the bucket scan checks for an existing id; the miss path acquires
         // `inner.write()` briefly to push the new slot.
         let (id, is_miss) = {
-            let timing_on = crate::request_observers::capture_timing_enabled();
+            let timing_on = crate::request_observers::capture_timing_enabled::<M>();
             // Fast path: shard-hit. Shard Mutex is short-lived; parallel
             // across shards.
             let lock_start = if timing_on {
@@ -1755,7 +1763,7 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition::<M>(lock_wait);
             #[cfg(test)]
             self.race_event(ArenaRaceEvent::BeforeDedupLookup);
             let mut inner = self.write_for_intern();
@@ -1788,7 +1796,7 @@ impl NodeArena {
                 let lock_wait = lock_start
                     .map(|t| t.elapsed())
                     .unwrap_or(std::time::Duration::ZERO);
-                crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+                crate::request_observers::record_node_arena_lock_acquisition::<M>(lock_wait);
                 let mut inner = self.write_for_intern();
                 if let Some(existing) = shard.lookup(fingerprint, &data, &scope, |id| {
                     matches!(inner.slot(id), Slot::Live(..))
@@ -1886,7 +1894,7 @@ impl NodeArena {
         inner
     }
 
-    pub(super) fn try_intern_owned(
+    pub(super) fn try_intern_owned<M: verter_audit::observe::ObserveExec>(
         &self,
         mut data: SemanticNodeData,
         scope: NodeScopeId,
@@ -1898,7 +1906,7 @@ impl NodeArena {
             }
         }
         let fingerprint = structural_fingerprint(&data, &scope);
-        let id = self.try_intern_with_fingerprint(data, scope, fingerprint)?;
+        let id = self.try_intern_with_fingerprint::<M>(data, scope, fingerprint)?;
         Ok(super::node_roots::NodeRoot::adopt(
             Arc::clone(&self.core),
             id,
@@ -1913,7 +1921,7 @@ impl NodeArena {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> super::node_roots::NodeRoot {
-        let id = self.push_impl(data, scope);
+        let id = self.push_impl::<verter_audit::observe::Uncaptured>(data, scope);
         super::node_roots::NodeRoot::adopt(Arc::clone(&self.core), id)
     }
 
@@ -1991,8 +1999,11 @@ impl NodeArena {
     /// Touches every shard mutex once. Each shard's retain walk is
     /// O(shard size). When `node_arena_lock_acquisitions` is wired
     /// into the audit context, each shard lock acquisition is recorded.
-    pub(super) fn invalidate_for_canonical(&self, canonical_id: &str) {
-        let timing_on = crate::request_observers::capture_timing_enabled();
+    pub(super) fn invalidate_for_canonical<M: verter_audit::observe::ObserveExec>(
+        &self,
+        canonical_id: &str,
+    ) {
+        let timing_on = crate::request_observers::capture_timing_enabled::<M>();
         for shard in self.shards.iter() {
             let lock_start = if timing_on {
                 Some(Instant::now())
@@ -2003,7 +2014,7 @@ impl NodeArena {
             let lock_wait = lock_start
                 .map(|t| t.elapsed())
                 .unwrap_or(std::time::Duration::ZERO);
-            crate::request_observers::record_node_arena_lock_acquisition(lock_wait);
+            crate::request_observers::record_node_arena_lock_acquisition::<M>(lock_wait);
             let mut bucket_delta = 0isize;
             shard.index.retain(|_fingerprint, bucket| {
                 let before = bucket_heap_bytes(bucket);
@@ -2407,8 +2418,16 @@ mod arena_intern_tests {
         let b = SemanticNodeData::Primitive(PrimitiveKind::Number);
         let forced_fp = 0x00C0_FFEE_u64;
 
-        let id_a = arena.intern_with_fingerprint(a.clone(), NodeScopeId::Global, forced_fp);
-        let id_b = arena.intern_with_fingerprint(b.clone(), NodeScopeId::Global, forced_fp);
+        let id_a = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            a.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_b = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            b.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
         assert_ne!(
             id_a, id_b,
             "distinct payloads sharing one fingerprint bucket must get distinct ids (no aliasing)",
@@ -2416,8 +2435,16 @@ mod arena_intern_tests {
 
         // Re-intern of each SAME payload into the SAME (collided) bucket
         // still dedups to its own id.
-        let id_a2 = arena.intern_with_fingerprint(a, NodeScopeId::Global, forced_fp);
-        let id_b2 = arena.intern_with_fingerprint(b, NodeScopeId::Global, forced_fp);
+        let id_a2 = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            a,
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_b2 = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            b,
+            NodeScopeId::Global,
+            forced_fp,
+        );
         assert_eq!(id_a, id_a2, "same payload in a collided bucket must dedup");
         assert_eq!(id_b, id_b2, "same payload in a collided bucket must dedup");
 
@@ -2442,9 +2469,16 @@ mod arena_intern_tests {
         let payload = SemanticNodeData::Primitive(PrimitiveKind::Boolean);
         let forced_fp = 0x0000_ABCD_u64;
 
-        let id_global =
-            arena.intern_with_fingerprint(payload.clone(), NodeScopeId::Global, forced_fp);
-        let id_file = arena.intern_with_fingerprint(payload, file_scope("/w/a.ts"), forced_fp);
+        let id_global = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            payload.clone(),
+            NodeScopeId::Global,
+            forced_fp,
+        );
+        let id_file = arena.intern_with_fingerprint::<verter_audit::observe::Uncaptured>(
+            payload,
+            file_scope("/w/a.ts"),
+            forced_fp,
+        );
         assert_ne!(
             id_global, id_file,
             "same payload at different scopes in one bucket must get distinct ids (scope is identity)",

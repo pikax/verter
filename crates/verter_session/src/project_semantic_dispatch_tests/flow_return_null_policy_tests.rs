@@ -2150,7 +2150,12 @@ fn observe_at_checker_altitude(host: &VerterHost, canonical: &str, symbol: &str)
     };
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let demand = dispatch.normalize_node_keeping_declaration_refs_for_tests(
         result.return_type(),
@@ -4659,9 +4664,14 @@ export function twinTernary(c: boolean) { return c ? twin(c) : { a: 1 }; }
     let single = node_of("single");
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let Some(SemanticNodeData::Object(view)) = graph
         .node_data(twin)
         .as_deref()
@@ -5917,7 +5927,10 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
         let spread = node_of("spreadArm");
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         for (source, target) in [(join, declared), (declared, join)] {
             assert!(
@@ -5929,7 +5942,7 @@ export function spreadArm(c: boolean, s: { z: number }) { return c ? { a: 1, q: 
                  each to the other"
             );
         }
-        let graph = dispatch.graph();
+        let graph = dispatch.graph_arc();
         let Some(SemanticNodeData::Union(arms)) = graph
             .node_data(spread)
             .as_deref()

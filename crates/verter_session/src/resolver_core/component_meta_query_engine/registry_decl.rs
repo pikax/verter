@@ -45,7 +45,7 @@ use verter_type_engine::semantic_query::{
     SemanticQueryOutput,
 };
 
-impl<'a> ComponentMetaQueryEngine<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> {
     pub fn resolve_direct_prepared_type_declaration(
         &mut self,
         canonical_source: &str,
@@ -240,7 +240,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     /// prepared_decl_bundle, dispatch, etc.) is on the trait surface.
     pub(crate) fn semantic_dispatch(
         &self,
-    ) -> &'a ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities> {
+    ) -> &'a ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities<M>> {
         self.dispatch
     }
 
@@ -627,7 +627,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                         // gated mint is `route_admission::admit_materialized`,
                         // which admits the node WITHOUT materialising it.
                         node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
-                            route_admission::admit_materialized(dispatch.graph(), &witness)
+                            route_admission::admit_materialized(dispatch.graph().store(), &witness)
                         })
                     }
                     _ => None,
@@ -709,7 +709,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
                 // node WITHOUT materialising it — the publication wrapper
                 // materialises once at the registry sink.
                 node_raised_shape_facts_with_dispatch(dispatch, node).and_then(|witness| {
-                    route_admission::admit_materialized(dispatch.graph(), &witness)
+                    route_admission::admit_materialized(dispatch.graph().store(), &witness)
                 })
             }
             _ => None,

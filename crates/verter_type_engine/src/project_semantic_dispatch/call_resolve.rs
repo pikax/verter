@@ -333,7 +333,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // beneath a `FlowReturn` root leaves no trace of the family that decided
         // its overload, and the audit record under-reports the query families the
         // resolution actually touched.
-        crate::observe_request!(|ctx| {
+        crate::observe_request!(C::Observe => |ctx| {
             ctx.record_dispatched_query_tag(
                 crate::semantic_query::SemanticQueryKeyTag::ResolveCall,
             );
@@ -1185,7 +1185,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         inline_flight: root.inline_flight,
                         self_roots: root.self_roots,
                     }
-                    .held(self.graph());
+                    .held(self.graph().store());
                     self.dispatch_txn
                         .borrow_mut()
                         .call
@@ -2235,7 +2235,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|completed| (completed.fixed.clone(), completed.diagnostic))
             .unwrap_or_default();
         let contextual_substitution = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             contextual_fixed.iter().map(|(&p, &b)| (p, b)).collect(),
         );
         let (params, visible_type_params) = match graph.node_data(candidate.node).as_deref() {
@@ -2368,7 +2368,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
 
         let setup = InferenceSessionSetup::new(
-            self.graph(),
+            self.graph().store(),
             self.call_inference_infos(&visible_type_params),
             VariancePhase::Covariant,
             InferencePassKind::CallApplicability,
@@ -2881,7 +2881,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.abandon_session(session_id);
                     return CandidateVerdict::Degraded(ResolveCallFailure::Undecidable);
                 };
-                let prefix = CanonicalTypeSubstitution::new(self.graph(), substitution.clone());
+                let prefix =
+                    CanonicalTypeSubstitution::new(self.graph().store(), substitution.clone());
                 substitution.push((decl.param, self.substitute_canonical(default, &prefix)));
             }
         }
@@ -2890,9 +2891,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .iter()
                 .map(|binding| (binding.param, binding.bound)),
         );
-        let substitution = CanonicalTypeSubstitution::new(self.graph(), substitution);
+        let substitution = CanonicalTypeSubstitution::new(self.graph().store(), substitution);
         let substitution = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             substitution
                 .bindings()
                 .iter()
@@ -2958,7 +2959,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitution
         } else {
             let rebound = CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 substitution
                     .bindings()
                     .iter()
@@ -2976,7 +2977,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .collect(),
             );
             let substitution = CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 rebound
                     .bindings()
                     .iter()
@@ -3165,7 +3166,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // the way the checker reads a literal context through a type
             // parameter's constraint.
             let inferred = CanonicalTypeSubstitution::new(
-                self.graph(),
+                self.graph().store(),
                 substitution
                     .bindings()
                     .iter()
@@ -3399,7 +3400,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                             _ => vec![*bound],
                                         };
                                     candidates.into_iter().any(|candidate| {
-                                        super::enum_type::is_literal_type(graph, candidate)
+                                        super::enum_type::is_literal_type(graph.store(), candidate)
                                             && self.binding_is_fresh_literal_deposit(
                                                 session_id, *param, candidate,
                                             )
@@ -3769,7 +3770,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|(_, binding)| binding)
             .collect();
         let inferred = CanonicalTypeSubstitution::new(
-            self.graph(),
+            self.graph().store(),
             inferred
                 .iter()
                 .map(|binding| (binding.param, binding.bound))
@@ -4330,7 +4331,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let fresh: Vec<SemanticNodeId> = candidates
                 .into_iter()
                 .filter(|candidate| {
-                    super::enum_type::is_literal_type(graph, *candidate)
+                    super::enum_type::is_literal_type(graph.store(), *candidate)
                         && self.binding_is_fresh_literal_deposit(session_id, *param, *candidate)
                 })
                 .collect();
@@ -4391,7 +4392,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Result<CanonicalTypeSubstitution, ResolveCallFailure> {
         let mut bindings = widened.bindings().to_vec();
         for defaulted in defaulted {
-            let current = CanonicalTypeSubstitution::new(self.graph(), bindings.clone());
+            let current = CanonicalTypeSubstitution::new(self.graph().store(), bindings.clone());
             let mut bound = self.substitute_canonical(defaulted.default, &current);
             if let Some(constraint) = defaulted.constraint {
                 let constraint = self.substitute_canonical(constraint, &current);
@@ -4411,7 +4412,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 None => bindings.push((defaulted.param, bound)),
             }
         }
-        Ok(CanonicalTypeSubstitution::new(self.graph(), bindings))
+        Ok(CanonicalTypeSubstitution::new(
+            self.graph().store(),
+            bindings,
+        ))
     }
 
     /// The widened substitution described above; a fresh deposit whose
@@ -4430,7 +4434,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for (param, bound) in substitution.bindings() {
             // Whether one candidate is a fresh literal deposit.
             let is_fresh = |candidate: SemanticNodeId| {
-                super::enum_type::is_literal_type(graph, candidate)
+                super::enum_type::is_literal_type(graph.store(), candidate)
                     && self.binding_is_fresh_literal_deposit(session_id, *param, candidate)
             };
             // One candidate widens when it is a fresh literal deposit.
@@ -4489,7 +4493,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             any_widened |= widened != *bound;
             widened_bindings.push((*param, widened));
         }
-        Ok(any_widened.then(|| CanonicalTypeSubstitution::new(self.graph(), widened_bindings)))
+        Ok(any_widened
+            .then(|| CanonicalTypeSubstitution::new(self.graph().store(), widened_bindings)))
     }
 
     pub(super) fn call_inference_candidate(
@@ -5090,13 +5095,13 @@ fn call_candidate_arity(
     }
 }
 
-fn mapped_parameter_type(
+fn mapped_parameter_type<M: verter_audit::observe::ObserveExec>(
     params: &[FunctionParam],
     rest: Option<&RestParam<'_>>,
     index: usize,
     argument_count: usize,
     argument: CallArgument,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
@@ -5166,9 +5171,9 @@ fn mapped_parameter_type(
 /// position's check type is `T | undefined` (a defaulted parameter takes
 /// its default there). A declared type already carrying the `undefined`
 /// arm keeps its own node.
-fn optional_parameter_target(
+fn optional_parameter_target<M: verter_audit::observe::ObserveExec>(
     param: &FunctionParam,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
@@ -5201,11 +5206,11 @@ fn optional_parameter_target(
 /// that is exactly the trailing rest element is that element's own array
 /// type, which an indefinite spread relates against directly. Any other
 /// suffix re-interns the remaining elements as their own tuple.
-fn tuple_suffix_target(
+fn tuple_suffix_target<M: verter_audit::observe::ObserveExec>(
     elements: &Arc<[crate::semantic_query::TupleElement]>,
     offset: usize,
     declared: SemanticNodeId,
-    graph: &crate::semantic_query_memo::SemanticGraphStore,
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
 ) -> Option<SemanticNodeId> {
     if offset == 0 {
         return Some(declared);

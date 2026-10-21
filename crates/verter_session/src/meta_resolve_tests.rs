@@ -8862,12 +8862,13 @@ fn overlay_session_vue_macro_dtos_sees_overlay_prop_without_leaking_to_base() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The overlay session's own whole-hash hint (resolved through the session
     // ctx) keys the overlay DTO slot; the core re-derives + validates it.
@@ -9004,12 +9005,13 @@ fn overlay_session_vue_macro_dtos_define_model_reads_overlay_without_leaking_to_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     let overlay_hash =
         verter_type_engine::resolver_core::request_ports::IndexedInputs::get_whole_hash(
@@ -9159,12 +9161,13 @@ fn overlay_session_vue_macro_slot_bindings_read_overlay_carrier_without_leaking_
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let session_ctx = crate::resolver_core::SessionResolverContext::new(
-        &host,
-        &view,
-        &store_view,
-        std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
-    );
+    let session_ctx =
+        crate::resolver_core::SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &view,
+            &store_view,
+            std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+        );
 
     // The SFC's own whole-hash is UNCHANGED (only the carrier `/slots.ts` was
     // overlaid), so the overlay read keys on the same SFC hash — the binding

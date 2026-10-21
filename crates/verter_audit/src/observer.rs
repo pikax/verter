@@ -492,9 +492,19 @@ impl Drop for ObserverGuard {
 
 /// Emit to the current request's audit observer.
 ///
-/// `observe!(|obs| obs.record_event(AuditEvent::X))` runs the body with
-/// the installed observer when the binary is built with
-/// `semantic-observe` and the running request selected captured
+/// Two forms:
+///
+/// - `observe!(M => |obs| body)` emits from execution compiled for the mode
+///   type `M` ([`crate::observe::ObserveExec`]). The uncaptured expansion is
+///   a constant-false branch: it reads no observer slot and builds no
+///   payload. Hot paths — anything an execution unit runs per operation —
+///   use this form.
+/// - `observe!(|obs| body)` reads the observer slot directly. It belongs only
+///   at once-per-request or once-per-phase boundaries (a root entry's
+///   record, a compile phase timing), never inside a per-operation path.
+///
+/// Both run the body with the installed observer when the binary is built
+/// with `semantic-observe` and the running request selected captured
 /// execution at its root entry.
 ///
 /// Without `semantic-observe` the body is type-checked inside a closure
@@ -509,6 +519,14 @@ macro_rules! observe {
         if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
             let $obs: &dyn $crate::AuditObserver = &*observer;
             $body;
+        }
+    }};
+    ($M:ty => |$obs:ident| $body:expr) => {{
+        if <$M as $crate::observe::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
+                let $obs: &dyn $crate::AuditObserver = &*observer;
+                $body;
+            }
         }
     }};
 }
@@ -527,5 +545,9 @@ macro_rules! observe {
                 $body;
             };
         }
+    }};
+    ($M:ty => |$obs:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe!(|$obs| $body)
     }};
 }

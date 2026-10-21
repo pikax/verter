@@ -3045,28 +3045,32 @@ impl VerterHost {
             let overlay =
                 std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
             if seed.view.overlay_content_hash_for(&canonical).is_some() {
-                let session_ctx = crate::resolver_core::SessionResolverContext::from_cold_seed(
-                    self,
-                    seed.view,
-                    seed.cold_seed,
-                    overlay,
-                );
-                self.produce_vue_macro_codegen_with_ctx(
-                    &session_ctx,
-                    &canonical,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-                )
+                verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                    let session_ctx = crate::resolver_core::SessionResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        seed.view,
+                        seed.cold_seed,
+                        overlay,
+                    );
+                    self.produce_vue_macro_codegen_with_ctx(
+                        &session_ctx,
+                        &canonical,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                    )
+                })
             } else {
-                let host_ctx = crate::resolver_core::HostResolverContext::from_cold_seed(
-                    self,
-                    seed.cold_seed,
-                    overlay,
-                );
-                self.produce_vue_macro_codegen_with_ctx(
-                    &host_ctx,
-                    &canonical,
-                    crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
-                )
+                verter_audit::specialise!(crate::capture::installed_mode() => M, {
+                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                        self,
+                        seed.cold_seed,
+                        overlay,
+                    );
+                    self.produce_vue_macro_codegen_with_ctx(
+                        &host_ctx,
+                        &canonical,
+                        crate::typeinfo::vue_macro_codegen::VueMacroCodegenDemand::Tsc,
+                    )
+                })
             }
         } else {
             self.produce_vue_macro_codegen(

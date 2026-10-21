@@ -104,7 +104,12 @@ fn with_dispatch<R>(
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let _builder = dispatch.enter_construction_scope();
     f(&dispatch)
@@ -203,7 +208,7 @@ fn assert_string_or_marker_array(
     node: SemanticNodeId,
     what: &str,
 ) {
-    let graph = dispatch.graph();
+    let graph = dispatch.graph_arc();
     let element = match graph.node_data(node).as_deref() {
         Some(SemanticNodeData::Array { element, .. }) => *element,
         other => panic!("{what}: the array survives, got {other:?}"),

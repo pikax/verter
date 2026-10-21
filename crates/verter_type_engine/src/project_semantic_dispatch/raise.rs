@@ -517,7 +517,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result_is_partial = state.result_is_partial;
         ReducedOutputNode {
             _roots: crate::semantic_query_memo::node_roots::IdentityNodeRoots::in_graph(
-                self.graph(),
+                self.graph().store(),
                 [node_id],
             ),
             node_id,
@@ -683,7 +683,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // node via the rebuild_* fall-through.
                         continue;
                     }
-                    let Some(data) = super::node_data_for(self.graph(), frame.node) else {
+                    let Some(data) = super::node_data_for(self.graph().store(), frame.node) else {
                         // No graph data — record a self-identity
                         // reduction so callers reading `mapping`
                         // get the raw node.
@@ -1027,7 +1027,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         state: &mut ReduceState,
     ) -> SemanticNodeId {
-        let Some(data) = super::node_data_for(self.graph(), node) else {
+        let Some(data) = super::node_data_for(self.graph().store(), node) else {
             return node;
         };
         let mode = context.mode;
@@ -1900,7 +1900,7 @@ fn rebuild_object<C: crate::resolver_core::ResolverCapabilities>(
     mapping: &MappingMap,
     context: ProjectionReductionContext,
 ) -> Option<SemanticNodeId> {
-    let data = super::node_data_for(dispatch.graph(), node)?;
+    let data = super::node_data_for(dispatch.graph().store(), node)?;
     let SemanticNodeData::Object(view) = data.as_ref() else {
         return None;
     };

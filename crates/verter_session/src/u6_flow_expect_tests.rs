@@ -533,18 +533,20 @@ pub(crate) fn render_node(
         }
         SemanticNodeData::ObjectSpreadProgram(_) => "ObjectSpreadProgram".to_owned(),
         SemanticNodeData::Union(members) => {
-            let parts: Vec<String> =
-                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members)
-                    .into_iter()
-                    .map(|arm| match arm {
-                        verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
-                            render_node(dispatch, member, depth + 1)
-                        }
-                        verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
-                            format!("Enum({})", decl.decl_name)
-                        }
-                    })
-                    .collect();
+            let parts: Vec<String> = verter_type_engine::semantic_query::printed_union_arms(
+                dispatch.graph().store(),
+                members,
+            )
+            .into_iter()
+            .map(|arm| match arm {
+                verter_type_engine::semantic_query::PrintedUnionArm::Node(member) => {
+                    render_node(dispatch, member, depth + 1)
+                }
+                verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl) => {
+                    format!("Enum({})", decl.decl_name)
+                }
+            })
+            .collect();
             format!("Union({})", parts.join(" | "))
         }
         SemanticNodeData::Intersection(members) => {
@@ -649,7 +651,7 @@ pub(crate) fn render_node(
                 .iter()
                 .map(|arg| render_node(dispatch, *arg, depth + 1))
                 .collect();
-            let name = identity.printed_name_in(dispatch.graph(), type_arguments);
+            let name = identity.printed_name_in(dispatch.graph().store(), type_arguments);
             if own.is_empty() {
                 format!("ClassExpressionInstance({name})")
             } else {
@@ -940,7 +942,10 @@ pub(crate) fn drive_expect_boundary_with_lib(
     let (expect_failures, rendered) = {
         let store_view = host.resolver_store_view_read().into_owned_view();
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+        let host_ctx = crate::resolver_core::HostResolverContext::<
+            '_,
+            verter_audit::observe::Uncaptured,
+        >::new(&host, &store_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         match node {
             Some(node) => (
@@ -1109,7 +1114,12 @@ pub(crate) fn with_live_flow_node_with_lib<R>(
     let node = carrier.as_result().ok().map(|result| result.return_type());
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     f(&dispatch, node)
 }
@@ -2224,7 +2234,7 @@ pub(crate) mod checker_syntax {
                 },
             ) => {
                 identity.own_arity == 0
-                    && identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                    && identity.printed_name_in(dispatch.graph().store(), type_arguments) == *name
             }
             (
                 CheckerType::GenericRef { name, args },
@@ -2235,7 +2245,7 @@ pub(crate) mod checker_syntax {
                 },
             ) => {
                 let own = identity.own_type_arguments(type_arguments);
-                identity.printed_name_in(dispatch.graph(), type_arguments) == *name
+                identity.printed_name_in(dispatch.graph().store(), type_arguments) == *name
                     && own.len() == args.len()
                     && own
                         .iter()
@@ -2275,7 +2285,7 @@ pub(crate) mod checker_syntax {
             }
             // A union holding every member of one enum prints as the enum.
             (CheckerType::Ref(name), SemanticNodeData::Union(members)) => matches!(
-                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph(), members).as_slice(),
+                verter_type_engine::semantic_query::printed_union_arms(dispatch.graph().store(), members).as_slice(),
                 [verter_type_engine::semantic_query::PrintedUnionArm::Enum(decl)]
                     if &*decl.decl_name == name.as_str()
             ),
@@ -2284,7 +2294,7 @@ pub(crate) mod checker_syntax {
                 // checker prints it, backtracking so duplicate constituents
                 // are handled exactly.
                 let members = verter_type_engine::semantic_query::printed_union_arms(
-                    dispatch.graph(),
+                    dispatch.graph().store(),
                     members,
                 );
                 if members.len() != exp.len() {
@@ -6398,7 +6408,12 @@ fn flow_return_candidate_count(id: &str, script: &str) -> usize {
     }
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx = crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+            &host,
+            &store_view,
+            overlay,
+        );
     let dispatch = ProjectSemanticDispatch::new(&host_ctx);
     let key = verter_type_engine::semantic_query::FlowReturnKey {
         function: dispatch.flow_function_slot_for(

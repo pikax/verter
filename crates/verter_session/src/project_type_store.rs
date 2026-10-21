@@ -484,12 +484,23 @@ impl AnalysisReadyDb {
 
     /// Strict lookup by full key.
     #[must_use]
+    /// [`Self::get_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get(&self, key: &AnalysisArtifactKey) -> Option<Arc<AnalysisReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_in::<M>(key)
+        })
+    }
+
+    pub fn get_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        key: &AnalysisArtifactKey,
+    ) -> Option<Arc<AnalysisReady>> {
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
         let result = self.entries.get(key).map(|v| v.clone());
-        verter_type_engine::observe_request!(|ctx| {
+        verter_type_engine::observe_request!(M =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis
@@ -510,7 +521,20 @@ impl AnalysisReadyDb {
     /// the requested scope. This is the bitflag-based containment rule
     /// called out in the project-global overhaul plan.
     #[must_use]
+    /// [`Self::find_satisfying_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn find_satisfying(
+        &self,
+        canonical_id: &str,
+        whole_hash: Hash16,
+        requested_scope: AnalysisScope,
+    ) -> Option<Arc<AnalysisReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.find_satisfying_in::<M>(canonical_id, whole_hash, requested_scope)
+        })
+    }
+
+    pub fn find_satisfying_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
         whole_hash: Hash16,
@@ -533,7 +557,7 @@ impl AnalysisReadyDb {
             }
             found
         };
-        verter_type_engine::observe_request!(|ctx| {
+        verter_type_engine::observe_request!(M =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .analysis

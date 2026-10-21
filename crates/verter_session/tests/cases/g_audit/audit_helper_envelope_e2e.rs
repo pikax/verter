@@ -18,7 +18,9 @@ use verter_session::component_meta_audit::{
     CacheOutcomeKind, MaterializationScopeAudit, MaterializeSkipReason, ProjectionModeAudit,
     StructuredAuditEvent,
 };
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::{
+    Captured, RequestContext, RequestContextGuard, Uncaptured,
+};
 use verter_type_engine::request_footprint::RequestFootprintAccumulator;
 use verter_type_engine::request_observers::{
     push_structured_event, record_dep_signature_intern_hit, record_dep_signature_merge,
@@ -31,10 +33,10 @@ fn counters_no_op_without_request_context() {
     // assert by absence: the call returns; nothing panics; no global
     // state we can observe is touched. The assertion is that the
     // calls compile and return — exercising the fast-path branch.
-    record_node_arena_lock_acquisition(std::time::Duration::ZERO);
-    record_family_map_lock_acquisition(std::time::Duration::ZERO);
-    record_dep_signature_merge();
-    record_dep_signature_intern_hit();
+    record_node_arena_lock_acquisition::<Captured>(std::time::Duration::ZERO);
+    record_family_map_lock_acquisition::<Captured>(std::time::Duration::ZERO);
+    record_dep_signature_merge::<Captured>();
+    record_dep_signature_intern_hit::<Captured>();
     // If this point is reached, the no-op path works. Nothing more
     // to assert without a context.
 }
@@ -45,17 +47,37 @@ fn counters_increment_under_request_context() {
     let ctx = RequestContext::new(101, Arc::from("/c.vue"), true, Some(Arc::clone(&acc)));
     let _g = RequestContextGuard::install(Arc::clone(&ctx));
 
-    record_node_arena_lock_acquisition(std::time::Duration::ZERO);
-    record_family_map_lock_acquisition(std::time::Duration::ZERO);
-    record_dep_signature_merge();
-    record_dep_signature_merge();
-    record_dep_signature_merge();
-    record_dep_signature_intern_hit();
+    record_node_arena_lock_acquisition::<Captured>(std::time::Duration::ZERO);
+    record_family_map_lock_acquisition::<Captured>(std::time::Duration::ZERO);
+    record_dep_signature_merge::<Captured>();
+    record_dep_signature_merge::<Captured>();
+    record_dep_signature_merge::<Captured>();
+    record_dep_signature_intern_hit::<Captured>();
 
     assert_eq!(ctx.node_arena_lock_acquisitions.load(Ordering::Relaxed), 1);
     assert_eq!(ctx.family_map_lock_acquisitions.load(Ordering::Relaxed), 1);
     assert_eq!(ctx.dep_signature_merges.load(Ordering::Relaxed), 3);
     assert_eq!(ctx.dep_signature_intern_hits.load(Ordering::Relaxed), 1);
+}
+
+/// Execution compiled for the uncaptured mode records nothing even while a
+/// captured request context is installed: the mode is a type the emission
+/// tests as a constant, not a slot it reads.
+#[test]
+fn uncaptured_execution_records_nothing_under_a_captured_context() {
+    let acc = Arc::new(RequestFootprintAccumulator::new());
+    let ctx = RequestContext::new(102, Arc::from("/c.vue"), true, Some(Arc::clone(&acc)));
+    let _g = RequestContextGuard::install(Arc::clone(&ctx));
+
+    record_node_arena_lock_acquisition::<Uncaptured>(std::time::Duration::ZERO);
+    record_family_map_lock_acquisition::<Uncaptured>(std::time::Duration::ZERO);
+    record_dep_signature_merge::<Uncaptured>();
+    record_dep_signature_intern_hit::<Uncaptured>();
+
+    assert_eq!(ctx.node_arena_lock_acquisitions.load(Ordering::Relaxed), 0);
+    assert_eq!(ctx.family_map_lock_acquisitions.load(Ordering::Relaxed), 0);
+    assert_eq!(ctx.dep_signature_merges.load(Ordering::Relaxed), 0);
+    assert_eq!(ctx.dep_signature_intern_hits.load(Ordering::Relaxed), 0);
 }
 
 #[test]

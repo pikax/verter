@@ -144,7 +144,11 @@ mod pairwise_budget_tests {
             .map(|file| array_of_a_in(&graph, file))
             .collect();
         STRUCTURAL_COMPARISONS.set(0);
-        let union = intern_ordered_union(&graph, &arms, NullabilityPolicy::Strict);
+        let union = intern_ordered_union(
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
+            &arms,
+            NullabilityPolicy::Strict,
+        );
         let comparisons = STRUCTURAL_COMPARISONS.get();
 
         assert!(
@@ -179,7 +183,7 @@ mod literal_provenance_tests {
             .collect();
         SUBSUMPTION_READS.set(0);
         let result = intern_ordered_union(
-            &graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &members,
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         );
@@ -238,7 +242,9 @@ mod literal_provenance_tests {
             let left = scoped_literal(&graph, left, "/fresh.ts");
             let right = scoped_literal(&graph, right, "/pinned.ts");
             let result = intern_ordered_union(
-                &graph,
+                crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(
+                    &graph,
+                ),
                 &[left, right],
                 verter_session_query::flow::policy::NullabilityPolicy::Strict,
             )
@@ -265,13 +271,13 @@ mod literal_provenance_tests {
         let b = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("b".into())));
         let c = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String("c".into())));
         let root = intern_ordered_union(
-            &graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[c, b, a],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
         .node;
         let partial = intern_ordered_union(
-            &graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[c, a],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
@@ -346,7 +352,7 @@ mod literal_provenance_tests {
             "7".repeat(4096),
         )));
         let root = intern_ordered_union(
-            &graph,
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
             &[string, bigint],
             verter_session_query::flow::policy::NullabilityPolicy::Strict,
         )
@@ -898,8 +904,8 @@ pub fn numeric_literal_values_disjoint(a: f64, b: f64) -> bool {
 /// the relation: its type there also holds `undefined`.
 /// A property intersection that distributes pays `meter` first; one it
 /// cannot pay for is not proven `never`, and its rails join `evidence`.
-pub(crate) fn object_arms_conflict_on_a_literal_property(
-    graph: &SemanticGraphStore,
+pub(crate) fn object_arms_conflict_on_a_literal_property<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[SemanticNodeId],
     meter: ConstructionMeter<'_>,
     evidence: &mut CanonicalEvidence,
@@ -957,8 +963,8 @@ pub(crate) fn object_arms_conflict_on_a_literal_property(
 
 construction_ordinal_seam! {
     /// Canonical union construction over `members` under `nullability`.
-    fn intern_ordered_union(
-        graph: &SemanticGraphStore,
+    fn intern_ordered_union<M: verter_audit::observe::ObserveExec>(
+        graph: crate::semantic_query_memo::GraphIn<'_, M>,
         members: &[SemanticNodeId],
         nullability: NullabilityPolicy,
     ) -> CanonicalComposite {
@@ -972,8 +978,8 @@ construction_ordinal_seam! {
 
 /// [`intern_ordered_union`] inside a connected demand: every distribution
 /// it runs pays `meter` before it builds ([`admit_cross_product`]).
-pub(crate) fn intern_ordered_union_charged(
-    graph: &SemanticGraphStore,
+pub(crate) fn intern_ordered_union_charged<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
@@ -984,8 +990,8 @@ pub(crate) fn intern_ordered_union_charged(
 /// [`intern_ordered_union`] inside a construction lane this thread holds of
 /// `graph`. Without such a lane the members' bare ordinals authorize nothing
 /// and there is no union.
-pub fn intern_ordered_union_in_scope(
-    graph: &SemanticGraphStore,
+pub fn intern_ordered_union_in_scope<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
     nullability: NullabilityPolicy,
 ) -> Option<CanonicalComposite> {
@@ -1002,8 +1008,8 @@ construction_ordinal_seam! {
     /// authored shell, reduced by [`reduced_authored_intersection_charged`].
     /// Every distribution it runs pays `meter` before it builds
     /// ([`admit_cross_product`]).
-    fn intern_ordered_intersection_charged(
-        graph: &SemanticGraphStore,
+    fn intern_ordered_intersection_charged<M: verter_audit::observe::ObserveExec>(
+        graph: crate::semantic_query_memo::GraphIn<'_, M>,
         members: &[SemanticNodeId],
         meter: ConstructionMeter<'_>,
     ) -> CanonicalComposite {
@@ -1028,8 +1034,8 @@ construction_ordinal_seam! {
     /// union keeps the written intersection as its printed origin when the
     /// distribution is wider. Every distribution it runs pays `meter`
     /// before it builds ([`admit_cross_product`]).
-    fn intern_written_intersection_charged(
-        graph: &SemanticGraphStore,
+    fn intern_written_intersection_charged<M: verter_audit::observe::ObserveExec>(
+        graph: crate::semantic_query_memo::GraphIn<'_, M>,
         members: &[SemanticNodeId],
         nullability: NullabilityPolicy,
         meter: ConstructionMeter<'_>,
@@ -1043,15 +1049,15 @@ construction_ordinal_seam! {
 /// limit and charged to no ledger. Tests only — production constructions
 /// pay their demand's ledger.
 #[cfg(any(test, feature = "test-support"))]
-pub fn intern_ordered_intersection(
-    graph: &SemanticGraphStore,
+pub fn intern_ordered_intersection<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
 ) -> CanonicalComposite {
     intern_ordered_intersection_charged(graph, members, ConstructionMeter::UNMETERED)
 }
 
-fn canonicalize(
-    graph: &SemanticGraphStore,
+fn canonicalize<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
     is_union: bool,
     nullability: NullabilityPolicy,
@@ -1091,8 +1097,8 @@ enum SupertypeReduction {
 /// the arms already kept instead of hashing every payload.
 const TIER1_DIRECT_SCAN_MAX: usize = 8;
 
-fn canonicalize_with(
-    graph: &SemanticGraphStore,
+fn canonicalize_with<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
     is_union: bool,
     nullability: NullabilityPolicy,
@@ -1117,7 +1123,7 @@ fn canonicalize_with(
     // 1. Recursive same-kind flattening: a union is never an arm of a union,
     //    an intersection never an arm of an intersection (mirrors the
     //    checker's own `getUnionType` flattening). Source order preserved.
-    let flat = flatten_members(graph, members, is_union, &mut evidence);
+    let flat = flatten_members(graph.store(), members, is_union, &mut evidence);
     // A union's constituents are types as the checker holds them: an
     // authored intersection the checker reduces is that reduced type.
     let flat = if is_union {
@@ -1150,7 +1156,7 @@ fn canonicalize_with(
     let mut has_unknown = false;
     let mut has_never = false;
     for &m in &flat {
-        let special = peek_special_via_graph(graph, m, Some(&mut evidence));
+        let special = peek_special_via_graph(graph.store(), m, Some(&mut evidence));
         match special {
             Some((SpecialKind::Any, _)) => has_any = true,
             Some((SpecialKind::Unknown, _)) => has_unknown = true,
@@ -1236,7 +1242,7 @@ fn canonicalize_with(
         let mut first_null: Option<SemanticNodeId> = None;
         let mut first_undefined: Option<SemanticNodeId> = None;
         arms.retain(
-            |&arm| match peek_nullable_via_graph(graph, arm, &mut evidence) {
+            |&arm| match peek_nullable_via_graph(graph.store(), arm, &mut evidence) {
                 Some(PrimitiveKind::Null) => {
                     first_null.get_or_insert(arm);
                     false
@@ -1296,7 +1302,8 @@ fn canonicalize_with(
                     Some(SemanticNodeData::Literal(literal)) => literal_bit(literal),
                     Some(SemanticNodeData::TemplateLiteral { .. }) => 1,
                     Some(_)
-                        if super::template_relation::string_mapping(graph, *member).is_some() =>
+                        if super::template_relation::string_mapping(graph.store(), *member)
+                            .is_some() =>
                     {
                         1
                     }
@@ -1355,7 +1362,7 @@ fn canonicalize_with(
         let patterns: Vec<SemanticNodeId> = arms
             .iter()
             .copied()
-            .filter(|arm| super::template_relation::is_pattern_literal(graph, *arm))
+            .filter(|arm| super::template_relation::is_pattern_literal(graph.store(), *arm))
             .collect();
         if !patterns.is_empty() {
             let string_text = |member: SemanticNodeId| -> Option<String> {
@@ -1376,7 +1383,11 @@ fn canonicalize_with(
             };
             arms.retain(|arm| match string_text(*arm) {
                 Some(text) => !patterns.iter().any(|pattern| {
-                    super::template_relation::string_literal_matches_pattern(graph, &text, *pattern)
+                    super::template_relation::string_literal_matches_pattern(
+                        graph.store(),
+                        &text,
+                        *pattern,
+                    )
                 }),
                 None => true,
             });
@@ -1476,10 +1487,12 @@ fn canonicalize_with(
                 if *candidate == m {
                     continue 'direct;
                 }
-                if **candidate_data == *data && same_importing_unit(graph, *candidate, m, &data) {
+                if **candidate_data == *data
+                    && same_importing_unit(graph.store(), *candidate, m, &data)
+                {
                     // Content-identical cross-scope duplicate — discarded,
                     // its transitive structure roots kept as evidence.
-                    evidence.record_subtree_roots(graph, m);
+                    evidence.record_subtree_roots(graph.store(), m);
                     continue 'direct;
                 }
             }
@@ -1508,13 +1521,13 @@ fn canonicalize_with(
                     continue 'tier1;
                 }
                 if graph.node_data(candidate).is_some_and(|cand| {
-                    *cand == *data && same_importing_unit(graph, candidate, m, &data)
+                    *cand == *data && same_importing_unit(graph.store(), candidate, m, &data)
                 }) {
                     // Content-identical cross-scope duplicate — discarded. The
                     // payload-equality claim rests on the SHARED CHILD ids, so
                     // the discarded arm's transitive structure roots enter the
                     // evidence even though tier 1 never descends.
-                    evidence.record_subtree_roots(graph, m);
+                    evidence.record_subtree_roots(graph.store(), m);
                     continue 'tier1;
                 }
             }
@@ -1559,7 +1572,10 @@ fn canonicalize_with(
                     .map(|(index, _)| kept[*index])
                     .collect();
                 let mut groups: FxHashMap<ArmBucketKey, Vec<usize>> = FxHashMap::default();
-                for (position, key) in arm_bucket_keys(graph, &roots).into_iter().enumerate() {
+                for (position, key) in arm_bucket_keys(graph.store(), &roots)
+                    .into_iter()
+                    .enumerate()
+                {
                     groups.entry(key).or_default().push(position);
                 }
                 Some(groups)
@@ -1593,13 +1609,18 @@ fn canonicalize_with(
                     #[cfg(test)]
                     pairwise_budget_tests::STRUCTURAL_COMPARISONS
                         .with(|count| count.set(count.get() + 1));
-                    match compare_structural(graph, kept[index_m], kept[index_k], evidence, budget)
-                    {
+                    match compare_structural(
+                        graph.store(),
+                        kept[index_m],
+                        kept[index_k],
+                        evidence,
+                        budget,
+                    ) {
                         StructuralIdentity::Equal => {
                             // The comparator's payload-equal fast path can
                             // skip shared subtrees — root the DISCARDED
                             // arm's full structure explicitly.
-                            evidence.record_subtree_roots(graph, kept[index_m]);
+                            evidence.record_subtree_roots(graph.store(), kept[index_m]);
                             discarded.push(index_m);
                             break;
                         }
@@ -1647,8 +1668,8 @@ fn canonicalize_with(
     //    arms — exactly the pairwise [`tag_level_disjoint`] judgement,
     //    computed in O(n) over the childless scalar domain.
     if !is_union
-        && (scalar_domain_provably_empty(graph, &kept)
-            || nullable_beside_object_type(graph, &kept, &mut evidence)
+        && (scalar_domain_provably_empty(graph.store(), &kept)
+            || nullable_beside_object_type(graph.store(), &kept, &mut evidence)
             || object_arms_conflict_on_a_literal_property(graph, &kept, meter, &mut evidence))
     {
         return CanonicalComposite {
@@ -1669,7 +1690,7 @@ fn canonicalize_with(
     //     the written intersection, never canonical, a partial of the rails
     //     it exhausted.
     if !is_union {
-        remove_redundant_supertypes(graph, &mut kept, supertype_reduction);
+        remove_redundant_supertypes(graph.store(), &mut kept, supertype_reduction);
         if kept.len() >= 2 {
             match intersect_over_unions(
                 graph,
@@ -1685,7 +1706,7 @@ fn canonicalize_with(
                 Ok(Some(distributed)) => {
                     if origin == DistributionOrigin::Distributed
                         || (origin == DistributionOrigin::KeepWrittenIntersection
-                            && !distributed.keeps_written_origin(graph, &kept))
+                            && !distributed.keeps_written_origin(graph.store(), &kept))
                     {
                         let node = distributed.into_node(graph, nullability, meter, &mut evidence);
                         return CanonicalComposite { node, evidence };
@@ -1726,15 +1747,18 @@ fn canonicalize_with(
 /// itself, and more members intern under `Global` through the sealed
 /// canonical mint, stamped `Canonical` only when `evidence` carries no
 /// incompleteness signal.
-fn mint_composite(
-    graph: &SemanticGraphStore,
+fn mint_composite<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     mut kept: Vec<SemanticNodeId>,
     is_union: bool,
     nullability: NullabilityPolicy,
     evidence: &CanonicalEvidence,
 ) -> SemanticNodeId {
     if is_union {
-        crate::semantic_query::stable_key::sort_and_collapse_union_members(graph, &mut kept);
+        crate::semantic_query::stable_key::sort_and_collapse_union_members(
+            graph.store(),
+            &mut kept,
+        );
     } else {
         // Intersection preserves construction order. First-occurrence
         // construction-identical dedup only.
@@ -1884,8 +1908,8 @@ pub(crate) fn is_kept_primitive_over_empty_object(
 /// `(string | null) & {}` is the written `string & {}`). Decided before
 /// flattening, as `getTypeFromIntersectionTypeNode` decides it on the type
 /// node's own arms.
-fn is_written_kept_pair(
-    graph: &SemanticGraphStore,
+fn is_written_kept_pair<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
@@ -1893,10 +1917,10 @@ fn is_written_kept_pair(
 ) -> bool {
     match members {
         [_, _] if nullability == NullabilityPolicy::Erased => is_kept_primitive_over_empty_object(
-            graph,
+            graph.store(),
             &erase_nullable_union_arms(graph, members.to_vec(), meter, evidence),
         ),
-        [_, _] => is_kept_primitive_over_empty_object(graph, members),
+        [_, _] => is_kept_primitive_over_empty_object(graph.store(), members),
         _ => false,
     }
 }
@@ -1907,8 +1931,8 @@ fn is_written_kept_pair(
 /// a distributed union spliced into the arms. An arm the canonical
 /// intersection keeps as it is stays the authored node; the canonical
 /// intersection keeps its arms in their written order.
-fn reduce_authored_intersection_arms(
-    graph: &SemanticGraphStore,
+fn reduce_authored_intersection_arms<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: Vec<SemanticNodeId>,
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
@@ -1916,7 +1940,7 @@ fn reduce_authored_intersection_arms(
 ) -> Vec<SemanticNodeId> {
     if !arms
         .iter()
-        .any(|arm| authored_intersection_members(graph, *arm).is_some())
+        .any(|arm| authored_intersection_members(graph.store(), *arm).is_some())
     {
         return arms;
     }
@@ -1946,8 +1970,8 @@ fn reduce_authored_intersection_arms(
 /// an arm naming one is that union without it (`(string | null) & {}`
 /// intersects `string` with `{}`, the written pair it keeps). Every other arm
 /// stays as it is.
-fn erase_nullable_union_arms(
-    graph: &SemanticGraphStore,
+fn erase_nullable_union_arms<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: Vec<SemanticNodeId>,
     meter: ConstructionMeter<'_>,
     evidence: &mut CanonicalEvidence,
@@ -1960,7 +1984,7 @@ fn erase_nullable_union_arms(
             };
             if !members
                 .iter()
-                .any(|member| peek_nullable_via_graph(graph, *member, evidence).is_some())
+                .any(|member| peek_nullable_via_graph(graph.store(), *member, evidence).is_some())
             {
                 return arm;
             }
@@ -1991,13 +2015,13 @@ fn authored_intersection_members(
 /// differs from the shell as written, or when its construction could not be
 /// paid for (its evidence then carries the exhausted rails); `None` for any
 /// other node and for a shell the canonical intersection keeps as it is.
-fn reduce_authored_intersection(
-    graph: &SemanticGraphStore,
+fn reduce_authored_intersection<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     node: SemanticNodeId,
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
 ) -> Option<CanonicalComposite> {
-    let members = authored_intersection_members(graph, node)?;
+    let members = authored_intersection_members(graph.store(), node)?;
     let reduced = canonicalize(graph, &members, false, nullability, meter);
     let kept_as_written = match graph.node_data(reduced.node).as_deref() {
         Some(SemanticNodeData::Intersection(kept)) => kept.iter().eq(members.iter()),
@@ -2016,8 +2040,8 @@ construction_ordinal_seam! {
     /// reduction runs pays `meter` before it builds; one it cannot pay for
     /// leaves the shell standing for itself (`None`), its rails joining
     /// `evidence`.
-    fn reduced_authored_intersection_charged(
-        graph: &SemanticGraphStore,
+    fn reduced_authored_intersection_charged<M: verter_audit::observe::ObserveExec>(
+        graph: crate::semantic_query_memo::GraphIn<'_, M>,
         node: SemanticNodeId,
         nullability: NullabilityPolicy,
         meter: ConstructionMeter<'_>,
@@ -2034,8 +2058,8 @@ construction_ordinal_seam! {
 /// connected demand. Tests only — production readers pay their demand's
 /// ledger.
 #[cfg(any(test, feature = "test-support"))]
-pub fn reduced_authored_intersection(
-    graph: &SemanticGraphStore,
+pub fn reduced_authored_intersection<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     node: SemanticNodeId,
     nullability: NullabilityPolicy,
 ) -> Option<SemanticNodeId> {
@@ -2310,8 +2334,11 @@ pub fn intern_ordered_intersection_paying_for_tests(
         paid_work: Cell::new(0),
         paid_bytes: Cell::new(0),
     };
-    let composite =
-        intern_ordered_intersection_charged(graph, members, ConstructionMeter::charged(&allowance));
+    let composite = intern_ordered_intersection_charged(
+        crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+        members,
+        ConstructionMeter::charged(&allowance),
+    );
     PaidConstruction {
         node: composite.node,
         exhausted: composite.evidence.exhausted,
@@ -2356,8 +2383,8 @@ fn is_union_node(graph: &SemanticGraphStore, arm: SemanticNodeId) -> bool {
 /// forms denote one type. A cross product the checker refuses is the TS2590
 /// recovery ([`intersect_over_unions`]); one the connected demand cannot
 /// pay for is not distributed (`None`), its rails joining `evidence`.
-pub(super) fn distribute_over_unions(
-    graph: &SemanticGraphStore,
+pub(super) fn distribute_over_unions<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     origin: DistributionOrigin,
@@ -2377,7 +2404,7 @@ pub(super) fn distribute_over_unions(
         Ok(None) => None,
         Ok(Some(distributed)) => (origin == DistributionOrigin::Distributed
             || (origin == DistributionOrigin::KeepWrittenIntersection
-                && !distributed.keeps_written_origin(graph, arms)))
+                && !distributed.keeps_written_origin(graph.store(), arms)))
         .then(|| distributed.into_node(graph, nullability, meter, evidence)),
         Err(DistributionStop::Refused(refusal)) => {
             let written = mint_composite(graph, arms.to_vec(), false, nullability, evidence);
@@ -2403,8 +2430,8 @@ pub(super) fn distribute_over_unions(
 /// built — each paid for to `meter` before it is. `None` when the checker
 /// distributes it, or when the demand could not pay for a half (its rails
 /// then join `evidence`).
-pub(super) fn intersection_cross_product_refused(
-    graph: &SemanticGraphStore,
+pub(super) fn intersection_cross_product_refused<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
@@ -2447,9 +2474,9 @@ impl DistributedIntersection {
     }
 
     /// The type the intersection is: the union over the constituents.
-    fn into_node(
+    fn into_node<M: verter_audit::observe::ObserveExec>(
         self,
-        graph: &SemanticGraphStore,
+        graph: crate::semantic_query_memo::GraphIn<'_, M>,
         nullability: NullabilityPolicy,
         meter: ConstructionMeter<'_>,
         evidence: &mut CanonicalEvidence,
@@ -2507,8 +2534,8 @@ fn stop_of(evidence: &CanonicalEvidence) -> Option<DistributionStop> {
 /// limit whole is accepted from its widths alone: no strategy adds a
 /// constituent, and a divided product's halves multiply to no more than it.
 #[allow(clippy::too_many_arguments)]
-fn intersect_over_unions(
-    graph: &SemanticGraphStore,
+fn intersect_over_unions<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[SemanticNodeId],
     written_len: usize,
     nullability: NullabilityPolicy,
@@ -2517,10 +2544,10 @@ fn intersect_over_unions(
     meter: ConstructionMeter<'_>,
     evidence: &mut CanonicalEvidence,
 ) -> Result<Option<DistributedIntersection>, DistributionStop> {
-    if !arms.iter().any(|arm| is_union_node(graph, *arm)) {
+    if !arms.iter().any(|arm| is_union_node(graph.store(), *arm)) {
         return Ok(None);
     }
-    if origin == DistributionOrigin::Weighed && weigh_cross_product(graph, arms).is_ok() {
+    if origin == DistributionOrigin::Weighed && weigh_cross_product(graph.store(), arms).is_ok() {
         return Ok(Some(DistributedIntersection::unbuilt()));
     }
     // A restarted or divided intersection is this intersection's own
@@ -2556,14 +2583,17 @@ fn intersect_over_unions(
     }
 
     // 2. Every arm a union with `undefined`, then with `null`.
-    let unions: Vec<Option<Arc<[SemanticNodeId]>>> =
-        arms.iter().map(|arm| union_members(graph, *arm)).collect();
-    if let Some(nullish) = shared_nullish_member(graph, unions.iter().map(Option::as_deref)) {
+    let unions: Vec<Option<Arc<[SemanticNodeId]>>> = arms
+        .iter()
+        .map(|arm| union_members(graph.store(), *arm))
+        .collect();
+    if let Some(nullish) = shared_nullish_member(graph.store(), unions.iter().map(Option::as_deref))
+    {
         let mut stripped: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
         for members in unions.iter().flatten() {
             let rest = canonicalize(
                 graph,
-                &without_member(graph, members, nullish),
+                &without_member(graph.store(), members, nullish),
                 true,
                 nullability,
                 meter,
@@ -2643,12 +2673,12 @@ fn intersect_over_unions(
     //    it is only checked.
     let build = origin != DistributionOrigin::Weighed;
     let width = admit_cross_product(
-        arms.iter().map(|arm| product_width(graph, *arm)),
+        arms.iter().map(|arm| product_width(graph.store(), *arm)),
         // A constituent holds each choice's members once flattened: a
         // divided half's constituents are themselves intersections.
         || {
             flattened_arity(
-                graph,
+                graph.store(),
                 arms.iter()
                     .zip(&unions)
                     .map(|(arm, members)| members.as_deref().unwrap_or(std::slice::from_ref(arm))),
@@ -2715,8 +2745,8 @@ fn intersect_over_unions(
 /// union of the members every one of those unions contains
 /// ([`shared_primitive_members`]) and the others leave. `None` when fewer
 /// than two such unions are present.
-fn intersect_unions_of_primitive_types(
-    graph: &SemanticGraphStore,
+fn intersect_unions_of_primitive_types<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     arms: &[SemanticNodeId],
     nullability: NullabilityPolicy,
     meter: ConstructionMeter<'_>,
@@ -2726,14 +2756,17 @@ fn intersect_unions_of_primitive_types(
         .iter()
         .enumerate()
         .filter_map(|(index, arm)| {
-            let members = union_members(graph, *arm)?;
+            let members = union_members(graph.store(), *arm)?;
             primitive_union_members(graph, &members).map(|members| (index, members))
         })
         .collect();
     if unions.len() < 2 {
         return None;
     }
-    let result = shared_primitive_members(graph, unions.iter().map(|(_, members)| &members[..]));
+    let result = shared_primitive_members(
+        graph.store(),
+        unions.iter().map(|(_, members)| &members[..]),
+    );
     let first = unions[0].0;
     let mut reduced: Vec<SemanticNodeId> = Vec::with_capacity(arms.len());
     for (index, arm) in arms.iter().enumerate() {
@@ -2751,8 +2784,8 @@ fn intersect_unions_of_primitive_types(
 /// A union's `members` as the checker holds them when it intersects unions
 /// of primitive types: `boolean` is `true | false`. `None` when some member
 /// is not a primitive type.
-fn primitive_union_members(
-    graph: &SemanticGraphStore,
+fn primitive_union_members<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     members: &[SemanticNodeId],
 ) -> Option<Vec<SemanticNodeId>> {
     // Read first, so a union holding any other type allocates nothing.
@@ -2779,7 +2812,7 @@ fn primitive_union_members(
     }
     let mut out = Vec::with_capacity(members.len());
     for member in members {
-        if is_primitive(graph, *member, PrimitiveKind::Boolean) {
+        if is_primitive(graph.store(), *member, PrimitiveKind::Boolean) {
             for value in [true, false] {
                 out.push(
                     graph.intern_node(SemanticNodeData::Literal(LiteralValue::Boolean(value))),
@@ -2945,8 +2978,8 @@ pub(super) struct PresimplifiedFactors {
 /// it back ([`shared_nullish_member`]). A product written a million wide
 /// that reduces member-wise is weighed at what it reduces to. `None` when
 /// no strategy applies.
-pub(super) fn presimplify_factors(
-    graph: &SemanticGraphStore,
+pub(super) fn presimplify_factors<M: verter_audit::observe::ObserveExec>(
+    graph: crate::semantic_query_memo::GraphIn<'_, M>,
     factors: &[Vec<SemanticNodeId>],
 ) -> Option<PresimplifiedFactors> {
     let mut current: Option<Vec<Vec<SemanticNodeId>>> = None;
@@ -2963,7 +2996,7 @@ pub(super) fn presimplify_factors(
             .collect();
         if unions.len() >= 2 {
             let mut shared = Some(shared_primitive_members(
-                graph,
+                graph.store(),
                 unions.iter().map(|(_, members)| &members[..]),
             ));
             let next = view
@@ -2981,7 +3014,7 @@ pub(super) fn presimplify_factors(
             continue;
         }
         let Some(kind) = shared_nullish_member(
-            graph,
+            graph.store(),
             view.iter()
                 .map(|factor| (factor.len() >= 2).then_some(factor.as_slice())),
         ) else {
@@ -2990,7 +3023,7 @@ pub(super) fn presimplify_factors(
         nullish.push(kind);
         current = Some(
             view.iter()
-                .map(|factor| without_member(graph, factor, kind))
+                .map(|factor| without_member(graph.store(), factor, kind))
                 .collect(),
         );
     }
@@ -4922,7 +4955,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
         &self,
         subject: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput<crate::semantic_query::SemanticQueryValue> {
-        let (domain, evidence) = classify_truthiness_domain(self.graph(), subject);
+        let (domain, evidence) = classify_truthiness_domain(self.graph().store(), subject);
         let fence = self.project_generation_signature();
         // Self-version rooting: the subject node's own file origin plus
         // every file-scoped node the walk inspected.

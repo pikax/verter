@@ -810,9 +810,9 @@ fn cheap_component_meta_record(
 }
 
 #[cfg(test)]
-fn extract_component_meta_from_resolved_with_evaluated(
+fn extract_component_meta_from_resolved_with_evaluated<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     canonical_id: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     evaluated_types: Option<&ExpandedComponentTypes>,

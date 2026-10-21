@@ -267,16 +267,16 @@ impl VerterHost {
     /// capture cannot pair a fresh-view analysis with the capture-bound
     /// extraction/materialization context (the torn-result race).
     #[allow(clippy::too_many_arguments)]
-    fn component_meta_with_resolution_cold(
+    fn component_meta_with_resolution_cold<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,
         request_id: u64,
         view: &dyn crate::session_view::SessionView,
         fixed: &crate::resolver_store::BatchFixedView,
-        host_ctx_ref: &dyn crate::resolver_core::HostRequestContext,
+        host_ctx_ref: &dyn crate::resolver_core::HostRequestContext<M>,
         dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         seed_fence: &super::component_meta_entry::ColdSeedFence,
         validated_at_generation: u64,
@@ -789,172 +789,185 @@ impl VerterHost {
         // `HostStoreView` and counts a warm hit only when validation
         // passes and the value is returned.
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx =
-            crate::resolver_core::HostResolverContext::from_current(self, current_view, overlay);
-        let dispatch =
-            verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
-        let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(
-            &dispatch,
-            self.project_type_store().component_meta_results(),
-            self.provenance(),
-        )
-        .peek(&key, owner_whole_hash)?;
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, current_view, overlay);
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
+            let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(
+                &dispatch,
+                self.project_type_store().component_meta_results(),
+                self.provenance(),
+            )
+            .peek(&key, owner_whole_hash)?;
 
-        // Rehydrate the resolution template into a fresh per-request state.
-        // Returns None on the bounded eviction race where the snapshot
-        // was evicted between the warm-cache validation and reload.
-        let cached = entry.payload.clone();
-        let snapshot =
-            reload_component_meta_template_snapshot(self, &cached.canonical_id, cached.whole_hash)?;
-        let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
+            // Rehydrate the resolution template into a fresh per-request state.
+            // Returns None on the bounded eviction race where the snapshot
+            // was evicted between the warm-cache validation and reload.
+            let cached = entry.payload.clone();
+            let snapshot =
+                reload_component_meta_template_snapshot_in::<M>(self, &cached.canonical_id, cached.whole_hash)?;
+            let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
 
-        // Synthesize a from_cache audit record so consumers via
-        // `take_record(resolution.request_id)` get uniform
-        // observability. Snapshot per-request cache counters from
-        // the active TLS context — the warm path consulted
-        // `ComponentMetaResultDb::get` and `FileArtifactStore::get`
-        // through `shallow_file_state`, both of which bumped
-        // hits/misses on this request's `cache_counters`. The
-        // joiner-accounting contract requires the snapshot to
-        // attribute exactly to THIS request, not a host-global delta.
-        // The peak-RSS slot is read from the active request context —
-        // if the sampler thread ticked while the warm-cache path ran,
-        // the peak surfaces here too.
-        #[cfg(feature = "semantic-observe")]
-        if self.config.audit_enabled {
-            let store = crate::component_meta_audit::RequestStoreAudit {
-                cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
-                bypass_diagnostics:
-                    crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
-                ..Default::default()
-            };
-            // Warm-cache replay carries the same parent-request and
-            // scheduler attribution the live request would have
-            // observed had it run cold — read both off the active
-            // request context (installed by the audited entry-point
-            // a few lines above this branch). The same context lookup
-            // also surfaces the per-request peak-RSS slot and the
-            // per-request accumulator (used below to synthesise the
-            // warm-path footprint).
-            let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
-            let (parent_request_id, scheduler_audit, waits, trace_id, footprint, files) =
-                match verter_type_engine::request_context::current_request_context() {
-                    Some(ctx) if ctx.request_id == request_id => {
-                        memory.process_rss_peak_bytes = ctx
-                            .process_rss_peak_bytes
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        // Finalise the footprint through the SAME path
-                        // the cold resolver uses
-                        // (`compute_and_record_component_meta`): drain
-                        // THIS request's accumulator, build the per-file
-                        // audit vector off the drained state, then feed
-                        // the rest through the deterministic miner. A
-                        // warm hit performs little/no VFS work, so the
-                        // mined footprint is typically empty — but it is
-                        // always `Some(..)`, never `None`, so every
-                        // audited request (warm or cold) carries a
-                        // footprint. The accumulator is per-request and
-                        // the `SessionVfsSink` filters by `request_id`,
-                        // so the drained state attributes ONLY this
-                        // request's reads — the strict per-request
-                        // isolation the cold path relies on is
-                        // preserved. Footprint is `Some` exactly when
-                        // the cold path would produce one (i.e. when
-                        // `footprint_capture` is on and an accumulator is
-                        // attached); when capture is off it stays `None`,
-                        // matching the cold contract.
-                        let (footprint, files) = if ctx.footprint_capture {
-                            if let Some(acc) = ctx.audit_accumulator.as_ref() {
-                                let state = acc.drain();
-                                let direct_imports =
-                                    self.direct_import_canonicals(ctx.canonical_id.as_ref());
-                                let files = crate::component_meta_audit::build_file_audit_vec(
-                                    &state,
-                                    ctx.canonical_id.as_ref(),
-                                    &direct_imports,
-                                    self.config.audit_timing_capture && self.config.audit_enabled,
-                                );
-                                let footprint = crate::component_meta_audit::mine_footprint(
-                                    self.project_type_store().semantic_graph(),
-                                    self.project_type_store().construction_grant(),
-                                    state,
-                                    &ctx,
-                                    self.config.max_derivation_edges,
-                                    &self.config.audit_caps,
-                                );
-                                (Some(footprint), files)
+            // Synthesize a from_cache audit record so consumers via
+            // `take_record(resolution.request_id)` get uniform
+            // observability. Snapshot per-request cache counters from
+            // the active TLS context — the warm path consulted
+            // `ComponentMetaResultDb::get` and `FileArtifactStore::get`
+            // through `shallow_file_state`, both of which bumped
+            // hits/misses on this request's `cache_counters`. The
+            // joiner-accounting contract requires the snapshot to
+            // attribute exactly to THIS request, not a host-global delta.
+            // The peak-RSS slot is read from the active request context —
+            // if the sampler thread ticked while the warm-cache path ran,
+            // the peak surfaces here too.
+            #[cfg(feature = "semantic-observe")]
+            if self.config.audit_enabled {
+                let store = crate::component_meta_audit::RequestStoreAudit {
+                    cache_layers: crate::component_meta_audit::snapshot_cache_layers_from_tls(),
+                    bypass_diagnostics:
+                        crate::component_meta_audit::snapshot_bypass_diagnostics_from_tls(),
+                    ..Default::default()
+                };
+                // Warm-cache replay carries the same parent-request and
+                // scheduler attribution the live request would have
+                // observed had it run cold — read both off the active
+                // request context (installed by the audited entry-point
+                // a few lines above this branch). The same context lookup
+                // also surfaces the per-request peak-RSS slot and the
+                // per-request accumulator (used below to synthesise the
+                // warm-path footprint).
+                let mut memory = crate::component_meta_audit::RequestMemoryAudit::default();
+                let (parent_request_id, scheduler_audit, waits, trace_id, footprint, files) =
+                    match verter_type_engine::request_context::current_request_context() {
+                        Some(ctx) if ctx.request_id == request_id => {
+                            memory.process_rss_peak_bytes = ctx
+                                .process_rss_peak_bytes
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            // Finalise the footprint through the SAME path
+                            // the cold resolver uses
+                            // (`compute_and_record_component_meta`): drain
+                            // THIS request's accumulator, build the per-file
+                            // audit vector off the drained state, then feed
+                            // the rest through the deterministic miner. A
+                            // warm hit performs little/no VFS work, so the
+                            // mined footprint is typically empty — but it is
+                            // always `Some(..)`, never `None`, so every
+                            // audited request (warm or cold) carries a
+                            // footprint. The accumulator is per-request and
+                            // the `SessionVfsSink` filters by `request_id`,
+                            // so the drained state attributes ONLY this
+                            // request's reads — the strict per-request
+                            // isolation the cold path relies on is
+                            // preserved. Footprint is `Some` exactly when
+                            // the cold path would produce one (i.e. when
+                            // `footprint_capture` is on and an accumulator is
+                            // attached); when capture is off it stays `None`,
+                            // matching the cold contract.
+                            let (footprint, files) = if ctx.footprint_capture {
+                                if let Some(acc) = ctx.audit_accumulator.as_ref() {
+                                    let state = acc.drain();
+                                    let direct_imports =
+                                        self.direct_import_canonicals(ctx.canonical_id.as_ref());
+                                    let files = crate::component_meta_audit::build_file_audit_vec(
+                                        &state,
+                                        ctx.canonical_id.as_ref(),
+                                        &direct_imports,
+                                        self.config.audit_timing_capture && self.config.audit_enabled,
+                                    );
+                                    let footprint = crate::component_meta_audit::mine_footprint(
+                                        self.project_type_store().semantic_graph(),
+                                        self.project_type_store().construction_grant(),
+                                        state,
+                                        &ctx,
+                                        self.config.max_derivation_edges,
+                                        &self.config.audit_caps,
+                                    );
+                                    (Some(footprint), files)
+                                } else {
+                                    (None, Vec::new())
+                                }
                             } else {
                                 (None, Vec::new())
-                            }
-                        } else {
-                            (None, Vec::new())
-                        };
-                        // Surface `WaitAudit` only when the host's
-                        // `audit_timing_capture` flag is on (mirrored on
-                        // `RequestContext::timing_capture`). The warm
-                        // path observed no locks of its own, but the
-                        // aggregate state on the context is the source
-                        // of truth — a stricter rule (always populate
-                        // when context exists) would mask the flag-gate.
-                        let waits = if ctx.timing_capture {
-                            Some(verter_audit::WaitAudit {
-                                lock_wait_ns: ctx
-                                    .lock_wait_ns
-                                    .load(std::sync::atomic::Ordering::Relaxed),
-                                queue_wait_ns: ctx
-                                    .queue_wait_ns
-                                    .load(std::sync::atomic::Ordering::Relaxed),
-                                lock_acquisitions: ctx
-                                    .lock_acquisitions
-                                    .load(std::sync::atomic::Ordering::Relaxed),
-                            })
-                        } else {
-                            None
-                        };
-                        let parent_request_id = ctx.parent_request_id.map(|id| id.to_string());
-                        let scheduler_audit = ctx.scheduler_audit.lock().clone();
-                        let trace_id = ctx.trace_id.clone();
-                        (
-                            parent_request_id,
-                            scheduler_audit,
-                            waits,
-                            trace_id,
-                            footprint,
-                            files,
-                        )
-                    }
-                    _ => (None, None, None, String::new(), None, Vec::new()),
+                            };
+                            // Surface `WaitAudit` only when the host's
+                            // `audit_timing_capture` flag is on (mirrored on
+                            // `RequestContext::timing_capture`). The warm
+                            // path observed no locks of its own, but the
+                            // aggregate state on the context is the source
+                            // of truth — a stricter rule (always populate
+                            // when context exists) would mask the flag-gate.
+                            let waits = if ctx.timing_capture {
+                                Some(verter_audit::WaitAudit {
+                                    lock_wait_ns: ctx
+                                        .lock_wait_ns
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                    queue_wait_ns: ctx
+                                        .queue_wait_ns
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                    lock_acquisitions: ctx
+                                        .lock_acquisitions
+                                        .load(std::sync::atomic::Ordering::Relaxed),
+                                })
+                            } else {
+                                None
+                            };
+                            let parent_request_id = ctx.parent_request_id.map(|id| id.to_string());
+                            let scheduler_audit = ctx.scheduler_audit.lock().clone();
+                            let trace_id = ctx.trace_id.clone();
+                            (
+                                parent_request_id,
+                                scheduler_audit,
+                                waits,
+                                trace_id,
+                                footprint,
+                                files,
+                            )
+                        }
+                        _ => (None, None, None, String::new(), None, Vec::new()),
+                    };
+                let synthesized = crate::component_meta_audit::RequestAuditRecord {
+                    request_id,
+                    canonical_id: canonical.to_string(),
+                    target_identity: Some(verter_audit::RequestTargetIdentity::registered(canonical)),
+                    kind: crate::component_meta_audit::RequestKind::ComponentMeta,
+                    parent_request_id,
+                    timings: crate::component_meta_audit::RequestTimingAudit::default(),
+                    store,
+                    memory,
+                    footprint,
+                    scheduler: scheduler_audit,
+                    files,
+                    waits,
+                    from_cache: true,
+                    kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
+                        crate::component_meta_audit::ComponentMetaPayload::default(),
+                    ),
+                    trace_id,
+                    capture_state: verter_audit::AuditCaptureState::ActiveStored,
                 };
-            let synthesized = crate::component_meta_audit::RequestAuditRecord {
-                request_id,
-                canonical_id: canonical.to_string(),
-                target_identity: Some(verter_audit::RequestTargetIdentity::registered(canonical)),
-                kind: crate::component_meta_audit::RequestKind::ComponentMeta,
-                parent_request_id,
-                timings: crate::component_meta_audit::RequestTimingAudit::default(),
-                store,
-                memory,
-                footprint,
-                scheduler: scheduler_audit,
-                files,
-                waits,
-                from_cache: true,
-                kind_payload: crate::component_meta_audit::RequestKindPayload::ComponentMeta(
-                    crate::component_meta_audit::ComponentMetaPayload::default(),
-                ),
-                trace_id,
-                capture_state: verter_audit::AuditCaptureState::ActiveStored,
-            };
-            verter_debug_assert_eq!(synthesized.request_id, resolution.request_id);
-            self.host_audit_runtime().publish_record(synthesized);
-        }
+                verter_debug_assert_eq!(synthesized.request_id, resolution.request_id);
+                self.host_audit_runtime().publish_record(synthesized);
+            }
 
-        Some((cached.analysis.0.clone(), resolution))
+            Some((cached.analysis.0.clone(), resolution))
+        })
     }
 }
 
 /// Select the exact currently authoritative artifact at the warm template reload boundary.
+/// [`reload_component_meta_template_snapshot_in`] adopting the mode the installed request carries.
 pub(crate) fn reload_component_meta_template_snapshot(
+    host: &crate::VerterHost,
+    canonical_id: &str,
+    whole_hash: verter_session_query::analysis::types::Hash16,
+) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        reload_component_meta_template_snapshot_in::<M>(host, canonical_id, whole_hash)
+    })
+}
+
+pub(crate) fn reload_component_meta_template_snapshot_in<M: verter_audit::observe::ObserveExec>(
     host: &crate::VerterHost,
     canonical_id: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,
@@ -963,7 +976,7 @@ pub(crate) fn reload_component_meta_template_snapshot(
     if key.content_hash != whole_hash {
         return None;
     }
-    let indexed = host.project_type_store().indexed().get(
+    let indexed = host.project_type_store().indexed().get_in::<M>(
         canonical_id,
         whole_hash,
         &key.parse_key,

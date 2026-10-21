@@ -316,13 +316,25 @@ impl RouteDb {
     // -----------------------------------------------------------------------
 
     /// Look up a cached route for `key` if valid in the view.
+    /// [`Self::get_route_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_route<V: StoreView>(
         &self,
         key: &RouteNameKey,
         view: &V,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_route_in::<_, M>(key, view)
+        })
+    }
+
+    pub fn get_route_in<V: StoreView, M: verter_audit::observe::ObserveExec>(
+        &self,
+        key: &RouteNameKey,
+        view: &V,
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, view);
-        verter_type_engine::observe_request!(|ctx| {
+        verter_type_engine::observe_request!(M =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db
@@ -340,12 +352,23 @@ impl RouteDb {
 
     /// Permissive route lookup without store-view validation.
     #[cfg(any(test, feature = "test-support"))]
+    /// [`Self::get_route_any_in`] for a caller outside a captured or uncaptured
+    /// execution unit: adopts the mode the installed request carries.
     pub fn get_route_any(
         &self,
         key: &RouteNameKey,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.get_route_any_in::<M>(key)
+        })
+    }
+
+    pub fn get_route_any_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        key: &RouteNameKey,
+    ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         let result = self.routes.get_if_valid(key, &PermissiveStoreView);
-        verter_type_engine::observe_request!(|ctx| {
+        verter_type_engine::observe_request!(M =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db

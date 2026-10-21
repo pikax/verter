@@ -4162,7 +4162,7 @@ fn store_view_capability_split_guard_is_discriminating() {
     // non-allowlisted file that does `.into_cold_seed_view().into_inner()`
     // (the INDIRECT-validation seam — raw cold-seed view fed into a
     // context that then validates) must be flagged.
-    let leaky_indirect = "let v = self\n    .resolver_store_view_read()\n    .into_cold_seed_view()\n    .into_inner();\nlet ctx = SessionResolverContext::new(self, view, &v, overlay);";
+    let leaky_indirect = "let v = self\n    .resolver_store_view_read()\n    .into_cold_seed_view()\n    .into_inner();\nlet ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(self, view, &v, overlay);";
     assert!(
         contains_cold_seed_into_inner(leaky_indirect),
         "cold-seed-into-inner predicate must catch the `.into_cold_seed_view().into_inner()` \

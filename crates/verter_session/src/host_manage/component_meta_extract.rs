@@ -132,7 +132,7 @@ pub(in crate::host_manage) fn collect_required_root_fallthrough_runtime_value_na
 /// Returns `(bindings, return_type)`.
 /// Build a `ComponentMetaAnalysis` from a resolved-meta state.
 /// Shared by `get_component_meta` and `get_component_meta_with_resolution`.
-fn extract_component_meta_from_inputs(
+fn extract_component_meta_from_inputs<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     canonical_or_alias: &str,
     snapshot: &FileAnalysisSnapshot,
@@ -140,17 +140,17 @@ fn extract_component_meta_from_inputs(
     resolved_type_registry: &[verter_session_query::analysis::component_meta::ResolvedTypeAnalysis],
     evaluated_types: Option<&verter_session_query::analysis::type_expand::ExpandedComponentTypes>,
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 ) -> verter_session_query::analysis::component_meta::ComponentMetaAnalysis {
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_binding_reactivity = resolved_binding_reactivity(ctx, dispatch, snapshot);
-    component_meta_trace_custom!(
+    component_meta_trace_custom!(M =>
         "extract_component_meta",
         format!(
             "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={}",
@@ -180,7 +180,7 @@ fn extract_component_meta_from_inputs(
         file_path: &canonical,
     };
     let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
-    component_meta_trace_custom!(
+    component_meta_trace_custom!(M =>
         "extract_component_meta_declared_surface",
         format!(
             "owner={} props={} events={} slots={}",
@@ -241,13 +241,13 @@ fn extract_component_meta_from_inputs(
 /// invariant) — but it is folded as a PARTIAL propagation of the whole result,
 /// never as a fatal that drops the row: the degraded role is still published on
 /// its binding, per-row and fail-closed.
-pub(crate) fn resolved_binding_reactivity(
+pub(crate) fn resolved_binding_reactivity<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     snapshot: &FileAnalysisSnapshot,
 ) -> Vec<verter_semantic::analysis::component_meta::ResolvedBindingReactivityInput> {
@@ -348,13 +348,13 @@ pub(crate) fn resolved_binding_reactivity(
 ///
 /// Cross-file resolution goes through `host.resolve_local_import_symbol_target`
 /// (cache-backed). No fresh resolver; no duplicate route discovery.
-pub(crate) fn resolve_ref_to_root_identity(
+pub(crate) fn resolve_ref_to_root_identity<M: verter_audit::observe::ObserveExec>(
     ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     owner_canonical: &str,
     owner: verter_type_expr::TopLevelOwnerId,
@@ -473,15 +473,15 @@ pub(crate) struct ComponentMetaExtractOutcome {
     pub(crate) completeness: verter_type_engine::semantic_query::ResultCompleteness,
 }
 
-pub(crate) fn extract_component_meta_from_resolved(
+pub(crate) fn extract_component_meta_from_resolved<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
     include_fallthrough: bool,
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 ) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
@@ -590,14 +590,16 @@ pub(crate) fn extract_component_meta_from_resolved(
 /// but also returns the fallthrough resolution's fact versions (if available).
 /// Used by the payload cache to store Full payloads with the correct fact set.
 #[allow(dead_code)]
-pub(crate) fn extract_component_meta_from_resolved_with_facts(
+pub(crate) fn extract_component_meta_from_resolved_with_facts<
+    M: verter_audit::observe::ObserveExec,
+>(
     host: &VerterHost,
     canonical_or_alias: &str,
     resolved: &crate::meta_resolve::ResolvedComponentMetaState,
-    ctx: &dyn crate::resolver_core::HostRequestContext,
+    ctx: &dyn crate::resolver_core::HostRequestContext<M>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
 ) -> ComponentMetaExtractOutcome {
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);

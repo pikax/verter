@@ -278,6 +278,11 @@ pub trait ResolverCapabilities: 'static {
     type HostAttachment: ?Sized + Sync + 'static;
     /// The request-retained macro hot-mirror selector an engine binding holds.
     type MacroMirrors: crate::resolver_core::request_ports::MacroMirrorSource + Send + 'static;
+    /// The concrete capture execution a request context of this family runs
+    /// ([`verter_audit::observe::Captured`] or
+    /// [`verter_audit::observe::Uncaptured`]). A dispatcher over `C` is
+    /// compiled for this mode, so its emission sites test a constant.
+    type Observe: verter_audit::observe::ObserveExec;
 }
 
 // Sealed marker — `VerterHost` is the base implementer,

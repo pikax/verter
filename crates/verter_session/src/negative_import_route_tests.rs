@@ -265,14 +265,17 @@ fn cached_import_route_resolution_refuses_a_known_miss_and_serves_a_positive() {
     }
 
     assert_eq!(
-        host.cached_import_route_resolution(owner, "./present")
-            .and_then(|resolution| resolution.resolved_canonical_id),
+        host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+            owner,
+            "./present"
+        )
+        .and_then(|resolution| resolution.resolved_canonical_id),
         Some(present.to_string()),
         "a caller-supplied authoritative POSITIVE must still be served warm — \
          the known-miss refusal must not degenerate into refusing every row",
     );
     assert!(
-        host.cached_import_route_resolution(owner, "./absent")
+        host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(owner, "./absent")
             .is_none(),
         "a KNOWN-MISS row must never be served warm: a negative answer is not \
          evidence that the answer is still negative. Falling through to \

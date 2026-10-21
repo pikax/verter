@@ -101,11 +101,11 @@ fn route_outer_utility_is_shadowed(
 /// Returns `Some(projected)` only when the projection produced a
 /// fully-expanded surface (no deferred `KeyOf` / `IndexedAccess` /
 /// `Mapped` / `TypeOf` / `Conditional` shells).
-pub(crate) fn project_expr_class_a_via_dispatch(
-    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn project_expr_class_a_via_dispatch<M: verter_audit::observe::ObserveExec>(
+    ctx: &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         '_,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     scope_canonical_id: &str,
     expr: &verter_type_expr::TypeExpr,
@@ -129,13 +129,16 @@ pub(crate) fn project_expr_class_a_via_dispatch(
 /// surface sink (e.g. via [`crate::resolver_core::project_class_a_published`]), so
 /// the registry member-path / refine consumers compute their reject/accept facts
 /// off the projected node WITHOUT re-lowering a materialised leaf.
-pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
-    ctx: &'ctx dyn ResolverContext<crate::resolver_core::HostCapabilities>,
+pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<
+    'ctx,
+    M: verter_audit::observe::ObserveExec,
+>(
+    ctx: &'ctx dyn ResolverContext<crate::resolver_core::HostCapabilities<M>>,
     dispatch: &'ctx verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<
         'ctx,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
-    mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>>,
+    mut engine: Option<&mut crate::resolver_core::ComponentMetaQueryEngine<'ctx, M>>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &verter_type_expr::TypeExpr,
@@ -165,8 +168,8 @@ pub(crate) fn project_expr_class_a_node_via_dispatch_threaded<'ctx>(
         .or_else(|| component_meta_registry_public_utility_route(expr))
         .filter(|_| !route_outer_utility_is_shadowed(expr, &shadowing));
     if let Some((root_symbol, route)) = route {
-        let mut transient_engine: Option<ComponentMetaQueryEngine<'_>> = None;
-        let engine_ref: &mut ComponentMetaQueryEngine<'_> = match engine {
+        let mut transient_engine: Option<ComponentMetaQueryEngine<'_, M>> = None;
+        let engine_ref: &mut ComponentMetaQueryEngine<'_, M> = match engine {
             Some(e) => e,
             None => transient_engine.insert(ComponentMetaQueryEngine::new(ctx, dispatch)),
         };
@@ -286,8 +289,11 @@ pub(crate) fn decompose_indexed_access_chain(
 
 /// Node-domain empty-terminal `Expanded` projection: returns the admitted route
 /// node (no materialisation).
-pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<
+    'ctx,
+    M: verter_audit::observe::ObserveExec,
+>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx, M>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     expr: &verter_type_expr::TypeExpr,
@@ -305,8 +311,11 @@ pub(crate) fn lower_and_project_to_expanded_node_via_host_threaded<'ctx>(
 
 /// Node-domain registry-route projection: returns the admitted registry-route
 /// node (no materialisation).
-pub(crate) fn project_route_surface_node_via_host_threaded<'ctx>(
-    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx>,
+pub(crate) fn project_route_surface_node_via_host_threaded<
+    'ctx,
+    M: verter_audit::observe::ObserveExec,
+>(
+    engine: &mut crate::resolver_core::ComponentMetaQueryEngine<'ctx, M>,
     scope_canonical_id: &str,
     scope_owner: verter_type_expr::TopLevelOwnerId,
     root_symbol: &str,

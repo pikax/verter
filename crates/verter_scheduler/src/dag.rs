@@ -1706,11 +1706,21 @@ impl SchedulerDag {
             }
         }
 
+        // Background capture is selected at job submission: the queue-dwell
+        // clock runs only for a job whose submitting request is captured.
+        #[cfg(feature = "semantic-observe")]
+        let enqueue_mode = verter_audit::observe::ObserveMode::select(
+            request_context
+                .as_ref()
+                .is_some_and(|context| context.0.captured()),
+        );
+        #[cfg(not(feature = "semantic-observe"))]
+        let enqueue_mode = verter_audit::observe::ObserveMode::Uncaptured;
         let node = DagNode {
             identity: identity.clone(),
             kind,
             base_priority: priority,
-            enqueue_time: verter_audit::observe::Stopwatch::start(),
+            enqueue_time: verter_audit::observe::Stopwatch::start_for(enqueue_mode),
             request_context,
             cancellation: CancellationToken::aggregate(),
             deps_remaining,

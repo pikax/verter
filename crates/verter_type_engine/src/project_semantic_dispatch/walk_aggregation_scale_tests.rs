@@ -96,9 +96,24 @@ fn merge(
     let evidence = &mut Default::default();
     let meter = ConstructionMeter::UNMETERED;
     match kind {
-        Merge::Intersection => merge_intersection_surfaces_with_graph(graph, arms, meter, evidence),
-        Merge::UnionCommon => merge_union_surfaces(graph, arms, meter, evidence),
-        Merge::UnionMacro => merge_union_surfaces_for_macro(graph, arms, meter, evidence),
+        Merge::Intersection => merge_intersection_surfaces_with_graph(
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+            arms,
+            meter,
+            evidence,
+        ),
+        Merge::UnionCommon => merge_union_surfaces(
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+            arms,
+            meter,
+            evidence,
+        ),
+        Merge::UnionMacro => merge_union_surfaces_for_macro(
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(graph),
+            arms,
+            meter,
+            evidence,
+        ),
     }
     .expect("two object arms merge")
 }
@@ -209,7 +224,10 @@ fn declaration_merges_fold_numeric_spellings_and_keep_the_first_authored_member(
         let core = super::merge_declaration_surfaces_core(&surfaces);
         assert_eq!(core.members.len(), 1);
         assert_eq!(core.members[0].member.key, keys[0]);
-        let surface = super::merge_declaration_surfaces(&graph, &surfaces);
+        let surface = super::merge_declaration_surfaces(
+            crate::semantic_query_memo::GraphIn::<verter_audit::observe::Uncaptured>::of(&graph),
+            &surfaces,
+        );
         assert_eq!(surface.members.len(), 1);
         assert_eq!(surface.entries.len(), 1);
         assert_eq!(surface.members[0].key, keys[0]);

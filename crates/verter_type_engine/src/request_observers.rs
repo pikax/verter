@@ -22,15 +22,16 @@ pub fn component_meta_debug(message: impl AsRef<str>) {
     }
 }
 
-/// Whether the active request asked for timing capture. Without
-/// `semantic-observe` timing capture does not exist, so this is the
-/// constant `false` and every timing branch behind it compiles away.
+/// Whether the active request asked for timing capture, from execution
+/// compiled for `M`. The uncaptured execution is the constant `false` and
+/// reads no slot; without `semantic-observe` timing capture does not exist,
+/// so every timing branch behind it compiles away.
 #[inline(always)]
 #[must_use]
-pub fn capture_timing_enabled() -> bool {
+pub fn capture_timing_enabled<M: verter_audit::observe::ObserveExec>() -> bool {
     #[cfg(feature = "semantic-observe")]
     {
-        verter_execution::request_context::current_timing_enabled()
+        M::CAPTURED && verter_execution::request_context::current_timing_enabled()
     }
     #[cfg(not(feature = "semantic-observe"))]
     {
@@ -39,10 +40,17 @@ pub fn capture_timing_enabled() -> bool {
 }
 
 /// Route one cache event to the request context the scheduler installed on
-/// this thread. Optional capture: without `semantic-observe` it reads no
-/// context and records nothing.
+/// this thread, from execution compiled for `M`. Optional capture: the
+/// uncaptured execution and a build without `semantic-observe` read no
+/// context and record nothing.
 #[inline(always)]
-pub fn record_cache_event(event: verter_execution::request_context::CacheEventKind) {
+pub fn record_cache_event<M: verter_audit::observe::ObserveExec>(
+    event: verter_execution::request_context::CacheEventKind,
+) {
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = verter_execution::request_context::current_context() {
         ctx.0.record_cache_event(event);
@@ -75,8 +83,11 @@ pub fn push_structured_event(event: verter_audit::structured_event::StructuredAu
 /// runtime value is stored as an `Arc<str>` so the event remains
 /// serialisable.
 #[inline(always)]
-pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
-    crate::component_meta_trace_structured!(
+pub fn push_cache_drained_at_upsert<M: verter_audit::observe::ObserveExec>(
+    layer: &'static str,
+    canonical_id: &str,
+) {
+    crate::component_meta_trace_structured!(M =>
         verter_audit::structured_event::StructuredAuditEvent::CacheDrainedAtUpsert {
             layer: std::sync::Arc::<str>::from(layer),
             canonical_id: std::sync::Arc::<str>::from(canonical_id),
@@ -92,9 +103,15 @@ pub fn push_cache_drained_at_upsert(layer: &'static str, canonical_id: &str) {
 /// `Instant::now()` at that point and pass `Duration::ZERO` here so
 /// the zero-cost path is preserved.
 #[inline(always)]
-pub fn record_node_arena_lock_acquisition(wait: std::time::Duration) {
+pub fn record_node_arena_lock_acquisition<M: verter_audit::observe::ObserveExec>(
+    wait: std::time::Duration,
+) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = wait;
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = crate::request_context::current_captured_request_context() {
         // Single mutation point: the observer-trait method on
@@ -115,9 +132,15 @@ pub fn record_node_arena_lock_acquisition(wait: std::time::Duration) {
 /// [`record_node_arena_lock_acquisition`] for the timing-flag
 /// contract on the `wait` argument.
 #[inline(always)]
-pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
+pub fn record_family_map_lock_acquisition<M: verter_audit::observe::ObserveExec>(
+    wait: std::time::Duration,
+) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = wait;
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = crate::request_context::current_captured_request_context() {
         // Single mutation point: the observer-trait method on
@@ -135,7 +158,11 @@ pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
 /// Bump `dep_signature_merges` on the current request's context.
 /// No-op without a context.
 #[inline(always)]
-pub fn record_dep_signature_merge() {
+pub fn record_dep_signature_merge<M: verter_audit::observe::ObserveExec>() {
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.dep_signature_merges
@@ -146,7 +173,11 @@ pub fn record_dep_signature_merge() {
 /// Bump `dep_signature_intern_hits` on the current request's context.
 /// No-op without a context.
 #[inline(always)]
-pub fn record_dep_signature_intern_hit() {
+pub fn record_dep_signature_intern_hit<M: verter_audit::observe::ObserveExec>() {
+    #[cfg(feature = "semantic-observe")]
+    if !M::CAPTURED {
+        return;
+    }
     #[cfg(feature = "semantic-observe")]
     if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.dep_signature_intern_hits
@@ -190,9 +221,19 @@ pub fn push_structured_custom(name: &'static str, detail: impl Into<String>) {
 /// Optional capture: the event is built only when an accumulator is
 /// installed, and without `semantic-observe` it is type-checked but never
 /// built.
+///
+/// `component_meta_trace_structured!(M => event)` emits from execution
+/// compiled for the mode type `M`: the uncaptured expansion is a
+/// constant-false branch that reads no accumulator slot. Per-operation paths
+/// use that form; the untyped form belongs at once-per-request boundaries.
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! component_meta_trace_structured {
+    ($M:ty => $event:expr $(,)?) => {{
+        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
+            $crate::component_meta_trace_structured!($event);
+        }
+    }};
     ($event:expr $(,)?) => {{
         if $crate::request_context::current_accumulator().is_some() {
             $crate::request_observers::push_structured_event($event);
@@ -206,6 +247,10 @@ macro_rules! component_meta_trace_structured {
 #[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! component_meta_trace_structured {
+    ($M:ty => $event:expr $(,)?) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::component_meta_trace_structured!($event);
+    }};
     ($event:expr $(,)?) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {
@@ -223,6 +268,11 @@ macro_rules! component_meta_trace_structured {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! component_meta_trace_custom {
+    ($M:ty => $name:expr, $detail:expr $(,)?) => {{
+        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
+            $crate::component_meta_trace_custom!($name, $detail);
+        }
+    }};
     ($name:expr, $detail:expr $(,)?) => {{
         // The accumulator check gates the $detail expression so its
         // allocations (typically a format!) are skipped when no audit
@@ -239,6 +289,10 @@ macro_rules! component_meta_trace_custom {
 #[macro_export]
 #[doc(hidden)]
 macro_rules! component_meta_trace_custom {
+    ($M:ty => $name:expr, $detail:expr $(,)?) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::component_meta_trace_custom!($name, $detail);
+    }};
     ($name:expr, $detail:expr $(,)?) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {

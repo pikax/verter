@@ -7,7 +7,7 @@
 use super::ComponentMetaQueryEngine;
 use verter_type_engine::resolver_core::FuseTrip;
 
-impl<'a> ComponentMetaQueryEngine<'a> {
+impl<'a, M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'a, M> {
     pub fn enter_member_surface(&mut self) -> bool {
         self.fuse_state.push_member_recursion();
         !self
@@ -31,7 +31,7 @@ impl<'a> ComponentMetaQueryEngine<'a> {
     pub fn allow_wildcard_route(&mut self) -> bool {
         !self
             .fuse_state
-            .check_wildcard_route_fanout(&self.fuse_budgets)
+            .check_wildcard_route_fanout::<M>(&self.fuse_budgets)
     }
 
     /// Check imported-root fanout budget. Returns `true` if within budget.

@@ -549,65 +549,67 @@ fn resolve_named_symbol_request(
         return (Ok(None), effective_mode);
     };
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-    let host_ctx =
-        crate::resolver_core::HostResolverContext::from_current(host, &current_view, overlay);
-    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-    // The request composes construction ordinals across several dispatcher
-    // operations (lowered wire arguments, the bare declaration, the
-    // instantiation, alias hops) before it roots the one it delivers; the
-    // dispatcher's lane owns none of them, so the request holds an explicit
-    // builder owner that releases them all when the request returns.
-    let builder = dispatch.enter_construction_scope();
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        let host_ctx =
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current(host, &current_view, overlay);
+        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+        // The request composes construction ordinals across several dispatcher
+        // operations (lowered wire arguments, the bare declaration, the
+        // instantiation, alias hops) before it roots the one it delivers; the
+        // dispatcher's lane owns none of them, so the request holds an explicit
+        // builder owner that releases them all when the request returns.
+        let builder = dispatch.enter_construction_scope();
 
-    // Wire-boundary lowering, INSIDE the audited request and under THIS
-    // dispatch (and therefore this view), in `Navigate` mode — the args are
-    // a context inherited by the instantiation, not the body being
-    // projected. A miss on any single arg is a NON-FAULT `Ok(None)` miss
-    // (the established boundary bail-out semantics, now audit-carrying):
-    // the resolution never runs partially instantiated.
-    let lowered_wire_args: Vec<SemanticNodeId>;
-    let type_args: crate::typeinfo::types::TypeArgList<'_> = match type_args {
-        NamedSymbolTypeArgs::Lowered(args) => args,
-        NamedSymbolTypeArgs::Wire(wire) => {
-            let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
-            for arg in wire {
-                match dispatch
-                    .owning()
-                    .lower_type_expr_in_scope_with_mode(
-                        canonical_id,
-                        arg.as_ref(),
-                        ProjectionMode::Navigate,
-                    )
-                    .into_value_in(&builder)
-                {
-                    Some(node) => lowered.push(node),
-                    None => return (Ok(None), effective_mode),
+        // Wire-boundary lowering, INSIDE the audited request and under THIS
+        // dispatch (and therefore this view), in `Navigate` mode — the args are
+        // a context inherited by the instantiation, not the body being
+        // projected. A miss on any single arg is a NON-FAULT `Ok(None)` miss
+        // (the established boundary bail-out semantics, now audit-carrying):
+        // the resolution never runs partially instantiated.
+        let lowered_wire_args: Vec<SemanticNodeId>;
+        let type_args: crate::typeinfo::types::TypeArgList<'_> = match type_args {
+            NamedSymbolTypeArgs::Lowered(args) => args,
+            NamedSymbolTypeArgs::Wire(wire) => {
+                let mut lowered: Vec<SemanticNodeId> = Vec::with_capacity(wire.len());
+                for arg in wire {
+                    match dispatch
+                        .owning()
+                        .lower_type_expr_in_scope_with_mode(
+                            canonical_id,
+                            arg.as_ref(),
+                            ProjectionMode::Navigate,
+                        )
+                        .into_value_in(&builder)
+                    {
+                        Some(node) => lowered.push(node),
+                        None => return (Ok(None), effective_mode),
+                    }
                 }
+                lowered_wire_args = lowered;
+                &lowered_wire_args
             }
-            lowered_wire_args = lowered;
-            &lowered_wire_args
-        }
-    };
+        };
 
-    let (outcome, mode) = resolve_named_symbol_in_current_view(
-        host,
-        &dispatch,
-        canonical_id,
-        name,
-        type_args,
-        effective_mode,
-    );
-    // Deliver the resolved node under its own root: the caller holds it
-    // past this request's construction scope, and a later projection reads
-    // it through that root, never through the bare ordinal. A resolved node
-    // that cannot be rooted is a typed fault, never an absent symbol.
-    (
-        outcome.and_then(|node| {
-            node.map(|node| deliver_resolved_root(dispatch.graph(), node))
-                .transpose()
-        }),
-        mode,
-    )
+        let (outcome, mode) = resolve_named_symbol_in_current_view(
+            host,
+            &dispatch,
+            canonical_id,
+            name,
+            type_args,
+            effective_mode,
+        );
+        // Deliver the resolved node under its own root: the caller holds it
+        // past this request's construction scope, and a later projection reads
+        // it through that root, never through the bare ordinal. A resolved node
+        // that cannot be rooted is a typed fault, never an absent symbol.
+        (
+            outcome.and_then(|node| {
+                node.map(|node| deliver_resolved_root(dispatch.graph().store(), node))
+                    .transpose()
+            }),
+            mode,
+        )
+    })
 }
 
 /// Root a resolved construction ordinal for delivery past its request. A
@@ -639,9 +641,9 @@ pub(crate) fn deliver_resolved_root(
 /// [`compute_effective_mode`] before view acquisition, so the request body's
 /// early-miss returns and this path report the SAME mode).
 #[allow(clippy::type_complexity)]
-fn resolve_named_symbol_in_current_view(
+fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
     name: &str,
     type_args: crate::typeinfo::types::TypeArgList<'_>,
@@ -819,9 +821,9 @@ pub(crate) fn classify_dispatch_error(
 /// hang the resolver — the dispatch's own cycle detection catches
 /// genuine alias cycles and returns `Opaque(AliasCycle)` long
 /// before this loop runs out of steps.
-pub(crate) fn materialize_through_aliases(
+pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     start: SemanticNodeId,
     mode: ProjectionMode,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {

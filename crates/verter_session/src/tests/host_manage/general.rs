@@ -1700,7 +1700,7 @@ fn artifact_only_wildcard_barrel_edge_stale_does_not_recurse() {
 
     // MUST terminate (no stack overflow) and re-index to the FRESH target.
     let result = host
-        .artifact_current_indexed(foreign)
+        .artifact_current_indexed::<verter_audit::observe::Uncaptured>(foreign)
         .expect("artifact-only reader serves the wildcard barrel");
     assert!(
         result.shallow_state.has_wildcard_reexports(),

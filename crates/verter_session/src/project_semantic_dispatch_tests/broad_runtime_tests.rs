@@ -534,7 +534,7 @@ fn canonical_classifier_candidates_are_isolated_by_overlay_read_sets() {
         .resolver_store_view_read()
         .into_owned_view()
         .with_session_overlay(&host, &view);
-    let overlay_ctx = SessionResolverContext::new(
+    let overlay_ctx = SessionResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
         &host,
         &view,
         &store_view,

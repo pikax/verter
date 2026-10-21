@@ -39,10 +39,12 @@ enum RouteLayerNode {
 }
 
 impl VerterHost {
-    fn append_route_participant_fact_versions_with_context(
+    fn append_route_participant_fact_versions_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical: &str,
         facts: &mut Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
@@ -128,10 +130,10 @@ impl VerterHost {
         Some(resolved)
     }
 
-    pub(crate) fn resolve_route_type_edge_with_context(
+    pub(crate) fn resolve_route_type_edge_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         owner_canonical: &str,
         source_specifier: &str,
@@ -147,10 +149,10 @@ impl VerterHost {
         Some(resolved)
     }
 
-    fn resolve_named_type_export_route_from_target(
+    fn resolve_named_type_export_route_from_target<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         provider_canonical: &str,
         target: &verter_session_query::inputs::shallow::ExportTarget,
@@ -325,10 +327,10 @@ impl VerterHost {
     /// producers. The context remains the semantic read authority; its
     /// `StoreView` is not used as a substitute for overlay-aware artifact
     /// lookup.
-    pub(crate) fn routed_shallow_state_serve_with_context(
+    pub(crate) fn routed_shallow_state_serve_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
     ) -> Option<RoutedShallowServe<verter_session_query::inputs::shallow::ShallowInputRecord>> {
@@ -336,10 +338,10 @@ impl VerterHost {
         self.route_shallow_state_serve_with_context(ctx, canonical_id, &mut route_shallow_cache)
     }
 
-    fn route_shallow_state_serve_with_context(
+    fn route_shallow_state_serve_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
@@ -361,10 +363,10 @@ impl VerterHost {
         Some(serve)
     }
 
-    fn route_shallow_state_with_context(
+    fn route_shallow_state_with_context<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache<
@@ -441,10 +443,10 @@ impl VerterHost {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn resolve_named_type_export_route_uncached(
+    fn resolve_named_type_export_route_uncached<M: verter_audit::observe::ObserveExec>(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         provider_canonical: &str,
         exported_name: &str,
@@ -619,19 +621,23 @@ impl VerterHost {
         crate::resolver_core::RouteResult,
         Vec<verter_session_query::facts::fact_cache::FactVersionRef>,
     )> {
-        self.with_base_resolver_context(|ctx| {
-            self.build_named_type_export_route_entry_with_context(
-                ctx,
-                dep_canonical,
-                requested_name,
-            )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.with_base_resolver_context::<_, M>(|ctx| {
+                self.build_named_type_export_route_entry_with_context(
+                    ctx,
+                    dep_canonical,
+                    requested_name,
+                )
+            })
         })
     }
 
-    pub(crate) fn build_named_type_export_route_entry_with_context(
+    pub(crate) fn build_named_type_export_route_entry_with_context<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         dep_canonical: &str,
         requested_name: &str,
@@ -740,10 +746,12 @@ impl VerterHost {
     /// `SessionResolverContext`) route through this variant; off-path
     /// callers compose a one-shot request context at the entry boundary; the
     /// direct-host convenience remains compile-fenced to tests.
-    pub(super) fn resolve_named_type_export_target_uncached_with_store_view(
+    pub(super) fn resolve_named_type_export_target_uncached_with_store_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
@@ -829,10 +837,12 @@ impl VerterHost {
 
     /// View-bound variant — production-reachable through ctx-bound
     /// `HostResolverContext` / `SessionResolverContext` callers.
-    pub(crate) fn resolve_named_type_export_target_shallow_with_store_view(
+    pub(crate) fn resolve_named_type_export_target_shallow_with_store_view<
+        M: verter_audit::observe::ObserveExec,
+    >(
         &self,
         ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<M>,
         >,
         view: &dyn verter_session_query::facts::store_view::StoreView,
         dep_canonical: &str,
@@ -844,7 +854,7 @@ impl VerterHost {
             dep_canonical,
             requested_name,
         )?;
-        component_meta_trace_custom!(
+        component_meta_trace_custom!(M =>
             "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=false",

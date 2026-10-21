@@ -25,7 +25,7 @@ pub fn emit_slot_binding_graph_dispatch_facts<C: crate::resolver_core::ResolverC
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     if !sig.is_empty() {
-        crate::request_observers::record_dep_signature_merge();
+        crate::request_observers::record_dep_signature_merge::<C::Observe>();
     }
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
@@ -92,7 +92,9 @@ fn slot_param_root_step<C: crate::resolver_core::ResolverCapabilities>(
     dispatch: &ProjectSemanticDispatch<'_, C>,
     node: SemanticNodeId,
 ) -> SlotRootStep {
-    let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node) else {
+    let Some(data) =
+        crate::project_semantic_dispatch::node_data_for(dispatch.graph().store(), node)
+    else {
         return SlotRootStep::Symbolic(false);
     };
     SlotRootStep::Symbolic(match data.as_ref() {
@@ -230,7 +232,8 @@ pub fn node_contains_free_type_param<C: crate::resolver_core::ResolverCapabiliti
 ) -> bool {
     use crate::graph_walk::Reach;
     crate::graph_walk::reaches(node, |node| {
-        let Some(data) = crate::project_semantic_dispatch::node_data_for(dispatch.graph(), node)
+        let Some(data) =
+            crate::project_semantic_dispatch::node_data_for(dispatch.graph().store(), node)
         else {
             return Reach::Parts(Vec::new());
         };

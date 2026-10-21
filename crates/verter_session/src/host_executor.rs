@@ -338,7 +338,9 @@ impl HostStageExecutor {
         // ledger push happens only when timing capture is on AND a
         // request context is installed.
         #[cfg(feature = "semantic-observe")]
-        let timing_on = verter_type_engine::request_observers::capture_timing_enabled();
+        let timing_on = verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            verter_type_engine::request_observers::capture_timing_enabled::<M>()
+        });
 
         #[cfg(test)]
         let _catalog_host = crate::parse::CatalogEvalSourceHostGuard::new(self.host_instance.get());

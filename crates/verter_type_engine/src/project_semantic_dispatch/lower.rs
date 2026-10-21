@@ -2265,7 +2265,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // distinct fingerprints. See
                 // [`crate::mapper_binder_registry`].
                 let mapper_decl_name = crate::mapper_binder_registry::mapper_binder_decl_name(
-                    graph,
+                    graph.store(),
                     source,
                     value,
                     *optional,
@@ -2356,7 +2356,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // 258K-collision count tracks 258K cold MappedType
                 // dispatches, indicating (b) — the registry is
                 // doing what it can.
-                crate::observe_request!(|ctx| {
+                crate::observe_request!(C::Observe => |ctx| {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],
@@ -2546,7 +2546,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // binder node id directly, avoiding display-name
                 // conflation.
                 let kind = crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    graph.store(),
                     value_sem,
                     source_sem,
                     parameter_id,
@@ -2566,12 +2566,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     over_type_variable: over_type_variable
                         || (matches!(source.as_ref(), TypeExpr::KeyOf(_))
                             && crate::semantic_query::keyof_operand_is_type_variable(
-                                graph, source_sem,
+                                graph.store(),
+                                source_sem,
                             )),
                     modifiers_type: match source.as_ref() {
                         TypeExpr::KeyOf(_) => None,
                         _ => crate::semantic_query::modifiers_type_of_key_parameter(
-                            graph, source_sem,
+                            graph.store(),
+                            source_sem,
                         ),
                     },
                 };

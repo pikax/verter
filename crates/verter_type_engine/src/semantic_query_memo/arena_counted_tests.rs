@@ -107,7 +107,10 @@ fn counted_stale_child_is_refused_before_allocating_parent() {
     let id = root.id();
     drop(root);
     assert!(matches!(
-        arena.try_intern_owned(SemanticNodeData::Alias(id), NodeScopeId::Global),
+        arena.try_intern_owned::<verter_audit::observe::Uncaptured>(
+            SemanticNodeData::Alias(id),
+            NodeScopeId::Global
+        ),
         Err(crate::semantic_query::QueryError::StaleSemanticOperand)
     ));
     assert_eq!(arena.live_len(), 0);
