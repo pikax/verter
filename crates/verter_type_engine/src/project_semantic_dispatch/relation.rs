@@ -1340,7 +1340,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(relation_step_from_payload(&payload));
             }
         }
-        let served = self.graph().get_relation_payload(self.ctx, key)?;
+        let served = match self.graph().get_relation_payload(self.ctx, key) {
+            Some(served) => served,
+            // A relation the request completed for itself — a root nested
+            // in another computation, or a member of its component — is
+            // kept in the request's tier, never the memo.
+            None => self.kept_value_read(&key.to_query_key(), |value| match value {
+                SemanticQueryValue::Relation(payload) => Some(payload),
+                _ => None,
+            })?,
+        };
         let payload = served.value;
         if measurement {
             if !self.admits_served_as_own_check(&served.receipt) {
@@ -4281,6 +4290,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 std::mem::take(&mut txn.call.completed_members),
             )
         };
+        for member in &members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &flow_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &call_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+    }
+
+    /// Keep a relation root the request completed for itself
+    /// ([`super::completes_request_locally`]) in the request's completion
+    /// tier together with every member its component completed, under the
+    /// root's carrier, receipt and edit clocks — the members a published
+    /// root's batched publish would admit to the family memo, and none it
+    /// would not. The component is kept whole or not at all: a root that is
+    /// not kept (partial, unpriced, cancelled, or `carrier` absent because
+    /// it is not admissible), a member that is not a decided binary relation
+    /// or whose value is no longer live, or a refused reservation keeps
+    /// nothing. Either way each member's flight ends unpublished: a joiner
+    /// computes again, and a reader in this request finds the kept member.
+    pub(super) fn relation_keep_completed_component(
+        &self,
+        key: &SemanticQueryKey,
+        read: &crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
+        carrier: Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        computed_at: super::WorkspaceEdit,
+    ) {
+        let (members, flow_members, call_members) = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
+            (
+                {
+                    txn.relation.settled.clear();
+                    std::mem::take(&mut txn.relation.completed_members)
+                },
+                std::mem::take(&mut txn.flow.completed_members),
+                std::mem::take(&mut txn.call.completed_members),
+            )
+        };
+        let graph = self.graph();
+        let component = carrier
+            .filter(|_| !read.result_is_partial() && read.receipt.priced().is_some())
+            .and_then(|carrier| {
+                let member_read = |value: SemanticQueryValue| {
+                    graph
+                        .completed_member_read(value, read.receipt.clone())
+                        .ok()
+                };
+                let mut kept = vec![(key.clone(), read.clone())];
+                for member in members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if !matches!(
+                        member.payload.outcome,
+                        RelationOutcome::Assignable | RelationOutcome::NotAssignable
+                    ) {
+                        return None;
+                    }
+                    kept.push((
+                        member.key.to_query_key(),
+                        member_read(SemanticQueryValue::Relation(member.payload.clone()))?,
+                    ));
+                }
+                for member in flow_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if member.result.key() != &member.key {
+                        return None;
+                    }
+                    kept.push((
+                        SemanticQueryKey::FlowReturn(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::FlowReturn(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.value().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                for member in call_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    kept.push((
+                        SemanticQueryKey::ResolveCall(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::ResolveCall(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.get().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                Some((kept, carrier))
+            });
+        if let Some((kept, carrier)) = component {
+            self.completions
+                .keep_component(graph, kept, &carrier, computed_at);
+        }
         for member in &members {
             self.abort_inline_flight(member.inline_flight.as_ref());
         }

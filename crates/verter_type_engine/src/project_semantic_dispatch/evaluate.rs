@@ -4033,15 +4033,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         // The checker's union origin: the named unions, when they do not
         // overlap and the reduction kept every member they name.
+        // Every member a named union names, looked up by hash: a named
+        // union of thousands of members is read once, not once per member.
         let named_members: rustc_hash::FxHashSet<SemanticNodeId> = named_unions
             .iter()
             .flat_map(|(_, members)| members.iter().copied())
             .collect();
-        let in_named = |member: &SemanticNodeId| named_members.contains(member);
         let remaining: Vec<SemanticNodeId> = type_set
             .iter()
             .copied()
-            .filter(|member| !in_named(member))
+            .filter(|member| !named_members.contains(member))
             .collect();
         let named_count: usize = named_unions.iter().map(|(_, members)| members.len()).sum();
         let result = match named_unions.as_slice() {
