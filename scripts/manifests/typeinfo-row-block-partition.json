@@ -2013,7 +2013,7 @@
     {
       "file": "call_resolution.rs",
       "function": "call_resolution_this_receiver_method_call_returns_declared_return",
-      "block": "U6.FLOW_RETURN_SUBSTRATE",
+      "block": "U6.CALL_RESOLVE",
       "capability": "CallResolution",
       "status": "lifted"
     },

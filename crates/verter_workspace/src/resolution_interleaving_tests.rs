@@ -418,6 +418,9 @@ fn assert_module_re_add_restarts(point: Point) {
             admitted.signature().validates(current.as_ref()),
             "the admitted witness answers for the world after the re-add, {point:?}"
         ),
+        ResolutionPublication::Unretained(_) => {
+            panic!("the restart is admitted, {point:?}: it was not retained")
+        }
         ResolutionPublication::Refused(refusal) => {
             panic!("the restart is admitted, {point:?}: {:?}", refusal.reason())
         }

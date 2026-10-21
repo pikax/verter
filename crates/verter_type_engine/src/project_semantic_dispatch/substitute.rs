@@ -1298,11 +1298,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return (*built, true);
                     }
                 }
+                // A template with a hole still open keeps it; its literal
+                // holes fold into its text all the same.
+                let (quasis, new_expressions) =
+                    match self.folded_literal_holes(quasis, &new_expressions) {
+                        Some((folded, holes)) => {
+                            (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                        }
+                        None => ((*quasis).clone(), new_expressions),
+                    };
                 (
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::TemplateLiteral {
-                            quasis: (*quasis).clone(),
+                            quasis,
                             expressions: crate::semantic_query::PayloadArray::from(
                                 new_expressions.into_boxed_slice(),
                             ),

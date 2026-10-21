@@ -132,11 +132,14 @@ impl verter_session_query::retention::resolution_charge::ResolutionRetentionAcco
 
 /// Under retention pressure the leader's complete answer is not retained,
 /// yet still delivered: its subscribers adopt it, restating its witness,
-/// instead of each running the producer again.
+/// instead of each running the producer again. Every demand — leader and
+/// subscribers alike — delivers the answer unretained, so no consumer can
+/// root a retained entry on it.
 ///
-/// Mutation recipe: on a refused reservation, leave the flight without a
-/// delivery. Each subscriber then resolves for itself and the producer runs
-/// three times.
+/// Mutation recipes: on a refused reservation, leave the flight without a
+/// delivery (each subscriber then resolves for itself and the producer runs
+/// three times); or let a subscriber keep its adopted answer cacheable (it
+/// then publishes as admitted).
 #[test]
 fn a_refused_retention_still_serves_the_flight_subscribers() {
     let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
@@ -171,31 +174,106 @@ fn a_refused_retention_still_serves_the_flight_subscribers() {
         follower.join().unwrap();
     }
     assert_eq!(target(&leader), Some("/p/dep.ts".to_string()));
-    assert_eq!(
-        leader.non_admission_reason(),
-        Some(verter_audit::NonAdmissionReason::RetentionPressure)
-    );
     let fresh = WorkspaceRead::capture_resolution_world(workspace.as_ref()).expect("captured");
-    for outcome in outcomes.lock().unwrap().iter() {
-        assert_eq!(target(outcome), Some("/p/dep.ts".to_string()));
+    let assert_unretained = |outcome: ResolutionOutcome, who: &str| {
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::RetentionPressure),
+            "{who}"
+        );
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Unretained(unretained) => {
+                assert_eq!(
+                    unretained.result().map(|result| result.source_id.as_str()),
+                    Some("/p/dep.ts"),
+                    "{who} delivers the complete answer"
+                );
+                assert!(
+                    unretained.witness().validates(fresh.as_ref()),
+                    "{who}'s witness is the answer's own, valid in its world"
+                );
+            }
+            other => panic!("{who} delivers the answer unretained, got {other:?}"),
+        }
+    };
+    assert_unretained(leader, "the leader");
+    for outcome in outcomes.lock().unwrap().drain(..) {
         assert!(
             outcome.trace().reused(),
             "the subscriber adopted the delivery"
         );
-        match &outcome.admission {
-            verter_session_query::facts::fact_cache::SignatureAdmission::Cacheable(witness) => {
-                assert!(
-                    witness.validates(fresh.as_ref()),
-                    "the restated witness is the answer's own, valid in its world"
-                );
-            }
-            other => panic!("a subscriber's adopted answer is cacheable, got {other:?}"),
-        }
+        assert_unretained(outcome, "a subscriber");
     }
     assert_eq!(
         producer_runs(&workspace),
         1,
         "one producer run for three demands under retention pressure"
+    );
+    assert_eq!(workspace.resource_snapshot().resolution.slots, 0);
+    assert_eq!(workspace.resource_snapshot().resolution_flights, 0);
+}
+
+/// A flight for an importer the workspace has already retired delivers an
+/// answer no slot holds, yet nothing refused to retain it: the leader and
+/// every subscriber that adopts it answer admitted under its own witness,
+/// never as retention pressure.
+///
+/// Mutation recipe: deliver the retired importer's answer on the lane a
+/// refused retention uses. The subscribers then publish unretained, with a
+/// pressure non-admission no account reported.
+#[test]
+fn a_retired_importers_flight_subscribers_stay_admitted() {
+    let workspace = workspace(&[("/p/dep.ts", "export const dep = 1\n")]);
+    workspace.remove_file(MAIN);
+    let outcomes: Arc<Mutex<Vec<ResolutionOutcome>>> = Arc::default();
+    let followers = Arc::new(Mutex::new(Vec::new()));
+    let hook_workspace = Arc::clone(&workspace);
+    let hook_outcomes = Arc::clone(&outcomes);
+    let hook_followers = Arc::clone(&followers);
+    let leader = resolution_test_hooks::with_hook(
+        ResolutionPhase::PreAdmissionValidation,
+        move || {
+            for _ in 0..2 {
+                let workspace = Arc::clone(&hook_workspace);
+                let outcomes = Arc::clone(&hook_outcomes);
+                hook_followers
+                    .lock()
+                    .unwrap()
+                    .push(std::thread::spawn(move || {
+                        let outcome = workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT);
+                        outcomes.lock().unwrap().push(outcome);
+                    }));
+            }
+            await_subscribers(&hook_workspace, false, 2);
+        },
+        || workspace.resolve_import_outcome(MAIN, "./dep", CONTEXT),
+    );
+    for follower in followers.lock().unwrap().drain(..) {
+        follower.join().unwrap();
+    }
+    let assert_admitted = |outcome: ResolutionOutcome, who: &str| {
+        assert_eq!(outcome.non_admission_reason(), None, "{who}");
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Admitted(admitted) => assert_eq!(
+                admitted.result().map(|result| result.source_id.as_str()),
+                Some("/p/dep.ts"),
+                "{who} delivers the complete answer"
+            ),
+            other => panic!("{who} answers admitted, got {other:?}"),
+        }
+    };
+    assert_admitted(leader, "the leader");
+    for outcome in outcomes.lock().unwrap().drain(..) {
+        assert!(
+            outcome.trace().reused(),
+            "the subscriber adopted the delivery"
+        );
+        assert_admitted(outcome, "a subscriber");
+    }
+    assert_eq!(
+        producer_runs(&workspace),
+        1,
+        "one producer run for three demands"
     );
     assert_eq!(workspace.resource_snapshot().resolution.slots, 0);
     assert_eq!(workspace.resource_snapshot().resolution_flights, 0);

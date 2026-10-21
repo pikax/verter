@@ -809,6 +809,7 @@ impl crate::VerterHost {
         &self,
         consumer_project: ProjectStableKey,
         symbol: &str,
+        space: verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace,
     ) -> Option<AmbientSymbolHit> {
         let workspace = self.workspace();
         let registry = workspace.ambient_libs_view();
@@ -845,14 +846,43 @@ impl crate::VerterHost {
             verter_type_engine::resolver_core::resolver_context::observe_program_file_order(&order);
             order
         };
-        candidates
+        let mut candidates: Vec<_> = candidates
             .into_iter()
             .filter(|(virtual_id, _, _)| order.loads_library(virtual_id))
-            .min_by(|(left, _, _), (right, _, _)| {
-                order
-                    .rank(left)
-                    .cmp(&order.rank(right))
-                    .then_with(|| left.cmp(right))
+            .collect();
+        candidates.sort_by(|(left, _, _), (right, _, _)| {
+            order
+                .rank(left)
+                .cmp(&order.rank(right))
+                .then_with(|| left.cmp(right))
+        });
+        candidates
+            .into_iter()
+            .find(|(virtual_id, _, _)| {
+                // Read only headers, in declaration precedence order. A type-only
+                // declaration cannot shadow a later value (or the reverse).
+                // The observed serve retains negative namespace lookups as proof.
+                let Some(serve) = self.ensure_indexed_ready_serve(virtual_id) else {
+                    // Retain the unreadable first candidate so its declaration
+                    // read fails normally instead of guessing a later winner.
+                    return true;
+                };
+                verter_type_engine::resolver_core::resolver_context::observe_fan_out(
+                    verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
+                        canonical_id: virtual_id.to_string(),
+                        hash: serve.indexed.whole_hash,
+                    },
+                );
+                let headers = &serve.indexed.shallow_state.headers;
+                let owner = verter_type_expr::TopLevelOwnerId::ordinary_file();
+                match space {
+                    verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Type => {
+                        headers.type_header_in(owner, symbol).is_some()
+                    }
+                    verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace::Value => {
+                        headers.value_header_in(owner, symbol).is_some()
+                    }
+                }
             })
             .map(|(virtual_id, canonical_id, lib_order)| AmbientSymbolHit {
                 project: consumer_project,
@@ -1315,12 +1345,18 @@ impl crate::VerterHost {
                 kind: verter_session_query::resolution::ResolveRequestKind::TypeImport,
             },
         );
-        match outcome
+        let publication = outcome
             .into_publication()
-            .map_result(|target| target.source_id)
-        {
+            .map_result(|target| target.source_id);
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
+        match publication {
             verter_workspace::ResolutionPublication::Admitted(admitted) => {
                 admitted.result().map(|target| Arc::from(target.as_str()))
+            }
+            // The complete target, served and never stored.
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                *provisional = true;
+                unretained.result().map(|target| Arc::from(target.as_str()))
             }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 *provisional = true;

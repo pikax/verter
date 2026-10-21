@@ -130,7 +130,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         Arc::from(args.to_vec().into_boxed_slice()),
                         self.instantiate_context_for(
                             declaration.canonical_id.as_ref(),
-                            ProjectionReductionContext::published(ProjectionMode::Expanded),
+                            // The apparent surface supplies members and signature
+                            // carriers. Their interiors are demanded only by a
+                            // selected member or signature read.
+                            ProjectionReductionContext::published(ProjectionMode::Shallow),
                         ),
                     ),
                 ))

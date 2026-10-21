@@ -309,6 +309,17 @@ pub enum NonCacheablePropagation {
     Transitive,
 }
 
+/// What a non-cacheable mark says about the value it taints, as far as an
+/// admission must tell causes apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonCacheableBasis {
+    /// The read was complete and current; the process only declined to
+    /// retain it. A value built on it is the same answer, uncached.
+    RetentionDeclined,
+    /// Any other non-cacheable read, or a mark that does not say why.
+    Untrusted,
+}
+
 /// Push-style accumulator for cold-compute fact reads.
 ///
 /// Construct via [`FactReadSet::new`], record observations via
@@ -350,6 +361,9 @@ pub struct FactReadSet {
     /// the state allocation-free while preserving the distinction that a
     /// boolean erased. `Transitive` monotonically dominates `LocalOnly`.
     non_cacheable_propagation: Option<NonCacheablePropagation>,
+    /// TRUE once a non-cacheable mark OTHER than a declined retention was
+    /// observed. Sticky; a mark that does not say why counts.
+    untrusted_non_cacheable: bool,
     /// Live generation of each compaction domain, supplied by whoever
     /// installed this tracer. A domain absent from the basis never
     /// compacts — see [`compact_domains`].
@@ -402,6 +416,7 @@ impl FactReadSet {
             observations: SmallVec::new(),
             canonical_runs: Vec::new(),
             non_cacheable_propagation: None,
+            untrusted_non_cacheable: false,
             aggregate_basis: AggregateGenerations::default(),
             mutation_unstable: false,
             rewrites: 0,
@@ -476,10 +491,26 @@ impl FactReadSet {
     /// Record that a NON-CACHEABLE read (fenced serve, broken decl-body
     /// lease, unrootable route, unobservable source-env) was consumed
     /// inside this tracer's scope. Monotonic — never cleared.
+    /// A mark recorded here does not say why, so it counts as
+    /// [`NonCacheableBasis::Untrusted`].
     #[inline]
     pub fn note_non_cacheable_read(&mut self, propagation: NonCacheablePropagation) {
+        self.note_non_cacheable_read_with_basis(propagation, NonCacheableBasis::Untrusted);
+    }
+
+    /// [`Self::note_non_cacheable_read`], stating what the mark says about
+    /// the value it taints.
+    #[inline]
+    pub fn note_non_cacheable_read_with_basis(
+        &mut self,
+        propagation: NonCacheablePropagation,
+        basis: NonCacheableBasis,
+    ) {
         if self.non_cacheable_propagation != Some(NonCacheablePropagation::Transitive) {
             self.non_cacheable_propagation = Some(propagation);
+        }
+        if basis == NonCacheableBasis::Untrusted {
+            self.untrusted_non_cacheable = true;
         }
     }
 
@@ -489,6 +520,15 @@ impl FactReadSet {
     #[must_use]
     pub fn non_cacheable_read_observed(&self) -> bool {
         self.non_cacheable_propagation.is_some()
+    }
+
+    /// TRUE when a non-cacheable read was consumed and EVERY one was a
+    /// declined retention: the value is complete and current, only
+    /// uncached.
+    #[inline]
+    #[must_use]
+    pub fn non_cacheable_only_declined_retention(&self) -> bool {
+        self.non_cacheable_propagation.is_some() && !self.untrusted_non_cacheable
     }
 
     /// Record one observed fact.
@@ -941,6 +981,19 @@ impl FactReadSetCell {
     #[inline]
     pub fn note_non_cacheable_read(&self, propagation: NonCacheablePropagation) {
         self.0.borrow_mut().note_non_cacheable_read(propagation);
+    }
+
+    /// Record a non-cacheable read consumption and its basis through
+    /// `&self`. See [`FactReadSet::note_non_cacheable_read_with_basis`].
+    #[inline]
+    pub fn note_non_cacheable_read_with_basis(
+        &self,
+        propagation: NonCacheablePropagation,
+        basis: NonCacheableBasis,
+    ) {
+        self.0
+            .borrow_mut()
+            .note_non_cacheable_read_with_basis(propagation, basis);
     }
 
     /// Supply this scope's per-domain compaction basis through `&self`.
@@ -1404,6 +1457,43 @@ mod finalise_tests {
             }
             other => panic!("non-cacheable observation finalised as {other:?}"),
         }
+    }
+
+    /// A scope is retention-only while every non-cacheable mark it saw was a
+    /// declined retention; one untrustworthy or unexplained mark, in either
+    /// order, ends that for good.
+    #[test]
+    fn only_declined_retention_survives_no_untrusted_mark() {
+        let declined = |read_set: &mut FactReadSet| {
+            read_set.note_non_cacheable_read_with_basis(
+                NonCacheablePropagation::Transitive,
+                NonCacheableBasis::RetentionDeclined,
+            );
+        };
+        let mut read_set = FactReadSet::new();
+        assert!(!read_set.non_cacheable_only_declined_retention());
+        declined(&mut read_set);
+        declined(&mut read_set);
+        assert!(read_set.non_cacheable_only_declined_retention());
+        read_set.note_non_cacheable_read(NonCacheablePropagation::LocalOnly);
+        assert!(!read_set.non_cacheable_only_declined_retention());
+        declined(&mut read_set);
+        assert!(
+            !read_set.non_cacheable_only_declined_retention(),
+            "a later declined retention never clears an untrusted mark"
+        );
+        assert!(matches!(
+            read_set.finalise(),
+            FactReadSetFinalise::NonCacheable(_)
+        ));
+
+        let mut read_set = FactReadSet::new();
+        read_set.note_non_cacheable_read_with_basis(
+            NonCacheablePropagation::Transitive,
+            NonCacheableBasis::Untrusted,
+        );
+        declined(&mut read_set);
+        assert!(!read_set.non_cacheable_only_declined_retention());
     }
 
     #[test]

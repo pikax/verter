@@ -7226,6 +7226,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             heritage_self_roots: Vec::new(),
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
+            call_diagnostic_sites: rustc_hash::FxHashMap::default(),
             declared_reads: false,
             dead_writes: false,
             dead_written: rustc_hash::FxHashSet::default(),
@@ -7259,7 +7260,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let (outcome, body_falls_through) = evaluator.eval_region(&ir.body);
             evaluator.promote_pending_statement_gap();
             inferred_predicate = evaluator.inferred_predicate;
-            checker_diagnostics = std::mem::take(&mut evaluator.checker_diagnostics);
+            checker_diagnostics = {
+                let mut occurrences = std::mem::take(&mut evaluator.checker_diagnostics);
+                occurrences.sort();
+                occurrences
+            };
             holds = std::mem::take(&mut evaluator.holds);
             yield_contributions = std::mem::take(&mut evaluator.yield_contributions);
             observations = evaluator.observations;
@@ -10712,6 +10717,14 @@ pub(super) trait FlowDemandDriver {
         &self,
         node: SemanticNodeId,
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>>;
+    /// The occurrence of the diagnostic a recovery node carries, bound now to
+    /// where the checker reports it for the body of `canonical`.
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence>;
     /// Spread-normalise the tuple an array literal produces.
     fn normalize_expression_tuple_spread(
         &self,
@@ -10764,6 +10777,21 @@ pub(super) trait FlowDemandDriver {
         &self,
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext;
+    /// A failed relation's two types as a diagnostic message prints them.
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)>;
+    /// The occurrences the checker reports for `source` failing `target`
+    /// at the authored expression `site` under `head`, elaborated.
+    fn checker_relation_failure(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>>;
     fn resolve_closed_signature_utility(
         &self,
         node: SemanticNodeId,
@@ -11327,6 +11355,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         self.indexed_call_return_key(node)
             .and_then(|key| self.read_declared_call_return(key))
     }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        ProjectSemanticDispatch::bind_checker_recovery(self, node, canonical, call_span)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -11399,6 +11435,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
         ProjectSemanticDispatch::resolve_call_context_for(self, canonical)
+    }
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)> {
+        ProjectSemanticDispatch::print_relation_operands(self, source, target)
+    }
+    fn checker_relation_failure(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        ProjectSemanticDispatch::checker_relation_failure(self, source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -11620,6 +11672,31 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
 /// A frame sees only its static arena, selected input ports, observations,
 /// and finite semantic demands. It cannot acquire query leases or borrow the
 /// driver's transaction or resolver context.
+/// A flow frame's driver read as the printer a diagnostic recipe is bound
+/// with.
+struct FlowDiagnosticPrinter<'p, D>(&'p D);
+
+impl<D: FlowDemandDriver> crate::semantic_query::CheckerDiagnosticPrinter
+    for FlowDiagnosticPrinter<'_, D>
+{
+    fn relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)> {
+        self.0.print_relation_operands(source, target)
+    }
+    fn relation_failure(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        self.0.checker_relation_failure(source, target, head, site)
+    }
+}
+
 pub(super) struct FlowCx<'a, D: FlowDemandDriver> {
     driver: &'a D,
     arena: super::arena_ops::ArenaOps<'a>,
@@ -12066,6 +12143,15 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     ) -> Option<crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>> {
         self.driver.declared_call_return_read(node)
     }
+    fn bind_checker_recovery(
+        &self,
+        node: SemanticNodeId,
+        canonical: &str,
+        call_span: verter_span::Span,
+    ) -> Option<crate::semantic_query::CheckerDiagnosticOccurrence> {
+        self.driver
+            .bind_checker_recovery(node, canonical, call_span)
+    }
     fn normalize_expression_tuple_spread(
         &self,
         elements: &[crate::semantic_query::TupleElement],
@@ -12140,6 +12226,23 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
         canonical: &str,
     ) -> crate::semantic_query::ResolveCallContext {
         self.driver.resolve_call_context_for(canonical)
+    }
+    fn print_relation_operands(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<(String, String)> {
+        self.driver.print_relation_operands(source, target)
+    }
+    fn checker_relation_failure(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        head: crate::semantic_query::CheckerDiagnostic,
+        site: &verter_type_expr::IndexedReportSite,
+    ) -> Option<Vec<crate::semantic_query::CheckerDiagnosticOccurrence>> {
+        self.driver
+            .checker_relation_failure(source, target, head, site)
     }
     fn resolve_closed_signature_utility(
         &self,
@@ -12637,9 +12740,15 @@ struct FlowEvaluator<'d, 'b, D: FlowDemandDriver> {
     /// result carries it only when the whole return joins to `boolean`.
     inferred_predicate: Option<crate::semantic_query::SignaturePredicate>,
     /// The diagnostics of the calls this body resolved to the checker's
-    /// error-recovery candidate, deduplicated in first-seen order: the
-    /// frame's result carries them with its value.
-    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnostic>,
+    /// error-recovery candidate, each bound to the call it was reported at
+    /// and recorded once: the frame's result carries them with its value,
+    /// in the checker's order.
+    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
+    /// The authored report positions of each call this frame asked the
+    /// executor about, by the call's span: where a diagnostic recipe the
+    /// call's result carries is reported at THIS call site.
+    call_diagnostic_sites:
+        rustc_hash::FxHashMap<verter_span::Span, crate::semantic_query::CheckerDiagnosticSite>,
     /// Whether a read of a parameter or local answers its DECLARED type
     /// rather than its narrowed reaching value — on while a class
     /// expression's property initializer evaluates: a property
@@ -12970,6 +13079,7 @@ struct LoopPassTail {
     break_exits: Vec<FlowBreakExit>,
     return_edges: Vec<FlowLayerState>,
     throw_points: Vec<FlowLayerState>,
+    checker_diagnostics: Vec<crate::semantic_query::CheckerDiagnosticOccurrence>,
 }
 
 /// One pass of a loop body ([`FlowEvaluator::begin_loop_pass`]).
@@ -12995,6 +13105,7 @@ struct LoopPassMark {
     break_exits: usize,
     return_edges: usize,
     throw_points: usize,
+    checker_diagnostics: usize,
 }
 
 /// One captured `break` or `continue` exit: the target the lowering
@@ -14394,6 +14505,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        None,
                     ) {
                         return step;
                     }
@@ -14490,6 +14602,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         self.holds.len(),
                         false,
                         Positional::Value(any),
+                        None,
                     ) {
                         return step;
                     }
@@ -14627,6 +14740,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         holds_before,
                         widens_unique_symbols,
                         outcome,
+                        Some(member_context),
                     ) {
                         return step;
                     }
@@ -14743,6 +14857,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         holds_before: usize,
         widens_unique_symbols: bool,
         outcome: Positional<SemanticNodeId>,
+        contextual: Option<SemanticNodeId>,
     ) -> Option<ObjectEvalStep<'e>> {
         let value = self.settle_composite_part(outcome, holds_before);
         // Selective object widening (BL02-class): a member read of a
@@ -14751,8 +14866,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // publishes `b: number`), while `as const` / annotated
         // literal locals stay pinned. Direct literal members already
         // widened (or stayed pinned under a const assertion) at IR
-        // lowering.
-        let value = self.widen_value_position_read(member_value, value);
+        // lowering. A member's contextual type that is a literal context
+        // for the read keeps it (`{ a: c } satisfies { a: "a" }` is
+        // `{ a: "a" }`, the checker's
+        // `getWidenedLiteralLikeTypeForContextualType`).
+        let value = match contextual {
+            Some(contextual) if self.literal_of_contextual_type(value, contextual) => value,
+            _ => self.widen_value_position_read(member_value, value),
+        };
         let value = if widens_unique_symbols {
             widen_unique_symbols(self.dispatch, value, self.nullability)
         } else {
@@ -15343,8 +15464,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// per constituent of a union, the declared property, else a tuple's
     /// element at a numeric name, else an applicable index signature's
     /// value; a constrained type parameter's through its constraint (the
-    /// apparent type `getApparentTypeOfContextualType` reads). `None` when
-    /// no constituent types the property.
+    /// apparent type `getApparentTypeOfContextualType` reads), and an
+    /// intersection holding one as the intersection of its constituents'
+    /// (`reducers: R & {}` types `reducers.inc` by `R`'s constraint).
+    /// `None` when no constituent types the property.
     fn contextual_property_type(
         &self,
         contextual: SemanticNodeId,
@@ -15353,6 +15476,31 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let graph = self.dispatch.graph();
         let contextual = self.dispatch.resolved_reduction_view(contextual);
         let data = graph.node_data(contextual);
+        if let Some(SemanticNodeData::Intersection(members)) = data.as_deref() {
+            let members = members.to_vec();
+            if members.iter().any(|member| {
+                matches!(
+                    graph
+                        .node_data(self.dispatch.resolved_reduction_view(*member))
+                        .as_deref(),
+                    Some(SemanticNodeData::TypeParam { .. })
+                )
+            }) {
+                drop(data);
+                let types: Vec<SemanticNodeId> = members
+                    .iter()
+                    .filter_map(|member| self.contextual_property_type(*member, name))
+                    .collect();
+                return match types.as_slice() {
+                    [] => None,
+                    [only] => Some(*only),
+                    _ => Some(
+                        self.dispatch
+                            .intern_normalized_union_or_intersection(&types, false),
+                    ),
+                };
+            }
+        }
         match data.as_deref()? {
             SemanticNodeData::Union(members) => {
                 let members = members.to_vec();
@@ -15383,6 +15531,14 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             SemanticNodeData::Primitive(_)
             | SemanticNodeData::Literal(_)
             | SemanticNodeData::TypeParam { .. } => None,
+            // A mapped type's members are its template at each key it
+            // produces (`Partial<{ a: 1 }>` types `a` as `1`), which
+            // only a path projection materialises: its one-level surface
+            // lists none of them.
+            SemanticNodeData::Mapped { .. } => {
+                drop(data);
+                self.contextual_mapped_property_type(contextual, name)
+            }
             _ => {
                 drop(data);
                 let surface = match graph.node_data(contextual).as_deref() {
@@ -15412,6 +15568,40 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     .map(|signature| signature.value_type)
             }
         }
+    }
+
+    /// The member `name` of the mapped type `contextual` through the
+    /// shared path projection; `None` when the projection does not answer
+    /// it with a modelled type.
+    fn contextual_mapped_property_type(
+        &self,
+        contextual: SemanticNodeId,
+        name: &str,
+    ) -> Option<SemanticNodeId> {
+        let _demand_scope = self
+            .dispatch
+            .enter_lexical_demand(Arc::from(self.canonical));
+        let crate::semantic_query::QueryResult::Value(output) =
+            self.dispatch
+                .demand_type_node(crate::semantic_query::SemanticQueryKey::ProjectPath {
+                    base: contextual,
+                    path: verter_type_expr::OwnedSlice::from([
+                        crate::semantic_query::PathSegment::Member(
+                            crate::semantic_query::PropertyKey::identifier(Arc::from(name)),
+                        ),
+                    ]),
+                    context: crate::semantic_query::ProjectionReductionContext::published(
+                        crate::semantic_query::ProjectionMode::Navigate,
+                    ),
+                })
+        else {
+            return None;
+        };
+        (!matches!(
+            self.dispatch.graph().node_data(output.value).as_deref(),
+            None | Some(SemanticNodeData::Opaque(_))
+        ))
+        .then_some(output.value)
     }
 
     /// The checker's contextual type of the element at `position` of an
@@ -15731,7 +15921,10 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     } else if widening_nullish {
                         frame.parts.push((ReductionArm::plain(node), true));
                     } else {
-                        let read = self.widen_value_position_read(value, node);
+                        let read = match element_context {
+                            Some(context) if self.literal_of_contextual_type(node, context) => node,
+                            _ => self.widen_value_position_read(value, node),
+                        };
                         let read = if element_context.is_none() {
                             widen_unique_symbols(self.dispatch, read, self.nullability)
                         } else {
@@ -18117,6 +18310,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             break_exits: self.break_exits.len(),
             return_edges: self.return_edges.len(),
             throw_points: self.throw_points.len(),
+            checker_diagnostics: self.checker_diagnostics.len(),
         }
     }
 
@@ -18133,6 +18327,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             break_exits: self.break_exits.split_off(mark.break_exits),
             return_edges: self.return_edges.split_off(mark.return_edges),
             throw_points: self.throw_points.split_off(mark.throw_points),
+            checker_diagnostics: self.checker_diagnostics.split_off(mark.checker_diagnostics),
         }
     }
 
@@ -18146,6 +18341,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         self.break_exits.extend(tail.break_exits);
         self.return_edges.extend(tail.return_edges);
         self.throw_points.extend(tail.throw_points);
+        self.checker_diagnostics.extend(tail.checker_diagnostics);
     }
 
     /// Merge exactly the paths that continue past a conditional. A missing
@@ -19907,14 +20103,30 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// Apply one entered `asserts` call: the call is a throw point first
     /// (if it throws, the narrow never happened), then its predicate
     /// narrows the subject for the rest of the path — to the target, or by
-    /// truthiness for a targetless `asserts v`.
+    /// truthiness for a targetless `asserts v` — or, for a targetless
+    /// assertion passed a condition, the condition holds.
     fn apply_assertion(
         &mut self,
-        subject: &verter_session_query::flow::slice::SliceNarrowSubject,
-        target: Option<&verter_session_query::flow::slice::GatedType>,
+        claim: &verter_session_query::flow::slice::SliceAssertionClaim,
         call: verter_span::Span,
     ) {
+        use verter_session_query::flow::slice::SliceAssertionClaim;
         self.capture_throw_point();
+        let (subject, target) = match claim {
+            SliceAssertionClaim::Reference { subject, target } => (subject, target.as_ref()),
+            SliceAssertionClaim::Condition(guard) => {
+                // A targetless assertion over a condition: the condition
+                // holds past the call (`narrowType(…, assumeTrue)`), its
+                // positive reading landing for the rest of the region as a
+                // reference assertion's narrow does.
+                self.call_evidence.push(FlowCallEvidence {
+                    span: call,
+                    relations_decided: true,
+                });
+                self.apply_guard_scoped(guard, true);
+                return;
+            }
+        };
         // The assertion call's evidence, with the same discipline a
         // predicate call's narrowing takes: the call was evaluated, and
         // its relation decided (or not) the narrow it established. A
@@ -19984,12 +20196,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     /// an `asserts` call, or the join of a conditional's arms.
     fn apply_entered_effect(&mut self, effect: &verter_session_query::flow::slice::SliceStatement) {
         match effect {
-            verter_session_query::flow::slice::SliceStatement::Assertion {
-                subject,
-                target,
-                call,
-            } => {
-                self.apply_assertion(subject, target.as_ref(), *call);
+            verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
+                self.apply_assertion(claim, *call);
             }
             verter_session_query::flow::slice::SliceStatement::If {
                 guard,
@@ -24166,6 +24374,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                 if type_parameters.is_empty()
                         ) =>
                     {
+                        // The lone signature narrows only for a call it
+                        // applies to: the executor's applicability check
+                        // (the call's own evaluation reuses its cached
+                        // result) records the checker's diagnostic.
+                        self.record_lone_predicate_applicability(callee, site);
                         *only
                     }
                     _ => match self.resolve_call_step(
@@ -24185,8 +24398,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             // The checker's effects signature of a call no
                             // candidate applies to is its error-recovery
                             // candidate; the diagnostic rides the narrow.
-                            if let Some(diagnostic) = recovery_diagnostic {
-                                self.record_checker_diagnostic(diagnostic);
+                            if let Some(recipe) = recovery_diagnostic {
+                                self.record_call_diagnostic(&recipe, site);
                             }
                             selected_signature
                         }
@@ -24275,9 +24488,61 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     }
 
     /// Record a diagnostic the checker reports for one of this body's calls.
-    fn record_checker_diagnostic(&mut self, diagnostic: crate::semantic_query::CheckerDiagnostic) {
-        if !self.checker_diagnostics.contains(&diagnostic) {
-            self.checker_diagnostics.push(diagnostic);
+    fn record_checker_diagnostic(
+        &mut self,
+        occurrence: crate::semantic_query::CheckerDiagnosticOccurrence,
+    ) {
+        if !self.checker_diagnostics.contains(&occurrence) {
+            self.checker_diagnostics.push(occurrence);
+        }
+    }
+
+    /// The applicability check of a call to a lone non-generic predicate
+    /// signature: the executor route's diagnostic for an argument the
+    /// signature does not accept, recorded like the multi-signature path's.
+    fn record_lone_predicate_applicability(
+        &mut self,
+        callee: SemanticNodeId,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) {
+        let recipe = match self.resolve_call_step(
+            callee,
+            site,
+            &verter_session_query::flow::slice::SliceCallArguments::none(),
+        ) {
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Complete(
+                crate::semantic_query::ResolvedCallResult::Selected {
+                    recovery_diagnostic,
+                    ..
+                },
+            ))) => recovery_diagnostic,
+            Some(Positional::Value(super::call_resolve::ResolveCallStep::Degraded(
+                crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
+            ))) => Some(recipe),
+            _ => None,
+        };
+        if let Some(recipe) = recipe {
+            self.record_call_diagnostic(&recipe, site);
+        }
+    }
+
+    /// Record the diagnostic `recipe` a call's result carries, bound to the
+    /// call at `site`: its subject read off the report positions the
+    /// call's executor route recorded for it, its message printed and
+    /// elaborated now. A recipe the call's positions cannot place, or whose
+    /// elaboration is not modelled, records nothing: a diagnostic is never
+    /// moved to a position, or given a message, the checker's is not.
+    fn record_call_diagnostic(
+        &mut self,
+        recipe: &crate::semantic_query::CheckerDiagnosticRecipe,
+        site: verter_session_query::flow::slice::SliceCallSite,
+    ) {
+        let Some(positions) = self.call_diagnostic_sites.get(&site.span()) else {
+            return;
+        };
+        let printer = FlowDiagnosticPrinter(self.dispatch);
+        for occurrence in recipe.bind(positions, &printer).into_iter().flatten() {
+            self.record_checker_diagnostic(occurrence);
         }
     }
 
@@ -26131,11 +26396,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         frame.dead_at_never_call = true;
                     }
                 }
-                verter_session_query::flow::slice::SliceStatement::Assertion {
-                    subject,
-                    target,
-                    call,
-                } => {
+                verter_session_query::flow::slice::SliceStatement::Assertion { claim, call } => {
                     // A same-file assertion call: the narrowing fact lives
                     // in the callee's declared return, and it PERSISTS for
                     // the rest of the region (there is no arm scope to
@@ -26145,11 +26406,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     // happened, so the snapshot precedes the fact. A
                     // TARGETLESS `asserts v` narrows by truthiness: the
                     // definitely-falsy arms leave the subject's type.
-                    self.apply_assertion(subject, target.as_ref(), *call);
+                    self.apply_assertion(claim, *call);
                 }
                 verter_session_query::flow::slice::SliceStatement::CalleeEffect {
                     callee,
                     arguments,
+                    conditions,
                     site,
                 } => {
                     // The call throws before any effect it asserts.
@@ -26163,15 +26425,39 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                             }
                         }
                         CalleeStatementEffect::Assertion { parameter, target } => {
-                            if let Some(Some(subject)) = arguments.get(parameter) {
-                                let fact = match target {
-                                    Some(target) => {
-                                        self.narrow_to_predicate_node(subject, target, false).0
+                            // A targetless assertion over a condition (an
+                            // aliased one included): the condition holds
+                            // past the call.
+                            let condition = match target {
+                                None => conditions.get(parameter).and_then(Option::as_ref),
+                                Some(_) => None,
+                            };
+                            match condition {
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Guard(
+                                        guard,
+                                    ),
+                                ) => self.apply_guard_scoped(guard, true),
+                                Some(
+                                    verter_session_query::flow::slice::SliceAssertionCondition::Unexpressible,
+                                ) => self.record_degradation(
+                                    crate::semantic_query::FlowReturnDegradation::FlowGap(
+                                        verter_session_query::flow::policy::FlowGap::GuardNarrowing,
+                                    ),
+                                ),
+                                None => {
+                                    if let Some(Some(subject)) = arguments.get(parameter) {
+                                        let fact = match target {
+                                            Some(target) => {
+                                                self.narrow_to_predicate_node(subject, target, false)
+                                                    .0
+                                            }
+                                            None => self.narrow_truthy(subject, false),
+                                        };
+                                        if let GuardNarrowing::Narrowed(subject, node) = fact {
+                                            self.push_narrowing(&subject, node);
+                                        }
                                     }
-                                    None => self.narrow_truthy(subject, false),
-                                };
-                                if let GuardNarrowing::Narrowed(subject, node) = fact {
-                                    self.push_narrowing(&subject, node);
                                 }
                             }
                         }
@@ -27512,11 +27798,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }
                     Some(Waiting::Sequence(after)) => {
                         if let Some(assertion) = after {
-                            self.apply_assertion(
-                                &assertion.subject,
-                                assertion.target.as_ref(),
-                                assertion.call,
-                            );
+                            self.apply_assertion(&assertion.claim, assertion.call);
                         }
                     }
                     Some(Waiting::Arithmetic {
@@ -28164,11 +28446,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 let outcome = self.eval_expr(value);
                 if let Some(assertion) = after {
-                    self.apply_assertion(
-                        &assertion.subject,
-                        assertion.target.as_ref(),
-                        assertion.call,
-                    );
+                    self.apply_assertion(&assertion.claim, assertion.call);
                 }
                 outcome
             }
@@ -28640,6 +28918,20 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         {
             return true;
         }
+        // A lone non-generic signature with a DECLARED return answers that
+        // return whether or not the call applies, but the checker still
+        // checks the call against it: the executor decides applicability,
+        // so the diagnostic of a call it does not accept rides the answer.
+        // A parameterless signature called with no arguments cannot be
+        // refused, so its declared return is read as it stands.
+        if self
+            .lone_declared_signature(&call_sigs, &construct_sigs)
+            .is_some_and(|only| {
+                site.supplies_parameter_ordinal(0) || self.signature_takes_parameters(only)
+            })
+        {
+            return true;
+        }
         let supplies_evidence =
             site.supplies_parameter_ordinal(0) || site.has_explicit_type_arguments();
         if !supplies_evidence {
@@ -28657,6 +28949,56 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     }) if !type_parameters.is_empty()
                 )
             })
+    }
+
+    /// Whether `callee`'s one signature is a lone non-generic one with a
+    /// DECLARED return ([`Self::lone_declared_signature`]): a refusal of
+    /// its call leaves that declared return, read by the caller's own
+    /// rail, as the answer.
+    fn callee_is_lone_declared(&self, callee: SemanticNodeId) -> bool {
+        self.dispatch
+            .shared_signature_buckets(callee)
+            .is_ok_and(|(call_sigs, construct_sigs)| {
+                self.lone_declared_signature(&call_sigs, &construct_sigs)
+                    .is_some()
+            })
+    }
+
+    /// The one signature of a bucket holding exactly one, non-generic, whose
+    /// return is DECLARED: its answer does not depend on the arguments, so
+    /// resolving the call through the executor changes no value and only
+    /// adds the applicability check the checker runs.
+    fn lone_declared_signature(
+        &self,
+        call_sigs: &[SemanticNodeId],
+        construct_sigs: &[SemanticNodeId],
+    ) -> Option<SemanticNodeId> {
+        let [only] = (if call_sigs.is_empty() {
+            construct_sigs
+        } else if construct_sigs.is_empty() {
+            call_sigs
+        } else {
+            return None;
+        }) else {
+            return None;
+        };
+        matches!(
+            self.dispatch.arena().node_data(*only).as_deref(),
+            Some(SemanticNodeData::Signature {
+                type_parameters,
+                return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
+                ..
+            }) if type_parameters.is_empty()
+        )
+        .then_some(*only)
+    }
+
+    /// Whether the signature declares any parameter.
+    fn signature_takes_parameters(&self, signature: SemanticNodeId) -> bool {
+        matches!(
+            self.dispatch.arena().node_data(signature).as_deref(),
+            Some(SemanticNodeData::Signature { params, .. }) if !params.is_empty()
+        )
     }
 
     /// Whether a signature of `callee` reads its own type parameters in
@@ -28712,6 +29054,36 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 }
                 false
             })
+    }
+
+    /// Whether a call of the callee type has an applicability to decide: the
+    /// callee has exactly one call signature, it declares no type
+    /// parameters, and the call supplies arguments or the signature takes
+    /// parameters. A parameterless signature called with no arguments cannot
+    /// be refused, so its declared return stays the retained answer.
+    fn callee_call_needs_applicability_check(
+        &self,
+        callee_node: SemanticNodeId,
+        argument_count: usize,
+    ) -> bool {
+        let resolved = self.dispatch.resolve_signature_source_carrier(
+            callee_node,
+            crate::semantic_query::ProjectionReductionContext::structural_transit(),
+        );
+        let super::signature_utility::AuthoredSignatures::Nodes(signatures) = self
+            .dispatch
+            .authored_signatures_of(resolved, crate::semantic_query::SignatureKind::Call)
+        else {
+            return false;
+        };
+        let [only] = signatures.as_slice() else {
+            return false;
+        };
+        matches!(
+            self.dispatch.graph().node_data(*only).as_deref(),
+            Some(SemanticNodeData::Signature { params, type_parameters, .. })
+                if type_parameters.is_empty() && (argument_count > 0 || !params.is_empty())
+        )
     }
 
     /// Whether `signature`'s value depends on the receiver it is called
@@ -28818,8 +29190,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         let step = match step {
             Some(Positional::Value(step)) => step,
             Some(Positional::Hold) => return Some(Positional::Hold),
+            // A route that cannot type the call decides nothing: a lone
+            // declared callee's caller still reads its declared return, but
+            // its applicability went unchecked, so the result is a recorded
+            // gap, never claimed complete.
             Some(Positional::Unmodeled) | None => {
-                return Some(self.degraded_unrepresentable_callee())
+                if self.callee_is_lone_declared(callee) {
+                    self.record_degradation(
+                        crate::semantic_query::FlowReturnDegradation::UnrepresentableCallee,
+                    );
+                    return None;
+                }
+                return Some(self.degraded_unrepresentable_callee());
             }
         };
         match step {
@@ -28830,11 +29212,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // frame's freshness widening — the return join widens it,
                 // a value position keeps it.
                 if let crate::semantic_query::ResolvedCallResult::Selected {
-                    recovery_diagnostic: Some(diagnostic),
+                    recovery_diagnostic: Some(recipe),
                     ..
                 } = &result
                 {
-                    self.record_checker_diagnostic(*diagnostic);
+                    self.record_call_diagnostic(recipe, site);
                 }
                 if let crate::semantic_query::ResolvedCallResult::Selected {
                     selected_signature,
@@ -28868,24 +29250,26 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                         .partial_reasons()
                         .contains(crate::semantic_query::PartialReasonSet::OPERATION_BUDGET);
                     if let QueryResult::Value(node) = read.value {
-                        let diagnostic = self.dispatch.arena().node_data(node).and_then(|data| {
-                            match data.as_ref() {
-                                SemanticNodeData::Opaque(QueryError::CheckerRecovery {
-                                    diagnostic,
-                                    ..
-                                }) => Some(*diagnostic),
-                                _ => None,
-                            }
-                        });
+                        let recovers = matches!(
+                            self.dispatch.arena().node_data(node).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::CheckerRecovery { .. }))
+                        );
                         if budget {
                             self.record_degradation(
                                 crate::semantic_query::FlowReturnDegradation::OperationBudget,
                             );
                         }
-                        if let Some(diagnostic) = diagnostic {
-                            self.record_checker_diagnostic(diagnostic);
+                        // Bound now, to this body's file: the recovery's
+                        // message arguments and authored report location are
+                        // read off the carrier at this call, never kept from
+                        // another caller's bind.
+                        if let Some(occurrence) =
+                            self.dispatch
+                                .bind_checker_recovery(node, self.canonical, site.span())
+                        {
+                            self.record_checker_diagnostic(occurrence);
                         }
-                        if budget || diagnostic.is_some() {
+                        if budget || recovers {
                             returned = node;
                         }
                     }
@@ -28899,10 +29283,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             // it on the component's admitted results.
             super::call_resolve::ResolveCallStep::Hold(_) => Some(Positional::Hold),
             super::call_resolve::ResolveCallStep::Degraded(
-                crate::semantic_query::ResolveCallFailure::Diagnosed(diagnostic),
+                crate::semantic_query::ResolveCallFailure::Diagnosed(recipe),
             ) => {
-                self.record_checker_diagnostic(diagnostic);
-                Some(self.degraded_unrepresentable_callee())
+                self.record_call_diagnostic(&recipe, site);
+                (!self.callee_is_lone_declared(callee))
+                    .then(|| self.degraded_unrepresentable_callee())
             }
             // A PROVEN refusal — the callee is not callable, or no
             // overload accepts the authored arguments — is the typed
@@ -28916,7 +29301,8 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 crate::semantic_query::ResolveCallFailure::NotCallable
                 | crate::semantic_query::ResolveCallFailure::NoApplicableOverload
                 | crate::semantic_query::ResolveCallFailure::ContextSensitiveInference { .. },
-            ) => Some(self.degraded_unrepresentable_callee()),
+            ) => (!self.callee_is_lone_declared(callee))
+                .then(|| self.degraded_unrepresentable_callee()),
             // An UNDECIDED executor (the machinery cannot decide this
             // shape, or a budget edge) is NOT a refusal: the caller
             // falls back to this rail's own read of the same call. That
@@ -29128,6 +29514,18 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     else {
                         return self.degraded_unrepresentable_callee();
                     };
+                    // The checker still checks the call against the annotated
+                    // type: for a lone non-generic signature the executor
+                    // decides applicability first, and an undecided executor
+                    // leaves the declared-return read. A generic callee keeps
+                    // the interim answer (no call-site instantiation here).
+                    if self.callee_call_needs_applicability_check(callee_node, arguments.len()) {
+                        if let Some(value) =
+                            self.eval_call_via_resolve_call(callee_node, site, arguments)
+                        {
+                            return value;
+                        }
+                    }
                     return self.call_return_of_callee_node(callee_node, site);
                 }
                 let ordinal = match &target.part {
@@ -29171,6 +29569,29 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                     return self
                         .eval_call_via_resolve_call(callee, site, arguments)
                         .unwrap_or_else(|| self.degraded_unrepresentable_callee());
+                }
+                // A lone non-generic callee with a DECLARED return answers
+                // that return whatever the arguments, and the checker still
+                // checks the call: the executor decides applicability so a
+                // call it does not accept carries the checker's diagnostic.
+                // An undecided executor leaves the declared read below.
+                if prepared.as_ref().is_some_and(|prepared| {
+                    matches!(
+                        prepared.signatures.as_slice(),
+                        [signature] if signature.type_parameters.is_empty()
+                            && matches!(
+                                signature.return_source,
+                                verter_type_expr::facts::FunctionReturnSource::Declared(_)
+                            )
+                    )
+                }) {
+                    if let Some(callee) = self.direct_callee_value_node(target) {
+                        if let Some(value) =
+                            self.eval_call_via_resolve_call(callee, site, arguments)
+                        {
+                            return value;
+                        }
+                    }
                 }
                 let source = prepared.as_ref().and_then(|prepared| {
                     prepared
@@ -29390,10 +29811,16 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 // The binding's own reaching definition wins; the
                 // parameter ordinal is the FALLBACK a `var` redeclaring
                 // a parameter name resolves to before its declarator
-                // runs (mirrors the `Local` read).
-                let node = self.read_local(binding).or_else(|| {
-                    param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
-                });
+                // runs (mirrors the `Local` read). A narrowing standing on
+                // the binding is what the callee reads, as any read of it
+                // does: `typeof f === "function"` leaves `f()` calling the
+                // callable arms alone.
+                let node = self
+                    .frame_binding_read(binding)
+                    .or_else(|| self.read_local(binding))
+                    .or_else(|| {
+                        param.and_then(|ordinal| self.params.get(ordinal as usize).copied())
+                    });
                 let Some(node) = node else {
                     // A CAPTURED callee the seeded snapshot does not carry
                     // has no honest value: the POSITION carries the marker
