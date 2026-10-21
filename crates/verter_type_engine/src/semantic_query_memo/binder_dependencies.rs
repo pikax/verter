@@ -95,31 +95,53 @@ impl SemanticGraphStore {
         }
         let mut done: FxHashMap<SemanticNodeId, Arc<BinderDependencies>> = FxHashMap::default();
         let mut active = FxHashSet::default();
-        let mut work = vec![(root, false)];
-        while let Some((node, finish)) = work.pop() {
-            if done.contains_key(&node) {
-                continue;
-            }
-            if let Some(summary) = self.binder_dependencies_cached(node) {
-                done.insert(node, summary);
-                continue;
-            }
-            let Some(data) = self.node_data(node) else {
-                done.insert(node, Arc::new(BinderDependencies::default()));
-                continue;
-            };
-            let mut children = Vec::new();
-            let children_complete = matches!(
-                data.for_each_child(|child| children.push(child)),
-                crate::semantic_query::ChildWalk::Enumerated
-            );
-            if !finish {
-                if !active.insert(node) {
-                    done.insert(node, Arc::new(BinderDependencies::default()));
+        // A node is read once, on entry; its finish step keeps what the
+        // entry read.
+        let mut work = vec![BinderWalk::Enter(root)];
+        while let Some(step) = work.pop() {
+            let (node, data, children, children_complete) = match step {
+                BinderWalk::Enter(node) => {
+                    if done.contains_key(&node) {
+                        continue;
+                    }
+                    if let Some(summary) = self.binder_dependencies_cached(node) {
+                        done.insert(node, summary);
+                        continue;
+                    }
+                    let Some(data) = self.node_data(node) else {
+                        done.insert(node, Arc::new(BinderDependencies::default()));
+                        continue;
+                    };
+                    if !active.insert(node) {
+                        done.insert(node, Arc::new(BinderDependencies::default()));
+                        continue;
+                    }
+                    let mut children = Vec::new();
+                    let children_complete = matches!(
+                        data.for_each_child(|child| children.push(child)),
+                        crate::semantic_query::ChildWalk::Enumerated
+                    );
+                    let finish = work.len();
+                    work.extend(children.iter().rev().copied().map(BinderWalk::Enter));
+                    work.insert(
+                        finish,
+                        BinderWalk::Finish {
+                            node,
+                            data,
+                            children,
+                            children_complete,
+                        },
+                    );
                     continue;
                 }
-                work.push((node, true));
-                work.extend(children.into_iter().rev().map(|child| (child, false)));
+                BinderWalk::Finish {
+                    node,
+                    data,
+                    children,
+                    children_complete,
+                } => (node, data, children, children_complete),
+            };
+            if done.contains_key(&node) {
                 continue;
             }
             active.remove(&node);
@@ -168,4 +190,17 @@ impl SemanticGraphStore {
         }
         done.remove(&root).unwrap_or_default()
     }
+}
+
+/// One step of [`SemanticGraphStore::binder_dependencies_for`]'s walk.
+enum BinderWalk {
+    /// Read the node and enter its children.
+    Enter(SemanticNodeId),
+    /// Summarise the node from its finished children.
+    Finish {
+        node: SemanticNodeId,
+        data: super::NodeData,
+        children: Vec<SemanticNodeId>,
+        children_complete: bool,
+    },
 }

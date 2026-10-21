@@ -2142,7 +2142,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => None,
         };
 
-        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut stack: Vec<SemanticNodeId> = Vec::new();
         stack.push(root);
         while let Some(node) = stack.pop() {

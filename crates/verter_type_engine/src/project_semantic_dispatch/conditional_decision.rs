@@ -2263,10 +2263,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     fn type_is_generic_operand(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
         let graph = self.graph();
         let mut pending = vec![(node, infer_operand)];
-        let mut seen: rustc_hash::FxHashSet<(SemanticNodeId, bool)> =
-            rustc_hash::FxHashSet::default();
+        // One visited set per operand position: a node met as an infer
+        // operand and as an ordinary operand is visited once in each.
+        let mut seen = [
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+        ];
         while let Some((node, infer_operand)) = pending.pop() {
-            if !seen.insert((node, infer_operand)) {
+            if !seen[usize::from(infer_operand)].insert(node) {
                 continue;
             }
             let Some(data) = graph.node_data(node) else {
