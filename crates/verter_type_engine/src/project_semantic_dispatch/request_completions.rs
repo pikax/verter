@@ -42,7 +42,7 @@ use verter_session_query::retention::{
 
 use super::WorkspaceEdit;
 use crate::semantic_query::{CacheRead, QueryResult, SemanticQueryKey, SemanticQueryValue};
-use crate::semantic_query_memo::{CompletedCarrier, SemanticGraphStore};
+use crate::semantic_query_memo::SemanticGraphStore;
 
 type ValueRead = CacheRead<QueryResult<SemanticQueryValue>>;
 
@@ -107,13 +107,12 @@ pub(crate) struct RequestCompletionTier {
 }
 
 /// One kept result: the read (with the receipt its computation sealed),
-/// the carrier its readers replay with the self-roots it completed under,
-/// the edit clocks it was computed under, and its share of the retention
-/// charge it was kept under — the result's own, or the one charge its whole
-/// relation component shares.
+/// the carrier its readers replay, the edit clocks it was computed under,
+/// and its share of the retention charge it was kept under — the result's
+/// own, or the one charge its whole relation component shares.
 pub(super) struct CompletedResult {
     pub(super) read: ValueRead,
-    pub(super) completed: CompletedCarrier,
+    pub(super) carrier: ReadSetSignature,
     pub(super) completed_at: WorkspaceEdit,
     _retention: Arc<RetentionCharge>,
 }
@@ -145,7 +144,7 @@ impl RequestCompletionTier {
             if result.completed_at != edit {
                 return None;
             }
-            (result.read.clone(), result.completed.carrier.clone())
+            (result.read.clone(), result.carrier.clone())
         };
         serves(&read.value).then_some((read, carrier))
     }
@@ -158,7 +157,7 @@ impl RequestCompletionTier {
         graph: &SemanticGraphStore,
         key: &SemanticQueryKey,
         read: &ValueRead,
-        completed: CompletedCarrier,
+        carrier: ReadSetSignature,
         completed_at: WorkspaceEdit,
     ) {
         let RetentionAdmission::Admitted(retention) = graph
@@ -171,7 +170,7 @@ impl RequestCompletionTier {
             key.clone(),
             CompletedResult {
                 read: read.clone(),
-                completed,
+                carrier,
                 completed_at,
                 _retention: Arc::new(retention),
             },
@@ -186,7 +185,7 @@ impl RequestCompletionTier {
         &self,
         graph: &SemanticGraphStore,
         members: Vec<(SemanticQueryKey, ValueRead)>,
-        completed: &CompletedCarrier,
+        carrier: &ReadSetSignature,
         completed_at: WorkspaceEdit,
     ) -> bool {
         if members.is_empty() {
@@ -209,7 +208,7 @@ impl RequestCompletionTier {
                 key,
                 CompletedResult {
                     read,
-                    completed: completed.clone(),
+                    carrier: carrier.clone(),
                     completed_at,
                     _retention: Arc::clone(&retention),
                 },
@@ -223,13 +222,14 @@ impl RequestCompletionTier {
         self.completed.lock().len()
     }
 
-    /// The self-roots the result kept for `key` completed under.
+    /// Every canonical the carrier of the result kept for `key` depends
+    /// on.
     #[cfg(any(test, feature = "test-support"))]
-    pub(super) fn self_roots_for_tests(&self, key: &SemanticQueryKey) -> Option<Arc<[Arc<str>]>> {
+    pub(super) fn canonicals_for_tests(&self, key: &SemanticQueryKey) -> Option<Vec<Arc<str>>> {
         self.completed
             .lock()
             .get(key)
-            .map(|result| Arc::clone(&result.completed.self_roots))
+            .map(|result| result.carrier.canonical_ids())
     }
 }
 

@@ -15,7 +15,7 @@ use crate::semantic_query::{
     LiteralValue, ReadReceipt, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
     SemanticQueryValue,
 };
-use crate::semantic_query_memo::{CompletedCarrier, SemanticGraphStore};
+use crate::semantic_query_memo::SemanticGraphStore;
 
 fn edit(content: u64) -> WorkspaceEdit {
     WorkspaceEdit {
@@ -25,11 +25,8 @@ fn edit(content: u64) -> WorkspaceEdit {
     }
 }
 
-fn completed() -> CompletedCarrier {
-    CompletedCarrier {
-        carrier: ReadSetSignature::new(Arc::from(Vec::new())),
-        self_roots: Arc::from(Vec::new()),
-    }
+fn completed() -> ReadSetSignature {
+    ReadSetSignature::new(Arc::from(Vec::new()))
 }
 
 fn store(limits: RetentionLimits) -> (Arc<SemanticRetentionAccount>, SemanticGraphStore) {

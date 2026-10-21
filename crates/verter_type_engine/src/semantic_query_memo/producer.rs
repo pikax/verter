@@ -1228,15 +1228,6 @@ fn settle_output(
     }
 }
 
-/// The rails a completed result is kept on outside the family memo: the
-/// carrier every read of it replays and the self-roots that carrier
-/// completed under — what a memo candidate records.
-#[derive(Clone)]
-pub(crate) struct CompletedCarrier {
-    pub(crate) carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
-    pub(crate) self_roots: Arc<[Arc<str>]>,
-}
-
 impl SemanticGraphStore {
     /// Complete a build the requesting dispatcher ran for itself after the
     /// lookup `attempt` missed, outside the family memo's claim: the key's
@@ -1244,7 +1235,7 @@ impl SemanticGraphStore {
     /// enters the family memo. The output
     /// settles exactly as a producer's does ([`ProducerLease::settle`]),
     /// its carrier is delivered through `capture`, and the read
-    /// carries the receipt its recording sealed. The returned rails are
+    /// carries the receipt its recording sealed. The returned carrier is
     /// `Some` when the result is complete, cacheable and priced — what the
     /// request may keep and serve again — and `None` otherwise. A
     /// cancelled request answers with the cancellation read.
@@ -1257,7 +1248,10 @@ impl SemanticGraphStore {
             Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
         >,
         capture: &mut ReadCapture<'_>,
-    ) -> (ValueRead, Option<CompletedCarrier>) {
+    ) -> (
+        ValueRead,
+        Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+    ) {
         if !attempt.miss_recorded {
             // The one miss a claim of the key records.
             self.stats.misses.fetch_add(1, Ordering::Relaxed);
@@ -1286,11 +1280,7 @@ impl SemanticGraphStore {
             fact_status: settled.fact_status,
             receipt: cost_receipt.into(),
         };
-        let kept = settled.admissible.then(|| CompletedCarrier {
-            carrier: settled.carrier,
-            self_roots: settled.self_root_canonicals,
-        });
-        (read, kept)
+        (read, settled.admissible.then_some(settled.carrier))
     }
 
     /// The read a member of a component completed for the request is kept
@@ -1592,13 +1582,12 @@ impl SettledProducer<'_> {
         Ok(())
     }
 
-    /// The published result's fact carrier and self-roots, when
-    /// [`Self::admit`] entered it into the family memo.
-    pub(crate) fn published_carrier(&self) -> Option<CompletedCarrier> {
-        self.published.then(|| CompletedCarrier {
-            carrier: self.carrier.clone(),
-            self_roots: Arc::clone(&self.self_root_canonicals),
-        })
+    /// The published result's fact carrier, when [`Self::admit`] entered
+    /// it into the family memo.
+    pub(crate) fn published_carrier(
+        &self,
+    ) -> Option<verter_session_query::facts::fact_cache::ReadSetSignature> {
+        self.published.then(|| self.carrier.clone())
     }
 
     fn abort_for_cancellation(&self) -> ValueRead {

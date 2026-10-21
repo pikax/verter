@@ -1793,12 +1793,11 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
 }
 
 /// A mixed relation <-> flow component's members ride the UNION carrier:
-/// the flow member's self-roots cover every component file — its own file
-/// AND the files of the relation members' nodes. The decision reads its
+/// the flow member's carrier covers every component file — its own file AND
+/// the files of the relation members' nodes. The decision reads its
 /// relation nested in its own evaluation, so the relation completes for the
 /// request with its whole component, which the request keeps on the root's
-/// carrier. Mutation recipe: keeping the member with its own relation-only
-/// self-root set drops the other files from it.
+/// carrier.
 ///
 /// The conditional relates object types holding the classes: a decision
 /// instantiates operands that name declarations before it relates them,
@@ -1894,7 +1893,7 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             "a member of a component the request completed never enters the family memo"
         );
         let roots = dispatch
-            .request_kept_self_roots_for_tests(&key)
+            .request_kept_canonicals_for_tests(&key)
             .expect("the request keeps the component's flow member");
         // The member's own file AND every relation member's node file
         // (the relation root's own demanding file is not a relation input

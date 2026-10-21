@@ -1267,8 +1267,8 @@ The tier keeps (`keep_published`) the results the request's builds published
 — admitted results, kept for a claim the memo cannot serve back to the
 request's own view (the candidate records facts newer than the view) — and
 its request-local completions, each with its read (and the receipt its
-computation sealed), its carrier and self-roots (`CompletedCarrier`), and the
-workspace edit clocks it was computed at. Every entry holds a `Retained`
+computation sealed), its carrier, and the workspace edit clocks it was
+computed at. Every entry holds a `Retained`
 charge on the process retention account: a refused reservation keeps nothing,
 and the result's delivery stays its only owner. A kept result serves
 (`own_published_read`, `kept_value_read`) only while its edit clocks are
@@ -1314,8 +1314,8 @@ A relation root completed for the request keeps its component with it
 (`relation_keep_completed_component`): the root and every member the
 component completed that a published root's batched member publish would
 admit — decided binary relation members, proven flow members and call
-members, each with a flight — kept under the root's carrier, self-roots,
-receipt and edit clocks (`completed_member_read`), under ONE charge for the
+members, each with a flight — kept under the root's carrier, receipt and
+edit clocks (`completed_member_read`), under ONE charge for the
 whole component, all or nothing (`RequestCompletionTier::keep_component`). The
 members' flights end unpublished (a joiner computes again; a reader in the
 request finds the kept member), and the inline relation, flow-return and

@@ -4301,7 +4301,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         read: &crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
-        completed: Option<crate::semantic_query_memo::CompletedCarrier>,
+        carrier: Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
         computed_at: super::WorkspaceEdit,
     ) {
         let (members, flow_members, call_members) = {
@@ -4317,9 +4317,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         let graph = self.graph();
-        let component = completed
+        let component = carrier
             .filter(|_| !read.result_is_partial() && read.receipt.priced().is_some())
-            .and_then(|completed| {
+            .and_then(|carrier| {
                 let member_read = |value: SemanticQueryValue| {
                     graph
                         .completed_member_read(value, read.receipt.clone())
@@ -4370,11 +4370,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         ))?,
                     ));
                 }
-                Some((kept, completed))
+                Some((kept, carrier))
             });
-        if let Some((kept, completed)) = component {
+        if let Some((kept, carrier)) = component {
             self.completions
-                .keep_component(graph, kept, &completed, computed_at);
+                .keep_component(graph, kept, &carrier, computed_at);
         }
         for member in &members {
             self.abort_inline_flight(member.inline_flight.as_ref());

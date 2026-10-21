@@ -1912,14 +1912,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &SemanticQueryKey,
         read: &CacheRead<QueryResult<SemanticQueryValue>>,
-        completed: crate::semantic_query_memo::CompletedCarrier,
+        carrier: verter_session_query::facts::fact_cache::ReadSetSignature,
         computed_at: WorkspaceEdit,
     ) {
         if read.result_is_partial() || read.receipt.priced().is_none() {
             return;
         }
         self.completions
-            .keep(self.graph(), key, read, completed, computed_at);
+            .keep(self.graph(), key, read, carrier, computed_at);
     }
 
     /// How many results the request's completion tier keeps on this
@@ -1929,14 +1929,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.completions.len()
     }
 
-    /// The self-roots the result the request kept for `key` completed
-    /// under, when the request keeps one.
+    /// Every canonical the carrier of the result the request kept for
+    /// `key` depends on, when the request keeps one.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn request_kept_self_roots_for_tests(
+    pub fn request_kept_canonicals_for_tests(
         &self,
         key: &SemanticQueryKey,
-    ) -> Option<Arc<[Arc<str>]>> {
-        self.completions.self_roots_for_tests(key)
+    ) -> Option<Vec<Arc<str>>> {
+        self.completions.canonicals_for_tests(key)
     }
 
     /// The workspace's edit clocks now.
