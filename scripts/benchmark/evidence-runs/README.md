@@ -85,7 +85,10 @@ module count, props and oversized props, its largest published input bytes,
 the components whose results it holds live at once, its absolute
 live-artifact, registered-source and snapshot-lease maxima, and its finite
 retained-byte bound — fixed figures a larger request never enlarges; the
-full surge's retained bound is the ratified aggregate ceiling); the
+full surge's retained bound is the ratified aggregate ceiling). The driver
+requires both complete shapes with finite positive integer limits, rejects
+requests larger than their declared populations, and checks each retained
+bound against the applicable retention policy. The
 runner records what it actually published and the verdict fails any action
 whose publications differ, so a fixture the freeze omits fails the run. The
 runner's test (`cargo nextest run -p verter_bench --features soak-support -E
@@ -110,6 +113,13 @@ own deltas and window peaks, never lifetime counters) are read on every
 worker; wall time, peak RSS and the process-tree peak are `benchM3Only`
 cells. A soak manifest carries `name`, `kind`, `description`, `modes`,
 `noise`, `soak` and `requiredCells` (`mode`, `metrics`, `benchM3Only`).
+
+Candidate churn records the demanded slot's admission tokens and declared
+cap: an old token leaving while a new one enters at the cap proves displacement.
+An unchanged aggregate candidate count alone does not. Concurrent refusal
+demands report `null` for unmeasured work counters; only measured zero counters
+can prove a replay without recomputation. Paid-context controls also record and
+check their equal entry allowance.
 
 | Field                             | Meaning                                                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

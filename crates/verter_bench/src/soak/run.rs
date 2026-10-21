@@ -229,12 +229,13 @@ pub struct PressureEvidence {
     pub memo_candidates_before: u64,
     /// Retained memo candidates when it finished.
     pub memo_candidates_after: u64,
-    /// For a candidate churn: the retained memo candidate count before the
-    /// churn and after each published version, in order. A step that admits
-    /// grows it; a step after an admission that does not grow it displaced a
-    /// candidate.
+    /// Exact admission tokens in the demanded identity's slot before the
+    /// churn and after each published version. Removal plus a new admission
+    /// at the slot's cap witnesses displacement, independently of refusals.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub memo_candidate_trace: Vec<u64>,
+    pub memo_candidate_trace: Vec<Vec<u64>>,
+    /// The demanded family's declared candidate cap (zero for a surge).
+    pub memo_candidate_cap: usize,
     /// Reservations refused because the active class was exhausted while
     /// the action ran.
     pub refusals_active: u64,
@@ -916,6 +917,7 @@ impl Engine {
             memo_candidates_before: before.semantic_memo_candidates as u64,
             memo_candidates_after: after.semantic_memo_candidates as u64,
             memo_candidate_trace: Vec::new(),
+            memo_candidate_cap: 0,
             refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
             retained_results: Some(retained_results),
             surge_counts: Some(surge_counts),
@@ -1163,7 +1165,11 @@ impl Engine {
             }
             (CandidateChurn, Target::Churn { file, alias, edits }) => {
                 let before = host.retention_snapshot();
-                let mut trace = vec![before.semantic_memo_candidates as u64];
+                let graph = host.project_type_store().semantic_graph();
+                let key = resolve_decl_key(file, alias);
+                let candidates = || graph.slot_candidate_admission_seqs_for_tests(&key);
+                let cap = graph.family_candidate_cap_for_tests(&key);
+                let mut trace = vec![candidates()];
                 'churn: {
                     for edit in 0..*edits {
                         let text = fixtures::module_source(self.mode, action.tranche, 100 + edit);
@@ -1172,7 +1178,7 @@ impl Engine {
                             break 'churn;
                         }
                         observe(&mut record, demand(&self.host, file, alias, None));
-                        trace.push(host.retention_snapshot().semantic_memo_candidates as u64);
+                        trace.push(candidates());
                         if record.outcome != Outcome::Value {
                             break 'churn;
                         }
@@ -1188,6 +1194,7 @@ impl Engine {
                     memo_candidates_before: before.semantic_memo_candidates as u64,
                     memo_candidates_after: after.semantic_memo_candidates as u64,
                     memo_candidate_trace: trace,
+                    memo_candidate_cap: cap,
                     refusals_active: after.refusals_active.saturating_sub(before.refusals_active),
                     retained_results: None,
                     surge_counts: None,

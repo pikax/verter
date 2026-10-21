@@ -459,6 +459,7 @@ fn evidence() -> IsolationEvidence {
     IsolationEvidence {
         callback_ran: true,
         ops_before: 36,
+        other_context_ops: 36,
         same_budget: true,
         spent: answer("spent", AnswerClass::OperationProfile),
         isolated: answer("isolated", AnswerClass::Complete),
@@ -489,7 +490,8 @@ fn isolation_details(evidence: &IsolationEvidence) -> Vec<String> {
 fn isolation_rules_fail_each_broken_property() {
     assert!(isolation_details(&evidence()).is_empty());
     type Break = fn(&mut IsolationEvidence);
-    let cases: [(&str, Break); 17] = [
+    let cases: [(&str, Break); 18] = [
+        ("equal entry allowance", |e| e.other_context_ops += 1),
         // A different paid context must compute, match its own cold oracle
         // and be a refusal, not reuse the first context's retained refusal
         // or a complete answer.
@@ -557,8 +559,8 @@ fn demand(role: DemandRole, answer: Answer, work: u64) -> Demand {
     Demand {
         role,
         answer,
-        recomputes: work,
-        producer_runs: work,
+        recomputes: Some(work),
+        producer_runs: Some(work),
     }
 }
 
@@ -687,12 +689,20 @@ fn refusal_rules_fail_each_broken_property() {
     // A replay that recomputed, by either counter, is not a retained refusal.
     for variant in [RefusalVariant::Sealed, RefusalVariant::DepthSealed] {
         fails(
-            broken(variant, |e| e.demands[1].recomputes = 2),
+            broken(variant, |e| e.demands[1].recomputes = Some(2)),
             "a replay that resolved again",
         );
         fails(
-            broken(variant, |e| e.demands[1].producer_runs = 1),
+            broken(variant, |e| e.demands[1].producer_runs = Some(1)),
             "a replay that ran a semantic producer",
+        );
+        fails(
+            broken(variant, |e| e.demands[1].recomputes = None),
+            "a replay with unmeasured resolutions",
+        );
+        fails(
+            broken(variant, |e| e.demands[1].producer_runs = None),
+            "a replay with unmeasured producer runs",
         );
     }
     // A repeat that completes is not the refusal.
@@ -712,7 +722,7 @@ fn refusal_rules_fail_each_broken_property() {
     fails(
         broken(RefusalVariant::Healing, |e| {
             e.demands[1].answer = answer("sealed", OperationProfile);
-            e.demands[1].recomputes = 0;
+            e.demands[1].recomputes = Some(0);
         }),
         "a larger profile replaying the tight refusal",
     );
@@ -732,7 +742,9 @@ fn refusal_rules_fail_each_broken_property() {
     );
     // A relevant edit that replayed the old depth refusal.
     fails(
-        broken(RefusalVariant::DepthEdited, |e| e.demands[1].recomputes = 0),
+        broken(RefusalVariant::DepthEdited, |e| {
+            e.demands[1].recomputes = Some(0)
+        }),
         "an edit that did not invalidate the depth refusal",
     );
     fails(
@@ -745,7 +757,7 @@ fn refusal_rules_fail_each_broken_property() {
     for index in [1, 2, 3] {
         fails(
             broken(RefusalVariant::DepthControls, |e| {
-                e.demands[index].recomputes = 0
+                e.demands[index].recomputes = Some(0)
             }),
             "an ineligible request replaying the refusal",
         );
@@ -759,7 +771,7 @@ fn refusal_rules_fail_each_broken_property() {
     // A missing input that was retained, or that does not heal.
     fails(
         broken(RefusalVariant::DepthMissingInput, |e| {
-            e.demands[1].recomputes = 0
+            e.demands[1].recomputes = Some(0)
         }),
         "a retained missing input",
     );
@@ -1009,6 +1021,7 @@ fn surge(
             memo_candidates_before: 0,
             memo_candidates_after: 0,
             memo_candidate_trace: Vec::new(),
+            memo_candidate_cap: 0,
             refusals_active: 0,
             retained_results: Some(u64::from(modules) / 2),
             surge_counts: Some(SoakCounts {
@@ -1526,7 +1539,11 @@ fn summary_judgments_fail_closed_on_doctored_evidence() {
     };
     // A churn whose candidate count never grows admitted nothing; one that
     // never stops growing displaced nothing.
-    for trace in [vec![3; 25], (0..25).collect::<Vec<u64>>()] {
+    for trace in [
+        vec![vec![1, 2, 3]; 25],
+        (0..25).map(|i| (0..i).collect::<Vec<u64>>()).collect(),
+        [vec![vec![]], vec![vec![1]; 24]].concat(),
+    ] {
         let failures = judged(&|s| {
             record_of(s, LifecycleClass::CandidateChurn)
                 .pressure
@@ -1579,6 +1596,38 @@ fn summary_judgments_fail_closed_on_doctored_evidence() {
         SoakFailure::AbsoluteLimitExceeded { violations, .. }
             if violations.iter().any(|v| v.figure == "retained_bytes")
     )));
+    let invalid = judged(&|s| {
+        for sample in &mut s.samples {
+            sample.counts.content_pinned_bytes = u64::MAX;
+        }
+    });
+    assert!(invalid.iter().any(|f| matches!(
+        f,
+        SoakFailure::AbsoluteLimitExceeded { violations, .. }
+            if violations.iter().any(|v| v.figure == "content_pinned_bytes")
+    )));
+}
+
+#[test]
+fn concurrent_refusal_work_is_explicitly_unmeasured() {
+    let _serial = serial();
+    let (observed, _) = verter_bench::soak::refusal::run(RefusalVariant::Concurrent, 36, 0, 64);
+    let concurrent: Vec<_> = observed
+        .demands
+        .iter()
+        .filter(|d| {
+            matches!(
+                d.role,
+                DemandRole::ConcurrentTight | DemandRole::ConcurrentLarge
+            )
+        })
+        .collect();
+    assert_eq!(concurrent.len(), 4);
+    for demand in concurrent {
+        let wire = serde_json::to_value(demand).unwrap();
+        assert!(wire["recomputes"].is_null(), "{wire}");
+        assert!(wire["producerRuns"].is_null(), "{wire}");
+    }
 }
 
 /// The frozen oversized component is one retained result above the account's

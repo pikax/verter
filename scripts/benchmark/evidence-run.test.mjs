@@ -564,6 +564,34 @@ describe("soak manifests", () => {
     assert.deepEqual(run.soak, { modes: ["normal", "pressure"], tranches: 100 });
   });
 
+  test("surge bounds are complete finite registrations, independent of requested work", () => {
+    assert.deepEqual(
+      problemsOf(() => {}),
+      [],
+    );
+    for (const edit of [
+      (m) => delete m.soak.surgeLimits,
+      (m) => delete m.soak.surgeLimits.full,
+      (m) => (m.soak.surgeLimits.bounded = null),
+      (m) => (m.soak.surgeLimits.full.extra = 1),
+      ...Object.keys(registered().soak.surgeLimits.full).flatMap((field) => [
+        (m) => delete m.soak.surgeLimits.full[field],
+        (m) => (m.soak.surgeLimits.full[field] = 0),
+        (m) => (m.soak.surgeLimits.full[field] = Number.MAX_SAFE_INTEGER + 1),
+      ]),
+      (m) => (m.soak.surgeLimits.full.modules += 1),
+      (m) => (m.soak.surgeLimits.full.concurrency += 1),
+      (m) => (m.soak.surgeLimits.full.retainedBytesMax = 2 ** 30 + 1),
+      (m) => (m.soak.surgeLimits.bounded.retainedBytesMax = 2 ** 26 + 1),
+    ]) {
+      const problems = problemsOf(edit);
+      assert.ok(
+        problems.some((p) => /soak.surgeLimits/.test(p)),
+        problems.join("\n"),
+      );
+    }
+  });
+
   test("a time or memory metric outside a bench-m3-only cell is rejected", () => {
     const problems = problemsOf((m) => m.requiredCells[0].metrics.push("peakRssBytes"));
     assert.ok(

@@ -158,6 +158,8 @@ pub struct IsolationEvidence {
     /// operations on a different component: equal entry allowance, a
     /// different paid set.
     pub other_context: Answer,
+    /// Operations spent before entering the other paid context's demand.
+    pub other_context_ops: u64,
     /// Resolutions the other-context demand itself ran: it never inherits the
     /// refusal the first spent context sealed.
     pub other_context_recomputes: u64,
@@ -425,6 +427,7 @@ pub fn run(
         repeat_recomputes: after_repeat - after_isolated,
         repeat_producer_runs,
         other_context_recomputes: other.as_ref().map_or(0, |s| s.recomputes),
+        other_context_ops: other.as_ref().map_or(0, |s| s.ops),
         other_context: other.map_or_else(Answer::absent, |s| s.answer),
         oracle_other_context: oracle_other.map_or_else(Answer::absent, |s| s.answer),
         oracle_spent: oracle_spent.map_or_else(Answer::absent, |s| s.answer),

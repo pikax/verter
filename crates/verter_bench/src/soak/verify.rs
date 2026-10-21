@@ -199,6 +199,10 @@ pub fn check_isolation(index: u32, e: &IsolationEvidence) -> Vec<SoakFailure> {
     // Same root, profile and entry allowance under a different paid set: the
     // refusal sealed in the first spent context must not be replayed.
     check(
+        e.other_context_ops == e.ops_before && e.other_context_ops > 0,
+        "the other paid context did not preserve equal entry allowance",
+    );
+    check(
         e.other_context_recomputes > 0,
         "a different paid context was answered without computing: it inherited another context's refusal",
     );
@@ -286,9 +290,10 @@ pub fn check_refusal(index: u32, e: &RefusalEvidence) -> Vec<SoakFailure> {
     } else {
         AnswerClass::OperationProfile
     };
-    let computed = |d: &Demand| d.recomputes > 0;
-    let replayed =
-        |d: &Demand, want: &Answer| d.answer == *want && d.recomputes == 0 && d.producer_runs == 0;
+    let computed = |d: &Demand| d.recomputes.is_some_and(|n| n > 0);
+    let replayed = |d: &Demand, want: &Answer| {
+        d.answer == *want && d.recomputes == Some(0) && d.producer_runs == Some(0)
+    };
     let all = |role: DemandRole, count: usize, rule: &dyn Fn(&Demand) -> bool| {
         let demands: Vec<_> = e.of(role).collect();
         demands.len() == count && demands.iter().all(|d| rule(d))
@@ -766,6 +771,7 @@ pub const ABSOLUTE_LIMITS: &[(&str, u64)] = &[
     ("resolution_retired_decisions", 256),
     ("active_bytes", 512 * 1024 * 1024),
     ("pinned_bytes", 512 * 1024 * 1024),
+    ("content_pinned_bytes", 512 * 1024 * 1024),
     // A workload bound well under the account's own ceiling (which can never
     // fail: the account refuses past it): a tranche's retained results peak
     // near a megabyte and fall back as it closes, so growth that the close
@@ -785,7 +791,9 @@ pub const REFUSABLE_CEILING_BYTES: u64 = 1024 * 1024 * 1024;
 /// The populations a registered surge shape bounds at its own frozen
 /// maxima instead of the soak host's: (figure, its bound in
 /// [`SurgeLimits`]).
-const SURGE_REGISTERED_FIGURES: &[(&str, fn(&SurgeLimits) -> u64)] = &[
+type SurgeFigure = (&'static str, fn(&SurgeLimits) -> u64);
+
+const SURGE_REGISTERED_FIGURES: &[SurgeFigure] = &[
     ("live_artifacts", |l| l.live_artifacts_max),
     ("registered_sources", |l| l.registered_sources_max),
     ("snapshot_leases", |l| l.snapshot_leases_max),
@@ -1013,13 +1021,19 @@ fn check_outcomes(expected: &Manifest, summary: &SoakSummary, failures: &mut Vec
                 // eviction.
                 let evicted = record.pressure.as_ref().is_some_and(|p| {
                     let trace = &p.memo_candidate_trace;
-                    trace.len() as u64 > edits
-                        && trace
-                            .iter()
-                            .zip(trace.iter().skip(1))
-                            .map(|(was, now)| now > was)
-                            .skip_while(|admitted| !admitted)
-                            .any(|admitted| !admitted)
+                    p.memo_candidate_cap > 0
+                        && trace.len() as u64 == edits + 1
+                        && trace.iter().all(|tokens| {
+                            tokens.len() <= p.memo_candidate_cap
+                                && tokens.iter().collect::<BTreeSet<_>>().len() == tokens.len()
+                        })
+                        && trace.windows(2).any(|pair| {
+                            let (was, now) = (&pair[0], &pair[1]);
+                            was.len() == p.memo_candidate_cap
+                                && now.len() == p.memo_candidate_cap
+                                && was.iter().any(|token| !now.contains(token))
+                                && now.iter().any(|token| !was.contains(token))
+                        })
                 });
                 if !evicted {
                     failures.push(wrong(

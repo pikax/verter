@@ -147,10 +147,11 @@ pub enum DemandRole {
 pub struct Demand {
     pub role: DemandRole,
     pub answer: Answer,
-    /// Component-meta resolutions the host ran for it.
-    pub recomputes: u64,
-    /// Cold semantic producer runs the host made for it.
-    pub producer_runs: u64,
+    /// Component-meta resolutions, or `None` when shared concurrent counters
+    /// cannot attribute work to this demand.
+    pub recomputes: Option<u64>,
+    /// Cold semantic producer runs, with the same attribution rule.
+    pub producer_runs: Option<u64>,
 }
 
 /// What one refusal action observed.
@@ -181,8 +182,8 @@ impl Driver<'_> {
         self.demands.push(Demand {
             role,
             answer: answer.clone(),
-            recomputes: self.rig.recomputes() - recomputes,
-            producer_runs: self.rig.producer_runs() - producers,
+            recomputes: Some(self.rig.recomputes() - recomputes),
+            producer_runs: Some(self.rig.producer_runs() - producers),
         });
         answer
     }
@@ -298,8 +299,8 @@ pub fn run(
                 .extend(answers.into_iter().map(|(role, answer)| Demand {
                     role,
                     answer,
-                    recomputes: 0,
-                    producer_runs: 0,
+                    recomputes: None,
+                    producer_runs: None,
                 }));
         }
         RefusalVariant::DepthSealed => {

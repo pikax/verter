@@ -344,6 +344,7 @@ export function validateManifest(manifest, file) {
 export const SOAK_MODES = ["normal", "pressure"];
 const SOAK_REQUIRED = ["name", "kind", "description", "modes", "noise", "soak", "requiredCells"];
 const SOAK_FIELDS = [
+  "surgeLimits",
   "runner",
   "tranches",
   "actionsPerTranche",
@@ -427,6 +428,47 @@ export const SOAK_METRICS = {
 
 const isDigest = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 
+function surgeLimitProblems(limits) {
+  const at = "soak.surgeLimits";
+  const object = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+  if (!object(limits)) return [`${at} must declare bounded and full surge bounds`];
+  const problems = [];
+  const fields = [
+    "modules",
+    "props",
+    "oversizedProps",
+    "inputBytesMax",
+    "concurrency",
+    "liveArtifactsMax",
+    "registeredSourcesMax",
+    "snapshotLeasesMax",
+    "retainedBytesMax",
+  ];
+  for (const name of Object.keys(limits))
+    if (!["bounded", "full"].includes(name)) problems.push(`${at}: unknown shape ${name}`);
+  for (const name of ["bounded", "full"]) {
+    const shape = limits[name];
+    const where = `${at}.${name}`;
+    if (!object(shape)) {
+      problems.push(`${where} must be an object`);
+      continue;
+    }
+    for (const field of Object.keys(shape))
+      if (!fields.includes(field)) problems.push(`${where}: unknown field ${field}`);
+    for (const field of fields)
+      if (!Number.isSafeInteger(shape[field]) || shape[field] <= 0)
+        problems.push(`${where}.${field} must be a positive safe integer`);
+    if (shape.modules !== shape.concurrency)
+      problems.push(`${where}.concurrency must cover all requested modules together`);
+    for (const field of ["liveArtifactsMax", "registeredSourcesMax", "snapshotLeasesMax"])
+      if (shape.modules > shape[field]) problems.push(`${where}.modules exceeds ${field}`);
+    const retainedLimit = name === "bounded" ? 64 * 1024 ** 2 : 1024 ** 3;
+    if (shape.retainedBytesMax > retainedLimit)
+      problems.push(`${where}.retainedBytesMax exceeds the retained-byte policy`);
+  }
+  return problems;
+}
+
 function soakCellProblems(cell, at, modes) {
   const problems = [];
   if (!cell || typeof cell !== "object" || Array.isArray(cell)) return [`${at} is not an object`];
@@ -484,6 +526,7 @@ export function validateSoakManifest(manifest, file) {
   for (const key of Object.keys(soak))
     if (!SOAK_FIELDS.includes(key)) problems.push(`soak: unknown field ${key}`);
   for (const key of SOAK_FIELDS) if (!(key in soak)) problems.push(`soak: missing field ${key}`);
+  problems.push(...surgeLimitProblems(soak.surgeLimits));
   if (soak.runner !== "verter-soak") problems.push("soak.runner must be verter-soak");
   for (const key of SOAK_COUNTS)
     if (key in soak && !isInt(soak[key], 1))
