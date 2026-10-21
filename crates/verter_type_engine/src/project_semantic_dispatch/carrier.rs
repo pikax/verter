@@ -1611,7 +1611,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // sentinels + the active-instantiation back-edge are the primary
         // termination mechanism; this only prevents a pre-memo carrier ->
         // carrier normalization loop.
-        if self.carrier_normalizing.borrow().contains(&node) {
+        if self.carrier_normalizing_holds(node) {
             return CarrierResolution::complete(node);
         }
         self.carrier_normalizing.borrow_mut().push(node);
