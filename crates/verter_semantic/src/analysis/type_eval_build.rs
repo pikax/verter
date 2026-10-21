@@ -321,6 +321,9 @@ pub struct LoweredTypeDeclParts {
     /// `unique symbol` — object-type-literal and interface property
     /// members, including intersection arms.
     pub unique_symbol_members: Vec<String>,
+    /// Whether the declaration is a type alias whose authored body is the
+    /// `intrinsic` keyword (`type NoInfer<T> = intrinsic`).
+    pub intrinsic: bool,
 }
 
 /// TRANSIENT lowered parts of one VALUE declaration.
@@ -906,6 +909,7 @@ fn lower_jsdoc_typedef_named_matching(
             type_parameter_variances: Vec::new(),
             body: typedef.body.clone(),
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         };
         env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner));
         return Some(typedef);
@@ -946,6 +950,7 @@ fn register_jsdoc_typedefs(
             type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         };
         env.add_type(mint_type_decl(
             &parts,
@@ -1116,6 +1121,7 @@ fn mint_type_decl(
         direct_member_headers: member_header_facts_from_body(&parts.body),
         unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
+        intrinsic: parts.intrinsic,
     }
 }
 
@@ -1759,6 +1765,7 @@ fn lower_named_type_alias_parts(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
+        intrinsic: matches!(decl.type_annotation, TSType::TSIntrinsicKeyword(_)),
     }
 }
 
@@ -2088,6 +2095,7 @@ fn lower_named_interface_parts(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_interface_body(decl),
+        intrinsic: false,
     }
 }
 
@@ -2781,6 +2789,7 @@ fn alias_default_export_type_symbol(
         body: decl.body.clone(),
         direct_member_headers: decl.direct_member_headers.clone(),
         unique_symbol_members: Arc::clone(&decl.unique_symbol_members),
+        intrinsic: decl.intrinsic,
     };
     env.add_type(aliased);
 }
@@ -3499,6 +3508,7 @@ fn collect_named_class_selecting(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: Vec::new(),
+        intrinsic: false,
     });
 
     // Also register as a value (for typeof ClassName / InstanceType). An
@@ -3772,6 +3782,7 @@ fn collect_enum(
         type_parameter_variances: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
+        intrinsic: false,
     });
 }
 
@@ -4763,7 +4774,8 @@ fn lower_identifier_variable_parts(
         if type_annotation.is_none()
             && (value_type_derives_from_a_call(init, source)
                 || contextual_object_initializer(init)
-                || literal_holds_block_bodied_function(init))
+                || literal_holds_block_bodied_function(init)
+                || flow_typed_member_read(init))
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -6784,6 +6796,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         });
     }
     out
@@ -7654,6 +7667,26 @@ pub(super) fn contextual_object_initializer(mut expression: &Expression<'_>) -> 
                 &satisfies.expression
             }
             _ => return contextual && matches!(expression, Expression::ObjectExpression(_)),
+        };
+    }
+}
+
+/// A declarator initializer reading a member through a computed key
+/// (`d["data-foo"]`) or an optional chain (`o.a?.b`): the flow evaluator
+/// reads such a member — the index signature a key matches, the `undefined`
+/// a short-circuiting chain adds — where value inference has no member path
+/// for it. Facts and function discovery use this same classification.
+pub(super) fn flow_typed_member_read(mut expression: &Expression<'_>) -> bool {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+            Expression::TSNonNullExpression(non_null) => &non_null.expression,
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(_) | Expression::ChainExpression(_) => {
+                return true
+            }
+            _ => return false,
         };
     }
 }

@@ -339,6 +339,84 @@ fn no_infer() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`a_local_intrinsic_no_infer_alias_is_no_infer`]: the
+/// module declares `NoInfer` itself, as the lib does.
+const LOCAL_NO_INFER: &str = r##"
+type __BenchInit = 0;
+type NoInfer<T> = intrinsic;
+declare function f<T extends string>(vals: T[], def: NoInfer<T>): T;
+declare function g<T extends string>(vals: T[], def: T): T;
+const r = f(["a", "b"], "a");
+const s = g(["a", "b"], "c");
+"##;
+
+/// A type alias whose body is the `intrinsic` keyword is the intrinsic its
+/// name selects wherever it is declared: a module's own `type NoInfer<T> =
+/// intrinsic` blocks inference through the parameter it wraps, and over an
+/// operand that is not generic it is the operand.
+#[test]
+fn a_local_intrinsic_no_infer_alias_is_no_infer() {
+    let matrix = Matrix::new(LOCAL_NO_INFER);
+    let failures = matrix.types(&[("typeof r", r#""a" | "b""#), ("NoInfer<string>", "string")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An imported `intrinsic` alias answers from the declaring file's current
+/// version: once the file respells it as an ordinary alias, the importer's
+/// next read is that alias, never the earlier intrinsic answer.
+///
+/// Oracle: TypeScript 7.0.2 answers `"ok"` while `base.ts` declares
+/// `type NoInfer<T> = intrinsic`, then `"ok"[]` after it declares
+/// `type NoInfer<T> = T[]`.
+#[test]
+fn editing_an_imported_intrinsic_alias_misses_the_warm_answer() {
+    use super::checker_probe_lane_tests::{default_probe_host, evaluated_render_on_host};
+    let host = default_probe_host();
+    let source = "import type { NoInfer } from \"./base\";\nexport {};\n";
+    let answer = |declaration: &str| {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            "/wb/base.ts",
+            declaration,
+            crate::FileLanguage::script_ts(),
+        );
+        evaluated_render_on_host(&host, source, "NoInfer<\"ok\">")
+    };
+    assert_eq!(answer("export type NoInfer<T> = intrinsic;\n"), "\"ok\"");
+    assert_eq!(answer("export type NoInfer<T> = T[];\n"), "Array(\"ok\")");
+}
+
+/// An `intrinsic` alias whose name selects no implemented intrinsic is that
+/// unsupported intrinsic, a typed partial answer, never the body it spells:
+/// the `intrinsic` keyword is not a reference, so a module's own
+/// `type intrinsic` never answers it.
+#[test]
+fn a_local_intrinsic_alias_without_an_implementation_is_unsupported() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use super::StructuralFactDemandOutcome;
+    let host = default_probe_host();
+    let source = "type intrinsic = string;\n\
+                  type BuiltinIteratorReturn = intrinsic;\n\
+                  type NotAnIntrinsic<T> = intrinsic;\n\
+                  export {};\n";
+    for probe in ["BuiltinIteratorReturn", "NotAnIntrinsic<1>"] {
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            source,
+            probe,
+            |_, outcome| {
+                assert!(
+                    matches!(outcome, StructuralFactDemandOutcome::Partial(_)),
+                    "{probe}: {outcome:?}"
+                );
+            },
+        );
+    }
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;
