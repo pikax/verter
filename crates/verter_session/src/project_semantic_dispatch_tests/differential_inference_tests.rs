@@ -479,6 +479,11 @@ export function v11() { return trailing(["a", "b", 1]); }
 export function v12() { return framed(fy); }
 export function v13<U extends unknown[]>(x: [0, ...U]) { return after0(x); }
 export function v14<U extends [number, string]>(x: [0, ...U]) { return pairAfter0(x); }
+export function v15<A extends [number, string], U extends A>(x: [0, ...U]) { return pairAfter0(x); }
+declare function pair<T extends [unknown, unknown]>(x: T): T;
+export function v16<A extends [number, string], U extends A>(x: U) { return pair(x); }
+export function v17<A extends [number], U extends A>(x: U) { return pair(x); }
+export function v18<A extends [number, string], B extends A, C extends B, D extends C, E extends D, F extends E, G extends F, H extends G, I extends H, J extends I>(x: [0, ...J]) { return pairAfter0(x); }
 "##;
 
 /// Variadic tuple types spread, infer and instantiate as the checker's do.
@@ -963,13 +968,24 @@ export function m4() { return unmut({ a: 1 }); }
 export function m5() { return unopt({ a: 1 }); }
 export function m6() { return unwrapAll([[1], ["s"]]); }
 export function m7() { return unpre({ p_a: 1 }); }
+type Sink<T> = (x: T) => void;
+interface Reader<T> { get(): T }
+declare function pick<T>(a: T, s: Sink<T>): T;
+declare function both<T>(r: Reader<T>, s: Sink<T>): T;
+declare const sn: Sink<string | number>;
+declare const n: number;
+declare const ra: Reader<"a">;
+declare const ss: Sink<string>;
+export function m8() { return pick(n, sn); }
+export function m9() { return both(ra, ss); }
 "##;
 
 /// A homomorphic mapped type over a parameter the inference infers
 /// reverse-maps, in a call as in a conditional's `infer` pattern and nested
 /// inside one; two applications of one alias infer from the alias
-/// arguments; and a key-remapped mapped type infers nothing, its parameter
-/// fixing to `unknown`.
+/// arguments, a contravariant argument contravariantly (`m8`, `m9`); and a
+/// key-remapped mapped type infers nothing, its parameter fixing to
+/// `unknown`.
 #[test]
 fn reverse_mapped_and_alias_inference() {
     let failures = Matrix::new(REVERSE_MAPPED_INFERENCE).same(&[
@@ -980,6 +996,8 @@ fn reverse_mapped_and_alias_inference() {
         (Read::Return(r#"m5"#), r#"{ a: number; }"#),
         (Read::Return(r#"m6"#), r#"[number, string]"#),
         (Read::Return(r#"m7"#), r#"unknown"#),
+        (Read::Return(r#"m8"#), r#"number"#),
+        (Read::Return(r#"m9"#), r#""a""#),
         (
             Read::Type(r#"{ a: Box<1> } extends Boxed<infer T> ? T : never"#),
             r#"{ a: 1; }"#,
@@ -2806,7 +2824,10 @@ fn const_type_parameters_in_mutable_array_contexts() {
 /// infers elementwise, its variadic to the caller's parameter (`v13`) —
 /// also under a fixed tuple constraint, which the caller's parameter
 /// satisfies by the positions its own constraint fixes, not by its one
-/// spread element (`v14`).
+/// spread element (`v14`), however many sibling parameters that constraint
+/// passes through (`v15`, `v18`). A parameter bounded through a sibling
+/// satisfies a fixed tuple constraint by that sibling's bound (`v16`) and
+/// fails one it does not fit (`v17`).
 #[test]
 fn variadic_tuple_inference_in_calls() {
     let failures = Matrix::new(VARIADIC_TUPLES).same(&[
@@ -2822,6 +2843,10 @@ fn variadic_tuple_inference_in_calls() {
         (Read::Return(r#"v12"#), r#"(x: number, y: string) => 0"#),
         (Read::Return(r#"v13"#), r#"U"#),
         (Read::Return(r#"v14"#), r#"U"#),
+        (Read::Return(r#"v15"#), r#"U"#),
+        (Read::Return(r#"v16"#), r#"U"#),
+        (Read::Return(r#"v17"#), r#"[unknown, unknown]"#),
+        (Read::Return(r#"v18"#), r#"J"#),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

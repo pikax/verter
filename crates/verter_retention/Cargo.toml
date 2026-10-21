@@ -13,6 +13,12 @@ publish = false
 # Exposes isolated-account constructors and test-only observability to
 # cross-crate test code. Production binaries MUST NOT enable this feature.
 test-support = []
+# The soak/tooling runner's opt-in to the ACTIVE-occupancy measurement
+# window alone (`active_window`), without the isolated-account constructors
+# of `test-support`. Default-off; forwarded only by
+# `verter_session_query/soak-support` and `verter_session/soak-support`, and
+# no production edge enables it.
+soak-support = []
 
 # The lowest semantic layer: every crate that mints a retained allocation —
 # the type-expression DTO included — reaches the one account through here, so
