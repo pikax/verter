@@ -481,15 +481,9 @@ fn promise_race_awaits_its_tuple_arguments_elements() {
 }
 
 /// `Promise.all([p, "s"] as const)` is `Promise<[number, "s"]>`: a homomorphic
-/// mapped type over the tuple whose template applies `Awaited` to `T[P]`.
-///
-/// What the lane gives: `Promise<[Awaited<<unreduced indexed access>>,
-/// Awaited<<unreduced indexed access>>]>`. An application template over a
-/// tuple element keeps its `T["0"]` argument as written (`{ [P in keyof T]:
-/// Box<T[P]> }` over `[1, 2]` prints the same way), where the checker reads
-/// the element.
+/// mapped type over the tuple whose template applies `Awaited` to `T[P]`,
+/// each element read off the tuple before `Awaited` applies to it.
 #[test]
-#[ignore = "an application template of a mapped type over a tuple keeps its element read unreduced"]
 fn promise_all_maps_its_tuple_argument() {
     let matrix = Matrix::new(PROMISES_AND_COLLECTIONS).lib(GLOBALS_LIB);
     let failures = matrix.returns(&[("pAll", "Promise<[number, \"s\"]>")]);

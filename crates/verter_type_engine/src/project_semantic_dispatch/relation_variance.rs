@@ -873,10 +873,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         identity: &DeclIdentity,
     ) -> Option<DeclIdentity> {
         let nominal = self.runtime_nominal_identity(identity)?;
+        // A node interned under the carrier's own builtin origin (an
+        // instantiation built in that origin's scope) is no more written in
+        // a file than a scope-less one.
         let canonical = match self
             .graph()
             .node_scope(node)
             .and_then(|scope| scope.canonical_file())
+            .filter(|canonical| canonical.as_ref() != identity.canonical_id.as_ref())
         {
             Some(canonical) => canonical,
             None => {

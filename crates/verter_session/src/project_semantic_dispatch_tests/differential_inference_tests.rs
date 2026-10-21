@@ -3178,7 +3178,6 @@ fn pinned_library_promise_relations_and_calls() {
 
 /// `Promise.all` awaits each element of its tuple argument.
 #[test]
-#[ignore = "print gap in the lane: an application template of a mapped type over a tuple keeps its `T[\"0\"]` argument unreduced"]
 fn pinned_library_promise_all() {
     let failures = Matrix::new(AWAITED_AND_PROMISES).lib(GLOBALS_LIB).four(&[(
         Read::Return(r#"a9"#),

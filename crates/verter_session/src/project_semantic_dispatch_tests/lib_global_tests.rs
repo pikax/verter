@@ -585,3 +585,61 @@ fn a_primitive_wrapper_read_is_the_demanding_projects() {
         "the shared `string` subject is never admitted"
     );
 }
+
+const COLLECTIONS_LIB: &str = "\
+interface Array<T> { length: number; [n: number]: T; }
+interface Boolean {}
+interface Function {}
+interface IArguments {}
+interface Number {}
+interface Object {}
+interface RegExp {}
+interface String {}
+interface CallableFunction {}
+interface NewableFunction {}
+interface Map<K, V> { get(key: K): V | undefined; set(key: K, value: V): this; readonly size: number; }
+interface Set<T> { add(value: T): this; clear(): void; }
+";
+
+/// A conditional over a library collection, read as a named alias through
+/// the typeinfo surface a shipped consumer calls, decides through the
+/// global declaration the reference names: `typeof m extends Map<infer K,
+/// infer V> ? [K, V] : never` over `m: Map<string, number[]>` is `[string,
+/// number[]]`, `Set<1> extends object ? 1 : 2` is `1` and `Map<1, 2>
+/// extends { size: number } ? 1 : 2` is `1` (TypeScript 7.0.2, `--noLib`
+/// over this library as a root file). A reference the alias reads is
+/// interned under its builtin carrier's own origin, which names no file;
+/// the declaration it refers to is the reading project's.
+///
+/// Mutation: taking that builtin origin for the reading file finds no
+/// global `Map` or `Set` there and leaves every conditional deferred.
+#[test]
+fn a_named_alias_conditional_over_a_library_collection_decides() {
+    let host = library_host(COLLECTIONS_LIB);
+    let canonical = format!("{PROJECT_ROOT}/collections.ts");
+    upsert(
+        &host,
+        &canonical,
+        "declare const m: Map<string, number[]>;\n\
+         type Entries = typeof m extends Map<infer K, infer V> ? [K, V] : never;\n\
+         type SetIsObject = Set<1> extends object ? 1 : 2;\n\
+         type MapHasSize = Map<1, 2> extends { size: number } ? 1 : 2;\n\
+         export {};\n",
+    );
+    for (alias, expected) in [
+        ("Entries", "[string, Array<number>]"),
+        ("SetIsObject", "1"),
+        ("MapHasSize", "1"),
+    ] {
+        let node = host
+            .resolve_named_symbol(&canonical, alias, None)
+            .unwrap_or_else(|| panic!("{alias} resolves"));
+        let expr = host
+            .project_node_to_type_expr_for_test(node.id())
+            .unwrap_or_else(|| panic!("{alias} projects"));
+        let rendered = verter_type_expr::render_type_expr_display(&expr)
+            .unwrap_or_else(|err| panic!("{alias} renders: {err:?}"))
+            .text;
+        assert_eq!(rendered, expected, "{alias}");
+    }
+}
