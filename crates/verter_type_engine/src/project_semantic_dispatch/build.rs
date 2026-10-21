@@ -8569,16 +8569,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// with the number of path segments it consumes: for each namespace
     /// `N` enclosing the block, innermost first, the longest prefix of the
     /// path that `{N}.{prefix}` names a global value of
-    /// ([`Self::global_value_declarations`]). `None` when no enclosing
-    /// namespace declares such a value.
+    /// ([`Self::global_value_declarations`]). The walk stops before
+    /// `outer_bound`, the namespace whose member the declaration's own scope
+    /// already binds the path's head to, so only a more inner namespace's
+    /// member shadows it. `None` when no enclosing namespace declares such a
+    /// value.
     pub(super) fn enclosing_namespace_value_root(
         &self,
         demand_canonical: &str,
         namespace: &str,
         path: &[String],
+        outer_bound: Option<&str>,
     ) -> Option<(verter_type_expr::OwnedStr, usize)> {
         let mut current = Some(namespace);
         while let Some(prefix) = current {
+            if outer_bound == Some(prefix) {
+                return None;
+            }
             let mut qualified = String::from(prefix);
             let mut candidates = Vec::with_capacity(path.len());
             for segment in path {

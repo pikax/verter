@@ -834,9 +834,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`DeclarationScopePayload::enclosing_global_namespace`]), whichever
     /// script's block of that namespace declares it: a namespace scope
     /// precedes the file's. `bound` is what the declaration's own
-    /// `name_resolution` binds the name to: a binding outside the file's
-    /// namespace members stands, and one to a member of an enclosing
-    /// namespace stands unless a more inner namespace declares the name.
+    /// `name_resolution` binds the name to: one to a member of an enclosing
+    /// namespace stands unless a more inner namespace declares the name, and
+    /// any other binding (a file-scope or global name) is outermost, so any
+    /// enclosing namespace's member shadows it.
     /// `None` when the body is no such block's or no enclosing namespace
     /// shadows the binding.
     pub(super) fn enclosing_namespace_binding(
@@ -850,18 +851,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         };
         let namespace = scope_payload?.enclosing_global_namespace()?;
-        let outer_bound = match bound {
-            None => None,
-            Some(bound) => {
-                let member_of = bound
-                    .symbol_name
-                    .as_ref()
-                    .strip_suffix(name)
-                    .and_then(|prefix| prefix.strip_suffix('.'))
-                    .filter(|_| bound.canonical_id.as_ref() == canonical_id.as_ref())?;
-                Some(member_of)
-            }
-        };
+        let outer_bound = bound.and_then(|bound| {
+            super::namespace_of_member(&bound.symbol_name, name)
+                .filter(|_| bound.canonical_id.as_ref() == canonical_id.as_ref())
+        });
         self.enclosing_namespace_type_member(canonical_id.as_ref(), namespace, name, outer_bound)
     }
 

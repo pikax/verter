@@ -164,17 +164,22 @@ type PlainValue = typeof P.v;
 /// of the same global namespace contributes, by its short name, in type and
 /// `typeof` position: global namespaces merge across scripts. A member of
 /// the inner namespace shadows the outer namespace's member of that name,
-/// whichever file declares it, and an edit to the contributing block
-/// reaches a warm read.
+/// whichever file declares it; any enclosing namespace's member shadows a
+/// file-scope name of the declaring script; and an edit to the contributing
+/// block reaches a warm read.
 ///
 /// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the two
 /// scripts and a probe module, each read off a TS2322 against `never`):
 /// `A.B.V` is `1`, `A.B.U[0]` `1`,
-/// `A.B.U[1]` `2`, `A.B.W` `"outer"`, `A.B.Y` `"inner"`; with `T = 3` in
+/// `A.B.U[1]` `2`, `A.B.W` `"outer"`, `A.B.Y` `"inner"`, `A.FP` `"inner"`,
+/// `A.FD` `"innerD"`, `A.FV` `"inner"`, `A.B.Q` `"inner"`; with `T = 3` in
 /// `b.ts`, `A.B.V` is `3`.
 ///
 /// Mutation: binding only the declaring file's own blocks leaves `C.T`
-/// unresolved inside `namespace A.B` and reads `X` as `A.X`.
+/// unresolved inside `namespace A.B` and reads `X` as `A.X`; letting a
+/// file-scope binding stand reads `A.FP` as `"file"` and `A.FD` as
+/// `"fileD"`; letting the declaring file's outer-namespace value stand
+/// reads `A.B.Q` as `"outer"`.
 #[test]
 fn a_dotted_block_reads_a_member_another_scripts_block_contributes() {
     use super::checker_probe_lane_tests::{
@@ -183,12 +188,20 @@ fn a_dotted_block_reads_a_member_another_scripts_block_contributes() {
     let declaring = "namespace A.B { export type V = C.T; export type U = [C.T, typeof C.v]; \
         export type W = O; }\n\
         namespace A { export type X = \"outer\"; }\n\
-        namespace A.B { export type Y = X; }\n";
+        namespace A.B { export type Y = X; }\n\
+        type P = \"file\";\n\
+        const fv = \"file\" as const;\n\
+        namespace D { export type T = \"fileD\"; }\n\
+        namespace A { export type FP = P; export type FD = D.T; export type FV = typeof fv; \
+        export const w = \"outer\" as const; }\n\
+        namespace A.B { export type Q = typeof w; }\n";
     let contributing = |t: &'static str| -> String {
         format!(
             "namespace A.B.C {{ export type T = {t}; export const v = 2 as const; }}\n\
              namespace A {{ export type O = \"outer\"; }}\n\
-             namespace A.B {{ export type X = \"inner\"; }}\n"
+             namespace A.B {{ export type X = \"inner\"; export const w = \"inner\" as const; }}\n\
+             namespace A {{ export type P = \"inner\"; export const fv = \"inner\" as const; \
+             export namespace D {{ export type T = \"innerD\"; }} }}\n"
         )
     };
     let before = contributing("1");
@@ -209,6 +222,10 @@ fn a_dotted_block_reads_a_member_another_scripts_block_contributes() {
             ("A.B.U[1]", "2"),
             ("A.B.W", "\"outer\""),
             ("A.B.Y", "\"inner\""),
+            ("A.FP", "\"inner\""),
+            ("A.FD", "\"innerD\""),
+            ("A.FV", "\"inner\""),
+            ("A.B.Q", "\"inner\""),
         ],
     );
     let warm = probe_host(project(&files));

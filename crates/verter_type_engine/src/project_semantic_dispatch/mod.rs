@@ -2896,12 +2896,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// The qualified value a `typeof` path written in a declaration body
     /// heads, with the number of path segments it consumes, when its head
-    /// names a member of an enclosing namespace: the member the body's
-    /// `name_resolution` binds in the file's own blocks
-    /// ([`namespace_scoped_typeof_root`]), else, in a block of a global
+    /// names a member of an enclosing namespace: in a block of a global
     /// namespace, the member any script's block of an enclosing namespace
-    /// declares ([`Self::enclosing_namespace_value_root`]). `None` when the
-    /// path reads from its written root.
+    /// declares ([`Self::enclosing_namespace_value_root`]), innermost first,
+    /// down to the namespace whose member the body's `name_resolution`
+    /// binds in the file's own blocks ([`namespace_scoped_typeof_root`]),
+    /// which answers when no more inner namespace declares the head. `None`
+    /// when the path reads from its written root.
     pub(super) fn namespace_scoped_value_root(
         &self,
         name_resolution: Option<
@@ -2912,12 +2913,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         owner: verter_type_expr::TopLevelOwnerId,
         path: &[String],
     ) -> Option<(verter_type_expr::OwnedStr, usize)> {
-        name_resolution
-            .and_then(|names| namespace_scoped_typeof_root(names, canonical, owner, path))
-            .or_else(|| {
-                let namespace = scope_payload?.enclosing_global_namespace()?;
-                self.enclosing_namespace_value_root(canonical, namespace, path)
-            })
+        let bound = name_resolution
+            .and_then(|names| namespace_scoped_typeof_root(names, canonical, owner, path));
+        let enclosing = scope_payload
+            .and_then(|payload| payload.enclosing_global_namespace())
+            .and_then(|namespace| {
+                let outer_bound = bound.as_ref().and_then(|(qualified, consumed)| {
+                    namespace_of_member(qualified.as_ref(), &path[..*consumed].join("."))
+                });
+                self.enclosing_namespace_value_root(canonical, namespace, path, outer_bound)
+            });
+        enclosing.or(bound)
     }
 
     /// [`Self::typeof_reference_key`] for a reference written in a
@@ -6436,6 +6442,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.build_classify_materialization_cycle_gate(key)
         }
     }
+}
+
+/// The namespace `qualified` (`A.B.T`) is a member named `name` (`T`) of
+/// (`A.B`). `None` when `qualified` is no namespace's member of that name.
+pub(super) fn namespace_of_member<'a>(qualified: &'a str, name: &str) -> Option<&'a str> {
+    qualified.strip_suffix(name)?.strip_suffix('.')
 }
 
 /// The namespace member a `typeof` path written in a namespaced declaration's
