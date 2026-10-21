@@ -21,6 +21,8 @@ interface H2 extends G { r: \"s\" }
 interface H5 extends G { r: \"s\"; q: 1 }
 interface B3 { r: \"s\" }
 interface H3 extends B3 { get r(): \"s\" }
+interface B4 { r: string }
+interface H4 extends B4 { get r(): \"s\"; set r(v: \"s\") }
 type Id<T> = { [K in keyof T]: T[K] };
 type Mut<T> = { -readonly [K in keyof T]: T[K] };
 type Req<T> = { [K in keyof T]-?: T[K] };
@@ -107,6 +109,8 @@ fn a_mapping_maps_an_accessor_as_its_property() {
 /// | `Id<H5>` | `{ r: "s"; q: 1; }` |
 /// | `Omit<H5, "q">` | `{ r: "s"; }` |
 /// | `Id<H3>` | `{ readonly r: "s"; }` |
+/// | `H4["r"]` | `"s"` |
+/// | `Id<H4>`, `Pick<H4, "r">` | `{ r: "s"; }` |
 #[test]
 fn an_own_member_over_an_inherited_accessor_maps_as_declared() {
     let mut failures = mismatches(FIXTURE, &[("{ [K in keyof H2]: H2[K] }", "{ r: \"s\"; }")]);
@@ -119,8 +123,11 @@ fn an_own_member_over_an_inherited_accessor_maps_as_declared() {
             ("Id<H5>", "{ r: \"s\"; q: 1; }"),
             ("Omit<H5, \"q\">", "{ r: \"s\"; }"),
             ("Id<H3>", "{ readonly r: \"s\"; }"),
+            ("Id<H4>", "{ r: \"s\"; }"),
+            ("Pick<H4, \"r\">", "{ r: \"s\"; }"),
         ],
     ));
+    failures.extend(mismatches(FIXTURE, &[("H4[\"r\"]", "\"s\"")]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
