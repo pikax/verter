@@ -9158,11 +9158,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // operands' unwraps are the ones read above, whose observations
         // this judgement has already adopted.
         let source = match source_unwrap {
-            IdentityCarrierUnwrap::Concrete(_) if preserve_source_reference => source_reference,
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        let source = if preserve_source_reference {
+            source_reference
+        } else {
+            source
         };
         let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
