@@ -11417,14 +11417,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // A homomorphic mapped type over a closed object is the
                 // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
                 // the checker resolves its members, so a relation compares
-                // them. Any other mapped type stays the operand it is.
+                // them. A mapped type over a closed key domain (a
+                // signature's mapped parameter once its type arguments
+                // are substituted) is the object its keys map to. One
+                // over an open source stays the operand it is.
                 SemanticNodeData::Mapped { source, mapper } => {
                     let (source, mapper) = (*source, mapper.clone());
                     drop(data);
-                    match self
-                        .identity_mapped_object_for_relation(source, &mapper)
-                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                    {
+                    match self.mapped_object_for_relation(source, &mapper, transit) {
                         Some(object) if object != current => {
                             current = object;
                             continue;
@@ -11496,6 +11496,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             current = unwrapped;
         }
         IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// The object a mapped type resolves to for a relation, when its source
+    /// and key domain are closed: an identity mapping over an object
+    /// ([`Self::identity_mapped_object_for_relation`]), a key domain holding
+    /// an index key ([`Self::index_key_mapped_object_for_relation`]), or an
+    /// enumerable key domain
+    /// ([`Self::enumerated_mapped_object_for_relation`]). `None` when the
+    /// mapped type stays the carrier it is. The ordinary relation and the
+    /// fresh excess-property check both read a mapped operand through it,
+    /// so the check runs on the object the relation decides against.
+    pub(super) fn mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        self.identity_mapped_object_for_relation(source, mapper)
+            .or_else(|| self.index_key_mapped_object_for_relation(mapper, transit))
+            .or_else(|| self.enumerated_mapped_object_for_relation(source, mapper, transit))
     }
 
     /// The object an identity mapped type over a closed object surface
@@ -11604,6 +11624,239 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     produced,
                     Some(mapper.key_space),
                 ))),
+        )
+    }
+
+    /// The object a mapped type over a closed, enumerable key domain
+    /// resolves to (the checker's `resolveMappedTypeMembers` for a
+    /// non-generic mapped type): `{ [K in keyof { a: 1 }]: [K] }` IS
+    /// `{ a: ["a"] }`. Each key reads the template with the binder bound
+    /// to it; a `Keep` modifier takes the member of the modifiers type
+    /// (the source of a homomorphic mapping) of that key. Productions of one
+    /// property spelling join and each value settles under the modifiers
+    /// through the mapped build's own rules
+    /// ([`Self::join_mapped_production`], [`Self::settle_mapped_member_value`]):
+    /// `{ [K in 1 | "1"]: K }` IS `{ 1: 1 | "1" }`, and `-?` drops the
+    /// `undefined` an optional source member adds.
+    ///
+    /// `None` (the operand stays the carrier it is, undecided) for a key
+    /// remap, a source, key domain or template that is still open, a
+    /// homomorphic source that is no plain object surface (a union
+    /// distributes, an array or tuple maps elementwise), a key domain with an
+    /// index key (see [`Self::index_key_mapped_object_for_relation`]) or a
+    /// unique-symbol key, and a template the binder substitution cannot read.
+    /// The object is interned for the relation only: no member is published,
+    /// so no member edge is recorded.
+    fn enumerated_mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if mapper.name_remap.is_some()
+            || super::raise::mapped_type_is_open_or_unknown(self, source, mapper)
+        {
+            return None;
+        }
+        let graph = self.graph();
+        let homomorphic = matches!(
+            graph.node_data(mapper.key_space).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        );
+        let modifier_members = match (homomorphic, mapper.modifiers_type) {
+            (true, _) => Some(self.plain_object_members_for_relation(source)?),
+            (false, Some(modifiers)) => Some(self.plain_object_members_for_relation(modifiers)?),
+            (false, None) => None,
+        };
+        // `-?` reads whether the SOURCE member was optional; a homomorphic
+        // mapping's modifiers type is its source.
+        let source_members = if homomorphic {
+            None
+        } else if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+            self.plain_object_members_for_relation(source)
+        } else {
+            None
+        };
+        fn index(
+            members: &[crate::semantic_query::SurfaceMember],
+        ) -> FxHashMap<crate::semantic_query::PropertyKey, &crate::semantic_query::SurfaceMember>
+        {
+            let mut index = FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        }
+        let modifier_index = modifier_members.as_deref().map(index);
+        let own_source_index = source_members.as_deref().map(index);
+        let source_index = if homomorphic {
+            modifier_index.as_ref()
+        } else {
+            own_source_index.as_ref()
+        };
+        let value_reads_modifiers_member = modifier_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    graph,
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
+        let keys = match (&modifier_members, homomorphic) {
+            (Some(members), true) => super::enumerate::KeyDomainKey::from_keys(
+                members
+                    .iter()
+                    .filter(|member| {
+                        member.visibility == verter_type_expr::MemberVisibility::Public
+                    })
+                    .map(|member| member.key.cloned_known())
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            _ => self.key_literals_from_keyspace_node(mapper.key_space)?,
+        };
+        let mut produced = super::build::MappedProducedMembers::with_capacity(keys.len());
+        for key in keys {
+            key.literal.as_ref()?;
+            let binder = self.key_domain_binder(&key)?;
+            let substituted = self.substitute_semantic_type_param(
+                mapper.value_expr,
+                mapper.parameter_node,
+                binder,
+            );
+            let value = self
+                .evaluate_deferred_semantic_node_with_context(substituted, transit)
+                .into_active_query_build_node(self);
+            if matches!(
+                graph.node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                return None;
+            }
+            let modifier = modifier_index
+                .as_ref()
+                .and_then(|index| index.get(&key.key).copied());
+            let optional = match mapper.optionality {
+                crate::semantic_query::OptionalityMod::Add => true,
+                crate::semantic_query::OptionalityMod::Remove => false,
+                crate::semantic_query::OptionalityMod::Keep => {
+                    modifier.is_some_and(|member| member.optional)
+                }
+            };
+            let kept_optional_read = modifier.filter(|_| value_reads_modifiers_member && optional);
+            // The modifiers settle the value the checker reads at this key,
+            // so each arm of a union value is read first: `O[K] | null`
+            // reads `O["a"]` as the optional member's `number | undefined`,
+            // the `undefined` that `-?` then removes.
+            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove
+                || kept_optional_read.is_some()
+            {
+                self.read_union_arms_for_relation(value, transit)?
+            } else {
+                value
+            };
+            let value =
+                self.settle_mapped_member_value(mapper, value, source, kept_optional_read, || {
+                    source_index
+                        .and_then(|index| index.get(&key.key))
+                        .map(|member| member.optional)
+                });
+            if self.join_mapped_production(&mut produced, &key.key, value) {
+                continue;
+            }
+            produced.push(crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::from_known(key.key),
+                value,
+                optional,
+                readonly: match mapper.readonly {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => {
+                        modifier.is_some_and(|member| member.readonly)
+                    }
+                },
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+                produced.into_members(),
+                Some(mapper.key_space),
+            ))),
+        )
+    }
+
+    /// `value` with each arm of it read at `Navigate` the way a relation
+    /// reads that arm (an indexed access over a settled object reads the
+    /// member's type), the arms re-united; `value` itself when no arm reads
+    /// further, and `None` when an arm reads as a miss.
+    fn read_union_arms_for_relation(
+        &self,
+        value: SemanticNodeId,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let arms = self.union_arms(value);
+        let read: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|&arm| {
+                self.evaluate_deferred_semantic_node_with_context(
+                    arm,
+                    transit.with_mode(crate::semantic_query::ProjectionMode::Navigate),
+                )
+                .into_active_query_build_node(self)
+            })
+            .collect();
+        if read.iter().any(|&arm| {
+            matches!(
+                self.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        }) {
+            return None;
+        }
+        if read == arms {
+            return Some(value);
+        }
+        Some(self.intern_normalized_union_or_intersection(&read, true))
+    }
+
+    /// The members of a plain object surface `node` names for a relation:
+    /// `None` for an open carrier, a non-object, and an object with call,
+    /// construct or index signatures.
+    fn plain_object_members_for_relation(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<crate::semantic_query::SurfaceMember>> {
+        let IdentityCarrierUnwrap::Concrete(object) =
+            self.unwrap_identity_carrier_for_relation(node)
+        else {
+            return None;
+        };
+        let data = self.graph().node_data(object)?;
+        let SemanticNodeData::Object(view) = &*data else {
+            return None;
+        };
+        if !view.call_signatures.is_empty()
+            || !view.construct_signatures.is_empty()
+            || !view.index_signatures.is_empty()
+        {
+            return None;
+        }
+        Some(
+            view.closed()
+                .complete_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
         )
     }
 

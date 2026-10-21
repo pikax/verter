@@ -3347,3 +3347,175 @@ fn pinned_recursive_template_length() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The fixture of [`intersection_with_a_mapped_type_over_the_inferred_parameter`].
+const VALIDATED_INTERSECTION: &str = r##"
+declare function validated<C>(reducers: C & { [K in keyof C]: C[K] extends { prepare: any } ? { reducer: unknown } : {} }): C;
+export const plain = validated({ a: 1 });
+export const annotated = validated({ a: (s: number) => {} });
+export const method = validated({ a(s: number) { return s; } });
+"##;
+
+/// A parameter typed as the inferred parameter intersected with a mapped
+/// type over its keys infers from the naked arm, eager and context
+/// sensitive arguments alike, and the argument relates to the mapped arm
+/// once the mapped type is instantiated over the inferred object.
+#[test]
+fn intersection_with_a_mapped_type_over_the_inferred_parameter() {
+    let failures = Matrix::new(VALIDATED_INTERSECTION).types(&[
+        ("typeof plain", "{ a: number; }"),
+        ("typeof annotated", "{ a: (s: number) => void; }"),
+        ("typeof method", "{ a(s: number): number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_mapped_parameter_over_closed_keys_relates_as_its_members`].
+const MAPPED_PARAMETER_MEMBERS: &str = r##"
+declare function dup<K extends PropertyKey>(x: { [P in K]: P }, k: K): "first";
+declare function dup<K>(x: unknown, k: K): "second";
+export const sameSpelling = dup<1 | "1">({ 1: "1" }, 1);
+declare function req<T>(x: { [K in keyof T]-?: T[K] | null }, t: T): "first";
+declare function req<T>(x: unknown, t: T): "second";
+export const required = req<{ a?: number }>({ a: undefined }, {});
+type Spelled = { [P in 1 | "1"]: P };
+declare function spelled(x: Spelled): "first";
+declare function spelled(x: unknown): "second";
+export const spelledAlias = spelled({ 1: "1" });
+type Optional = { a?: number };
+type NotOptional = { [K in keyof Optional]-?: Optional[K] | null };
+declare function notOptional(x: NotOptional): "first";
+declare function notOptional(x: unknown): "second";
+export const requiredAlias = notOptional({ a: undefined });
+"##;
+
+/// A mapped type over a closed key domain, as an alias or as a parameter
+/// once its type arguments are given, relates the argument to the members
+/// the mapped type has: `-?` drops the `undefined` an optional source
+/// member adds under `strictNullChecks`, and keys of one spelling (`1` and
+/// `"1"`) are one member holding both productions. The explicitly
+/// instantiated same-spelling call is not answered yet, but never with the
+/// overload the checker rejects.
+#[test]
+fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
+    let failures = Matrix::new(MAPPED_PARAMETER_MEMBERS).four(&[
+        (
+            Read::Type("typeof spelledAlias"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof requiredAlias"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof required"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof sameSpelling"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+    ]);
+    let wrong: Vec<&String> = failures
+        .iter()
+        .filter(|failure| {
+            !failure.contains("`typeof sameSpelling`") || !failure.starts_with("GAP ")
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{}",
+        wrong
+            .iter()
+            .map(|failure| failure.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// [`a_mapped_parameter_over_closed_keys_relates_as_its_members`]'s
+/// same-spelling call, answered.
+#[test]
+#[ignore = "typed gap in the lane: an argument to an explicitly instantiated mapped parameter degrades by UnresolvedValue"]
+fn pinned_same_spelling_mapped_parameter_call() {
+    let failures =
+        Matrix::new(MAPPED_PARAMETER_MEMBERS).types(&[("typeof sameSpelling", "\"first\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_fresh_literal_against_a_closed_mapped_type_is_excess_checked`].
+const MAPPED_EXCESS: &str = r##"
+type Enumerated = { [K in "a" | "b"]: K };
+declare function enumerated(x: Enumerated): "first";
+declare function enumerated(x: unknown): "second";
+export const enumeratedExcess = enumerated({ a: "a", b: "b", c: 1 });
+export const enumeratedExact = enumerated({ a: "a", b: "b" });
+type Valued = { [K in "a"]: number };
+declare function valued(x: Valued): "first";
+declare function valued(x: unknown): "second";
+export const valuedExcess = valued({ a: 1, z: 2 });
+type Face = { a: number };
+declare function partial(x: Partial<Face>): "first";
+declare function partial(x: unknown): "second";
+export const partialExcess = partial({ a: 1, z: 2 });
+declare function plain(x: { a: "a"; b: "b" }): "first";
+declare function plain(x: unknown): "second";
+export const plainExcess = plain({ a: "a", b: "b", c: 1 });
+declare function one(x: Enumerated): void;
+export function single() { return one({ a: "a", b: "b", c: 1 }); }
+declare function onePartial(x: Partial<Face>): void;
+export function singlePartial() { return onePartial({ a: 1, z: 2 }); }
+"##;
+
+/// A mapped type over a closed key domain is an object target of the fresh
+/// excess-property check, as the object its keys map to: a fresh literal
+/// with a property the mapped type has no key for selects the next
+/// overload, as it does against the object written out, while the literal
+/// with exactly its keys selects the mapped overload. A single signature
+/// reports the excess property (TS2353) at it.
+#[test]
+fn a_fresh_literal_against_a_closed_mapped_type_is_excess_checked() {
+    let mut failures = Matrix::new(MAPPED_EXCESS).types(&[
+        ("typeof enumeratedExcess", "\"second\""),
+        ("typeof enumeratedExact", "\"first\""),
+        ("typeof valuedExcess", "\"second\""),
+        ("typeof partialExcess", "\"second\""),
+        ("typeof plainExcess", "\"second\""),
+    ]);
+    let host = super::signature_predicate_inference_tests::host_with(MAPPED_EXCESS);
+    let rows: &[(&str, &str)] = &[
+        ("single", "(19,57): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type 'Enumerated'."),
+        ("singlePartial", "(21,61): error TS2353: Object literal may only specify known properties, and 'z' does not exist in type 'Partial<Face>'."),
+    ];
+    for root in [
+        super::signature_predicate_inference_tests::STRICT_ROOT,
+        super::signature_predicate_inference_tests::LOOSE_ROOT,
+    ] {
+        for (function, expected) in rows {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                function,
+                MAPPED_EXCESS,
+            );
+            if reported != [*expected] {
+                failures.push(format!(
+                    "`{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

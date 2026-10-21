@@ -15567,6 +15567,57 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Folds `value` into the member `produced` already holds under the
+    /// property spelling of `name`, as the checker unites the productions
+    /// of one property (`{ [K in 1 | "1"]: K }` is `{ 1: 1 | "1" }`); the
+    /// first production keeps the member's slot. `false` when no production
+    /// of that spelling exists yet.
+    pub(super) fn join_mapped_production(
+        &self,
+        produced: &mut MappedProducedMembers,
+        name: &PropertyKey,
+        value: SemanticNodeId,
+    ) -> bool {
+        let Some(&ordinal) = produced
+            .by_spelling
+            .get(&crate::semantic_query::property_spelling(name.clone()))
+        else {
+            return false;
+        };
+        let existing = &mut produced.members[ordinal];
+        if existing.value != value {
+            existing.value =
+                self.intern_normalized_union_or_intersection(&[existing.value, value], true);
+        }
+        true
+    }
+
+    /// A mapped member's value as the mapped type holds it under its
+    /// optionality modifier: `-?` removes the `undefined` an optional
+    /// source member added (`source_optional` reads that member's
+    /// optionality), and a kept `?` over a value that is the modifiers
+    /// type's own member read (`X[P]`, `kept_optional_read` that member)
+    /// drops the `undefined` the read added, since the member's optional
+    /// flag carries absence.
+    pub(super) fn settle_mapped_member_value(
+        &self,
+        mapper: &crate::semantic_query::MapperKey,
+        value: SemanticNodeId,
+        source: SemanticNodeId,
+        kept_optional_read: Option<&SurfaceMember>,
+        source_optional: impl Fn() -> Option<bool>,
+    ) -> SemanticNodeId {
+        if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+            return self.mapped_member_optionality_with(mapper, value, source, source_optional);
+        }
+        match (kept_optional_read, mapper.modifiers_type) {
+            (Some(member), Some(modifiers)) if member.optional => {
+                self.read_without_optional_member_undefined(value, member.value, modifiers)
+            }
+            _ => value,
+        }
+    }
+
     /// A mapped member's value read at its key under its optionality
     /// modifier, as the checker types a mapped symbol's property under
     /// `strictNullChecks` (`resolveMappedTypeMembers`): `+?` adds `undefined`
@@ -15674,7 +15725,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             })
     }
 
-    fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
+    pub(super) fn union_arms(&self, node: SemanticNodeId) -> Vec<SemanticNodeId> {
         match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Union(members)) => members.members_arc().to_vec(),
             _ => vec![node],
@@ -16319,8 +16370,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // removes. The evaluation itself is unchanged — see
         // [`Self::evaluate_k_independent_mapped_value`].
         let mut shared_value: Option<SemanticNodeId> = None;
-        let mut produced: Vec<SurfaceMember> = Vec::with_capacity(keys.len());
-        let mut produced_by_key = std::collections::HashMap::with_capacity(keys.len());
+        let mut produced = MappedProducedMembers::with_capacity(keys.len());
         let mut project_member_edges: Vec<(SemanticNodeId, PropertyKey)> = Vec::new();
         // A key whose `as` remap fails closed (`DeferCarrier`) taints the whole
         // mapped type: it returns the deferred `Mapped` carrier rather than a
@@ -16521,20 +16571,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A surface's optional flag carries absence; adding `undefined`
             // belongs to a member read. Removing optionality must settle its
             // value before the source modifier is lost.
-            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
-                self.key_domain_binder(key).map_or(value, |key_node| {
-                    self.mapped_member_optionality(mapper, value, source, key_node)
-                })
-            } else {
-                match (modifiers_member, mapper.modifiers_type) {
-                    (Some(member), Some(modifiers))
-                        if value_reads_modifiers_member && optional && member.optional =>
-                    {
-                        self.read_without_optional_member_undefined(value, member.value, modifiers)
-                    }
-                    _ => value,
-                }
-            };
+            let value = self.settle_mapped_member_value(
+                mapper,
+                value,
+                source,
+                modifiers_member.filter(|_| value_reads_modifiers_member && optional),
+                || {
+                    self.key_domain_binder(key)
+                        .and_then(|key_node| self.mapped_source_member_optional(source, key_node))
+                },
+            );
             // `produced_names` was decided above, before this key's value
             // operand was forced — see the key-domain ordering note at the
             // top of the loop.
@@ -16547,17 +16593,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // first production keeps the member slot (position,
                 // modifiers, and declaration site); later same-name
                 // productions fold their value into a Union arm.
-                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
-                if let Some(&ordinal) = produced_by_key.get(&spelling) {
-                    let existing: &mut SurfaceMember = &mut produced[ordinal];
-                    if existing.value != value {
-                        // Canonical construction: duplicate produced names
-                        // UNION their per-K values through the one authority.
-                        existing.value = self.intern_normalized_union_or_intersection(
-                            &[existing.value, value],
-                            true,
-                        );
-                    }
+                if self.join_mapped_production(&mut produced, &produced_name, value) {
                     project_member_edges.push((value, produced_name.clone()));
                     continue;
                 }
@@ -16574,7 +16610,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // NOT via own-body declaration in any consuming macro's
                 // T body. The construction layer is structurally
                 // heritage-equivalent — `false` is the truth.
-                produced_by_key.insert(spelling, produced.len());
                 produced.push(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(
                         produced_name.clone(),
@@ -16669,19 +16704,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // inherit modifiers from: only the mapping's own `+?` and
             // `+readonly` apply. A name produced again unites its values.
             for produced_name in produced_names {
-                let spelling = crate::semantic_query::property_spelling(produced_name.clone());
-                if let Some(&ordinal) = produced_by_key.get(&spelling) {
-                    let existing: &mut SurfaceMember = &mut produced[ordinal];
-                    if existing.value != value {
-                        existing.value = self.intern_normalized_union_or_intersection(
-                            &[existing.value, value],
-                            true,
-                        );
-                    }
+                if self.join_mapped_production(&mut produced, &produced_name, value) {
                     project_member_edges.push((value, produced_name));
                     continue;
                 }
-                produced_by_key.insert(spelling, produced.len());
                 produced.push(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(
                         produced_name.clone(),
@@ -16788,6 +16814,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(crate::semantic_query::SurfaceEntry::IndexSignature)
                 .chain(
                     produced
+                        .into_members()
                         .into_iter()
                         .map(crate::semantic_query::SurfaceEntry::Member),
                 )
@@ -21533,6 +21560,37 @@ struct MappedIndexRemap {
     key_types: Vec<SemanticNodeId>,
     /// The property names it produces.
     names: Vec<PropertyKey>,
+}
+
+/// The members a mapped type produces, in production order, indexed by
+/// property spelling so a later production of the same property joins the
+/// first ([`ProjectSemanticDispatch::join_mapped_production`]).
+pub(super) struct MappedProducedMembers {
+    members: Vec<SurfaceMember>,
+    by_spelling: FxHashMap<PropertyKey, usize>,
+}
+
+impl MappedProducedMembers {
+    pub(super) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            members: Vec::with_capacity(capacity),
+            by_spelling: FxHashMap::with_capacity_and_hasher(capacity, Default::default()),
+        }
+    }
+
+    /// Adds the first production of a property.
+    pub(super) fn push(&mut self, member: SurfaceMember) {
+        if let Some(key) = member.key.cloned_known() {
+            self.by_spelling
+                .entry(crate::semantic_query::property_spelling(key))
+                .or_insert(self.members.len());
+        }
+        self.members.push(member);
+    }
+
+    pub(super) fn into_members(self) -> Vec<SurfaceMember> {
+        self.members
+    }
 }
 
 /// A key TYPE of a homomorphic mapping's key domain — its source's index
