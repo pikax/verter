@@ -133,8 +133,8 @@ pub struct IndexedLiteralProvenance {
 }
 
 /// One step from a declaration's inferred type into a nested position its
-/// initializer writes: an object literal's member, or an array literal's
-/// element type.
+/// initializer writes: an object literal's member, an array literal's
+/// element type, or the members of a union one conditional arm holds.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DeclaredReadStep {
     /// The member with the statically known `key` that the authored
@@ -148,7 +148,21 @@ pub enum DeclaredReadStep {
         key: crate::TypePropertyKey,
         at: verter_span::Span,
     },
+    /// The member the authored property declared at `at` writes under a
+    /// computed key (`{ [k]: s }`), which only the key's resolution names.
+    ComputedMember {
+        at: verter_span::Span,
+    },
     Element,
+    /// The members of the union at this point that the conditional arm
+    /// `written` holds: the arm's type as the initializer wrote it, before
+    /// the arms join. An array arm's element positions are told apart from
+    /// another array arm's by it alone (`c ? [s, 1] : [sl, true]` writes two
+    /// element positions, each widened by its own reads); an object arm's
+    /// are already told apart by their members' declaration spans.
+    Arm {
+        written: Arc<TypeExpr>,
+    },
 }
 
 /// One position a declaration's initializer closes in a mutable location
