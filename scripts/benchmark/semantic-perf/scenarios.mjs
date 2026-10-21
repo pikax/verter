@@ -741,6 +741,22 @@ export function allScenarios() {
     );
   }
 
+  out.push(
+    scenario(
+      "scale-ambient-export-equals",
+      "ambient-module",
+      "read a named type exported by an ambient module's assigned namespace",
+      'import type { Opt } from "pkg";\n',
+      'Opt["k"]',
+      {
+        files: {
+          "pkg.d.ts":
+            'declare module "pkg" { namespace NS { interface Opt { k: 99 } } export = NS; }\n',
+        },
+      },
+    ),
+  );
+
   // Declaration merging: one interface merged from many contributing files.
   for (const n of [100, 500, 2000]) {
     out.push(
@@ -891,6 +907,7 @@ export const SCENARIO_TIERS = {
   "return-chain-20": "quick",
   "return-chain-100": "standard",
   "return-chain-300": "standard",
+  "scale-ambient-export-equals": "quick",
   "augment-global-100": "quick",
   "augment-global-500": "standard",
   "augment-global-2000": "standard",

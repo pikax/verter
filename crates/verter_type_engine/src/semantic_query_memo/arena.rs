@@ -1163,7 +1163,7 @@ fn scope_digest(scope: &NodeScopeId) -> u64 {
         std::num::NonZeroU64,
         verter_type_expr::TopLevelOwnerId,
         crate::semantic_query::HashValue,
-        Option<u32>,
+        Option<crate::semantic_query::NodeLocalScopeId>,
         u64,
     );
     std::thread_local! {

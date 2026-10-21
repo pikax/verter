@@ -7,6 +7,8 @@
 //! SOURCE plus the semantic-graph node it raises to through the one shared
 //! dispatch — never on a materialized `TypeExpr`.
 
+use verter_type_engine::semantic_query::{LocalScopeId, NodeLocalScopeId};
+
 use std::sync::Arc;
 
 use verter_session_query::analysis::component_meta::{
@@ -1115,13 +1117,13 @@ fn symbolic_projection_rejects_canonical_and_scope_identity_collisions() {
         canonical_id: verter_type_expr::OwnedStr::from("/workspace/a.ts"),
         owner,
         whole_hash: [1; 16],
-        local_scope: Some(1),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(1))),
     };
     let scope_b = verter_type_engine::semantic_query::NodeScopeId::File {
         canonical_id: verter_type_expr::OwnedStr::from("/workspace/b.ts"),
         owner,
         whole_hash: [2; 16],
-        local_scope: Some(2),
+        local_scope: Some(NodeLocalScopeId::Lexical(LocalScopeId(2))),
     };
     let bare_a = graph.intern_node_with_scope(
         SemanticNodeData::new_bare_ref(

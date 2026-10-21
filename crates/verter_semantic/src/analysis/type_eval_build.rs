@@ -2455,6 +2455,9 @@ fn collect_namespaced_statement_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Statement::ClassDeclaration(class) if implicit_export => {
+            collect_class_into_augmentation(class, source, out, namespace, scope);
+        }
         Statement::TSEnumDeclaration(decl) if implicit_export => {
             collect_enum_into_augmentation(
                 decl,
@@ -2519,6 +2522,9 @@ fn collect_namespaced_declaration_into_augmentation(
                 out.aug_value_decls.push((scope.clone(), parts));
             }
         }
+        Declaration::ClassDeclaration(class) => {
+            collect_class_into_augmentation(class, source, out, namespace, scope);
+        }
         Declaration::TSEnumDeclaration(decl) => {
             collect_enum_into_augmentation(
                 decl,
@@ -2529,6 +2535,26 @@ fn collect_namespaced_declaration_into_augmentation(
         }
         _ => {}
     }
+}
+
+fn collect_class_into_augmentation(
+    class: &Class<'_>,
+    source: &str,
+    out: &mut LoweredStatementParts,
+    namespace: &str,
+    scope: &AugmentationScopeKind,
+) {
+    let Some(id) = &class.id else {
+        return;
+    };
+    let mut inner = LoweredStatementParts::reading(&out.class_fields);
+    collect_named_class(
+        class,
+        source,
+        &mut inner,
+        qualified_name(namespace, &id.name),
+    );
+    move_value_parts_into_augmentation(inner, out, scope);
 }
 
 /// An enum an ambient augmentation block declares, under `name` (qualified

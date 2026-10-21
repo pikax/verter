@@ -709,9 +709,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     ),
                 ))
             }
-            SemanticNodeData::BareRef(_) => {
-                self.plan_bare_reference_projection(data, context, inputs, substitutions)
-            }
+            SemanticNodeData::BareRef(_) => self.plan_bare_reference_projection(
+                data,
+                context,
+                inputs,
+                substitutions,
+                self.in_deferred_interior(ancestors),
+            ),
             SemanticNodeData::ImportType(_) => {
                 self.plan_import_reference_projection(data, context, inputs, suspend)
             }

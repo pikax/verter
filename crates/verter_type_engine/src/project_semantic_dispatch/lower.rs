@@ -733,13 +733,77 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// namespace's own file.
     pub(super) fn resolve_enum_member_type(
         &self,
-        scope_canonical: &str,
-        scope_owner: verter_type_expr::TopLevelOwnerId,
+        scope: &NodeScopeId,
         name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
     ) -> Option<SemanticNodeId> {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return None;
+        };
+        let scope_canonical = canonical_id.as_ref();
+        let scope_owner = *owner;
         let (prefix, member) = dotted_name.rsplit_once('.')?;
+        if let Some((specifier, qualified)) =
+            self.ambient_namespace_target(scope, prefix, super::build::GlobalSpace::Value)
+        {
+            let augmentation =
+                verter_session_query::declarations::AugmentationScopeKind::Module(specifier);
+            let enumeration = self.enum_declaration_in_augmentation(
+                scope_canonical,
+                scope_owner,
+                &qualified,
+                Some(&augmentation),
+            )?;
+            return self.enum_member_type(&enumeration, member);
+        }
+        let (head, rest) = prefix.split_once('.').unwrap_or((prefix, ""));
+        let indexed = self
+            .ctx
+            .ensure_indexed_ready_serve(scope_canonical)?
+            .indexed;
+        if let Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(target)) =
+            indexed
+                .shallow_state
+                .visible_value_binding(scope_owner, head)
+        {
+            if self
+                .ctx
+                .resolve_type_dependency_canonical(scope_canonical, &target.source_specifier)
+                .is_none()
+            {
+                let path: Vec<verter_type_expr::OwnedStr> = if rest.is_empty() {
+                    Vec::new()
+                } else {
+                    rest.split('.')
+                        .map(verter_type_expr::OwnedStr::from)
+                        .collect()
+                };
+                let (root, consumed) =
+                    self.ambient_import_member_root(scope_canonical, target, &path)?;
+                if consumed != path.len() {
+                    return None;
+                }
+                let indexed = self
+                    .ctx
+                    .ensure_indexed_ready_serve(&root.scope.canonical_id)?
+                    .indexed;
+                let augmentation =
+                    Self::ambient_value_scope(&root.scope, &indexed.shallow_state.headers);
+                let enumeration = self.enum_declaration_in_augmentation(
+                    &root.scope.canonical_id,
+                    root.scope.owner,
+                    &root.name,
+                    augmentation,
+                )?;
+                return self.enum_member_type(&enumeration, member);
+            }
+        }
         let identity = match prefix.split_once('.') {
             None => match name_resolution.get(prefix) {
                 Some(direct) => direct.clone(),
