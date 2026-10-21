@@ -1376,8 +1376,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             t.borrow_mut()
                 .push(super::raise::query_key_discriminant(key))
         });
-        #[cfg(any(test, feature = "test-support"))]
-        super::raise::record_dispatch_key(key);
         let mut carrier = None;
         // The runtime holds this entry on the heap: it enters no nested
         // native query level.

@@ -13,6 +13,7 @@ const PASS_FIXTURES: &[&str] = &[
     "recursive_self_good_recursive_carrier.rs",
     "script_fact_partial_exact_syntax.rs",
     "public_owned_carriers_borrow_and_own.rs",
+    "host_release_completion_in_production_build.rs",
 ];
 
 fn workspace_root() -> PathBuf {
@@ -159,6 +160,7 @@ fn main() {
                     // dedicated session-soak compile-contract lane.
                     | Some("flight_rendezvous_opt_in_through_soak_support.rs")
                     | Some("active_occupancy_window_opt_in_through_soak_support.rs")
+                    | Some("host_release_completion_through_soak_support.rs")
             )
         });
     }

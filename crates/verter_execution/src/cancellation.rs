@@ -227,10 +227,10 @@ impl CancellationToken {
     /// semantic cancellation; scoped shared jobs use this aggregate instead.
     #[must_use]
     pub fn has_registered_owners(&self) -> bool {
-        self.state
-            .owners
-            .as_ref()
-            .is_some_and(|owners| owners.ever_registered.load(Ordering::Acquire))
+        match &self.state.owners {
+            Some(owners) => owners.ever_registered.load(Ordering::Acquire),
+            None => false,
+        }
     }
 }
 

@@ -5547,6 +5547,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
         }
 
+        // A built-in utility's instantiation, once a gate below has proved its
+        // identity.
+        let builtin_utility_output = |builtin_utility: Option<BuiltinUtility>| {
+            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
+            // `ReturnType<F>`, …) inspects its argument nodes to form the
+            // result — `build_builtin_utility` reads `X`'s Object surface,
+            // enumerates `K`'s key space, walks `F`'s call signature, etc.
+            // The result therefore transitively depends on the file
+            // content each file-derived argument was lowered from. Derive
+            // the self-roots from the `args` node set (the same
+            // file-derived-input rooting `KeyOf` / `MappedType` /
+            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
+            // contributes one `(canonical, observed_hash)` self-root so an
+            // edit to that file rejects this utility memo entry on the
+            // strict warm-read validator. Structural args (`Global`-scoped
+            // primitives, literal-union key sets) contribute nothing.
+            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+            // Builtin-utility results are NEVER macro-T own-body (by
+            // design): `defineProps<Omit<Vendor, K>>()` surfaces
+            // members that came from `Vendor` via the utility, none of
+            // which the author wrote in the macro T body. Downgrade the
+            // provenance to structural so the utility's produced members
+            // report `declared_in_macro_type_arg = false`. (A carrier
+            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
+            // direct-decl case: CarrierProps's own body is stamped below
+            // and only its `extends`-reached members go through this
+            // utility path as structural.)
+            // `builtin_utility` is the identity the gate proved; builders never
+            // resolve a spelling themselves.
+            let (utility_result, utility_fence, utility_is_partial, approximation) = self
+                .build_builtin_utility(
+                    base,
+                    decl_name.as_ref(),
+                    builtin_utility,
+                    args,
+                    context.into_structural_provenance(),
+                );
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (utility_result, utility_fence).into();
+            // Two-signal fold: a mapper-utility surface whose
+            // nested KeyOf/MappedType subquery was genuinely incomplete
+            // (budget / recursion / walker-fatal) surfaces here as a
+            // complete-looking `Value` shell — carry its partiality
+            // through the published value so the component-meta + shape /
+            // materialize warm gates refuse it. Benign non-cacheability of
+            // the nested read does NOT taint this (it is `cache_suppress`
+            // on the inner memo only).
+            output.fold_partial(utility_is_partial);
+            output.approximation = approximation;
+            output.with_observed_self_roots(observed_self_roots)
+        };
+
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
         // has NOT shadowed routes through the utility-specific dispatch
@@ -5578,55 +5630,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
             }
 
-            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
-            // `ReturnType<F>`, …) inspects its argument nodes to form the
-            // result — `build_builtin_utility` reads `X`'s Object surface,
-            // enumerates `K`'s key space, walks `F`'s call signature, etc.
-            // The result therefore transitively depends on the file
-            // content each file-derived argument was lowered from. Derive
-            // the self-roots from the `args` node set (the same
-            // file-derived-input rooting `KeyOf` / `MappedType` /
-            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
-            // contributes one `(canonical, observed_hash)` self-root so an
-            // edit to that file rejects this utility memo entry on the
-            // strict warm-read validator. Structural args (`Global`-scoped
-            // primitives, literal-union key sets) contribute nothing.
-            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-            // Builtin-utility results are NEVER macro-T own-body (by
-            // design): `defineProps<Omit<Vendor, K>>()` surfaces
-            // members that came from `Vendor` via the utility, none of
-            // which the author wrote in the macro T body. Downgrade the
-            // provenance to structural so the utility's produced members
-            // report `declared_in_macro_type_arg = false`. (A carrier
-            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
-            // direct-decl case: CarrierProps's own body is stamped below
-            // and only its `extends`-reached members go through this
-            // utility path as structural.)
-            // `builtin_utility` is the identity the gate above proved; builders
-            // never resolve a spelling themselves.
-            let (utility_result, utility_fence, utility_is_partial, approximation) = self
-                .build_builtin_utility(
-                    base,
-                    decl_name.as_ref(),
-                    builtin_utility,
-                    args,
-                    context.into_structural_provenance(),
-                );
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                (utility_result, utility_fence).into();
-            // Two-signal fold: a mapper-utility surface whose
-            // nested KeyOf/MappedType subquery was genuinely incomplete
-            // (budget / recursion / walker-fatal) surfaces here as a
-            // complete-looking `Value` shell — carry its partiality
-            // through the published value so the component-meta + shape /
-            // materialize warm gates refuse it. Benign non-cacheability of
-            // the nested read does NOT taint this (it is `cache_suppress`
-            // on the inner memo only).
-            output.fold_partial(utility_is_partial);
-            output.approximation = approximation;
-            return InstantiateStart::Done(Box::new(
-                output.with_observed_self_roots(observed_self_roots),
-            ));
+            return InstantiateStart::Done(Box::new(builtin_utility_output(builtin_utility)));
         }
 
         // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
@@ -5720,6 +5724,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(out));
             }
         };
+
+        // 3b. A type alias whose authored body is the `intrinsic` keyword is
+        // the compiler-provided type its name selects (the checker's
+        // `intrinsicTypeKinds`), whether the lib declares it or the user does:
+        // a local `type NoInfer<T> = intrinsic` is `NoInfer`. A name that
+        // selects no implemented intrinsic is that unsupported intrinsic, never
+        // the body it spells: the keyword is not a reference to evaluate.
+        if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
+            let mut output = match adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
+                Some(utility) => builtin_utility_output(Some(utility)),
+                None => (
+                    QueryResult::Value(self.opaque(QueryError::UnsupportedIntrinsic {
+                        name: verter_type_expr::OwnedStr::from(decl_name.as_ref()),
+                    })),
+                    self.project_generation_signature(),
+                )
+                    .into(),
+            };
+            // The answer exists because the declaring file spells the alias
+            // `intrinsic`: root it on that file's observed version, as the
+            // ordinary declaration path does, so an edit to the alias misses
+            // the warm read. A non-file base has no version.
+            if !is_non_file_base {
+                output.dep_signature = output
+                    .dep_signature
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.dep_signature_for(decl_canonical, decl_whole_hash)
+                            .iter()
+                            .cloned(),
+                    )
+                    .collect();
+                output =
+                    output.with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
+            }
+            return InstantiateStart::Done(Box::new(output));
+        }
 
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
@@ -11552,7 +11594,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // query build's taint frame (refusing warm admission) instead of
         // silently returning an intermediate carrier the signature-utility
         // caller would classify as settled.
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
@@ -13557,9 +13599,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node
         };
         let node = match data.as_deref() {
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
-                self.primitive_node(PrimitiveKind::Never)
-            }
+            // The non-primitive `object` declares no member, so it has no
+            // key (`keyof object` is `never`), as nullish types have none.
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Object,
+            )) => self.primitive_node(PrimitiveKind::Never),
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
@@ -16171,7 +16215,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         resolved_source: SemanticNodeId,
     ) -> Result<Vec<SemanticNodeId>, crate::semantic_query::PartialReasonSet> {
         let mut reads = Vec::new();
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut pending = vec![mapper.value_expr];
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
@@ -17288,7 +17332,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut current = self
             .evaluate_deferred_semantic_node_with_context(node, context)
             .into_active_query_build_node(self);
