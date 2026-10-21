@@ -98,7 +98,7 @@ pub use intern_table::{IdentityIndexSnapshot, InternIndexOccupancy};
 pub use producer::{
     Acquired, Claim, ClaimAttempt, Joined, ProducerLease, ReadCapture, Recursion, Subscription,
 };
-pub use release::{ClosedContent, SemanticCloseReport};
+pub use release::{ClosedContent, DrainedStorageReport, SemanticCloseReport};
 pub use scc_publish::{
     PendingFlowReturnMember, PendingRelationMember, PendingResolveCallMember, SccRootWitness,
 };

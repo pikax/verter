@@ -88,12 +88,15 @@
 // The `HeapSize` derive names this crate by its absolute path.
 extern crate self as verter_retention;
 
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub mod active_window;
 pub mod allocation;
 pub mod granular;
 pub mod heap_size;
 pub mod owned;
 pub mod shared;
 pub mod unshared;
+pub mod word_set;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -420,7 +423,21 @@ pub struct SemanticRetentionAccount {
     refusals_pressure: AtomicUsize,
     refusals_active: AtomicUsize,
     releases: AtomicUsize,
+    /// Open ACTIVE-occupancy windows and the transition sequence they
+    /// span. Optional test/tooling state: absent from production builds.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    active_windows: active_window::ActiveWindows,
 }
+
+/// Whether this build carries the ACTIVE-occupancy measurement window
+/// (the `active_window` module): `true` only under `test`, `test-support` or the
+/// default-off `soak-support` feature. A build without it has no window to
+/// report from — never a window that reports zero.
+pub const ACTIVE_OCCUPANCY_WINDOW_AVAILABLE: bool = cfg!(any(
+    test,
+    feature = "test-support",
+    feature = "soak-support"
+));
 
 static PROCESS_LOCAL: OnceLock<Arc<SemanticRetentionAccount>> = OnceLock::new();
 
@@ -449,6 +466,8 @@ impl SemanticRetentionAccount {
             refusals_pressure: AtomicUsize::new(0),
             refusals_active: AtomicUsize::new(0),
             releases: AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+            active_windows: active_window::ActiveWindows::default(),
         })
     }
 
@@ -478,6 +497,15 @@ impl SemanticRetentionAccount {
     ///
     /// A zero-byte reservation is always admitted and charges nothing.
     pub fn reserve(self: &Arc<Self>, class: ChargeClass, bytes: usize) -> RetentionAdmission {
+        self.reserve_with(class, bytes, Provenance::UNKNOWN)
+    }
+
+    fn reserve_with(
+        self: &Arc<Self>,
+        class: ChargeClass,
+        bytes: usize,
+        provenance: Provenance,
+    ) -> RetentionAdmission {
         if !class.is_refusable() {
             return RetentionAdmission::Admitted(self.pin(bytes));
         }
@@ -491,7 +519,7 @@ impl SemanticRetentionAccount {
         }
         if bytes == 0 {
             self.admissions.fetch_add(1, Ordering::Relaxed);
-            return RetentionAdmission::Admitted(self.mint_charge(class, 0));
+            return RetentionAdmission::Admitted(self.mint_charge(class, 0, provenance));
         }
         let _admission_lock = self.lock_aggregate_state();
         let current = self.refusable_bytes.load(Ordering::Relaxed);
@@ -521,12 +549,13 @@ impl SemanticRetentionAccount {
                 });
             }
             self.active_bytes.store(active + bytes, Ordering::Relaxed);
+            self.note_active_locked(provenance, bytes, 0);
         }
         self.refusable_bytes
             .store(current + bytes, Ordering::Relaxed);
         self.admissions.fetch_add(1, Ordering::Relaxed);
         self.note_peak_locked();
-        RetentionAdmission::Admitted(self.mint_charge(class, bytes))
+        RetentionAdmission::Admitted(self.mint_charge(class, bytes, provenance))
     }
 
     /// Reserve `bytes` for a LIVE handle: always admitted, always
@@ -540,7 +569,7 @@ impl SemanticRetentionAccount {
         }
         self.admissions.fetch_add(1, Ordering::Relaxed);
         self.note_peak_locked();
-        self.mint_charge(ChargeClass::Pinned, bytes)
+        self.mint_charge(ChargeClass::Pinned, bytes, Provenance::UNKNOWN)
     }
 
     /// Whether pinned bytes have passed
@@ -588,20 +617,26 @@ impl SemanticRetentionAccount {
         }
     }
 
-    fn mint_charge(self: &Arc<Self>, class: ChargeClass, bytes: usize) -> RetentionCharge {
+    fn mint_charge(
+        self: &Arc<Self>,
+        class: ChargeClass,
+        bytes: usize,
+        provenance: Provenance,
+    ) -> RetentionCharge {
         RetentionCharge {
             account: Some(Arc::clone(self)),
             class,
             bytes,
             held: None,
             held_backing: 0,
+            provenance,
         }
     }
 
     /// The single release path. Reached ONLY from [`RetentionCharge`]'s
     /// `Drop`, which is why exactly-once release is structural rather
     /// than a discipline callers must remember.
-    fn release(&self, class: ChargeClass, bytes: usize) {
+    fn release(&self, class: ChargeClass, bytes: usize, provenance: Provenance) {
         let _admission_lock = self.lock_aggregate_state();
         match class {
             ChargeClass::Pinned => {
@@ -617,6 +652,7 @@ impl SemanticRetentionAccount {
                     self.active_bytes.store(active - bytes, Ordering::Relaxed);
                     self.refusable_bytes
                         .store(refusable - bytes, Ordering::Relaxed);
+                    self.note_active_locked(provenance, 0, bytes);
                 }
             }
             ChargeClass::Retained => {
@@ -633,8 +669,19 @@ impl SemanticRetentionAccount {
     /// Move `bytes` from `from` to `to` without releasing them: the single
     /// transition both classes observe at once. Reached only from
     /// [`RetentionCharge::transfer_to_pinned`], whose target never refuses.
-    fn reclassify(&self, from: ChargeClass, to: ChargeClass, bytes: usize) {
+    fn reclassify(&self, from: ChargeClass, to: ChargeClass, bytes: usize, provenance: Provenance) {
         let _admission_lock = self.lock_aggregate_state();
+        self.reclassify_locked(from, to, bytes, provenance);
+    }
+
+    /// [`Self::reclassify`] with the admission lock already held.
+    fn reclassify_locked(
+        &self,
+        from: ChargeClass,
+        to: ChargeClass,
+        bytes: usize,
+        provenance: Provenance,
+    ) {
         if bytes == 0 || from == to {
             return;
         }
@@ -655,7 +702,12 @@ impl SemanticRetentionAccount {
         };
         self.refusable_bytes.store(refusable, Ordering::Relaxed);
         self.pinned_bytes.store(pinned, Ordering::Relaxed);
-        self.active_bytes.store(active, Ordering::Relaxed);
+        let before = self.active_bytes.swap(active, Ordering::Relaxed);
+        self.note_active_locked(
+            provenance,
+            active.saturating_sub(before),
+            before.saturating_sub(active),
+        );
     }
 
     /// Re-admit `bytes` already pinned as retained, under the admission
@@ -705,6 +757,108 @@ impl SemanticRetentionAccount {
         self.peak_total_bytes.fetch_max(total, Ordering::Relaxed);
         verter_audit::attribute_max!(StoreRetainedBytes, total);
     }
+}
+
+/// Whom a charge's ACTIVE transitions are attributed to by an ACTIVE-occupancy
+/// window (the `active_window` module): an explicit `ActiveOwner`, or no
+/// owner at all. A charge reserved without an owner is UNKNOWN and is never
+/// implicitly attributed to any window. Zero-sized, and never read, in a build
+/// without the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Provenance {
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    owner: Option<u64>,
+}
+
+impl Provenance {
+    const UNKNOWN: Self = Self {
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        owner: None,
+    };
+
+    /// Attribution to `owner`, which must be bound to `account`.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    fn of(owner: &active_window::ActiveOwner, account: &Arc<SemanticRetentionAccount>) -> Self {
+        owner.assert_bound_to(account);
+        Self {
+            owner: Some(owner.id().raw()),
+        }
+    }
+
+    /// The provenance of one charge that absorbed or adopted bytes of
+    /// another: the shared owner, or UNKNOWN when the two differ — mixed
+    /// provenance is never attributed to either side.
+    #[inline]
+    fn merged(self, other: Self) -> Self {
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        if self != other {
+            return Self::UNKNOWN;
+        }
+        #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
+        let _ = other;
+        self
+    }
+}
+
+impl SemanticRetentionAccount {
+    /// A charge of `class` holding `held_bytes` adopts the backing slice of
+    /// another charge: ONE account-locked transaction settles both the
+    /// provenance change (the held bytes move between ACTIVE balances, the
+    /// total unchanged) and the backing's class change, so no window or
+    /// admission observes the adoption half-applied.
+    fn adopt_backing(&self, adoption: BackingAdoption) {
+        let _admission_lock = self.lock_aggregate_state();
+        if adoption.class == ChargeClass::Active {
+            self.rehome_active_locked(adoption.from, adoption.to, adoption.held_bytes);
+        }
+        self.reclassify_locked(
+            adoption.backing_class,
+            adoption.class,
+            adoption.backing_bytes,
+            adoption.to,
+        );
+    }
+
+    /// Move `bytes` of ACTIVE attribution from one provenance to another.
+    /// Called only while [`Self::lock_aggregate_state`] is held; compiles to
+    /// nothing in a build without the window.
+    #[inline]
+    fn rehome_active_locked(&self, from: Provenance, to: Provenance, bytes: usize) {
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        self.active_windows
+            .rehome_locked(from.owner, to.owner, bytes);
+        #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
+        let _ = (from, to, bytes);
+    }
+
+    /// Note an ACTIVE transition of a charge of `provenance` to the open
+    /// measurement windows: the ACTIVE total just moved by `rise` or `fall`
+    /// bytes. Called only while [`Self::lock_aggregate_state`] is held,
+    /// after the move; compiles to nothing in a build without the window.
+    #[inline]
+    fn note_active_locked(&self, provenance: Provenance, rise: usize, fall: usize) {
+        #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+        self.active_windows
+            .note_locked(provenance.owner, rise, fall);
+        #[cfg(not(any(test, feature = "test-support", feature = "soak-support")))]
+        let _ = (provenance, rise, fall);
+    }
+}
+
+/// One charge adopting another's backing slice: what
+/// [`SemanticRetentionAccount::adopt_backing`] settles in a single
+/// transaction.
+struct BackingAdoption {
+    /// The adopting charge's class.
+    class: ChargeClass,
+    /// Bytes the adopting charge held before adopting.
+    held_bytes: usize,
+    /// Its provenance before, and after merging the backing's.
+    from: Provenance,
+    to: Provenance,
+    /// The adopted backing's class and bytes.
+    backing_class: ChargeClass,
+    backing_bytes: usize,
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -781,6 +935,9 @@ pub struct RetentionCharge {
     /// The part of `bytes` that charges the `held` slice's backing: released
     /// with the slice when the holds end before the charge does.
     held_backing: usize,
+    /// The owner this charge is attributed to for ACTIVE-occupancy windows;
+    /// zero-sized in builds without the measurement window.
+    provenance: Provenance,
 }
 
 impl RetentionCharge {
@@ -814,7 +971,20 @@ impl RetentionCharge {
                         .is_some_and(|a| Arc::ptr_eq(a, account)),
                     "the holds' backing is charged to the account their charge is"
                 );
-                account.reclassify(backing.class, self.class, bytes);
+                let merged = if bytes > 0 {
+                    self.provenance.merged(backing.provenance)
+                } else {
+                    self.provenance
+                };
+                account.adopt_backing(BackingAdoption {
+                    class: self.class,
+                    held_bytes: self.bytes,
+                    from: self.provenance,
+                    to: merged,
+                    backing_class: backing.class,
+                    backing_bytes: bytes,
+                });
+                self.provenance = merged;
             }
             self.bytes += bytes;
             self.held_backing += bytes;
@@ -865,6 +1035,7 @@ impl RetentionCharge {
             bytes,
             held: None,
             held_backing: 0,
+            provenance: self.provenance,
         }
     }
 
@@ -881,7 +1052,7 @@ impl RetentionCharge {
             return;
         }
         if let Some(account) = self.account.as_ref() {
-            account.reclassify(self.class, ChargeClass::Pinned, self.bytes);
+            account.reclassify(self.class, ChargeClass::Pinned, self.bytes, self.provenance);
         }
         self.class = ChargeClass::Pinned;
         // No cache keeps the value now: its owned allocations are their
@@ -897,6 +1068,7 @@ impl RetentionCharge {
                 bytes: backing,
                 held: None,
                 held_backing: 0,
+                provenance: self.provenance,
             });
         }
     }
@@ -944,6 +1116,7 @@ impl RetentionCharge {
                     account
                         .active_bytes
                         .store(active - self.bytes, Ordering::Relaxed);
+                    account.note_active_locked(self.provenance, 0, self.bytes);
                 }
             }
             self.class = ChargeClass::Retained;
@@ -955,7 +1128,7 @@ impl RetentionCharge {
 impl Drop for RetentionCharge {
     fn drop(&mut self) {
         if let Some(account) = self.account.take() {
-            account.release(self.class, self.bytes);
+            account.release(self.class, self.bytes, self.provenance);
         }
     }
 }
