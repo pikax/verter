@@ -74,7 +74,15 @@ neither approximate nor unavailable facts enter the family memo.
 A successful, complete lookup may return a typed negative carrier for a proven
 absent member or stable unresolved authored reference. Settlement preserves that
 exact carrier and its reuse evidence. A failed query supplies no value; an
-incomplete lookup cannot establish absence. A completed positional value may
+incomplete lookup cannot establish absence. A `ResolveDecl` or `Instantiate`
+whose own work stopped early (a connected query-depth or work stop) and then
+missed delivers only the causes its work observed: the miss is the stop, not a
+`MISSING_DEPENDENCY` (`projection_fact::unavailable_causes`). Likewise the
+shallow walker drops a surface-composition arm whose lookup returned
+`IncompleteSemanticOperand` without recording an `UnresolvedSurfaceArm`; the
+read already folded its causes. A genuinely missing input still names
+`MISSING_DEPENDENCY` beside any stop, so the stop is never laundered into an
+admissible refusal. A completed positional value may
 retain the unresolved position as an approximate gap, while a failed lookup or
 presence-only subset remains Unavailable. No gap establishes an exact negative.
 An unmodelled value position has the distinct `UnsupportedPosition` disposition:

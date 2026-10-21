@@ -165,8 +165,11 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, RecoveryBasis,
+    CheckerDiagnostic, CheckerDiagnosticArguments, CheckerDiagnosticChainLine,
+    CheckerDiagnosticCode, CheckerDiagnosticOccurrence, CheckerDiagnosticOperation,
+    CheckerDiagnosticRecipe, CheckerDiagnosticSubject, RecoveryBasis,
 };
+pub(crate) use checker_diagnostic::{CheckerDiagnosticPrinter, CheckerDiagnosticSite};
 /// The checker compatibility policy: the limits at which the checker gives up
 /// on a type operation, and the diagnostic it reports there.
 pub mod checker_policy;
@@ -2452,7 +2455,7 @@ pub enum ResolvedCallResult {
         /// (`getCandidateForOverloadFailure`): the call's value is then
         /// the checker's recovery answer, never a silent success. `None`
         /// for an applicable winner.
-        recovery_diagnostic: Option<CheckerDiagnostic>,
+        recovery_diagnostic: Option<CheckerDiagnosticRecipe>,
     },
     /// The callee is genuine dynamic `any` — a COMPLETE result, not a
     /// fallback.
@@ -2516,7 +2519,7 @@ pub enum ResolveCallFailure {
     NoApplicableOverload,
     /// A definite applicability failure with a checker diagnostic. The
     /// diagnostic travels with the refusal; it is never a successful value.
-    Diagnosed(CheckerDiagnostic),
+    Diagnosed(CheckerDiagnosticRecipe),
     /// Applicability depended on unsupported or unresolved semantic work.
     Undecidable,
     /// The call-resolution work envelope tripped.
@@ -6147,6 +6150,8 @@ impl<T> CacheRead<T> {
 }
 
 mod retained_nodes;
+
+pub(crate) mod small_node_set;
 
 // ──────────────────────────────────────────────────────────────────────────
 // Derivation / origin layer (plan B2 + Derivation/Origin Layer Contract)

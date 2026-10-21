@@ -149,10 +149,10 @@ pub fn enable_dispatch_trace_for_test() -> DispatchTraceGuard {
 }
 
 // =====================================================================
-// Per-key dispatch traffic counter (diagnostic only).
+// Per-key cold and warm dispatch counters (diagnostic only).
 //
-// Counts how many times `execute_read` is invoked with each
-// `SemanticQueryKey`, keyed by a (variant_discriminant, content_hash)
+// Count how many times each `SemanticQueryKey` is built cold and served
+// warm, keyed by a (variant_discriminant, content_hash)
 // digest. Diagnostic-only, `#[cfg(test)]`-gated, zero footprint outside
 // test builds.
 //
@@ -224,9 +224,6 @@ fn canonicalise_for_digest(
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static DISPATCH_KEY_COUNTS:
-        std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
-        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
     /// Supplement §5.D.0 r17 — per-key COLD dispatch count.
     /// Incremented when `execute_read` enters with no warm cache entry
     /// for the key (cache miss; `build` is invoked).
@@ -239,14 +236,6 @@ thread_local! {
     pub(crate) static DISPATCH_KEY_WARM_COUNTS:
         std::cell::RefCell<rustc_hash::FxHashMap<SemanticQueryKeyDigest, u32>> =
         std::cell::RefCell::new(rustc_hash::FxHashMap::default());
-}
-
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn record_dispatch_key(key: &crate::semantic_query::SemanticQueryKey) {
-    let digest = SemanticQueryKeyDigest::from_key(key);
-    DISPATCH_KEY_COUNTS.with(|c| {
-        *c.borrow_mut().entry(digest).or_insert(0) += 1;
-    });
 }
 
 /// Supplement §5.D.0 r17 — record a COLD dispatch entry for
@@ -428,12 +417,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         #[cfg(any(test, feature = "test-support"))]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
 
-        // Per-key dispatch traffic counter. Records a
-        // (variant_discriminant, content_hash) digest so diagnostic
-        // tests can dump the top-N most-dispatched keys.
-        #[cfg(any(test, feature = "test-support"))]
-        record_dispatch_key(&key);
-
         // Delegate to the shared cold-build helper. The helper handles
         // canonicalisation, sentinel construction, the tracer-wrapped
         // build closure, and the warm-hit fast path inside
@@ -455,8 +438,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) {
         #[cfg(any(test, feature = "test-support"))]
         DISPATCH_TRACE.with(|t| t.borrow_mut().push(query_key_discriminant(&key)));
-        #[cfg(any(test, feature = "test-support"))]
-        record_dispatch_key(&key);
 
         let mut evidence = None;
         let read = super::narrow_value_cache_read(

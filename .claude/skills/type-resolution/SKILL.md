@@ -24,6 +24,7 @@ as those owners land.
 | [snapshot-freshness.md](references/snapshot-freshness.md) | Reader-owned snapshot freshness | SKR-RET-F |
 | [declaration-headers.md](references/declaration-headers.md) | Indexed declarations and headers | SKR-P-HEADERS |
 | [inference-owner.md](references/inference-owner.md) | Reverse recovery and inference ownership | SKR-INFER-1 |
+| [checker-diagnostics.md](references/checker-diagnostics.md) | Checker diagnostic recipes, occurrences and their binding | SKR-DIAG |
 | [continuation-runtime.md](references/continuation-runtime.md) | Query identity and continuation runtime | SKR-RUNTIME |
 | [conditional-decisions.md](references/conditional-decisions.md) | Conditional decisions and path projection | SKR-COND |
 | [semantic-observe.md](references/semantic-observe.md) | Derivation, provenance and observability | SKR-OBS |
