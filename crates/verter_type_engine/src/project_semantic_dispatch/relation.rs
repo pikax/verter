@@ -9163,14 +9163,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The checker's `recursiveTypeRelatedTo` entry, judged on the
         // operands the carriers stand for.
         let concrete_read = self.observe_read(|| {
-            [source, target].map(|operand| {
-                match self.unwrap_identity_carrier_for_relation(operand) {
-                    IdentityCarrierUnwrap::Concrete(id) => id,
-                    IdentityCarrierUnwrap::Unresolvable => operand,
-                }
-            })
+            [source, target].map(|operand| self.unwrap_identity_carrier_for_relation(operand))
         });
-        let concrete = *concrete_read.value();
+        let [source_unwrap, target_unwrap] = *concrete_read.value();
+        let concrete = [(source, source_unwrap), (target, target_unwrap)].map(
+            |(operand, unwrap)| match unwrap {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => operand,
+            },
+        );
         // Without `strictNullChecks` a union of one type and `null` /
         // `undefined` is that type to the checker: the pair relates as the
         // pair of its member, one recursion entry, not a union and then its
@@ -9246,14 +9247,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
-        // verbatim and resolves at the bound's own demand points).
-        let source = match self.unwrap_identity_carrier_for_relation(source) {
+        // verbatim and resolves at the bound's own demand points). The
+        // operands' unwraps are the ones read above, whose observations
+        // this judgement has already adopted.
+        let source = match source_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        let target = match self.unwrap_identity_carrier_for_relation(target) {
+        let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
@@ -13337,6 +13340,7 @@ enum FramePop {
 
 /// Outcome of the identity-carrier unwrap performed before relation
 /// dispatch.
+#[derive(Clone, Copy)]
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
@@ -17220,4 +17224,111 @@ fn surface_is_weak(surface: &SurfaceView) -> bool {
         && surface.construct_signatures.is_empty()
         && surface.index_signatures.is_empty()
         && !surface.closed().has_index_signature()
+}
+
+/// Batched negative assignability proofs over plain closed object types: a
+/// source lacking a property the target requires is not assignable to it,
+/// whatever else the two declare (the checker's `getUnmatchedProperty`). A
+/// caller relating many sources to one target reads the target's
+/// [`ProjectSemanticDispatch::assignability_refuting_keys`] once and each
+/// source's [`ProjectSemanticDispatch::closed_object_own_string_keys`] once,
+/// and relates through the authority only the sources the keys leave
+/// undecided.
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The string keys of the properties `target` requires that no source
+    /// can supply but by declaring them itself: every required string-keyed
+    /// property of the object surface `target` stands for that the global
+    /// `Object` interface of `canonical`'s project does not declare (an
+    /// object type's apparent type carries `Object`'s members, so a source
+    /// lacking `toString` still has it). A plain closed object source
+    /// ([`Self::closed_object_own_string_keys`]) lacking any of them is not
+    /// assignable to `target`.
+    ///
+    /// `None` when `target` is no object surface or the `Object` interface
+    /// does not settle: no refutation is proved.
+    pub(super) fn assignability_refuting_keys(
+        &self,
+        target: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        let target = match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        let graph = self.graph();
+        let data = graph.node_data(target)?;
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            return None;
+        };
+        let apparent = match self.global_wrapper_surface("Object", &[], canonical) {
+            super::apparent_type::GlobalWrapper::Surface(node) => Some(graph.node_data(node)?),
+            super::apparent_type::GlobalWrapper::Absent => None,
+            super::apparent_type::GlobalWrapper::Unsettled => return None,
+        };
+        let apparent = match apparent.as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(
+            surface
+                .positive_members()
+                .iter()
+                .filter(|member| !member.optional)
+                .filter_map(|member| match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(key) => Some(key),
+                    _ => None,
+                })
+                .filter(|key| {
+                    apparent.is_none_or(|view| {
+                        matches!(
+                            view.project_known_key(&crate::semantic_query::PropertyKey::String(
+                                (*key).clone()
+                            )),
+                            crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                        )
+                    })
+                })
+                .map(|key| Arc::from(key.as_ref()))
+                .collect(),
+        )
+    }
+
+    /// Every property key of the object surface `source` stands for, when
+    /// that surface is a plain closed object: string-keyed members only, no
+    /// index signature (which supplies keys no member names) and no call or
+    /// construct signature (which gives it the apparent `Function`
+    /// members). Such a source has exactly these properties and the
+    /// apparent `Object` interface's, so a key absent here that
+    /// [`Self::assignability_refuting_keys`] names refutes its
+    /// assignability. `None` for any other source.
+    pub(super) fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+    ) -> Option<Vec<Arc<str>>> {
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        let data = self.graph().node_data(source)?;
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            return None;
+        };
+        if !surface.key_domain_is_closed()
+            || !surface.call_signatures().is_empty()
+            || !surface.construct_signatures().is_empty()
+        {
+            return None;
+        }
+        surface
+            .positive_members()
+            .iter()
+            .map(|member| match &member.key {
+                crate::semantic_query::AuthoredPropertyKey::String(key) => {
+                    Some(Arc::from(key.as_ref()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

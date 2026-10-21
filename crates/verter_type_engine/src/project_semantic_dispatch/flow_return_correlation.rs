@@ -7,9 +7,7 @@
 
 use std::sync::Arc;
 
-use super::{
-    FlowDemandDriver, FlowEvaluator, FlowProductSubject, GuardNarrowing, LiteralComparison,
-};
+use super::{FlowDemandDriver, FlowEvaluator, FlowProductSubject, LiteralComparison};
 use crate::semantic_query::{FlowReturnDegradation, SemanticNodeData, SemanticNodeId};
 use verter_session_query::flow::policy::FlowGap;
 use verter_session_query::flow::slice::{
@@ -528,9 +526,7 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
             ),
             _ => return,
         };
-        if let GuardNarrowing::Narrowed(subject, node) = fact {
-            self.push_narrowing(&subject, node);
-        }
+        self.push_guard_narrowing(fact);
     }
 
     /// Every correlated element reads its member of the narrowed parent,
