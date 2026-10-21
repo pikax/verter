@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => {
   const statusBarItems: { disposed: boolean }[] = [];
   const diagnosticCollections: { disposed: boolean }[] = [];
   const errorMessages: string[] = [];
+  const warningMessages: string[] = [];
   const state = {
     startShouldFail: true,
     startCalls: 0,
@@ -43,6 +44,7 @@ const mocks = vi.hoisted(() => {
     statusBarItems,
     diagnosticCollections,
     errorMessages,
+    warningMessages,
     state,
     configurationValues,
   };
@@ -86,7 +88,10 @@ vi.mock("vscode", () => {
         mocks.state.infoMessages.push(message);
         return undefined;
       },
-      showWarningMessage: async () => undefined,
+      showWarningMessage: async (message: string) => {
+        mocks.warningMessages.push(message);
+        return undefined;
+      },
       showErrorMessage: async (message: string) => {
         mocks.errorMessages.push(message);
         return undefined;
@@ -365,6 +370,7 @@ function resetHostRuntimeMocks() {
   mocks.statusBarItems.length = 0;
   mocks.diagnosticCollections.length = 0;
   mocks.errorMessages.length = 0;
+  mocks.warningMessages.length = 0;
   mocks.state.startCalls = 0;
   mocks.state.stopCalls = 0;
   mocks.state.holdStart = false;
@@ -1011,6 +1017,35 @@ describe("one crash-recovery authority", () => {
     expect(onReady).toHaveBeenCalledTimes(1);
 
     lifetime.dispose();
+  });
+
+  it("ignores a replaced client's engine pid and trust-prompt notifications", async () => {
+    const lifetime = new StartAttemptScope();
+    const server = await startAttempt(makeContext(), lifetime);
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    try {
+      await server.restart(false);
+
+      // Queued behind the replacement: the retired server's pid may be recycled
+      // by the time the current client closes, and its trust prompt is not the
+      // current server's to raise.
+      fireNotificationOn(0, "$/verter/typeProviderStarted", { pid: 424242, kind: "tsgo" });
+      fireNotificationOn(0, "$/verter/tsgoStarted", { pid: 424243 });
+      fireNotificationOn(0, "$/verter/viteConfigTrustRequired", {
+        configPath: "/stale/vite.config.ts",
+        workspaceRoot: "/stale",
+        reason: "dynamic",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mocks.warningMessages).toEqual([]);
+
+      fireNotificationOn(1, "$/verter/typeProviderStarted", { pid: 515151, kind: "tsgo" });
+      errorHandlerOf(1).closed();
+      expect(kill.mock.calls.map(([pid]) => pid)).toEqual([515151]);
+    } finally {
+      kill.mockRestore();
+      lifetime.dispose();
+    }
   });
 
   it("recovers a crash of a server whose slow replacement outlived the old watchdog", async () => {

@@ -152,8 +152,9 @@ export class DesktopLanguageLifecycle implements Disposable {
 
 /**
  * What a live client does with a connection error: tolerate the first three,
- * as the language client always has, then shut the connection down and treat
- * the server as lost.
+ * then shut the connection down and treat the server as lost. The threshold
+ * mirrors `DefaultErrorHandler.error` in vscode-languageclient (9.0.1,
+ * lib/common/client.js: `count && count <= 3` continues, otherwise shuts down).
  */
 export function connectionErrorDisposition(count: number | undefined): "continue" | "shutdown" {
   return count !== undefined && count <= 3 ? "continue" : "shutdown";

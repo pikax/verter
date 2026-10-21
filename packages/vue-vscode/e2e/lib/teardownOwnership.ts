@@ -52,25 +52,28 @@ export function survivingOwned(
   });
 }
 
-/** Record this host's owned set for the launcher. Nothing is written when none is owned. */
+/**
+ * Record this host's owned set for the launcher, even when it is empty: an
+ * absent file then means the recording never ran, not that nothing was owned.
+ */
 export async function recordOwnedProcesses(logFile: string, hostPid: number): Promise<void> {
   const owned = ownedProcessesUnder(await readProcessInventory(10_000), hostPid);
-  if (owned.length > 0) {
-    fs.writeFileSync(ownedProcessFile(logFile), JSON.stringify(owned));
-  }
+  fs.writeFileSync(ownedProcessFile(logFile), JSON.stringify(owned));
 }
 
 /**
  * Fail when a process the host owned outlives the editor. The server shuts down
  * on its own after the host goes, so survivors are polled for `graceMs` first.
- * A run that recorded nothing owned nothing to check.
+ * Returns the number of recorded processes that were reaped, or `undefined` when
+ * no recording was written — nothing was verified, which is not the same as a
+ * clean run, so the caller decides whether that run required a recording.
  */
 export async function assertOwnedProcessesReaped(
   logFile: string,
   graceMs = 15_000,
-): Promise<number> {
+): Promise<number | undefined> {
   const file = ownedProcessFile(logFile);
-  if (!fs.existsSync(file)) return 0;
+  if (!fs.existsSync(file)) return undefined;
   const recorded = JSON.parse(fs.readFileSync(file, "utf8")) as OwnedProcess[];
   const deadline = Date.now() + graceMs;
   let survivors = recorded;

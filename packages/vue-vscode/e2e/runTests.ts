@@ -39,7 +39,7 @@ import {
   serverProfilesForSuites,
   type E2eServerProfile,
 } from "./lib/serverProfiles";
-import { FIXTURE_SUITE_GLOBS } from "./lib/fixtureSuiteMap";
+import { FIXTURE_SUITE_GLOBS, suiteAllowedForFixture } from "./lib/fixtureSuiteMap";
 import {
   isProjectlessContractFixture,
   PROJECTLESS_CONTRACT_LOADED_FILES,
@@ -632,7 +632,11 @@ async function main() {
         // The editor has exited: whatever its Verter language server owned must be
         // gone with it. A failing summary below still reports first.
         const reapedCount = await assertOwnedProcessesReaped(logFile);
-        console.log(`  Teardown reaped ${reapedCount} owned process(es).`);
+        console.log(
+          reapedCount === undefined
+            ? "  Teardown reaping NOT verified: the extension host wrote no owned-process recording."
+            : `  Teardown reaped ${reapedCount} owned process(es).`,
+        );
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
         // on some hosts (Windows: VS Code can exit 0 even when the extension test run
         // rejected). The authoritative oracle is the run summary the mocha runner writes
@@ -684,6 +688,13 @@ async function main() {
             );
           }
           throw summaryError;
+        }
+        // A route whose suites include the teardown recording that produced none
+        // verified nothing: the host died before its root teardown ran.
+        if (reapedCount === undefined && suiteAllowedForFixture(fixture, "_teardown.test.js")) {
+          throw new Error(
+            `Route ${label} wrote no owned-process recording, so teardown reaping was not verified.`,
+          );
         }
         if (extensionHostError) {
           console.warn(

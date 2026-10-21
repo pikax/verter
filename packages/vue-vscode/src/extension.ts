@@ -1143,11 +1143,14 @@ async function startVueLanguageServer(
   // engine per owning configured project, so a monorepo announces several. Only
   // remembering the newest would leave the earlier engines orphaned.
   const typeProviderPids = new Set<number>();
-  function registerTypeProviderPidListener(lc: LanguageClient) {
+  function registerTypeProviderPidListener(lc: LanguageClient, epoch: number) {
+    // A retired client's queued announcement must not re-track its (possibly
+    // recycled) pid after the restart cleared the set: a later loss would signal it.
     // New unified notification
     lc.onNotification(
       NotificationType.TypeProviderStarted,
       (params: { pid: number; kind: "tsgo" | "tsserver" }) => {
+        if (!lifecycle.isCurrent(epoch)) return;
         typeProviderPids.add(params.pid);
         log.info(`Type provider (${params.kind}) started with PID ${params.pid}`);
         startupProbe?.markTypeProviderStarted(params.kind);
@@ -1155,6 +1158,7 @@ async function startVueLanguageServer(
     );
     // Legacy notification — only sent when TSGO is actually active
     lc.onNotification(NotificationType.TsgoStarted, (params: { pid: number }) => {
+      if (!lifecycle.isCurrent(epoch)) return;
       typeProviderPids.add(params.pid);
     });
   }
@@ -1169,7 +1173,7 @@ async function startVueLanguageServer(
     }
     typeProviderPids.clear();
   }
-  registerTypeProviderPidListener(client);
+  registerTypeProviderPidListener(client, initialEpoch);
 
   // ── MCP server auto-registration ────────────────────────────────
   // The LSP no longer embeds an MCP server (LSP/MCP decoupling): when
@@ -1267,10 +1271,12 @@ async function startVueLanguageServer(
   // prompting the user to trust the file for execution.
   const promptedViteConfigs = new Set<string>();
 
-  function registerViteConfigTrustHandler(lc: LanguageClient) {
+  function registerViteConfigTrustHandler(lc: LanguageClient, epoch: number) {
     lc.onNotification(
       NotificationType.ViteConfigTrustRequired,
       async (params: { configPath: string; workspaceRoot: string; reason: string }) => {
+        // A retired client must not prompt for, or persist, a trust decision.
+        if (!lifecycle.isCurrent(epoch)) return;
         if (promptedViteConfigs.has(params.configPath)) return;
         promptedViteConfigs.add(params.configPath);
 
@@ -1304,7 +1310,7 @@ async function startVueLanguageServer(
       },
     );
   }
-  registerViteConfigTrustHandler(client);
+  registerViteConfigTrustHandler(client, initialEpoch);
 
   // ── Type provider status bar ────────────────────────────────────
   // Shows which type provider is active. Warning state when none is available.
@@ -1667,13 +1673,13 @@ async function startVueLanguageServer(
             buildClientOptions(epoch),
           );
           bindPlainScriptSync(client);
-          registerTypeProviderPidListener(client);
+          registerTypeProviderPidListener(client, epoch);
           registerServerNotifications(client, epoch);
           // The standalone MCP child is attempt-owned, not client-owned: a
           // crash-recovery restart keeps the running server, while a
           // config-change restart re-reads the `verter.mcp.*` settings here.
           syncMcpServer();
-          registerViteConfigTrustHandler(client);
+          registerViteConfigTrustHandler(client, epoch);
           registerTypeProviderStatusHandler(client, epoch);
           tsQueryHandler = undefined; // Drop every project's TS service on restart
           registerTsQueryHandler(client);

@@ -153,6 +153,9 @@ export async function run(): Promise<void> {
       return false;
     }
     if (!onlyPattern) return true;
+    // The teardown recording is what the launcher's reaping check reads, so a
+    // narrowed run must still load it.
+    if (path.basename(file) === "_teardown.test.js") return true;
     return file.replace(/\\/g, "/").includes(onlyPattern.replace(/\\/g, "/"));
   });
 
