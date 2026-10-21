@@ -50,6 +50,13 @@ use crate::semantic_query::{
 /// Read-only, value-side resolution context for resolving a graph carrier
 /// (`BareRef` / `ImportType`) at demand time. See the module docs for the
 /// no-query-key contract.
+/// The binder-environment key marking `name` as an `infer` declaration of
+/// an enclosing conditional the position is outside the scope of, bound to
+/// the checker's TS2304 recovery.
+pub(crate) fn out_of_scope_infer_env_key(name: &str) -> String {
+    format!("\0verter:infer-out-of-scope:{name}")
+}
+
 pub struct CarrierResolverContext<'a> {
     /// Type-parameter binder environment (`param_name → arg node`). A bare
     /// reference that names a bound parameter substitutes to its argument.
@@ -864,6 +871,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             || verter_session_query::type_solver::builtin::BuiltinUtility::from_name(name).is_some()
     }
 
+    /// The member of an enclosing global namespace a name written in a
+    /// declaration body of a script's namespace block names
+    /// ([`DeclarationScopePayload::enclosing_global_namespace`]), whichever
+    /// script's block of that namespace declares it: a namespace scope
+    /// precedes the file's. `bound` is what the declaration's own
+    /// `name_resolution` binds the name to: one to a member of an enclosing
+    /// namespace stands unless a more inner namespace declares the name, and
+    /// any other binding (a file-scope or global name) is outermost, so any
+    /// enclosing namespace's member shadows it.
+    /// `None` when the body is no such block's or no enclosing namespace
+    /// shadows the binding.
+    pub(super) fn enclosing_namespace_binding(
+        &self,
+        scope: &NodeScopeId,
+        scope_payload: Option<&DeclarationScopePayload>,
+        name: &str,
+        bound: Option<&ResolvedRootIdentity>,
+    ) -> Option<ResolvedRootIdentity> {
+        let NodeScopeId::File { canonical_id, .. } = scope else {
+            return None;
+        };
+        let namespace = scope_payload?.enclosing_global_namespace()?;
+        let outer_bound = bound.and_then(|bound| {
+            super::namespace_of_member(&bound.symbol_name, name)
+                .filter(|_| bound.canonical_id.as_ref() == canonical_id.as_ref())
+        });
+        self.enclosing_namespace_type_member(canonical_id.as_ref(), namespace, name, outer_bound)
+    }
+
     pub(super) fn plan_bare_ref_head(
         &self,
         ctx: &CarrierResolverContext<'_>,
@@ -960,51 +996,70 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the map does not carry (the carrier-subject entry rehydrates an EMPTY
         // map + the scope payload, so the fallback is the whole resolver there).
         let resolved_root = if let Some(direct) = name_resolution.get(name.as_ref()) {
-            Some(direct.clone())
+            Some(
+                self.enclosing_namespace_binding(scope, scope_payload, name.as_ref(), Some(direct))
+                    .unwrap_or_else(|| direct.clone()),
+            )
         } else if let NodeScopeId::File {
             canonical_id,
             owner,
             ..
         } = scope
         {
-            resolve_bare_name_in_scope(
-                self.ctx,
-                self,
-                canonical_id.as_ref(),
-                *owner,
-                scope_payload,
-                name.as_ref(),
-            )
-            // A bare name nothing in scope declares or imports is a GLOBAL
-            // name: it names the merged global declaration of the project's
-            // library and the program, whose identity is its first
-            // declaration in declaration precedence order (the
-            // declaration's `Instantiate` folds in the rest).
-            .or_else(|| {
-                (!name.contains('.')
-                    && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
-                .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
-                .flatten()
-            })
-            // A qualified name whose head nothing in scope declares or
-            // imports reads through the GLOBAL namespace of that name.
-            .or_else(|| {
-                let (head, _) = name.split_once('.')?;
-                (!self.unresolved_head_is_authored_import(scope, name.as_ref())
-                    && resolve_bare_name_in_scope(
+            self.enclosing_namespace_binding(scope, scope_payload, name.as_ref(), None)
+                .or_else(|| {
+                    resolve_bare_name_in_scope(
                         self.ctx,
                         self,
                         canonical_id.as_ref(),
                         *owner,
                         scope_payload,
-                        head,
+                        name.as_ref(),
                     )
-                    .is_none())
-                .then(|| {
-                    self.global_namespace_type_declaration(canonical_id.as_ref(), name.as_ref())
                 })
-                .flatten()
-            })
+                // A bare name nothing in scope declares or imports is a GLOBAL
+                // name: it names the merged global declaration of the project's
+                // library and the program, whose identity is its first
+                // declaration in declaration precedence order (the
+                // declaration's `Instantiate` folds in the rest).
+                .or_else(|| {
+                    (!name.contains('.')
+                        && !self.unresolved_head_is_authored_import(scope, name.as_ref()))
+                    .then(|| self.first_global_declaration(canonical_id.as_ref(), name.as_ref()))
+                    .flatten()
+                })
+                // A qualified name whose head nothing in scope declares or
+                // imports reads through the GLOBAL namespace of that name —
+                // through the entity an `import X = N.M` alias heading it
+                // names (`X.T` reads the global `N.M.T`).
+                .or_else(|| {
+                    let expanded = self
+                        .ctx
+                        .ensure_indexed_ready_serve(canonical_id.as_ref())
+                        .and_then(|serve| {
+                            serve
+                                .indexed
+                                .shallow_state
+                                .headers
+                                .expand_namespace_alias(*owner, name.as_ref())
+                        });
+                    let qualified = expanded.as_deref().unwrap_or(name.as_ref());
+                    let (head, _) = qualified.split_once('.')?;
+                    (!self.unresolved_head_is_authored_import(scope, qualified)
+                        && resolve_bare_name_in_scope(
+                            self.ctx,
+                            self,
+                            canonical_id.as_ref(),
+                            *owner,
+                            scope_payload,
+                            head,
+                        )
+                        .is_none())
+                    .then(|| {
+                        self.global_namespace_type_declaration(canonical_id.as_ref(), qualified)
+                    })
+                    .flatten()
+                })
         } else {
             None
         };
@@ -1101,6 +1156,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
             {
                 return CarrierResolutionPlan::complete(member_type);
+            }
+            // A conditional's `infer` declaration read outside its scope,
+            // with nothing else binding the name, is the checker's TS2304 —
+            // applied (`U<string>`) or bare.
+            if let Some(recovery) = ctx.env().get(&out_of_scope_infer_env_key(name.as_ref())) {
+                return CarrierResolutionPlan::complete(*recovery);
             }
             // Currently-unresolved authored reference. Under the carrier
             // modes the head STAYS a scoped `BareRef` carrier — the authored

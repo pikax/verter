@@ -2492,8 +2492,10 @@ mod arena_intern_tests {
         let arena = NodeArena::default();
         let payload =
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("forced".into()));
-        // Select another shard under every per-process fingerprint seed.
-        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ SHARD_MASK;
+        // The fingerprint hasher is keyed per process, so a fixed forced
+        // fingerprint shares the payload's shard in some runs. Flipping the
+        // lowest shard bit of the payload's own fingerprint never does.
+        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ 1;
         assert_ne!(
             forced_fp & SHARD_MASK,
             structural_fingerprint(&payload, &NodeScopeId::Global) & SHARD_MASK,

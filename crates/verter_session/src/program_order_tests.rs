@@ -279,10 +279,10 @@ fn imported_unlisted_files_keep_the_programs_aliases_and_options() {
     use verter_workspace::WorkspaceAccess;
     let dir = tempfile::tempdir().unwrap();
     let directory = dir.path().canonicalize().unwrap();
-    let canonical_root = crate::id::canonicalize_id(directory.to_str().unwrap());
-    let root = canonical_root.as_ref();
+    let root = verter_workspace::canonicalize_path(directory.to_str().unwrap());
     std::fs::create_dir_all(directory.join("src")).unwrap();
     let config = directory.join("tsconfig.json");
+    let config_id = verter_workspace::canonicalize_path(config.to_str().unwrap());
     std::fs::write(&config, r#"{"compilerOptions":{"strict":true,"baseUrl":".","paths":{"@/*":["src/*"]}},"files":["src/main.ts"]}"#).unwrap();
     for (name, source) in [
         ("main.ts", "import './props'; export {};"),
@@ -300,9 +300,9 @@ fn imported_unlisted_files_keep_the_programs_aliases_and_options() {
     ));
     let project = verter_workspace::configured_ide_project(
         workspace.as_ref(),
-        root.into(),
-        root.into(),
-        config.to_str().unwrap(),
+        root.clone(),
+        root.clone(),
+        &config_id,
     );
     workspace.configure_resolver(vec![project]);
     let host = VerterHost::new(HostConfig::default(), workspace);

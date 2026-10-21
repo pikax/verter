@@ -12,6 +12,7 @@ use verter_session_query::analysis::signature_params::narrow_signature_type_para
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
+use crate::analysis::class_field_value::ClassField;
 use verter_session_query::declarations::class_fields::ClassFieldValues;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -321,6 +322,9 @@ pub struct LoweredTypeDeclParts {
     /// `unique symbol` — object-type-literal and interface property
     /// members, including intersection arms.
     pub unique_symbol_members: Vec<String>,
+    /// Whether the declaration is a type alias whose authored body is the
+    /// `intrinsic` keyword (`type NoInfer<T> = intrinsic`).
+    pub intrinsic: bool,
 }
 
 /// TRANSIENT lowered parts of one VALUE declaration.
@@ -906,6 +910,7 @@ fn lower_jsdoc_typedef_named_matching(
             type_parameter_variances: Vec::new(),
             body: typedef.body.clone(),
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         };
         env.add_type(mint_type_decl(&parts, &ctx.canonical_id, owner));
         return Some(typedef);
@@ -946,6 +951,7 @@ fn register_jsdoc_typedefs(
             type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         };
         env.add_type(mint_type_decl(
             &parts,
@@ -1116,6 +1122,7 @@ fn mint_type_decl(
         direct_member_headers: member_header_facts_from_body(&parts.body),
         unique_symbol_members: Arc::from(parts.unique_symbol_members.clone().into_boxed_slice()),
         body: anchored_slot(&anchor, Vec::new()),
+        intrinsic: parts.intrinsic,
     }
 }
 
@@ -1759,6 +1766,7 @@ fn lower_named_type_alias_parts(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_ts_type(&decl.type_annotation),
+        intrinsic: matches!(decl.type_annotation, TSType::TSIntrinsicKeyword(_)),
     }
 }
 
@@ -1809,6 +1817,9 @@ fn instance_element_names(element: &ClassElement<'_>, source: &str) -> std::vec:
     let names: Vec<String> = match element {
         ClassElement::PropertyDefinition(prop) if !prop.r#static => {
             class_member_spelling(&prop.key, source)
+        }
+        ClassElement::AccessorProperty(property) if !property.r#static => {
+            class_member_spelling(&property.key, source)
         }
         ClassElement::MethodDefinition(method)
             if method.kind == MethodDefinitionKind::Constructor =>
@@ -2001,10 +2012,10 @@ pub(crate) fn class_heritage_value_name(class_name: &str) -> String {
 /// without a static name.
 pub(crate) fn class_field_value_name(
     class_name: &str,
-    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    field: crate::analysis::class_field_value::ClassField<'_, '_>,
 ) -> Option<String> {
-    let key = crate::analysis::function_program::static_property_key_name(&prop.key)?;
-    let side = if prop.r#static { "static" } else { "field" };
+    let key = crate::analysis::function_program::static_property_key_name(field.key)?;
+    let side = if field.r#static { "static" } else { "field" };
     Some(format!("{class_name}:{side}:{key}"))
 }
 
@@ -2088,6 +2099,7 @@ fn lower_named_interface_parts(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: unique_symbol_members_of_interface_body(decl),
+        intrinsic: false,
     }
 }
 
@@ -2807,6 +2819,7 @@ fn alias_default_export_type_symbol(
         body: decl.body.clone(),
         direct_member_headers: decl.direct_member_headers.clone(),
         unique_symbol_members: Arc::clone(&decl.unique_symbol_members),
+        intrinsic: decl.intrinsic,
     };
     env.add_type(aliased);
 }
@@ -2977,6 +2990,139 @@ struct ClassElementSelection<'a> {
     lowered: usize,
 }
 
+/// The type a class field's initializer gives it through a served
+/// position, when one does, for a property definition and an `accessor`
+/// field alike. A function-valued initializer with NO authored annotation
+/// is a served class-member position (the index discovers it as
+/// `Member{[raw ordinal]}`); an initializer whose type derives from a call
+/// or reads `this` is read through a synthetic value declaration
+/// ([`class_field_value_name`]). `None` for a field its annotation or
+/// syntactic inference types.
+fn class_field_initializer_type(
+    decl: &Class<'_>,
+    field: ClassField<'_, '_>,
+    class_name: &str,
+    raw_member_ordinal: u32,
+    source: &str,
+    out: &mut LoweredStatementParts,
+) -> Option<TypeExpr> {
+    // A function-valued field initializer with NO authored
+    // annotation is a served class-member position (the index
+    // discovers it as `Member{[raw ordinal]}`): its body-derived
+    // return is demanded through the whole-function producer
+    // exactly like a method's. An authored TS annotation — on
+    // the field or on the function itself — stays the declared
+    // carrier.
+    let function_value = match field.value {
+        Some(Expression::ArrowFunctionExpression(arrow))
+            if field.type_annotation.is_none() && arrow.return_type.is_none() =>
+        {
+            let sig = extract_arrow_signature(arrow, source);
+            let mut function_expr = FunctionExpr::with_spans(
+                sig.parameters,
+                sig.return_type.map(Arc::new),
+                sig.type_parameters,
+                FunctionSpans {
+                    signature: Some(verter_span::Span::new(arrow.span.start, arrow.span.end)),
+                    return_type: None,
+                },
+            );
+            function_expr.flow_return = static_property_key_name(field.key).map(|_| {
+                Box::new(FlowFunctionReturnIdentity {
+                    anchor: AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(""),
+                        owner: TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(class_name),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::Member {
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            vec![raw_member_ordinal].into_boxed_slice(),
+                        ),
+                    },
+                    overload_ordinal: 0,
+                })
+            });
+            Some(TypeExpr::Function(Arc::new(function_expr)))
+        }
+        Some(Expression::FunctionExpression(func))
+            if field.type_annotation.is_none() && func.return_type.is_none() =>
+        {
+            let sig = extract_function_signature(func, source);
+            let mut function_expr = FunctionExpr::with_spans(
+                sig.parameters,
+                sig.return_type.map(Arc::new),
+                sig.type_parameters,
+                FunctionSpans {
+                    signature: Some(verter_span::Span::new(func.span.start, func.span.end)),
+                    return_type: None,
+                },
+            );
+            function_expr.flow_return = static_property_key_name(field.key).map(|_| {
+                Box::new(FlowFunctionReturnIdentity {
+                    anchor: AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(""),
+                        owner: TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(class_name),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::Member {
+                        member_path: verter_type_expr::OwnedSlice::from(
+                            vec![raw_member_ordinal].into_boxed_slice(),
+                        ),
+                    },
+                    overload_ordinal: 0,
+                })
+            });
+            Some(TypeExpr::Function(Arc::new(function_expr)))
+        }
+        _ => None,
+    };
+    // A field whose initializer's type derives from a call reads
+    // it through a synthetic value declaration indexed at the
+    // initializer; a mutable field widens a fresh result as a
+    // `let` does.
+    let field_value = function_value
+        .is_none()
+        .then(|| {
+            crate::analysis::class_field_value::class_field_value(
+                &out.class_fields,
+                decl,
+                field,
+                source,
+            )
+        })
+        .flatten()
+        .and_then(|_| class_field_value_name(class_name, field))
+        .map(|field_name| {
+            out.value_decls.push(LoweredValueDeclParts {
+                name: field_name.clone(),
+                kind: if field.readonly {
+                    ValueDeclKind::Const
+                } else {
+                    ValueDeclKind::Let
+                },
+                is_unique_symbol: false,
+                unique_symbol_members: Vec::new(),
+                type_annotation: None,
+                annotation_is_authored: false,
+                inference_unavailable: None,
+                expression_source_offset: field.value.map(|value| value.span().start),
+                signatures: Vec::new(),
+                object_shape: None,
+                enum_members: None,
+                enum_member_names: None,
+                literal_freshness: DeclaredLiteralFreshness::Regular,
+                read_provenance: None,
+            });
+            TypeExpr::TypeOf(ValueRef {
+                path: vec![field_name],
+                type_args: Vec::new(),
+            })
+        });
+    field_value.or(function_value)
+}
+
 /// [`collect_named_class`], or — with `selection` — only the instance
 /// members the listed raw `ClassBody.body` elements declare, delivered to
 /// the selection's member list. An element outside the list lowers nothing
@@ -3046,130 +3192,17 @@ fn collect_named_class_selecting(
                     continue;
                 }
                 let prop_key = class_member_key(&prop.key, source);
-                // A function-valued field initializer with NO authored
-                // annotation is a served class-member position (the index
-                // discovers it as `Member{[raw ordinal]}`): its body-derived
-                // return is demanded through the whole-function producer
-                // exactly like a method's. An authored TS annotation — on
-                // the field or on the function itself — stays the declared
-                // carrier.
-                let function_value = match prop.value.as_ref() {
-                    Some(Expression::ArrowFunctionExpression(arrow))
-                        if prop.type_annotation.is_none() && arrow.return_type.is_none() =>
-                    {
-                        let sig = extract_arrow_signature(arrow, source);
-                        let mut function_expr = FunctionExpr::with_spans(
-                            sig.parameters,
-                            sig.return_type.map(Arc::new),
-                            sig.type_parameters,
-                            FunctionSpans {
-                                signature: Some(verter_span::Span::new(
-                                    arrow.span.start,
-                                    arrow.span.end,
-                                )),
-                                return_type: None,
-                            },
-                        );
-                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
-                            Box::new(FlowFunctionReturnIdentity {
-                                anchor: AuthoredAnchor {
-                                    canonical_id: verter_type_expr::OwnedStr::from(""),
-                                    owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                                    space: LocatorSymbolSpace::Value,
-                                },
-                                function_part: FunctionPartIdentity::Member {
-                                    member_path: verter_type_expr::OwnedSlice::from(
-                                        vec![raw_member_ordinal].into_boxed_slice(),
-                                    ),
-                                },
-                                overload_ordinal: 0,
-                            })
-                        });
-                        Some(TypeExpr::Function(Arc::new(function_expr)))
-                    }
-                    Some(Expression::FunctionExpression(func))
-                        if prop.type_annotation.is_none() && func.return_type.is_none() =>
-                    {
-                        let sig = extract_function_signature(func, source);
-                        let mut function_expr = FunctionExpr::with_spans(
-                            sig.parameters,
-                            sig.return_type.map(Arc::new),
-                            sig.type_parameters,
-                            FunctionSpans {
-                                signature: Some(verter_span::Span::new(
-                                    func.span.start,
-                                    func.span.end,
-                                )),
-                                return_type: None,
-                            },
-                        );
-                        function_expr.flow_return = static_property_key_name(&prop.key).map(|_| {
-                            Box::new(FlowFunctionReturnIdentity {
-                                anchor: AuthoredAnchor {
-                                    canonical_id: verter_type_expr::OwnedStr::from(""),
-                                    owner: TopLevelOwnerId::ordinary_file(),
-                                    symbol: verter_type_expr::OwnedStr::from(name.as_str()),
-                                    space: LocatorSymbolSpace::Value,
-                                },
-                                function_part: FunctionPartIdentity::Member {
-                                    member_path: verter_type_expr::OwnedSlice::from(
-                                        vec![raw_member_ordinal].into_boxed_slice(),
-                                    ),
-                                },
-                                overload_ordinal: 0,
-                            })
-                        });
-                        Some(TypeExpr::Function(Arc::new(function_expr)))
-                    }
-                    _ => None,
-                };
-                // A field whose initializer's type derives from a call reads
-                // it through a synthetic value declaration indexed at the
-                // initializer; a mutable field widens a fresh result as a
-                // `let` does.
-                let field_value = function_value
-                    .is_none()
-                    .then(|| {
-                        crate::analysis::class_field_value::class_field_value(
-                            &out.class_fields,
-                            decl,
-                            prop,
-                            source,
-                        )
-                    })
-                    .flatten()
-                    .and_then(|_| class_field_value_name(&name, prop))
-                    .map(|field_name| {
-                        out.value_decls.push(LoweredValueDeclParts {
-                            name: field_name.clone(),
-                            kind: if prop.readonly {
-                                ValueDeclKind::Const
-                            } else {
-                                ValueDeclKind::Let
-                            },
-                            is_unique_symbol: false,
-                            unique_symbol_members: Vec::new(),
-                            type_annotation: None,
-                            annotation_is_authored: false,
-                            inference_unavailable: None,
-                            expression_source_offset: prop
-                                .value
-                                .as_ref()
-                                .map(|value| value.span().start),
-                            signatures: Vec::new(),
-                            object_shape: None,
-                            enum_members: None,
-                            enum_member_names: None,
-                            literal_freshness: DeclaredLiteralFreshness::Regular,
-                            read_provenance: None,
-                        });
-                        TypeExpr::TypeOf(ValueRef {
-                            path: vec![field_name],
-                            type_args: Vec::new(),
-                        })
-                    });
-                let ty = field_value.or(function_value).unwrap_or_else(|| {
+                let field =
+                    ClassField::of(element).expect("a property definition is a class field");
+                let ty = class_field_initializer_type(
+                    decl,
+                    field,
+                    &name,
+                    raw_member_ordinal,
+                    source,
+                    out,
+                )
+                .unwrap_or_else(|| {
                     prop.type_annotation
                         .as_ref()
                         .map(|ta| lower_ts_type(&ta.type_annotation, source))
@@ -3187,7 +3220,16 @@ fn collect_named_class_selecting(
                                 )
                             })
                         })
-                        .unwrap_or_else(|| implicit_property_type(decl, prop, source))
+                        .unwrap_or_else(|| {
+                            implicit_property_type(
+                                decl,
+                                &prop.key,
+                                prop.r#static,
+                                prop.declare,
+                                prop.span,
+                                source,
+                            )
+                        })
                 });
                 let spans = MemberSpans {
                     declaration: Some(verter_span::Span::new(prop.span.start, prop.span.end)),
@@ -3440,14 +3482,84 @@ fn collect_named_class_selecting(
                     members.push(ObjectMember::Method(signature));
                 }
             }
-            // `ClassElement::AccessorProperty` (the `accessor` keyword)
-            // deliberately does NOT fold — accessor lowering is out of the
-            // producer's scope on both the constructor (static) and
-            // instance surfaces. The future accessor-projection contract is
-            // tracked by the ignored
-            // `decorators_identity_accessor_decorator_publishes_public_property`
-            // typeinfo test; landing it means projecting the accessor's
-            // PUBLIC get/set surface, not folding the raw property shape.
+            ClassElement::AccessorProperty(property) => {
+                // An `accessor` field declares a get / set pair over private
+                // storage: to every reader it is one mutable PROPERTY of its
+                // annotated type, else its initializer's widened type, else
+                // the implicit type a property without either has, its
+                // initializer typed as a mutable field's is.
+                // `static` selects the constructor shape; a `#private` one
+                // is a private member, never a static one.
+                if property.r#static && matches!(property.key, PropertyKey::PrivateIdentifier(_)) {
+                    continue;
+                }
+                let field = ClassField::of(element).expect("an `accessor` field is a class field");
+                let ty = class_field_initializer_type(
+                    decl,
+                    field,
+                    &name,
+                    raw_member_ordinal,
+                    source,
+                    out,
+                )
+                .or_else(|| {
+                    property
+                        .type_annotation
+                        .as_ref()
+                        .map(|ta| lower_ts_type(&ta.type_annotation, source))
+                })
+                .or_else(|| {
+                    property.value.as_ref().map(|value| {
+                        infer_declaration_or_unknown(
+                            value,
+                            source,
+                            TopLevelLiteralPolicy::Widen,
+                            &mut inference_unavailable,
+                        )
+                    })
+                })
+                .unwrap_or_else(|| {
+                    implicit_property_type(
+                        decl,
+                        &property.key,
+                        property.r#static,
+                        // An `accessor` field cannot be `declare`.
+                        false,
+                        property.span,
+                        source,
+                    )
+                });
+                let spans = MemberSpans {
+                    declaration: Some(verter_span::Span::new(
+                        property.span.start,
+                        property.span.end,
+                    )),
+                    name: Some(verter_span::Span::new(
+                        property.key.span().start,
+                        property.key.span().end,
+                    )),
+                    type_annotation: property.type_annotation.as_ref().map(|ta| {
+                        verter_span::Span::new(
+                            ta.type_annotation.span().start,
+                            ta.type_annotation.span().end,
+                        )
+                    }),
+                };
+                let member =
+                    ObjectMember::Property(verter_type_expr::ObjectProperty::with_key_visibility(
+                        class_member_key(&property.key, source),
+                        ty,
+                        false,
+                        false,
+                        class_member_visibility(&property.key, property.accessibility),
+                        spans,
+                    ));
+                if property.r#static {
+                    static_members.push(member);
+                } else {
+                    members.push(member);
+                }
+            }
             _ => {}
         }
     }
@@ -3525,6 +3637,7 @@ fn collect_named_class_selecting(
         type_parameter_variances: type_param_variances(decl.type_parameters.as_deref()),
         body,
         unique_symbol_members: Vec::new(),
+        intrinsic: false,
     });
 
     // Also register as a value (for typeof ClassName / InstanceType). An
@@ -3798,6 +3911,7 @@ fn collect_enum(
         type_parameter_variances: Vec::new(),
         body: TypeExpr::Primitive(PrimitiveName::Never),
         unique_symbol_members: Vec::new(),
+        intrinsic: false,
     });
 }
 
@@ -4787,7 +4901,9 @@ fn lower_identifier_variable_parts(
         }
 
         if type_annotation.is_none()
-            && (value_type_derives_from_a_call(init, source) || contextual_object_initializer(init))
+            && (value_type_derives_from_a_call(init, source)
+                || contextual_object_initializer(init)
+                || flow_typed_member_read(init))
             && !has_authoritative_value_assertion(init)
         {
             expression_source_offset = Some(init.span().start);
@@ -4910,21 +5026,25 @@ fn lower_identifier_variable_parts(
 /// of a class with a static block (`getFlowTypeInStaticBlocks`). That flow
 /// type is not modelled here, so the property is the unrepresented
 /// authored type there, never a guessed one. An ambient (`declare`)
-/// property is the implicit `any`.
+/// property is the implicit `any`. An `accessor` field is a property
+/// declaration to the checker, typed the same way.
 fn implicit_property_type(
     class: &Class<'_>,
-    prop: &oxc_ast::ast::PropertyDefinition<'_>,
+    key: &PropertyKey<'_>,
+    is_static: bool,
+    declare: bool,
+    span: oxc_span::Span,
     source: &str,
 ) -> TypeExpr {
-    let flow_typed = !prop.declare
-        && if prop.r#static {
+    let flow_typed = !declare
+        && if is_static {
             class
                 .body
                 .body
                 .iter()
                 .any(|element| matches!(element, ClassElement::StaticBlock(_)))
         } else {
-            static_property_key_name(&prop.key).is_some_and(|name| {
+            static_property_key_name(key).is_some_and(|name| {
                 class.body.body.iter().any(|element| match element {
                     ClassElement::MethodDefinition(method)
                         if method.kind == MethodDefinitionKind::Constructor =>
@@ -4939,7 +5059,7 @@ fn implicit_property_type(
         };
     if flow_typed {
         TypeExpr::Unknown(verter_type_expr::UnknownValue::unsupported_syntax(
-            &source[prop.span.start as usize..prop.span.end as usize],
+            &source[span.start as usize..span.end as usize],
         ))
     } else {
         TypeExpr::Primitive(PrimitiveName::Any)
@@ -6808,6 +6928,7 @@ pub fn parse_and_lower_parts(source: &str) -> LoweredFileParts {
             type_parameter_variances: Vec::new(),
             body: typedef.body,
             unique_symbol_members: Vec::new(),
+            intrinsic: false,
         });
     }
     out
@@ -7610,6 +7731,26 @@ pub(super) fn contextual_object_initializer(mut expression: &Expression<'_>) -> 
                 &satisfies.expression
             }
             _ => return contextual && matches!(expression, Expression::ObjectExpression(_)),
+        };
+    }
+}
+
+/// A declarator initializer reading a member through a computed key
+/// (`d["data-foo"]`) or an optional chain (`o.a?.b`): the flow evaluator
+/// reads such a member — the index signature a key matches, the `undefined`
+/// a short-circuiting chain adds — where value inference has no member path
+/// for it. Facts and function discovery use this same classification.
+pub(super) fn flow_typed_member_read(mut expression: &Expression<'_>) -> bool {
+    loop {
+        expression = match expression {
+            Expression::ParenthesizedExpression(parenthesized) => &parenthesized.expression,
+            Expression::TSNonNullExpression(non_null) => &non_null.expression,
+            Expression::StaticMemberExpression(member) => &member.object,
+            Expression::PrivateFieldExpression(member) => &member.object,
+            Expression::ComputedMemberExpression(_) | Expression::ChainExpression(_) => {
+                return true
+            }
+            _ => return false,
         };
     }
 }

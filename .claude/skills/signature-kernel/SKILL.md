@@ -28,7 +28,7 @@ consumer is `project_semantic_dispatch/signature_discovery.rs`):
 | `storage.rs` | `AppendInterner<T>` — the private append-only interner over `boxcar::Vec` with `DEDUP_SHARDS` (16) hash shards. Hash is computed outside the shard lock; equality decides collisions. A record is fully initialised before its handle is published, so `boxcar`'s `count()` is never a published-handle range. |
 | `lifetime.rs` | `SignatureStore`: interning entry points, `replace_epoch()`, `retain_result`/`drain_retained`/`retained_len`, `live_reader_count()`, `StoreError`. |
 | `read_view.rs` | `SemanticReadView::pin(&SignatureStore)` — the request-pinned borrowed read. `BorrowedSet::{Empty, One, Many}`, `ReadError`, plus the `descriptor_chain_walks` / `shard_lock_acquires` probes the performance gates assert on. |
-| `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. |
+| `positional.rs` | The shared positional model: `PositionalShape`, `PositionalMode`, `TypeAt`, `MinArityFlags`, `ProjectedTuple`/`ProjectedElement`, `SlotTypeFacts`. Parameter matching, rest/receiver layout and arity are computed **once** here for every consumer. It also owns the one tuple-inference plan, `tuple_inference_plan` over `TupleElementKind` (`Required`/`Optional`/`Rest`/`Variadic`) with `VariadicArityFacts` (a variadic's implied arity and fixed constraint arity), returning `TupleInferenceStep`s — see "Tuple inference plan" below. |
 | `provenance.rs` | `SignatureProvenance`, `OverloadOrder`, `ArmIdentity`, `ConstituentSequence`, `DeclarationGroupId`, `MappedConstituent`, `OriginRelation`, `SourceLocatorId` — where a candidate came from and in what authored order. |
 | `substitution.rs` | `CallSubstitution`, `SubstTerm`, `compose_canonical`, `MAX_SUBSTITUTION_CHAIN_DEPTH`. The two substitution stages (declared/outer map and frozen call-site map) compose canonically; a hand-built chain past the bound flattens rather than growing. |
 | `discovery.rs` | `publish_signature`, `set_from_candidates`, `append_signatures`, `union_signatures`, `intersection_signatures`, `heritage_signatures`, `merged_declaration_signatures`, `resolution_order`, `signatures_identical`, `DiscoveryError`. Exact identity compares binders positionally with constraint/default identity. Assignability instead instantiates generic signatures through contextual inference, including corresponding operands of deferred conditional returns. |
@@ -42,6 +42,56 @@ Ordering and composite reduction live beside the kernel, in the dispatch crate:
 | `project_semantic_dispatch/canonical_algebra.rs` | `intern_ordered_union_charged` / `intern_ordered_intersection_charged` — the two crate-private canonical builders production constructions call, each paying a `ConstructionMeter`; `admit_cross_product`, the one cross-product admission; plus `compare_structural` and `CanonicalEvidence`. |
 | `project_semantic_dispatch/build.rs` | `build_reduce_union` / `build_reduce_intersection` — the query builders behind `SemanticQueryKey::ReduceUnion` / `ReduceIntersection`. |
 | `project_semantic_dispatch/signature_discovery.rs` | The cutover consumer: it drives discovery, positional matching and instantiation through the kernel records. |
+
+---
+
+### Tuple inference plan
+
+A concrete array or tuple inferring to a generic tuple — a conditional's
+`[infer H, ...infer R]` pattern and a call's `[unknown, ...T]` parameter alike —
+pairs its positions through `positional::tuple_inference_plan`, the checker's
+tuple arm of `inferFromObjectTypes`. The plan is pure: it reads only element
+kinds and a variadic's arity facts, never types.
+
+- Same structure (equal arity, every position's rest/variadic kind matching):
+  elementwise.
+- Otherwise the shared fixed prefix pairs from the front and the shared fixed
+  suffix (only when the target has a variable element) from the back.
+- An array source, or a source whose middle is one rest element, infers its
+  element type to every middle target position — an array of it to a
+  variadic one.
+- The middle of the target infers whole: a lone variadic takes the slice
+  (speculatively, `SpeculativeTuple`, when the target ends in an optional
+  element), a lone rest the union of the slice, two variadics split at the
+  first's implied arity only, and a variadic beside a rest splits at the
+  variadic's fixed constraint arity. Any other middle infers nothing.
+- Each slice is the checker's `sliceTupleType`: its bounds clamp as a
+  JavaScript `slice` does (a negative end counts from the back, an overlong
+  one stops at the length), so an implied arity overrunning the fixed ends
+  yields a shorter or empty slice rather than none, both halves of a split
+  infer independently, and a slice beginning past the source's fixed prefix
+  is the source's rest array (`TupleInferenceStep::RestArray`).
+
+The executor is `RelationCx::relate_generic_tuple` (in
+`project_semantic_dispatch/relation.rs`), entered when the active session
+infers one of the generic tuple's variadic elements
+(`ProjectSemanticDispatch::inferable_variadics`, `inference/tuple.rs`). It
+deposits each slice the plan assigns an inferable variadic
+(`relation_deposit_slice`: a mutable tuple keeping labels, optionality and
+rest; under a call's widening literal mode each element widens while the
+slice stays a tuple), then relates the concrete side to the generic tuple with
+each such element replaced by its slice — or, when the plan infers nothing to
+it or the slice cannot satisfy its fixed tuple constraint, by its constraint,
+else `unknown[]` — through the ordinary `tuple_position_pairs` arity rules. A
+matching structure's variadic deposits the source variadic it faces and keeps
+it in the instantiated tuple (`tail(x)` with `x: [0, ...U]` infers `U`). A
+split whose clamped halves do not tile the concrete middle deposits both and
+relates `Unknown`: the call's post-fixation pass decides the argument against
+the fixed inferences. In a contravariant position (a parameter
+list) the generic tuple is the relation's source. A call's implied arity for
+a bare rest type parameter is set on the session before inference
+(`InferenceSession::set_implied_arity`); there is no separate two-variadic
+split.
 
 ---
 

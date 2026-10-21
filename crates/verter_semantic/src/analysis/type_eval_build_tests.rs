@@ -859,11 +859,11 @@ fn extract_class_folds_static_members_into_constructor_shape() {
 }
 
 #[test]
-fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
-    // `static #tag` has a PrivateIdentifier key (no public name) and the
-    // `accessor` keyword produces an AccessorProperty — neither is folded
-    // into the constructor shape, and the instance accessor stays off the
-    // instance surface (current producer contract: accessors drop).
+fn extract_class_folds_accessor_fields_and_excludes_static_private_hash() {
+    // `static #tag` has a PrivateIdentifier key (no public name) and never
+    // folds into the constructor shape. An `accessor` field is one mutable
+    // property of its declared type on its surface: the static one on the
+    // constructor shape, the instance one on the instance body.
     let parts = lowered(
         r#"
         class C {
@@ -885,15 +885,19 @@ fn extract_class_static_private_hash_and_accessor_members_stay_excluded() {
         shape_property(shape, "#tag").is_none() && shape_property(shape, "tag").is_none(),
         "static #private field must not be folded"
     );
-    assert!(
-        shape_property(shape, "sv").is_none(),
-        "static accessor must not be folded (accessor lowering is out of scope)"
+    let static_accessor = shape_property(shape, "sv").expect("static accessor folds");
+    assert_eq!(
+        static_accessor.ty,
+        TypeExpr::Primitive(PrimitiveName::String)
     );
+    assert!(!static_accessor.readonly && !static_accessor.optional);
     let body = &parts.type_decl("C").expect("lowered C").body;
-    assert!(
-        class_property(body, "v").is_none(),
-        "instance accessor must stay off the instance surface"
+    let instance_accessor = class_property(body, "v").expect("instance accessor folds");
+    assert_eq!(
+        instance_accessor.ty,
+        TypeExpr::Primitive(PrimitiveName::String)
     );
+    assert!(!instance_accessor.readonly && !instance_accessor.optional);
 }
 
 #[test]

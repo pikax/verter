@@ -30949,8 +30949,8 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
 #[test]
 fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
     // GROWING-GENERIC discriminator. A conditional generic whose every
-    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
-    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // tail step applies itself to a FRESH node id (`type Grow<T> = [T]
+    // extends [never] ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
     // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
     // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
     // visited-ID cycle detection. Under a ledger too small for its tail run
@@ -30962,11 +30962,34 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // operational truncation ALSO refuses warm admission (`result_is_partial`
     // + `cache_suppress`). Under a ledger with room, the run reaches its tail
     // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
-    // tail budget than production's stands in on the same path.
+    // tail budget than production's stands in on the same path. Its check
+    // wraps the parameter (`[T]`), so no uniform-growth certificate covers
+    // it; the bare-parameter form (`T extends never ? never : Grow<[T]>`) is
+    // a certified divergence instead — the same complete TS2589 under the
+    // starved ledger, kept.
     //
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
-    // is `any` under TS2589.
-    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    // is `any` under TS2589, in both forms.
+    const CERTIFIED: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, instantiated, _) = grow_string_demand(CERTIFIED, Some(256));
+    assert!(
+        matches!(outcome, StructuralFactDemandOutcome::Complete(_)) && !partial && !suppressed,
+        "a certified divergence is complete under a starved ledger, got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
+                ..
+            })) if diagnostic.code
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+        ),
+        "the bare-parameter growth is the certified TS2589 recovery, got {instantiated:?}"
+    );
+
+    const GROW: &str = "export type Grow<T> = [T] extends [never] ? never : Grow<[T]>;\n";
     let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }

@@ -646,6 +646,7 @@ export function c3(c: C3) { return c.p; }
 class B { p = 1 }
 class Dd extends B { q; }
 export function ddq(d: Dd) { return d.q; }
+class AN { accessor n; static accessor s; constructor() { } }
 ";
 
 /// The four `strictNullChecks` × `noImplicitAny` settings.
@@ -664,7 +665,8 @@ const FOUR_SETTINGS: [Option<&str>; 4] = [
 ///
 /// Measured on TypeScript 7.0.2 (all four `strictNullChecks` ×
 /// `noImplicitAny` settings alike): `np`, `nq`, `ns`, `dp`, `cp`, `c3` and
-/// `ddq` are `any`.
+/// `ddq` are `any`, and so are the `accessor` fields `AN['n']` and
+/// `(typeof AN)['s']`.
 #[test]
 fn a_property_without_type_or_initializer_is_the_implicit_any() {
     for compiler_options in FOUR_SETTINGS {
@@ -683,6 +685,8 @@ fn a_property_without_type_or_initializer_is_the_implicit_any() {
                 ("ReturnType<typeof cp>", "any"),
                 ("ReturnType<typeof c3>", "any"),
                 ("ReturnType<typeof ddq>", "any"),
+                ("AN['n']", "any"),
+                ("(typeof AN)['s']", "any"),
             ],
         );
         assert!(
@@ -700,7 +704,10 @@ fn a_property_without_type_or_initializer_is_the_implicit_any() {
 /// ([`a_constructor_assigned_property_takes_the_assigned_type`] holds the
 /// measured answers). So is a static property of a class with a static
 /// block (TypeScript 7.0.2: `S1.s` with `static { this.s = 1; }` is
-/// `number` under `noImplicitAny`, `any` without it).
+/// `number` under `noImplicitAny`, `any` without it). An `accessor` field
+/// is typed as a property is (TypeScript 7.0.2: `A['x']` with `this.x = 1`
+/// in the constructor and `SA.s` with `static { this.s = 1; }`
+/// are `number` under `noImplicitAny`, `any` without it).
 #[test]
 fn a_flow_typed_property_is_the_missing_member_marker() {
     let source = "\
@@ -708,9 +715,14 @@ class K { readonly rCtor; constructor() { this.rCtor = 3; } }
 export function krCtor(k: K) { return k.rCtor; }
 class S1 { static s; static { this.s = 1; } }
 export function s1() { return S1.s; }
+class A { accessor x; constructor() { this.x = 1; } }
+class SA { static accessor s; static { this.s = 1; } }
+export function sa() { return SA.s; }
 ";
     for compiler_options in FOUR_SETTINGS {
         for probe in [
+            "A['x']",
+            "ReturnType<typeof sa>",
             "ReturnType<typeof krCtor>",
             "K['rCtor']",
             "ReturnType<typeof s1>",
