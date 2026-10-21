@@ -361,6 +361,31 @@ fn a_local_intrinsic_no_infer_alias_is_no_infer() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// An imported `intrinsic` alias answers from the declaring file's current
+/// version: once the file respells it as an ordinary alias, the importer's
+/// next read is that alias, never the earlier intrinsic answer.
+///
+/// Oracle: TypeScript 7.0.2 answers `"ok"` while `base.ts` declares
+/// `type NoInfer<T> = intrinsic`, then `"ok"[]` after it declares
+/// `type NoInfer<T> = T[]`.
+#[test]
+fn editing_an_imported_intrinsic_alias_misses_the_warm_answer() {
+    use super::checker_probe_lane_tests::{default_probe_host, evaluated_render_on_host};
+    let host = default_probe_host();
+    let source = "import type { NoInfer } from \"./base\";\nexport {};\n";
+    let answer = |declaration: &str| {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            "/wb/base.ts",
+            declaration,
+            crate::FileLanguage::script_ts(),
+        );
+        evaluated_render_on_host(&host, source, "NoInfer<\"ok\">")
+    };
+    assert_eq!(answer("export type NoInfer<T> = intrinsic;\n"), "\"ok\"");
+    assert_eq!(answer("export type NoInfer<T> = T[];\n"), "Array(\"ok\")");
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;

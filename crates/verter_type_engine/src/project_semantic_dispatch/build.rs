@@ -5731,7 +5731,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // a local `type NoInfer<T> = intrinsic` is `NoInfer`.
         if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
             if let Some(utility) = adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
-                return InstantiateStart::Done(Box::new(builtin_utility_output(Some(utility))));
+                let mut output = builtin_utility_output(Some(utility));
+                // The answer exists because the declaring file spells the
+                // alias `intrinsic`: root it on that file's observed version,
+                // as the ordinary declaration path does, so an edit to the
+                // alias misses the warm read. A non-file base has no version.
+                if !is_non_file_base {
+                    output.dep_signature = output
+                        .dep_signature
+                        .iter()
+                        .cloned()
+                        .chain(
+                            self.dep_signature_for(decl_canonical, decl_whole_hash)
+                                .iter()
+                                .cloned(),
+                        )
+                        .collect();
+                    output = output
+                        .with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
+                }
+                return InstantiateStart::Done(Box::new(output));
             }
         }
 
