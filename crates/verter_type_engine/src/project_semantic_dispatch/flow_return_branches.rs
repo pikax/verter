@@ -85,7 +85,7 @@ type ArmEnd = (
     bool,
     Vec<(
         verter_session_query::flow::slice::SliceNarrowSubject,
-        SemanticNodeId,
+        FlowNarrowed,
     )>,
 );
 
@@ -335,7 +335,11 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         // The checker's join of the two arms: a reference both continuing
         // arms narrowed reads the union of its per-arm narrowed types.
         if consequent_falls && alternate_falls {
-            self.join_arm_narrowings(vec![consequent_narrowings, alternate_narrowings]);
+            let alternatives = vec![
+                self.built_narrowings(consequent_narrowings),
+                self.built_narrowings(alternate_narrowings),
+            ];
+            self.join_arm_narrowings(alternatives);
         }
         // A single continuing predecessor already carries its final
         // facts. Reapplying its original test here would revive a guard
@@ -643,6 +647,12 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                                     // The equality rule also establishes the
                                     // tested member's parent fact in the frame.
                                     dispatch = self.layer_state();
+                                    self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
+                                }
+                                GuardNarrowing::Excluded(fact_subject, remainder) => {
+                                    dispatch = self.layer_state();
+                                    let node =
+                                        self.narrowed_node(&FlowNarrowed::Remainder(remainder));
                                     self.bake_narrow_into_state(&mut dispatch, &fact_subject, node);
                                 }
                                 GuardNarrowing::Unchanged => {}

@@ -1063,6 +1063,20 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             RelationStep::BudgetExceeded(_) => Err(ContextualCandidateFailure::Degraded(
                 ResolveCallFailure::Budget,
             )),
+            // A parameter whose type reads the candidate's own type
+            // parameters where this relation cannot decide it (a mapped type
+            // over one of them) infers nothing more from the argument: the
+            // checker infers first and checks applicability on the
+            // instantiated signature, which decides the argument.
+            RelationStep::Unknown
+                if declared
+                    .iter()
+                    .any(|decl| self.mentions_node(target, decl.param)) =>
+            {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                txn.call.undecided_relations = txn.call.undecided_relations.saturating_sub(1);
+                Ok(true)
+            }
             RelationStep::Unknown | RelationStep::Assumed(_) => Err(
                 ContextualCandidateFailure::Degraded(ResolveCallFailure::Undecidable),
             ),

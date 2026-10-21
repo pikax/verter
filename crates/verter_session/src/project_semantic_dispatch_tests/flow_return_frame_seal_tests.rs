@@ -13,6 +13,7 @@ use std::sync::Arc;
 use super::*;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
+use verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowed;
 use verter_type_engine::semantic_query::{
     FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
 };
@@ -653,12 +654,17 @@ fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalPro
                         .facts()
                         .iter()
                         .map(|fact| {
-                            format!(
-                                "{:?}/{:?}/{}",
-                                fact.binding,
-                                fact.path,
-                                node(fact.narrowed_to)
-                            )
+                            // A remainder is the union of the arms it keeps.
+                            let narrowed = match &fact.narrowed_to {
+                                FlowNarrowed::Node(narrowed) => node(*narrowed),
+                                FlowNarrowed::Remainder(remainder) => {
+                                    match remainder.remaining_arms().as_slice() {
+                                        [arm] => node(*arm),
+                                        arms => format!("union:{:?}", set(arms)),
+                                    }
+                                }
+                            };
+                            format!("{:?}/{:?}/{narrowed}", fact.binding, fact.path)
                         })
                         .collect();
                     facts.sort();

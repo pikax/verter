@@ -655,7 +655,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Resolve one target/arm position: follow `Alias`, resolve
     /// `DeclRef` / `InstantiationRef` through the shared dispatch
     /// ([`Self::unwrap_identity_carrier_for_relation`] — the same
-    /// `execute(Instantiate)` path the ordinary relation uses), and
+    /// `execute(Instantiate)` path the ordinary relation uses), reduce a
+    /// closed `Mapped` type to its object through the relation's own
+    /// [`Self::mapped_object_for_relation`], and
     /// recognize the global `Object` interface on the reference's
     /// declaration identity (a userland `Object` declaration is a merge
     /// partner of the global in TS, so the skip applies to it too). A bare
@@ -705,6 +707,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                 }
+                // A mapped type over a closed key domain is the object its
+                // keys map to — the object the ordinary relation decides
+                // against, and so the object the check classifies (TS
+                // resolves a non-generic mapped type's members before
+                // `isExcessPropertyCheckTarget`). One that stays open stays
+                // the carrier it is.
+                Some(SemanticNodeData::Mapped { source, mapper }) => {
+                    let (source, mapper) = (*source, mapper.clone());
+                    carrier_hops += 1;
+                    if carrier_hops > 8 {
+                        return ResolvedExcessNode::Exhausted;
+                    }
+                    match self.mapped_object_for_relation(
+                        source,
+                        &mapper,
+                        crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                    ) {
+                        Some(object) if object != current => current = object,
+                        _ => return ResolvedExcessNode::Node(current),
+                    }
+                }
                 Some(_) => return ResolvedExcessNode::Node(current),
                 None => return ResolvedExcessNode::Unresolvable,
             }
@@ -727,7 +750,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Object(_)) => Some(true),
             Some(SemanticNodeData::Primitive(PrimitiveKind::Object)) => Some(true),
             Some(SemanticNodeData::Alias(inner)) => self.is_excess_check_target(*inner, depth + 1),
-            Some(SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. }) => {
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Mapped { .. },
+            ) => {
                 match self.resolve_excess_node(node) {
                     ResolvedExcessNode::Node(resolved) if resolved != node => {
                         self.is_excess_check_target(resolved, depth + 1)

@@ -9901,6 +9901,51 @@ mod release_embedded_node_family_tests {
         ))
     }
 
+    /// A call whose one argument's literal provenance names `key` as a
+    /// member key: on a regular position's path, or only on a fresh read's.
+    fn resolve_call_with_member_key(
+        callee: SemanticNodeId,
+        key: SemanticNodeId,
+        fresh_read: bool,
+    ) -> SemanticQueryKey {
+        use verter_type_engine::semantic_query::{
+            ArgumentLiteralMode, ArgumentLiteralProvenance, ArgumentPathStep,
+            ArgumentRegularPosition, CallArgKey,
+        };
+        let path: Arc<[ArgumentPathStep]> = Arc::from([ArgumentPathStep::Member(key)]);
+        let provenance = if fresh_read {
+            ArgumentLiteralProvenance {
+                positions: Arc::from([]),
+                fresh_reads: Arc::from([path]),
+            }
+        } else {
+            ArgumentLiteralProvenance {
+                positions: Arc::from([ArgumentRegularPosition {
+                    path,
+                    literals: None,
+                }]),
+                fresh_reads: Arc::from([]),
+            }
+        };
+        let SemanticQueryKey::ResolveCall(mut call) = resolve_call_key(
+            callee,
+            CanonicalTypeSubstitution::empty(),
+            FlowNarrowingKey::empty(),
+        ) else {
+            unreachable!("resolve_call_key builds a ResolveCall")
+        };
+        call.args = Arc::from([CallArgKey::Eager {
+            first_pass: None,
+            ty: callee,
+            spread: false,
+            literal_mode: ArgumentLiteralMode::Widened,
+            literal_provenance: Some(Arc::new(provenance)),
+            context_sensitive: false,
+            const_view: None,
+        }]);
+        SemanticQueryKey::ResolveCall(call)
+    }
+
     fn flow_return_key(
         substitution: CanonicalTypeSubstitution,
         demand: verter_type_engine::semantic_query::ReturnProjectionDemand,
@@ -10057,6 +10102,14 @@ mod release_embedded_node_family_tests {
                         FlowNarrowingKey::empty(),
                     )
                 }),
+            ),
+            (
+                "ResolveCall.args regular position member key",
+                Box::new(move |node| resolve_call_with_member_key(live, node, false)),
+            ),
+            (
+                "ResolveCall.args fresh read member key",
+                Box::new(move |node| resolve_call_with_member_key(live, node, true)),
             ),
             (
                 "ResolveCall.flow",

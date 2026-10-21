@@ -22,6 +22,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Arc;
 use verter_session_query::flow::slice::{SliceGuard, SliceNarrowSubject};
 
+use super::super::flow_products::FlowNarrowed;
 use super::super::flow_solve::FlowDomain;
 use super::{
     FlowDemandDriver, FlowEvaluator, FlowProductStore, FlowProductSubject, NarrowingLedgerEntry,
@@ -87,7 +88,7 @@ struct NarrowingWindowMark {
 struct StandingFact {
     root: FlowProductSubject,
     subject: SliceNarrowSubject,
-    node: SemanticNodeId,
+    node: FlowNarrowed,
 }
 
 /// A kill a ledger window performed: every fact under `root`, or only
@@ -135,7 +136,7 @@ impl StandingIndex {
                     let fact = StandingFact {
                         root: root.clone(),
                         subject: subject.clone(),
-                        node: *node,
+                        node: node.clone(),
                     };
                     match self.by_subject.get(subject) {
                         Some(&slot) => self.slots[slot] = Some(fact),
@@ -190,14 +191,14 @@ impl StandingIndex {
         prefix: &StandingIndex,
         root: &FlowProductSubject,
         subject: &SliceNarrowSubject,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<FlowNarrowed> {
         if let Some(fact) = self.get(subject) {
-            return Some(fact.node);
+            return Some(fact.node.clone());
         }
         if self.kills.iter().any(|kill| kill.covers(root, subject)) {
             return None;
         }
-        prefix.get(subject).map(|fact| fact.node)
+        prefix.get(subject).map(|fact| fact.node.clone())
     }
 }
 
@@ -329,12 +330,14 @@ impl<D: FlowDemandDriver> FlowEvaluator<'_, '_, D> {
                         UnionCandidate {
                             filed: fact.root.clone(),
                             subject: fact.subject.clone(),
-                            nodes: vec![fact.node],
+                            nodes: vec![self.narrowed_node(&fact.node)],
                         }
                     })));
                 }
                 Some(union) => union.meet(|candidate| {
-                    delta.read_over(&prefix, &candidate.filed, &candidate.subject)
+                    delta
+                        .read_over(&prefix, &candidate.filed, &candidate.subject)
+                        .map(|narrowed| self.narrowed_node(&narrowed))
                 }),
             }
             self.restore_narrowing_window(&mark);
