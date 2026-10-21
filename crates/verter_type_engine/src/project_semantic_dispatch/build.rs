@@ -1501,9 +1501,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             visible_value,
             Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
         );
-        let has_type_symbol = shallow
-            .visible_local_type_owner(value_root.scope.owner, value_root.name.as_ref())
-            .is_some();
         // Namespace-qualified root: `Ns.Member` where `Ns` is an import
         // alias (`import * as Ns from './m'`). The shallow state indexes
         // only the top-level alias; the dotted name itself never appears
@@ -1521,7 +1518,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // qualified path (`NS.Inner.f`): the longest prefix of the path that
         // names one reads the rest of the path from it. The namespace a
         // function or class merges with contributes its members this way too.
-        let unbound = !(has_value || has_import_local || has_type_symbol || has_namespace_prefix);
+        let unbound = !(has_value || has_import_local || has_namespace_prefix);
         if let Some((member_root, consumed)) =
             self.qualified_value_member_root(value_root, path, shallow, unbound)
         {
@@ -1565,7 +1562,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 );
             }
         }
-        // A name no scope declares or imports is read in the program's GLOBAL
+        // A name no value scope declares or imports is read in the program's GLOBAL
         // scope: `globalThis` is the global object, and any other name its
         // global value declaration. The global root replaces the bare-name
         // resolution below; the segments `globalThis` consumed leave `path`.
@@ -1573,11 +1570,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A function declared in several files: every later file's
         // declaration, whose overloads join the first's.
         let mut global_peers: Vec<ResolvedRootIdentity> = Vec::new();
-        let (global_root, path) = if has_value
-            || has_import_local
-            || has_type_symbol
-            || has_namespace_prefix
-        {
+        let (global_root, path) = if has_value || has_import_local || has_namespace_prefix {
             (None, path)
         } else if value_root.name.as_ref() == "globalThis" {
             // Every leading `globalThis` segment is the global object again.
@@ -5954,10 +5947,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // type of its own deciding: the alias's declared type
                 // requires itself — the checker's TS2456, a checker error
                 // (`any`) and a complete answer, never a step of a tail run.
-                result = checker_policy::checker_recovery(
-                    self.graph(),
-                    checker_policy::circular_type_alias(),
-                );
+                let alias = self.graph().intern_node(SemanticNodeData::DeclRef {
+                    identity: crate::semantic_query::DeclIdentity {
+                        canonical_id: build.decl_canonical.clone(),
+                        owner: build.decl_owner,
+                        whole_hash: build.decl_whole_hash,
+                        decl_name: build.decl_name.clone(),
+                    },
+                });
+                result = checker_policy::circular_type_alias_recovery(self.graph(), alias);
             } else if let Some(next) = next {
                 // A run that comes back to arguments it already took is in
                 // the state it was in then, and each step is a function of
@@ -6477,9 +6475,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Build the single peer-merge carrier: base contributors ∪ augmenter
         // contributions. If the base body is itself a `MergedDecl` (same-file
         // merge), flatten its contributors so the augmenter peers merge AT THE
-        // SAME LEVEL — a nested `MergedDecl` contributor would be dropped by the
-        // contributor splitter (`collect_merged_contributor_arms` only reads
-        // Object / Intersection / Alias bodies).
+        // SAME LEVEL in declaration order. The shared contributor splitter also
+        // traverses nested groups supplied by other files' same-file merges.
         let base_contributors: Vec<SemanticNodeId> = match self.graph().node_data(base_result) {
             Some(data) => match data.as_ref() {
                 SemanticNodeData::MergedDecl { contributors } => contributors.to_vec(),
@@ -6879,6 +6876,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         use verter_session_query::resolution::AugmentationTargetKind;
 
         prepare();
+        // Every read the fold consumes from here on — the index read, the
+        // augmenter target resolutions, the contributor artifacts — decides
+        // whether its healed keys may be written back to the shared index.
+        let refusals = crate::fact_tracing::RefusalObservationScope::enter();
         // The source boundary captures the same session population and host
         // environment, ingests program roots, and returns an owned index read.
         let (key, augmenter_set, index_resolutions) =
@@ -7688,8 +7689,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // the identical fingerprint keeps every recorded
         // `ModuleAugmentationIndexShape` signature valid while making the next
         // stitch hit the fast exact-key path (mirrors the names stitch).
-        self.ctx
-            .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
+        // A fold that consumed a read the process did not keep — an
+        // unretained or refused resolution among them — answers this request
+        // only: nothing it derived, healed keys included, enters the index.
+        if refusals.observed().is_none() {
+            self.ctx
+                .refresh_augmentation_keys(&key, &augmenter_set, refreshed_keys);
+        }
+        drop(refusals);
 
         if contributor_nodes.is_empty() && planned_bodies.is_empty() && enum_blocks.is_empty() {
             // DISTINGUISH the two empty outcomes (they are NOT the same):
@@ -8213,6 +8220,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             demand_canonical,
             project,
             name,
+            match space {
+                GlobalSpace::Type => crate::resolver_core::request_ports::AmbientSymbolSpace::Type,
+                GlobalSpace::Value => {
+                    crate::resolver_core::request_ports::AmbientSymbolSpace::Value
+                }
+            },
         )?;
         // A library the view cannot serve is still the declaring file: the
         // read of its declaration that follows fails as that read does.
@@ -8274,14 +8287,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// contribution is not addressed by the identity when the module also
     /// declares a module-scope type of the name, which the identity names
     /// instead.
-    fn is_global_type_declaration(
+    pub(super) fn is_global_type_declaration(
         &self,
         demand_canonical: &str,
         canonical: &str,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &str,
     ) -> bool {
-        use verter_session_query::inputs::contributors::ContributorOrigin;
+        use verter_session_query::inputs::contributors::{ContributorOrigin, FileModuleKind};
         if self
             .lib_global_declaration(demand_canonical, name, GlobalSpace::Type)
             .is_some_and(|lib| lib.canonical_id.as_ref() == canonical && lib.owner == owner)
@@ -8296,7 +8309,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         population.entries.iter().any(|entry| {
             entry.artifact_key.canonical.as_ref() == canonical
                 && entry.owner == owner
-                && declares_global_type(entry)
+                && (declares_global_type(entry)
+                    || (entry.is_automatic_lib
+                        && entry.module_kind == FileModuleKind::Script
+                        && matches!(
+                            entry.origin,
+                            ContributorOrigin::FileScopeInterface
+                                | ContributorOrigin::FileScopeType
+                        )))
                 && (entry.origin != ContributorOrigin::DeclareGlobal
                     || self
                         .ctx
@@ -8951,7 +8971,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .map(|prepared| !prepared.type_parameters.is_empty())
     }
 
-    fn prepared_type_decl(
+    pub(super) fn prepared_type_decl(
         &self,
         identity: &crate::semantic_query::DeclIdentity,
     ) -> Option<verter_retention::heap_size::OwnedValue<PreparedTypeDecl>> {
@@ -15875,7 +15895,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// materialises the substituted node only enough to close the
     /// selected key under the caller's `context`:
     ///
-    /// 1. [`Self::evaluate_deferred_semantic_node_with_context`] walks
+    /// 1. The shared selected-value evaluator walks
     ///    Alias / KeyOf / IndexedAccess / Mapped / Conditional / TypeOf
     ///    / TemplateLiteral / DeclPlaceholder hops. Under
     ///    [`crate::semantic_query::ReductionDemand::StructuralTransit`]
@@ -15883,11 +15903,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ///    [`crate::semantic_query::may_reduce_operator`]; `Conditional`
     ///    reduction is gated separately by the relation engine and
     ///    still fires when the post-substitution check is concrete.
-    /// 2. When the evaluator leaves an `InstantiationRef` shell (the
-    ///    deferred-shell evaluator deliberately stops at carrier
-    ///    boundaries — the relation-engine identity-carrier rule),
-    ///    dispatch `SemanticQueryKey::Instantiate` so the substituted
-    ///    args bind into the body. Under the caller's transit demand
+    /// 2. A remaining `InstantiationRef` binds through the shared
+    ///    `Instantiate` query, and selected-value evaluation continues
+    ///    through its returned helper aliases. Under the caller's transit demand
     ///    the body lowering inherits
     ///    `may_reduce_operator(context) == false`, so nested `KeyOf`/
     ///    `Mapped` operators stay carrier-shaped; only `Conditional`
@@ -15925,43 +15943,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         let substituted =
             self.substitute_semantic_type_param(mapper.value_expr, mapper.parameter_node, key_arg);
-        // Object member interiors remain addressable until they are read.
-        // Value unions and templates reduce their now-bound expression arms;
-        // traversing object interiors would record unrequested sibling values.
-        let substituted = if matches!(
-            self.graph().node_data(substituted).as_deref(),
-            Some(SemanticNodeData::Union(_) | SemanticNodeData::TemplateLiteral { .. })
-        ) {
-            self.evaluate_selected_value_with_context(substituted, context)
-        } else {
-            substituted
-        };
-        let evaluated = self
-            .evaluate_deferred_semantic_node_with_context(substituted, context)
+        let resolved = self
+            .evaluate_mapped_member_value_outcome(substituted, context)
             .into_active_query_build_node(self);
-        let resolved = match self.graph().node_data(evaluated).as_deref() {
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                let slot = self.type_slot_for(
-                    base.canonical_id.clone(),
-                    base.owner,
-                    base.decl_name.clone(),
-                );
-                let inst_ctx = self.instantiate_context_for(&base.canonical_id, context);
-                let args = Arc::clone(args.as_arc());
-                let read = self.execute_read(SemanticQueryKey::Instantiate(
-                    crate::semantic_query::InstantiateKey::new(slot, args, inst_ctx),
-                ));
-                // Two-signal fold: per-K materialiser returns a bare node, so
-                // fold a genuinely-incomplete nested Instantiate onto the
-                // request's sticky partial flag.
-                crate::request_context::observe_component_meta_read_suppress(&read);
-                match read.value {
-                    QueryResult::Value(id) => id,
-                    _ => evaluated,
-                }
-            }
-            _ => evaluated,
-        };
         if matches!(
             self.graph().node_data(resolved).as_deref(),
             Some(SemanticNodeData::Opaque(_))
@@ -18769,7 +18753,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let plan = match self.template_plan(quasis, args, eval_context) {
             TemplateSpans::Plan(plan) => plan,
-            TemplateSpans::Open => return Ok(authored()),
+            // An open template keeps its open holes; its literal holes fold
+            // into its text as the checker's construction folds them.
+            TemplateSpans::Open => {
+                return Ok(match self.folded_literal_holes(quasis, args) {
+                    Some((quasis, args)) => graph.intern_node(SemanticNodeData::TemplateLiteral {
+                        quasis: verter_type_expr::OwnedSlice::from(quasis.as_slice()),
+                        expressions: crate::semantic_query::PayloadArray::from(
+                            args.into_boxed_slice(),
+                        ),
+                    }),
+                    None => authored(),
+                })
+            }
             TemplateSpans::TooComplex(refusal) => {
                 return Ok(self.recover_at_operation_budget(refusal, Some(authored())));
             }
@@ -18885,6 +18881,48 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
         Some((texts.into_iter().map(OwnedStr::from).collect(), holes))
+    }
+
+    /// The texts and holes of a template of `quasis` and `args` with every
+    /// hole that is one literal type, `null` or `undefined` folded into the
+    /// text around it — the checker's template construction folds such a
+    /// hole whatever its other holes are (`getTemplateLiteralType`), so
+    /// `` `${infer H}${D}${infer T}` `` with `D := "."` is
+    /// `` `${infer H}.${infer T}` ``, the pattern an inference matches. None
+    /// when no hole folds, or when every hole does: a closed template is the
+    /// string its construction builds ([`Self::reduce_template_literal_nodes`]).
+    pub(super) fn folded_literal_holes(
+        &self,
+        quasis: &[OwnedStr],
+        args: &[SemanticNodeId],
+    ) -> Option<(Vec<OwnedStr>, Vec<SemanticNodeId>)> {
+        let graph = self.graph();
+        let folded = |arg: SemanticNodeId| match graph.node_data(arg).as_deref() {
+            Some(SemanticNodeData::Literal(value)) => Some(literal_value_template_text(value)),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Null)) => Some("null".to_owned()),
+            Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined)) => {
+                Some("undefined".to_owned())
+            }
+            _ => None,
+        };
+        let text = |index: usize| quasis.get(index).map(|q| q.as_ref()).unwrap_or_default();
+        let mut texts: Vec<String> = vec![text(0).to_owned()];
+        let mut holes: Vec<SemanticNodeId> = Vec::with_capacity(args.len());
+        for (index, &arg) in args.iter().enumerate() {
+            match folded(arg) {
+                Some(spelled) => {
+                    let current = texts.last_mut().expect("a text");
+                    current.push_str(&spelled);
+                    current.push_str(text(index + 1));
+                }
+                None => {
+                    holes.push(arg);
+                    texts.push(text(index + 1).to_owned());
+                }
+            }
+        }
+        (!holes.is_empty() && holes.len() < args.len())
+            .then(|| (texts.into_iter().map(OwnedStr::from).collect(), holes))
     }
 
     /// The factored product of a template of `quasis` and `args`: each

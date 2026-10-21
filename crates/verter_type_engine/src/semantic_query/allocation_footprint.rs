@@ -108,9 +108,17 @@ measured_by_owned_heap!(
     super::MaterializationCycleGateFallbackReason,
     super::object_spread_projection::ObjectProjectionAlternative,
     super::CheckerDiagnostic,
+    super::CheckerDiagnosticOccurrence,
     crate::project_semantic_dispatch::flow_return::ExactMemberValue,
     crate::project_semantic_dispatch::flow_return::ExactReturnKeyDomain,
 );
+
+impl OwnedHeap for super::CheckerDiagnosticOccurrence {
+    /// The printed message arguments.
+    fn owned_heap_bytes(&self, aliases: &mut AliasSet) -> usize {
+        self.heap_bytes(aliases)
+    }
+}
 
 impl OwnedHeap for crate::project_semantic_dispatch::walk::WalkerDiagnostics {
     /// The list's owned allocation; the static empty list is never charged.
@@ -165,6 +173,7 @@ macro_rules! inline_only {
 inline_only!(
     super::MaterializationCycleGateFallbackReason,
     super::CheckerDiagnostic,
+    super::CheckerDiagnosticRecipe,
     super::SemanticNodeId,
     super::DepVersion,
     u32,

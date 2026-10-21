@@ -478,10 +478,11 @@ fn resolve_import_source_to_canonical(
     {
         return Some(caller_supplied);
     }
-    match host.resolve_type_dependency_canonical(canonical_id, source) {
-        verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-        verter_workspace::ResolutionPublication::Refused(_) => None,
-    }
+    // An unretained answer is the canonical the compile read; the
+    // resolution entry already refused the enclosing compile's admission.
+    host.resolve_type_dependency_canonical(canonical_id, source)
+        .into_delivered()
+        .flatten()
 }
 
 /// Observe the augmentation-index fingerprint for every imported
