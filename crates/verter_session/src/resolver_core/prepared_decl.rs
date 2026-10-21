@@ -524,6 +524,16 @@ fn finish_prepared_type_decl(
                 count: overflow.count,
             })?;
     }
+    // An alias whose authored body is the `intrinsic` keyword declares the
+    // compiler-provided type its name selects, not the body it spells.
+    if !lowered.body.is_merged()
+        && lowered
+            .contributor_facts
+            .iter()
+            .any(|contributor| contributor.intrinsic)
+    {
+        prepared.body_facts.classification = verter_type_expr::facts::TypeBodyClass::Intrinsic;
+    }
     prepared.type_parameters = lowered.narrow_type_parameters.clone();
     prepared.vue_ignored_heritage = Arc::clone(&lowered.vue_ignored_heritage);
     let mut unique_symbol_members = Vec::new();

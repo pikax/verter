@@ -1655,8 +1655,12 @@ fn discover_variable_declaration<'ast>(
                     Expression::ObjectExpression(_) | Expression::ArrayExpression(_)
                 )
                 && !super::type_eval_build::has_authoritative_value_assertion(init);
-            let served_literal = contextual_literal || call_literal;
-            if contextual_call || served_literal {
+            // A member read through a computed key or an optional chain is
+            // typed by the flow evaluator too, which reads the member it names.
+            let member_read = super::type_eval_build::flow_typed_member_read(init)
+                && !super::type_eval_build::has_authoritative_value_assertion(init);
+            let served_initializer = contextual_literal || call_literal || member_read;
+            if contextual_call || served_initializer {
                 // The initializer is a served expression body. Its callbacks
                 // use the same flow evaluator and call continuation as bodies.
                 discover_initializer_inner(
@@ -1701,7 +1705,7 @@ fn discover_variable_declaration<'ast>(
                 },
                 source,
             });
-            if !contextual_call && !served_literal {
+            if !contextual_call && !served_initializer {
                 discover_top_level_call_arg_positions(init, &name, anchor, &base_descent, ctx);
             }
         }
