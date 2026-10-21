@@ -2256,6 +2256,9 @@ pub enum TypeBodyClass {
     Class,
     /// Multiple same-name `interface X` declarations (merged).
     MergedInterface,
+    /// `type X<...> = intrinsic`: the compiler-provided type the alias's
+    /// name selects, wherever it is declared.
+    Intrinsic,
 }
 
 /// The `PreparedTypeDecl.body: TypeExpr` narrowing — a classification plus the
