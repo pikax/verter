@@ -529,7 +529,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 Some(ClosedOperatorRead::Named(node)) => Some(node),
                 Some(ClosedOperatorRead::Evaluated(node)) => {
                     self.carrier_normalizing.borrow_mut().push(operator);
-                    let projected = self.project_operator_read(node, context, inputs);
+                    let projected = self.with_closed_read_inputs(inputs.scope, |read_inputs| {
+                        self.project_operator_read(node, context, read_inputs)
+                    });
                     self.carrier_normalizing.borrow_mut().pop();
                     projected
                 }
@@ -626,12 +628,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
         let _operation = self.enter_operation(false);
-        // A member read through a closed access names nothing of the
-        // answering file: its references are already resolved.
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        self.with_closed_read_inputs(scope, |inputs| {
+            match self.project_operator_read(read, context, inputs) {
+                Some(projected) => self.reduce_answer_constituents(projected, context, inputs),
+                None => read,
+            }
+        })
+    }
+
+    /// The inputs a member read through a closed operator projects with,
+    /// answered in `scope`'s file. The member names nothing of the body
+    /// holding the operator — its references are already resolved — so no
+    /// type-parameter binding, script-setup generic, shadowing or authored
+    /// resolution debt of that body reaches it, and the read depends on
+    /// `scope` alone, which is what [`AnswerReads`] keys it by.
+    fn with_closed_read_inputs<R>(
+        &self,
+        scope: &NodeScopeId,
+        read: impl FnOnce(&LocatorViewInputs<'_>) -> R,
+    ) -> R {
         let env = rustc_hash::FxHashMap::default();
         let name_resolution = rustc_hash::FxHashMap::default();
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
-        let inputs = LocatorViewInputs {
+        read(&LocatorViewInputs {
             env: &env,
             scope,
             name_resolution: &name_resolution,
@@ -639,12 +659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             shadowing: &shadowing,
             authored_resolution_debt: None,
             self_value: None,
-        };
-        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
-        match self.project_operator_read(read, context, &inputs) {
-            Some(projected) => self.reduce_answer_constituents(projected, context, &inputs),
-            None => read,
-        }
+        })
     }
 
     /// A projected child as the composite holding it keeps it: a closed
