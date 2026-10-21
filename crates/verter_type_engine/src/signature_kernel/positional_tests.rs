@@ -315,3 +315,345 @@ fn generic_rest_index_stays_exact_past_u16() {
     let s = shape(&l, SignatureSemanticFlags::NONE);
     assert_ne!(s.type_at(65_535), s.type_at(65_536));
 }
+
+mod tuple_plan {
+    use super::super::positional::{
+        tuple_inference_plan, TupleElementKind, TupleInferenceStep, VariadicArityFacts,
+    };
+    use TupleElementKind::{Optional as O, Required as R, Rest as S, Variadic as V};
+    use TupleInferenceStep::{Element, RestArray, RestElement, Slice, SliceElementType};
+
+    /// Arity facts keyed by target position.
+    #[derive(Default)]
+    struct Arity {
+        implied: Vec<(usize, usize)>,
+        constraint: Vec<(usize, usize)>,
+    }
+    impl VariadicArityFacts for Arity {
+        fn implied_arity(&self, index: usize) -> Option<usize> {
+            self.implied
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, a)| *a)
+        }
+        fn fixed_constraint_arity(&self, index: usize) -> Option<usize> {
+            self.constraint
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, a)| *a)
+        }
+    }
+
+    fn plan(source: &[TupleElementKind], target: &[TupleElementKind]) -> Vec<TupleInferenceStep> {
+        tuple_inference_plan(source, true, target, &Arity::default())
+    }
+
+    fn slice(start: usize, end: usize, target: usize) -> TupleInferenceStep {
+        Slice {
+            start,
+            end,
+            target,
+            speculative: false,
+        }
+    }
+
+    /// `[1, 2, 3]` against `[infer H, ...infer R]` and `[H, ...M, L]`: the
+    /// fixed prefix and suffix pair, the variadic middle takes the slice.
+    #[test]
+    fn a_lone_variadic_takes_the_slice_between_the_fixed_ends() {
+        assert_eq!(
+            plan(&[R, R, R], &[R, V]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                slice(1, 0, 1)
+            ]
+        );
+        assert_eq!(
+            plan(&[R, R, R], &[R, V, R]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                slice(1, 1, 1),
+                Element {
+                    source: 2,
+                    target: 2
+                },
+            ]
+        );
+        // `[...T, number]` reserves the fixed suffix.
+        assert_eq!(
+            plan(&[R, R, R], &[V, R]),
+            vec![
+                slice(0, 1, 0),
+                Element {
+                    source: 2,
+                    target: 1
+                }
+            ]
+        );
+        // `[1, 2?]` against `[A, ...R]`: the optional element is in the slice.
+        assert_eq!(
+            plan(&[R, O], &[R, V]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                slice(1, 0, 1)
+            ]
+        );
+    }
+
+    /// `[...T, number?]` infers its slice speculatively.
+    #[test]
+    fn a_target_ending_in_an_optional_element_infers_its_slice_speculatively() {
+        assert_eq!(
+            plan(&[R, R, R], &[V, O]),
+            vec![
+                Slice {
+                    start: 0,
+                    end: 1,
+                    target: 0,
+                    speculative: true,
+                },
+                Element {
+                    source: 2,
+                    target: 1
+                },
+            ]
+        );
+    }
+
+    /// A source whose middle is one rest element infers its element type
+    /// to every middle target element (an array of it to a variadic one); an
+    /// array source is one rest.
+    #[test]
+    fn a_single_source_rest_infers_to_every_middle_element() {
+        assert_eq!(
+            plan(&[R, S], &[R, V]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                RestElement {
+                    source: 1,
+                    target: 1
+                },
+            ]
+        );
+        assert_eq!(
+            tuple_inference_plan(&[S], false, &[R, V], &Arity::default()),
+            vec![
+                RestElement {
+                    source: 0,
+                    target: 0
+                },
+                RestElement {
+                    source: 0,
+                    target: 1
+                },
+            ]
+        );
+        // `[1, ...string[], 2]` against `[...A, L]`: not a single rest once the
+        // suffix is reserved, so the variadic takes `[1, ...string[]]`.
+        assert_eq!(
+            plan(&[R, S, R], &[V, R]),
+            vec![
+                slice(0, 1, 0),
+                Element {
+                    source: 2,
+                    target: 1
+                }
+            ]
+        );
+    }
+
+    /// Two variadics split only at the first's implied arity.
+    #[test]
+    fn two_variadics_split_at_the_implied_arity_only() {
+        assert_eq!(plan(&[R, R], &[V, V]), Vec::new());
+        let implied = Arity {
+            implied: vec![(0, 1)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R], true, &[V, V], &implied),
+            vec![slice(0, 2, 0), slice(1, 0, 1)]
+        );
+        // A constraint arity is not an implied arity.
+        let constrained = Arity {
+            constraint: vec![(0, 1)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R], true, &[V, V], &constrained),
+            Vec::new()
+        );
+    }
+
+    /// Each half of a split is the checker's `sliceTupleType`: an implied
+    /// arity that overruns the fixed ends clamps the first slice as a
+    /// JavaScript `slice` does instead of dropping it, the second half
+    /// infers independently, and a second half beginning past the source's
+    /// fixed prefix takes its rest array.
+    #[test]
+    fn split_slices_clamp_and_infer_independently() {
+        let none_implied = Arity {
+            implied: vec![(1, 0)],
+            ..Arity::default()
+        };
+        // `[string, ...A, ...B, boolean]` against four required elements
+        // with nothing implied for `A`: `A` takes `[1, len - 5)`, which
+        // clamps to `[1, 3)`, and `B` the slice between the fixed ends.
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R, R], true, &[R, V, V, R], &none_implied),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                slice(1, 1, 1),
+                slice(1, 1, 2),
+                Element {
+                    source: 3,
+                    target: 3
+                },
+            ]
+        );
+        // An implied arity past the source's end leaves the second half
+        // empty rather than suppressing the first.
+        let overlong = Arity {
+            implied: vec![(0, 4)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[V, V], &overlong),
+            vec![slice(0, 0, 0), slice(2, 0, 1)]
+        );
+        // `[1, ...string[]]` split after two: the first half skips no end
+        // element, and the second begins past the fixed prefix and takes the
+        // rest array.
+        let past_prefix = Arity {
+            implied: vec![(0, 2)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, S], true, &[V, V], &past_prefix),
+            vec![
+                slice(0, 0, 0),
+                RestArray {
+                    start: 1,
+                    target: 1
+                }
+            ]
+        );
+        // A constraint arity past the source's length clamps the leading
+        // variadic's slice, and the trailing one's negative start counts
+        // from the end.
+        let leading = Arity {
+            constraint: vec![(0, 3)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[V, S], &leading),
+            vec![slice(0, 0, 0)]
+        );
+        let trailing = Arity {
+            constraint: vec![(1, 3)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[S, V], &trailing),
+            vec![slice(1, 0, 1)]
+        );
+    }
+
+    /// A variadic beside a rest splits at the variadic's fixed constraint
+    /// arity, from the front or from the back.
+    #[test]
+    fn a_variadic_beside_a_rest_splits_at_its_constraint_arity() {
+        let leading = Arity {
+            constraint: vec![(0, 2)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R], true, &[V, S], &leading),
+            vec![
+                slice(0, 1, 0),
+                SliceElementType {
+                    start: 2,
+                    end: 0,
+                    target: 1,
+                },
+            ]
+        );
+        let trailing = Arity {
+            constraint: vec![(1, 1)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R], true, &[S, V], &trailing),
+            vec![
+                SliceElementType {
+                    start: 0,
+                    end: 1,
+                    target: 0,
+                },
+                slice(2, 0, 1),
+            ]
+        );
+        assert_eq!(plan(&[R, R, R], &[V, S]), Vec::new());
+    }
+
+    /// Positions of the same structure infer elementwise, a variadic to a
+    /// variadic.
+    #[test]
+    fn matching_structure_infers_elementwise() {
+        assert_eq!(
+            plan(&[R, V], &[O, V]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                Element {
+                    source: 1,
+                    target: 1
+                },
+            ]
+        );
+    }
+
+    /// `[1, 2, 3]` against `[1, ...(infer R)[]]`: a lone rest takes the union
+    /// of the slice; an empty slice infers nothing.
+    #[test]
+    fn a_lone_rest_takes_the_union_of_a_nonempty_slice() {
+        assert_eq!(
+            plan(&[R, R, R], &[R, S]),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                SliceElementType {
+                    start: 1,
+                    end: 0,
+                    target: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            plan(&[R], &[R, S]),
+            vec![Element {
+                source: 0,
+                target: 0
+            }]
+        );
+    }
+}

@@ -256,7 +256,10 @@ pub fn type_body_fingerprint(
             for contributor in contributors {
                 collect_direct_object_members(contributor, &mut properties);
             }
-            let folded = TypeExpr::Object(Arc::new(ObjectExpr { properties }));
+            let folded = TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
+                properties,
+            }));
             compute_semantic_hash(&folded, space, lens)
         }
         TransientTypeBody::EnumUnion(scalars) => {

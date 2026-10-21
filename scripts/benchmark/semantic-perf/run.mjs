@@ -112,6 +112,7 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           every tier: 1 warmup + 3 measured fresh processes per arm, 3 warm repeats in one
                           live process per arm; deadline 60 s (quick), 120 s (standard), 600 s (stress)
   --out <dir>             output directory (default: target/semantic-perf/<timestamp>)
+  --expected <file>       measured reference (default: the committed expected.json)
   --only <a,b>            only these scenarios and sessions (id or id prefix, from the whole catalog;
                           overrides --tier)
   --settings <s>          strict (default) | all  (the four strictNullChecks x noImplicitAny settings)
@@ -147,10 +148,11 @@ process per invocation in the verter, verter-observe and tsc-api arms (tsc incre
 The verter-observe arm is the probe built with semantic-observe (capture compiled in) in its own target
 directory; the production probe has it physically compiled out.`;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     tier: "quick",
     out: null,
+    expected: EXPECTED_FILE,
     only: [],
     settings: "strict",
     arms: DEFAULT_ARMS,
@@ -191,6 +193,9 @@ function parseArgs(argv) {
       }
       case "--out":
         opts.out = resolve(next());
+        break;
+      case "--expected":
+        opts.expected = resolve(next());
         break;
       case "--only":
         opts.only = next().split(",").filter(Boolean);
@@ -272,10 +277,10 @@ function parseArgs(argv) {
   return opts;
 }
 
-function loadExpected() {
-  if (!existsSync(EXPECTED_FILE))
-    throw new Error(`the measured reference ${EXPECTED_FILE} is missing; run measure-expected.mjs`);
-  return JSON.parse(readFileSync(EXPECTED_FILE, "utf8"));
+function loadExpected(file) {
+  if (!existsSync(file))
+    throw new Error(`the measured reference ${file} is missing; run measure-expected.mjs`);
+  return JSON.parse(readFileSync(file, "utf8"));
 }
 
 /**
@@ -688,7 +693,7 @@ export async function main(argv) {
   // the two reads means the binary's source is unknown.
   const buildInputsAfterBuild = sourceTree(ROOT, BUILD_INPUTS);
 
-  const expected = loadExpected();
+  const expected = loadExpected(opts.expected);
   const libText = readFileSync(LIB_FILE, "utf8");
   // --only picks from the whole catalog; otherwise the tier decides.
   const scenarios = opts.only.length
@@ -879,8 +884,8 @@ export async function main(argv) {
       binaries,
       binariesAfter,
       expected: {
-        file: EXPECTED_FILE,
-        sha256: sha256File(EXPECTED_FILE),
+        file: opts.expected,
+        sha256: sha256File(opts.expected),
         schema: expected.schema,
         measuredWith: expected.measuredWith,
       },

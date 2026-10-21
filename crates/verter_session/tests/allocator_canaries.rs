@@ -785,3 +785,6 @@ mod recursive_growth_allocation;
 
 #[path = "allocation_cases/intersection_distribution.rs"]
 mod intersection_distribution_allocation;
+
+#[path = "allocation_cases/key_remap.rs"]
+mod key_remap_allocation;

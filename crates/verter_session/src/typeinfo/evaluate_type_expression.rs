@@ -442,6 +442,11 @@ fn evaluate_inner(
         remove_scratch(host, scratch_uri);
         return (Ok(None), false);
     };
+    // Every partiality the resolution below observes — a stopped
+    // instantiation, or a closed operator whose read stopped while the
+    // materializer projected the answer — folds here, whether or not a
+    // request context is installed, so the cache write below can refuse it.
+    let completeness = verter_type_engine::request_context::ColdComputeCompletenessScope::enter();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let host_ctx =
@@ -461,7 +466,6 @@ fn evaluate_inner(
             whole_hash: shallow.whole_hash,
             local_scope: None,
         };
-        let _ = &scope_node;
         let base = dispatch.type_slot_for(
             Arc::clone(&scratch_canonical),
             verter_type_expr::TopLevelOwnerId::ordinary_file(),
@@ -535,6 +539,7 @@ fn evaluate_inner(
                 &dispatch,
                 resolved_alias_node,
                 req.mode,
+                &scope_node,
             ) {
                 Ok(materialized) => materialized,
                 // A hard dispatch fault during nested materialization
@@ -549,10 +554,14 @@ fn evaluate_inner(
             },
         };
 
-        // Publish to cache if asked. The cached node id is the one we
-        // return so a later cache hit and a fresh request produce the
-        // same value.
-        if req.cacheable {
+        // Publish to cache if asked and the answer is complete. The cached
+        // node id is the one we return so a later cache hit and a fresh
+        // request produce the same value. A partial answer is returned but
+        // never warms the cache: a later request recomputes it.
+        let complete =
+            !verter_type_engine::request_context::current_cold_compute_completeness().is_partial();
+        drop(completeness);
+        if req.cacheable && complete {
             let mut guard = host.scratch_cache().lock();
             let roots = dispatch
                 .construction_grant()
@@ -575,7 +584,7 @@ fn evaluate_inner(
                 remove_scratch(host, &evicted_uri);
             }
         } else {
-            // Non-cacheable success: this request deliberately kept its
+            // Non-cacheable or partial success: this request kept its
             // scratch out of `scratch_cache`, so it holds no LRU owner.
             // EVICT (not full-remove) on this path: a successful resolution
             // admitted scratch-rooted entries into the semantic-graph memo,

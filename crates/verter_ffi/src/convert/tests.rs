@@ -863,11 +863,15 @@ fn component_meta_type_registry_reads_positional_lane_with_duplicate_names() {
     let lanes = host::meta_resolve::MaterializedComponentMetaTypeLanes {
         type_registry_entries: vec![
             verter_type_expr::TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: vec![verter_type_expr::ObjectMember::Property(
                     verter_type_expr::ObjectProperty::synthetic_public_key(
                         "variants".to_string().into(),
                         verter_type_expr::TypeExpr::Object(Arc::new(
-                            verter_type_expr::ObjectExpr { properties: vec![] },
+                            verter_type_expr::ObjectExpr {
+                                empty_literal: false,
+                                properties: vec![],
+                            },
                         )),
                         false,
                         false,
@@ -3064,6 +3068,7 @@ fn component_public_contract_crosses_the_production_ffi_seam_structurally() {
             return_type: Some(PublicTypeReference {
                 publication: materialized_publication(TypeExpr::Object(Arc::new(
                     verter_type_expr::ObjectExpr {
+                        empty_literal: false,
                         properties: Vec::new(),
                     },
                 ))),

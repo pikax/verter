@@ -567,7 +567,7 @@ pub(crate) fn relate_same_nodes_different_inference_context_do_not_warm_hit() {
         ),
         (
             InferenceContextKey {
-                pass_kind: InferencePassKind::ReverseHomomorphicMapped,
+                pass_kind: InferencePassKind::CallApplicability,
                 ..session.clone()
             },
             "pass_kind",

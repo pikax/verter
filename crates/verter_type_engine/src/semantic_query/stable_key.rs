@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use verter_retention::word_set::WordMap;
 
 use crate::semantic_query::composite::CompositeOriginCategory;
 use crate::semantic_query::{
@@ -367,6 +368,17 @@ pub const SHARED_SUBTREE_MIN_BYTES: u64 = 256;
 
 type ClassId = u32;
 
+/// The [`KeyClasses::order`] key of the ordered class pair `(a, b)`.
+fn class_pair(a: ClassId, b: ClassId) -> u64 {
+    (u64::from(a) << 32) | u64::from(b)
+}
+
+/// The [`KeyClasses::folds`] key of `class` folded at a state of low byte
+/// `low`.
+fn class_fold(class: ClassId, low: u8) -> u64 {
+    (u64::from(class) << 8) | u64::from(low)
+}
+
 /// One piece of a class's written-out form.
 #[derive(Clone, Copy)]
 enum Part {
@@ -456,12 +468,12 @@ pub(crate) struct KeyClasses {
     interned: FxHashMap<Box<[u8]>, ClassId>,
     /// Each classified node's class: a node's subtree is the same at every
     /// occurrence, so it is classified once per store.
-    classified: FxHashMap<SemanticNodeId, ClassId>,
-    order: FxHashMap<(ClassId, ClassId), Ordering>,
+    classified: WordMap<ClassId>,
+    order: WordMap<Ordering>,
     /// Each memoizing linear class's hash map (`ClassTable::fold`): the
     /// offset `T[l]` its bytes add to a state of low byte `l`, for the low
     /// bytes it was folded at — at most 256 per class.
-    folds: FxHashMap<(ClassId, u8), u64>,
+    folds: WordMap<u64>,
     /// Classified nodes released since the table was last emptied.
     released: usize,
     /// Nodes classified since the owning store last marked them as
@@ -481,7 +493,7 @@ impl KeyClasses {
     /// `dead` it held.
     pub(crate) fn release_nodes(&mut self, dead: impl Fn(SemanticNodeId) -> bool) -> usize {
         let before = self.classified.len();
-        self.classified.retain(|&id, _| !dead(id));
+        self.classified.retain(|id, _| !dead(SemanticNodeId(id)));
         let released = before - self.classified.len();
         self.released += released;
         if self.released > self.classified.len() {
@@ -620,7 +632,7 @@ impl<'t> ClassTable<'t> {
     fn complete(&mut self) -> Option<ClassId> {
         let frame = self.frames.pop()?;
         let class = self.build(&frame.recipe, frame.filled);
-        self.table.classified.insert(frame.node, class);
+        self.table.classified.insert(frame.node.0, class);
         self.table.fresh.push(frame.node);
         if self.frames.is_empty() {
             return Some(class);
@@ -643,7 +655,7 @@ impl<'t> ClassTable<'t> {
     /// Begin classifying `id`: an absent node or an already classified one
     /// answers at once; anything else opens a frame.
     fn enter(&mut self, id: SemanticNodeId) -> Option<ClassId> {
-        if let Some(&class) = self.table.classified.get(&id) {
+        if let Some(class) = self.table.classified.get(id.0) {
             return Some(class);
         }
         let Some(data) = self.graph.node_data(id) else {
@@ -783,7 +795,7 @@ impl<'t> ClassTable<'t> {
         if a == b {
             return Ordering::Equal;
         }
-        if let Some(&order) = self.table.order.get(&(a, b)) {
+        if let Some(order) = self.table.order.get(class_pair(a, b)) {
             return order;
         }
         let mut left = FullStream::new(a);
@@ -811,8 +823,8 @@ impl<'t> ClassTable<'t> {
                 }
             }
         };
-        self.table.order.insert((a, b), order);
-        self.table.order.insert((b, a), order.reverse());
+        self.table.order.insert(class_pair(a, b), order);
+        self.table.order.insert(class_pair(b, a), order.reverse());
         order
     }
 
@@ -914,7 +926,7 @@ impl<'t> ClassTable<'t> {
                             .wrapping_sub(finished.power.wrapping_mul(done.start));
                         self.table
                             .folds
-                            .insert((done.class, done.start as u8), offset);
+                            .insert(class_fold(done.class, done.start as u8), offset);
                     }
                     match stack.last_mut() {
                         Some(parent) => parent.state = done.state,
@@ -933,8 +945,8 @@ impl<'t> ClassTable<'t> {
         if !folded.memoized {
             return None;
         }
-        let offset = self.table.folds.get(&(class, state as u8))?;
-        Some(folded.power.wrapping_mul(state).wrapping_add(*offset))
+        let offset = self.table.folds.get(class_fold(class, state as u8))?;
+        Some(folded.power.wrapping_mul(state).wrapping_add(offset))
     }
 
     /// `members` with their classes, in key order: the `(fingerprint,
@@ -1559,6 +1571,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             for child in children {
                 enc.child(child);
             }
+            if !program.is_literal {
+                enc.bool(false);
+            }
         }
         SemanticNodeData::TypeOf(_) => {
             enc.header(category::AUTHORED, subtag::TYPEOF);
@@ -2047,6 +2062,7 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
                 crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
+                crate::semantic_query::CheckerDiagnosticOperation::TypeReference => 13,
             });
             // Frozen: a proven recovery and a budget recovery are distinct nodes.
             enc.u8(match basis {

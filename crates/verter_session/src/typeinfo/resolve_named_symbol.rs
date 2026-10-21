@@ -641,7 +641,7 @@ pub(crate) fn deliver_resolved_root(
 /// [`compute_effective_mode`] before view acquisition, so the request body's
 /// early-miss returns and this path report the SAME mode).
 #[allow(clippy::type_complexity)]
-fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
+pub(crate) fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     canonical_id: &str,
@@ -731,7 +731,6 @@ fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
-    let _ = &scope_node;
     let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
 
     let instantiate_key =
@@ -759,7 +758,7 @@ fn resolve_named_symbol_in_current_view<M: verter_audit::observe::ObserveExec>(
     let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
         node
     } else {
-        match materialize_through_aliases(host, dispatch, node, effective_mode) {
+        match materialize_through_aliases(host, dispatch, node, effective_mode, &scope_node) {
             Ok(materialized) => materialized,
             // A hard dispatch fault during nested materialization
             // propagates as `Err` rather than silently degrading to
@@ -807,7 +806,9 @@ pub(crate) fn classify_dispatch_error(
 /// `SemanticNodeData::Opaque(QueryError::DeclPlaceholder { … })`
 /// carriers, AND to REDUCE operator-bodied top-level aliases
 /// (`type X = Y[K]` / `type X = keyof Y`) through the shared
-/// `IndexedAccess` / `KeyOf` reducer under the publication modes.
+/// `IndexedAccess` / `KeyOf` reducer under the publication modes, and
+/// written unions / intersections (`type X = "a" | string`) through the
+/// canonical union / intersection algebra.
 ///
 /// This is the SINGLE canonical materializer for every typeinfo
 /// resolution entry-point — both the named-resolve path
@@ -821,16 +822,42 @@ pub(crate) fn classify_dispatch_error(
 /// hang the resolver — the dispatch's own cycle detection catches
 /// genuine alias cycles and returns `Opaque(AliasCycle)` long
 /// before this loop runs out of steps.
+///
+/// A published `Expanded` answer a root access read is projected as a
+/// body written in place is, in `scope`'s file, so the closed operators
+/// inside the member it read reduce there too.
 pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     start: SemanticNodeId,
     mode: ProjectionMode,
+    scope: &verter_type_engine::semantic_query::NodeScopeId,
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
+    let mut read_access = false;
+    let node = materialize_alias_chain(host, dispatch, start, mode, &mut read_access)?;
+    // Projected after the chain's reader scope closes, so the request's
+    // own builder owns what the projection constructs.
+    Ok(if read_access && mode == ProjectionMode::Expanded {
+        dispatch.published_answer_read(node, scope)
+    } else {
+        node
+    })
+}
+
+/// The alias / placeholder / operator chain [`materialize_through_aliases`]
+/// walks. `read_access` records whether the answer is a member a root
+/// access read.
+fn materialize_alias_chain<M: verter_audit::observe::ObserveExec>(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    start: SemanticNodeId,
+    mode: ProjectionMode,
+    read_access: &mut bool,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     // A construction reader: the scope owns every ordinal it reads.
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     let mut current = start;
     for _ in 0..16 {
         let data = store.read_in_scope(current);
@@ -911,6 +938,7 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                 match classify_operator_reduction_step(store, step_result, current)? {
                     MaterializationStep::Continue(next) => {
                         current = next;
+                        *read_access = true;
                         continue;
                     }
                     MaterializationStep::Stop(node) => return Ok(node),
@@ -1082,6 +1110,15 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
             }
+            // A declaration the access named stays the reference it is.
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Opaque(_),
+            ) => {
+                *read_access = false;
+                return Ok(current);
+            }
             // An intersection written at the alias root is the type the
             // checker constructs from it (`getTypeFromIntersectionTypeNode`):
             // the shared `ReduceIntersection` reducer, for a written type
@@ -1105,11 +1142,10 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                let nullability = root_nullability(store, dispatch, current);
                 let key = SemanticQueryKey::reduce_written_intersection_operands(
                     store,
                     members,
-                    nullability,
+                    root_nullability(store, dispatch, current),
                 );
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
@@ -1117,6 +1153,36 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                     }
                     QueryResult::Recursive(node) => QueryResult::Recursive(node),
                     QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // A union written at the alias root publishes the type the
+            // checker constructs from it when that construction absorbs a
+            // literal (`type X = "a" | string` is `string`, also when the
+            // literal or its supertype is written through an alias), reduced
+            // by the shared `ReduceUnion` algebra under the root file's
+            // `strictNullChecks`, as the intersection below. Any other written union
+            // stays as written, and so does one the reducer misses; a reducer
+            // fault propagates through the same fault/miss split as the
+            // operator bridge. `Skeleton` / `Identity` keep it.
+            Some(SemanticNodeData::Union(_))
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                let Some(step_result) = dispatch
+                    .owning()
+                    .reduced_written_union(current, root_nullability(store, dispatch, current))
+                    .into_value_in(&scope)
+                else {
+                    return Ok(current);
                 };
                 match classify_operator_reduction_step(store, step_result, current)? {
                     MaterializationStep::Continue(next) => {

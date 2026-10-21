@@ -462,6 +462,7 @@ fn expanded_locator_projection_does_not_request_hidden_spread_writes() {
     };
     let root = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from([
                 verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                     verter_type_engine::semantic_query::AuthoredPropertyEffect {
@@ -711,8 +712,12 @@ fn runaway_generic_returns_work_partial_one_root_diagnostic_and_seals_its_refusa
             input_id: "/runaway.ts".to_string(),
             // Through its own conditional type the self-application is the
             // checker's tail loop over ever-new arguments; applied directly it
-            // would be a circular declaration (TS2456), not growth.
-            source: Arc::from("export type Runaway<T> = T extends never ? never : Runaway<[T]>;\n"),
+            // would be a circular declaration (TS2456), not growth. Its check
+            // wraps the parameter (`[T]`), so no uniform-growth certificate
+            // covers it and the run falls back to the work rail.
+            source: Arc::from(
+                "export type Runaway<T> = [T] extends [never] ? never : Runaway<[T]>;\n",
+            ),
             file_language: crate::LanguageRegistry::global()
                 .classify_static("/runaway.ts")
                 .static_resolution(),
