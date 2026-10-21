@@ -147,6 +147,15 @@ fn a_declared_exclude_reads_a_derived_union_once_per_distribution() {
                 reads() - before
             });
             println!("declared {probe} (named: {named}): union reads {visits:?}");
+            // Preparing the membership index alone reads every arm once: a
+            // count below the width means the work went uncounted.
+            for (width, visits) in [32, 64, 128].into_iter().zip(visits) {
+                assert!(
+                    visits >= width,
+                    "the reads must be observed on this thread: {probe} (named: {named}): \
+                     {visits} at width {width}"
+                );
+            }
             for step in 0..2 {
                 assert!(
                     visits[step + 1] * 10 <= visits[step] * 22,
@@ -156,6 +165,113 @@ fn a_declared_exclude_reads_a_derived_union_once_per_distribution() {
             }
         }
     }
+}
+
+/// A union the composite reduction proved it leaves as written is reused
+/// only when every arm is a literal, a primitive or an enum member: that
+/// canonicalization charges the connected demand nothing, so replaying the
+/// proof prices a demand exactly as reducing the union again does. A union
+/// holding any other arm is reduced again by every demand.
+#[test]
+fn a_reused_composite_proof_prices_a_demand_as_reducing_again() {
+    use super::ProjectSemanticDispatch;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::composite::CompositeList;
+    use verter_type_engine::semantic_query::{
+        AuthoredPropertyKey, LiteralValue, MacroOwnBodyStamp, MergeRoleStamp, PrimitiveKind,
+        ProjectionReductionContext, SemanticNodeData, SurfaceMember,
+    };
+    type Dispatch<'a> = ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    dispatch
+        .set_connected_limits_for_tests(super::connected_demand::MAX_CONNECTED_PROJECTION_WORK, 24);
+    let graph = dispatch.graph();
+    let literals: Vec<_> = (0..16)
+        .map(|index| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                "s{index}"
+            ))))
+        })
+        .collect();
+    let union = |arms: Vec<_>| {
+        graph.intern_node(SemanticNodeData::Union(
+            CompositeList::authored_shell_for_tests(Arc::from(arms)),
+        ))
+    };
+    let literal_union = union(literals.clone());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(vec![SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: AuthoredPropertyKey::string("x"),
+                value: string,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                merge_role: MergeRoleStamp::NEUTRAL,
+                spans: Default::default(),
+                declaration_origin: None,
+            }].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let mixed_union = union(literals.iter().copied().chain([object]).collect());
+    // Both reads of each union run in one demand, as the members of one
+    // distribution do: each returns its own connected work, bytes and arm
+    // reads.
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    let demand = |node| {
+        let ledger = dispatch.connected_demand();
+        let before = (
+            ledger.work_used_for_tests(),
+            ledger.bytes_used_for_tests(),
+            Dispatch::composite_arm_reads_for_tests(),
+        );
+        let _ = dispatch.normalize_node_for_structural_fact_demand(
+            node,
+            ProjectionReductionContext::structural_transit(),
+        );
+        (
+            ledger.work_used_for_tests() - before.0,
+            ledger.bytes_used_for_tests() - before.1,
+            Dispatch::composite_arm_reads_for_tests() - before.2,
+        )
+    };
+    let cold = demand(literal_union);
+    let replay = demand(literal_union);
+    let first = demand(mixed_union);
+    let again = demand(mixed_union);
+    assert!(
+        cold.2 >= literals.len(),
+        "the cold reduction reads every arm: {cold:?}"
+    );
+    assert_eq!(
+        replay.2, 0,
+        "the proven union is not reduced again: {replay:?}"
+    );
+    assert!(
+        first.2 > literals.len() && again.2 == first.2,
+        "a union with an object arm is reduced by every demand: {first:?} {again:?}"
+    );
+    // A first read of either union also pays for settling the node, which
+    // later reads are served; past it, reducing a union again and replaying
+    // a proof charge the same.
+    assert_eq!(
+        (replay.0, replay.1),
+        (again.0, again.1),
+        "a replay charges what reducing again charges: {replay:?} {again:?}"
+    );
 }
 
 #[test]

@@ -22,6 +22,14 @@ use crate::semantic_query::{
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
+/// Whether `data` stores a child id: a payload with none is a leaf of every
+/// structural walk (a summary, an `infer` scan) and is read on its own.
+pub(super) fn has_children(data: &SemanticNodeData) -> bool {
+    let mut found = false;
+    let _ = data.for_each_child(|_| found = true);
+    found
+}
+
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static OPERAND_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -312,6 +320,10 @@ struct MaterializedBranches {
     true_branch: SemanticNodeId,
     false_branch: SemanticNodeId,
     pending: Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
+    /// Whether the distributed `extends` operand is a union of literals
+    /// alone, read once per distribution
+    /// ([`ProjectSemanticDispatch::decides_member_in_place`]).
+    literal_extends: Option<bool>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
@@ -358,7 +370,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
                 verter_session_query::retention::owned::Owned::new,
             )
         });
-        if dispatch.decides_member_in_place(member, extends) {
+        let literal_extends = *self
+            .literal_extends
+            .get_or_insert_with(|| dispatch.is_literal_only_union(extends));
+        if literal_extends && dispatch.decides_member_in_place(member) {
             // Evaluated in place, as a query the running decision reaches.
             let _nested = dispatch.nested_decision_query();
             return dispatch.decide_conditional(
@@ -369,6 +384,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
                     true_branch: self.true_branch,
                     false_branch: self.false_branch,
                     pending,
+                    literal_extends: None,
                 },
             );
         }
@@ -530,6 +546,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     true_branch,
                     false_branch,
                     pending,
+                    literal_extends: None,
                 },
             )
         }
@@ -1288,18 +1305,38 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Whether a distributed member is decided in place rather than as a
-    /// conditional query of its own: a literal member against a union
-    /// `extends` operand this operation already indexed as literals only, as
-    /// syntax-lowered members always are. Its decision reads the two operands
-    /// alone — the relation is a membership lookup — and binds the selected
-    /// branch without evaluating it, so it reaches no query that could
-    /// re-enter it, and a memo entry for each member of a wide union would be
-    /// read by nothing but this distribution.
-    fn decides_member_in_place(&self, member: SemanticNodeId, extends: SemanticNodeId) -> bool {
+    /// conditional query of its own, given an `extends` operand that is a
+    /// union of literals alone ([`Self::is_literal_only_union`]): a literal
+    /// member, as syntax-lowered members always are. The choice reads the
+    /// operands' shapes only, never what an earlier read prepared, so a
+    /// distribution decides its members the same way in every run. Such a
+    /// decision reads the two operands alone — the relation is a membership
+    /// lookup — and binds the selected branch by structural substitution,
+    /// which evaluates nothing (its only query builds a template whose holes
+    /// are closed literals), so it reaches no query that could re-enter it.
+    /// It runs the same decision with the same reads and charges as the
+    /// member's query would; a memo entry for each member of a wide union
+    /// would be read only by another distribution over the same member, which
+    /// decides it in place as cheaply.
+    fn decides_member_in_place(&self, member: SemanticNodeId) -> bool {
         matches!(
             self.graph().node_data(member).as_deref(),
             Some(SemanticNodeData::Literal(_))
-        ) && self.literal_union_index_proves_literal_only(extends)
+        )
+    }
+
+    /// Whether `node` is a union whose every arm is a literal.
+    fn is_literal_only_union(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms.iter().all(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            }),
+            _ => false,
+        }
     }
 
     fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
@@ -2163,9 +2200,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A node with no children is summarised from its own payload, without
         // the traversal's containers.
         if let Some(data) = graph.node_data(root) {
-            let mut has_child = false;
-            let _ = data.for_each_child(|_| has_child = true);
-            if !has_child {
+            if !has_children(&data) {
                 let summary = FreeTypeVariables {
                     params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
                         .then(|| Arc::from([root])),
@@ -2549,7 +2584,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.relation_pattern_info(extends).is_some() {
             return ConditionalInferRoute::InScopePattern;
         }
-        match self.infer_inventory(extends) {
+        match self.infer_inventory(extends).as_ref() {
             super::relation::InferInventory::Sites(_) => ConditionalInferRoute::None,
             super::relation::InferInventory::Unsupported => ConditionalInferRoute::OutOfScope,
         }

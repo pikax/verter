@@ -714,9 +714,11 @@ struct CompositeReduction {
 }
 
 /// The unions one operation proved its composite reduction leaves as
-/// written — no arm a name or a template, and the canonical union over the
-/// arms keeping every one — each with the file roots the proving
-/// canonicalization inspected. The proof reads only immutable node data, so
+/// written — every arm a literal, a primitive or an enum member, and the
+/// canonical union over the arms keeping every one — each with the file
+/// roots the proving canonicalization inspected. Such a canonicalization
+/// charges the connected demand nothing, so replaying its roots prices a
+/// demand exactly as reducing again would. The proof reads only immutable node data, so
 /// a later demand on the same union replays its roots instead of reducing
 /// it again: a distributive conditional demands its `extends` operand once
 /// per member. The outermost dispatch operation releases the table.
@@ -3688,6 +3690,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         )
     }
 
+    /// Whether `arm` is a literal, a primitive or an enum member: a union of
+    /// these alone canonicalizes without a metered construction.
+    fn is_unmetered_scalar(&self, arm: SemanticNodeId) -> bool {
+        matches!(
+            self.graph().node_data(arm).as_deref(),
+            Some(
+                SemanticNodeData::Literal(_)
+                    | SemanticNodeData::Primitive(_)
+                    | SemanticNodeData::EnumLiteral(_)
+            )
+        )
+    }
+
     /// Whether a resolved type is a literal, a primitive or an enum member
     /// — the types the composite reductions act on.
     fn is_composite_scalar(&self, view: SemanticNodeId) -> bool {
@@ -3990,12 +4005,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => false,
             };
             if kept {
-                // With no name to demand and no template to build, the
-                // proof read nothing but the arms: the operation reuses it.
+                // Arms that are literals, primitives and enum members alone
+                // leave no name to demand, no template to build and no
+                // intersection to distribute: the proof read nothing but the
+                // arms and charged the connected demand nothing (its meter
+                // pays only for distributions), so a replay that charges
+                // nothing prices it exactly as a cold run does.
                 if let Some(roots) = proof.filter(|_| {
                     !read_template
                         && matches!(reduction.completeness, ResultCompleteness::Complete)
-                        && !arms.iter().any(|arm| self.is_composite_name(*arm))
+                        && arms.iter().all(|arm| self.is_unmetered_scalar(*arm))
                 }) {
                     self.composite_fixed_points
                         .borrow_mut()

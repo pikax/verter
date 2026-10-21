@@ -121,6 +121,15 @@ pub(super) type LiteralUnionIndexes =
 #[derive(Hash, PartialEq, Eq)]
 struct LiteralUnionIndexKey(SemanticNodeId);
 
+/// Where a membership index is prepared: inside a relation frame, whose
+/// refusal it records on that frame, or ahead of any relation frame (a pair
+/// question), where a refusal falls back to the relation authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexPreparation {
+    InRelation,
+    AheadOfRelation,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static REDISCHARGE_EXECUTE_VISITS: std::cell::Cell<usize> =
@@ -206,7 +215,7 @@ enum NakedUnionInference {
 }
 
 /// The `infer` declarations a pattern holds, as the relation infers them.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum InferInventory {
     /// Each declaration, in discovery order, reached through structure the
     /// relation infers through: object members and their signatures and
@@ -2474,19 +2483,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         })
     }
 
-    /// A literal related to a literal-only union is decided by the
-    /// union's operation-scoped membership index
-    /// ([`Self::relate_literal_to_union`]) without a relation frame or memo
-    /// entry of its own, as a literal pair is: a distributive conditional
-    /// over a wide literal union asks it once per member. The index lookup
-    /// deposits the roots it inspected and consumes the index's receipt in
-    /// the asking build. Any other pair, an undecided lookup, and an open
-    /// inference session take the relation authority's ordinary path.
+    /// A literal related to a literal-only union is decided without a
+    /// relation frame or memo entry of its own, as a literal pair is: a
+    /// distributive conditional over a wide literal union asks it once per
+    /// member. A memoized answer for the pair is replayed first, paying its
+    /// receipt, so a pair asked again in a later operation does not rebuild
+    /// the index; otherwise the union's operation-scoped membership index
+    /// ([`Self::literal_members_in_union`]) answers, its lookup depositing
+    /// the roots it inspected and consuming the index's receipt in the asking
+    /// build. The pair takes this path whenever its operands are these
+    /// shapes, never according to what an earlier read prepared. Any other
+    /// pair, an open inference session and a preparation the connected
+    /// demand refuses take the relation authority's ordinary path, whose
+    /// frame records that refusal.
     fn literal_union_membership_of(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
     ) -> Option<RelationStep> {
+        if self.relation_session_active() {
+            return None;
+        }
+        // Only these shapes may skip the relation: the guard also keeps
+        // every other pair from building a memo key here.
         let graph = self.graph();
         if !matches!(
             (
@@ -2500,10 +2519,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return None;
         }
-        match self.relate_literal_to_union(source, target, &[])? {
-            RelationResult::Assignable { bindings } => Some(RelationStep::Assignable { bindings }),
-            RelationResult::NotAssignable => Some(RelationStep::NotAssignable),
-            RelationResult::Unknown => None,
+        if let Some(step) = self.relation_warm_step(&self.relate_key_for(source, target), false) {
+            return Some(step);
+        }
+        match self.literal_members_in_union(
+            &[source],
+            target,
+            &[],
+            IndexPreparation::AheadOfRelation,
+        )? {
+            Ok(RelationResult::Assignable { bindings }) => {
+                Some(RelationStep::Assignable { bindings })
+            }
+            Ok(RelationResult::NotAssignable) => Some(RelationStep::NotAssignable),
+            Ok(RelationResult::Unknown) | Err(_) => None,
         }
     }
 
@@ -4430,7 +4459,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// constraint is read where the conditional is written, so no
     /// declaration of the pattern sits in it. Cached per pattern node on the
     /// transaction.
-    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> InferInventory {
+    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> Arc<InferInventory> {
         if let Some(cached) = self
             .dispatch_txn
             .borrow()
@@ -4438,14 +4467,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             .inventory_cache
             .get(&pattern)
         {
-            return cached.clone();
+            return Arc::clone(cached);
         }
-        let computed = self.infer_inventory_uncached(pattern);
+        let computed = Arc::new(self.infer_inventory_uncached(pattern));
         self.dispatch_txn
             .borrow_mut()
             .relation
             .inventory_cache
-            .insert(pattern, computed.clone());
+            .insert(pattern, Arc::clone(&computed));
         computed
     }
 
@@ -4454,11 +4483,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut sites = Vec::new();
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
         let mut stack = vec![pattern];
-        let has_child = |data: &SemanticNodeData| {
-            let mut found = false;
-            let _ = data.for_each_child(|_| found = true);
-            found
-        };
         while let Some(node) = stack.pop() {
             if !visited.insert(node) {
                 continue;
@@ -4561,7 +4585,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
                 // A payload with no child holds no declaration below it.
-                other if !has_child(other) => {}
+                other if !super::conditional_decision::has_children(other) => {}
                 _ if self.subtree_contains_infer(node) => return InferInventory::Unsupported,
                 _ => {}
             }
@@ -4597,11 +4621,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 None,
             ));
         }
-        let InferInventory::Sites(nodes) = self.infer_inventory(target) else {
+        let inventory = self.infer_inventory(target);
+        let InferInventory::Sites(nodes) = inventory.as_ref() else {
             return None;
         };
         let sites: Vec<InferParamSite> = nodes
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|node| match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
                     node,
@@ -9872,33 +9898,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target: SemanticNodeId,
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
-        use super::canonical_algebra::LiteralValueIdentity;
-
-        if self.relation_session_active() {
-            return None;
-        }
-        let source_data = self.graph().node_data(source)?;
-        if !matches!(source_data.as_ref(), SemanticNodeData::Literal(_)) {
-            return None;
-        }
-        let index = match self.literal_union_index(target)? {
-            Ok(index) => index,
-            Err(undecided) => return Some(undecided),
-        };
-        let values = index.values.as_ref()?;
-        self.deposit_operand_self_roots(&index.roots);
-        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
-        Some(
-            if values.contains(&LiteralValueIdentity::new(source_data)) {
-                assignable(bindings)
-            } else {
-                RelationResult::NotAssignable
-            },
-        )
+        self.literal_members_in_union(&[source], target, bindings, IndexPreparation::InRelation)
+            .map(|verdict| verdict.unwrap_or_else(|undecided| undecided))
     }
 
     /// Whether this operation's membership index of `node` proves every arm
-    /// a literal, without reading the arms again.
+    /// a literal, without reading the arms again. It only spares rereading
+    /// arms whose answer it already holds: a read it shortcuts gives the
+    /// same value and charges nothing either way.
     pub(super) fn literal_union_index_proves_literal_only(&self, node: SemanticNodeId) -> bool {
         self.literal_union_indexes
             .borrow()
@@ -9913,38 +9920,62 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// read. It answers exactly as relating each member through
     /// [`Self::relate_literal_to_union`] does, and deposits the same roots
     /// in the same first-inspection order, without a work item per member.
-    /// `None` for any other source, a target that is not literal-only, and
-    /// an open inference session.
+    /// `None` for any other source, a target that is not literal-only, an
+    /// open inference session, and a preparation the connected demand
+    /// refuses: the members then relate one by one, and each reports the
+    /// refusal.
     fn relate_literal_union_to_union(
         &self,
         members: &[SemanticNodeId],
         target: SemanticNodeId,
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
+        self.literal_members_in_union(members, target, bindings, IndexPreparation::InRelation)?
+            .ok()
+    }
+
+    /// The one membership test behind every literal-against-literal-union
+    /// path: each of `members`, in order, looked up in `target`'s index
+    /// until the first the target lacks. It deposits the index's roots and,
+    /// in first-inspection order, the roots of the first member, the target
+    /// and every later member it read. `None` when a member is not a
+    /// literal, the target is not a literal-only union, or an inference
+    /// session is open; `Some(Err(undecided))` when the connected demand
+    /// refused the index's preparation.
+    fn literal_members_in_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+        preparation: IndexPreparation,
+    ) -> Option<Result<RelationResult, RelationResult>> {
         use super::canonical_algebra::LiteralValueIdentity;
 
         if self.relation_session_active() {
             return None;
         }
         let graph = self.graph();
-        let mut literals = Vec::with_capacity(members.len());
-        for member in members {
-            let data = graph.node_data(*member)?;
-            if !matches!(data.as_ref(), SemanticNodeData::Literal(_)) {
-                return None;
-            }
-            literals.push(data);
+        let literal = |member: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*member).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            )
+        };
+        if !members.iter().all(literal) {
+            return None;
         }
         let (&first, rest) = members.split_first()?;
-        let index = match self.literal_union_index(target)? {
+        let index = match self.literal_union_index(target, preparation)? {
             Ok(index) => index,
-            Err(undecided) => return Some(undecided),
+            Err(undecided) => return Some(Err(undecided)),
         };
         let values = index.values.as_ref()?;
-        let read = literals
-            .into_iter()
-            .position(|data| !values.contains(&LiteralValueIdentity::new(data)));
-        let inspected = read.map_or(members.len(), |missing| missing + 1);
+        let missing = members.iter().position(|member| {
+            graph
+                .node_data(*member)
+                .is_none_or(|data| !values.contains(&LiteralValueIdentity::new(data)))
+        });
+        let inspected = missing.map_or(members.len(), |missing| missing + 1);
         self.deposit_operand_self_roots(&index.roots);
         self.deposit_operand_self_roots(
             &self.observed_self_roots_from_nodes(
@@ -9953,19 +9984,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .chain(rest.iter().copied().take(inspected - 1)),
             ),
         );
-        Some(match read {
+        Some(Ok(match missing {
             None => assignable(bindings),
             Some(_) => RelationResult::NotAssignable,
-        })
+        }))
     }
 
     /// The operation's membership index of the union `target`, prepared on
     /// first use; `Err` carries the undecided result of a preparation the
     /// connected demand refused. `None` when `target` is not a union or
-    /// the preparation's receipt could not be finished.
+    /// the preparation's receipt could not be finished. A preparation ahead
+    /// of any relation frame records no budget edge (the frame on top, if
+    /// any, never asked for it) and starts only when the demand can pay for
+    /// every arm, so the relation it falls back to is not charged twice.
     fn literal_union_index(
         &self,
         target: SemanticNodeId,
+        preparation: IndexPreparation,
     ) -> Option<Result<Arc<LiteralUnionIndex>, RelationResult>> {
         use super::canonical_algebra::LiteralValueIdentity;
         use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
@@ -9989,6 +10024,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // released the index. Rebuild without paying it twice, but
                 // preserve its full cold price for future independent demands.
                 let already_paid = self.connected_demand.is_paid(&identity);
+                if preparation == IndexPreparation::AheadOfRelation
+                    && !already_paid
+                    && self
+                        .connected_demand
+                        .work_available()
+                        .map_or(true, |available| available < members.len())
+                {
+                    return Some(Err(RelationResult::Unknown));
+                }
+                let refused = || {
+                    if preparation == IndexPreparation::InRelation {
+                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+                    }
+                    Some(Err(RelationResult::Unknown))
+                };
                 let recording =
                     (!already_paid).then(|| self.connected_demand.record_cost(identity.clone()));
                 let mut usage = LogicalUsage::default();
@@ -9997,8 +10047,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 for member in members.iter() {
                     #[cfg(any(test, feature = "test-support"))]
                     RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
-                    if !self.charge_relation_work(u64::from(!already_paid)) {
-                        return Some(Err(RelationResult::Unknown));
+                    if self
+                        .connected_demand
+                        .charge_units(usize::from(!already_paid))
+                        .is_err()
+                    {
+                        return refused();
                     }
                     usage.work += 1;
                     let Some(data) = graph.node_data(*member) else {
@@ -10016,8 +10070,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .reserve_bytes(if already_paid { 0 } else { entry_bytes })
                         .is_err()
                     {
-                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
-                        return Some(Err(RelationResult::Unknown));
+                        return refused();
                     }
                     usage.bytes += entry_bytes as u64;
                     values

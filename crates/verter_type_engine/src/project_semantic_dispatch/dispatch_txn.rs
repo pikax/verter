@@ -2362,7 +2362,8 @@ pub struct RelationDomainRuntime {
     /// Per-pattern-node memo of its `infer` inventory (a pure function of
     /// the pattern): every member of a distributed conditional asks it of
     /// the one `extends` operand.
-    pub(crate) inventory_cache: FxHashMap<SemanticNodeId, super::relation::InferInventory>,
+    pub(crate) inventory_cache:
+        FxHashMap<SemanticNodeId, std::sync::Arc<super::relation::InferInventory>>,
     /// Nestable call-applicability final-check barriers. Sessions below the
     /// newest length watermark are inactive; a genuinely nested call may push
     /// a fresh session above it and infer normally.
