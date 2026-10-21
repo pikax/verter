@@ -363,6 +363,9 @@ impl Rig {
 impl Drop for Rig {
     fn drop(&mut self) {
         self.host.close();
+        // A stopped worker leaves its pins charged; the soak's drain checks
+        // judge what remains, so the boundary's error needs no second report.
+        let _ = self.host.release_completion().wait();
     }
 }
 

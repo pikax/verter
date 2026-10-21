@@ -119,7 +119,9 @@ fn repeated_demand_close_cycles_return_to_baseline_on_a_live_host() {
         host.evict(&id);
         host.remove(&id).expect("the module was open");
         host.close();
-        host.reclaim_retired_artifacts();
+        host.release_completion()
+            .wait()
+            .expect("the parse workers apply the close's releases");
         let closed = counts(&host);
         let leaks = verter_audit::soak::drain_violations(
             &baseline,

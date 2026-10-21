@@ -799,7 +799,8 @@ impl Engine {
         let before = host.retention_snapshot();
         // The ACTIVE witness covers the surge alone: the soak's own host is
         // idle while it runs, so detectable foreign work rejects it.
-        let window = host.open_active_occupancy_window();
+        let owner = host.mint_active_occupancy_owner();
+        let window = host.open_active_occupancy_window(&owner);
         record.outcome = Outcome::Value;
         for ordinal in 0..modules {
             let file = surge_file(tranche, ordinal);
@@ -852,6 +853,13 @@ impl Engine {
             active: Some(ActiveEvidence::of(&report)),
         });
         host.close();
+        // The surge host's parse releases complete before it is dropped, so
+        // none of its pins is still pending when the soak host is sampled.
+        if let Err(err) = host.release_completion().wait() {
+            record.outcome = Outcome::Fault {
+                detail: format!("surge release completion: {err:?}"),
+            };
+        }
     }
 
     fn execute(&mut self, action: &Action, mutation: Option<Mutation>) -> ActionRecord {
@@ -1111,15 +1119,19 @@ impl Engine {
         record
     }
 
-    /// Release every pin, close the configuration modules and tear the
-    /// host's state down through its close route. Returns the roots a planted
-    /// leak keeps.
-    fn teardown(&mut self) -> Vec<NodeRoot> {
+    /// Release every pin, close the configuration modules, tear the host's
+    /// state down through its close route and wait on the host's release
+    /// boundary, so the closed sample reads only what a live owner still
+    /// holds. Returns the roots a planted leak keeps.
+    fn teardown(&mut self) -> Result<Vec<NodeRoot>, SoakError> {
         self.pins.clear();
         self.close_sentinel();
         self.host.close();
-        self.host.reclaim_retired_artifacts();
-        std::mem::take(&mut self.leaked)
+        self.host
+            .release_completion()
+            .wait()
+            .map_err(|err| SoakError(format!("release completion after close: {err:?}")))?;
+        Ok(std::mem::take(&mut self.leaked))
     }
 }
 
@@ -1208,7 +1220,7 @@ pub fn run(options: &RunOptions) -> Result<SoakSummary, SoakError> {
             });
         }
     }
-    let leaked = engine.teardown();
+    let leaked = engine.teardown()?;
     let affected = if options.mutation == Some(Mutation::RetainedKeyLeak) {
         std::mem::take(&mut engine.leaked_at)
     } else {
