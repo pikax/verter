@@ -339,6 +339,84 @@ fn no_infer() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The fixture of [`a_local_intrinsic_no_infer_alias_is_no_infer`]: the
+/// module declares `NoInfer` itself, as the lib does.
+const LOCAL_NO_INFER: &str = r##"
+type __BenchInit = 0;
+type NoInfer<T> = intrinsic;
+declare function f<T extends string>(vals: T[], def: NoInfer<T>): T;
+declare function g<T extends string>(vals: T[], def: T): T;
+const r = f(["a", "b"], "a");
+const s = g(["a", "b"], "c");
+"##;
+
+/// A type alias whose body is the `intrinsic` keyword is the intrinsic its
+/// name selects wherever it is declared: a module's own `type NoInfer<T> =
+/// intrinsic` blocks inference through the parameter it wraps, and over an
+/// operand that is not generic it is the operand.
+#[test]
+fn a_local_intrinsic_no_infer_alias_is_no_infer() {
+    let matrix = Matrix::new(LOCAL_NO_INFER);
+    let failures = matrix.types(&[("typeof r", r#""a" | "b""#), ("NoInfer<string>", "string")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An imported `intrinsic` alias answers from the declaring file's current
+/// version: once the file respells it as an ordinary alias, the importer's
+/// next read is that alias, never the earlier intrinsic answer.
+///
+/// Oracle: TypeScript 7.0.2 answers `"ok"` while `base.ts` declares
+/// `type NoInfer<T> = intrinsic`, then `"ok"[]` after it declares
+/// `type NoInfer<T> = T[]`.
+#[test]
+fn editing_an_imported_intrinsic_alias_misses_the_warm_answer() {
+    use super::checker_probe_lane_tests::{default_probe_host, evaluated_render_on_host};
+    let host = default_probe_host();
+    let source = "import type { NoInfer } from \"./base\";\nexport {};\n";
+    let answer = |declaration: &str| {
+        crate::u6_flow_shape_corpus_tests::upsert(
+            &host,
+            "/wb/base.ts",
+            declaration,
+            crate::FileLanguage::script_ts(),
+        );
+        evaluated_render_on_host(&host, source, "NoInfer<\"ok\">")
+    };
+    assert_eq!(answer("export type NoInfer<T> = intrinsic;\n"), "\"ok\"");
+    assert_eq!(answer("export type NoInfer<T> = T[];\n"), "Array(\"ok\")");
+}
+
+/// An `intrinsic` alias whose name selects no implemented intrinsic is that
+/// unsupported intrinsic, a typed partial answer, never the body it spells:
+/// the `intrinsic` keyword is not a reference, so a module's own
+/// `type intrinsic` never answers it.
+#[test]
+fn a_local_intrinsic_alias_without_an_implementation_is_unsupported() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use super::StructuralFactDemandOutcome;
+    let host = default_probe_host();
+    let source = "type intrinsic = string;\n\
+                  type BuiltinIteratorReturn = intrinsic;\n\
+                  type NotAnIntrinsic<T> = intrinsic;\n\
+                  export {};\n";
+    for probe in ["BuiltinIteratorReturn", "NotAnIntrinsic<1>"] {
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            source,
+            probe,
+            |_, outcome| {
+                assert!(
+                    matches!(outcome, StructuralFactDemandOutcome::Partial(_)),
+                    "{probe}: {outcome:?}"
+                );
+            },
+        );
+    }
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;
@@ -2238,6 +2316,18 @@ export function n54(p: "a") { return id({ v: p, w: "b" }); }
 export function n55(o: { v: "a" }) { return pu({ v: o.v }); }
 export function n56() { return kc({ v: [sl, "b"] }); }
 export function n57(p: number) { return kc({ v: [p, "b"] }); }
+export function n58() { return kc({ v: "a" }); }
+export function n59() { return kcn("a"); }
+export function n60() { return kc({ v: c ? "a" : "b" }); }
+export function n61() { return kc({ v: s }); }
+export function n62() { return kcn(c ? "a" : "b"); }
+export function n63() { return kcn(s); }
+declare function kt<const T>(x: [T]): T;
+export function n64() { return kt(["a"]); }
+export function n65() { return kt([s]); }
+export function n66() { return kc({ v: c ? s : "b" }); }
+declare function kx<const T>(x: { v: (T & {}) | undefined }): T;
+export function n67() { return kx({ v: "a" }); }
 "##;
 
 /// A literal's freshness belongs to its authored occurrence: a fresh
@@ -2569,10 +2659,25 @@ fn nested_regular_literals_keep_their_type() {
     ]));
     // A fresh literal beside a regular read keeps its type in a const
     // context: the array literal's contextual type is a `const` type
-    // parameter, whatever the parameters the argument reaches.
+    // parameter, whatever the parameters the argument reaches. So does a
+    // fresh literal whose own contextual type is a `const` type parameter,
+    // alone, as a tuple element or under a union or intersection naming
+    // the parameter. A read or a conditional in a member or element
+    // position is no literal of its own and widens there, while a naked
+    // `const T` argument infers its literals as written.
     failures.extend(Matrix::new(AUTHORED_LITERAL_OCCURRENCES).same(&[
         (Read::Return(r#"n56"#), r#"readonly ["a", "b"]"#),
         (Read::Return(r#"n57"#), r#"readonly [number, "b"]"#),
+        (Read::Return(r#"n58"#), r#""a""#),
+        (Read::Return(r#"n59"#), r#""a""#),
+        (Read::Return(r#"n60"#), r#"string"#),
+        (Read::Return(r#"n61"#), r#"string"#),
+        (Read::Return(r#"n62"#), r#""a" | "b""#),
+        (Read::Return(r#"n63"#), r#""a""#),
+        (Read::Return(r#"n64"#), r#""a""#),
+        (Read::Return(r#"n65"#), r#"string"#),
+        (Read::Return(r#"n66"#), r#"string"#),
+        (Read::Return(r#"n67"#), r#""a""#),
     ]));
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -2629,6 +2734,13 @@ let d41 = c ? { v: sl, k: 1 } : { v: s, k: "z" };
 let d42 = { ...{ v: s } };
 let d43 = { ...{ v: sl } };
 let d44 = [...[s]];
+let d46 = { ["v"]: s };
+declare const u: unique symbol;
+let d48 = { [u]: s };
+let d49 = { [u]: c ? "a" : sl };
+let d50 = c ? { [u]: s } : { [u]: 1 };
+let d51 = c ? [s, 1] : [sl, true];
+let d52 = c ? [s, [1, "x"]] : [true];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2679,7 +2791,8 @@ fn declared_literal_occurrences() {
 /// the regular one — through a nested conditional, beside an asserted
 /// element, and through a member read of the declaration. A member read
 /// widens in each object or array arm of a conditional and beside a
-/// spread, while a later spread's own member of that key keeps its type.
+/// spread, while a later spread's own member of that key keeps its type,
+/// and under a computed key as under a written one.
 #[test]
 fn declared_reads_follow_their_binding_freshness() {
     let failures = Matrix::new(DECLARED_LITERAL_OCCURRENCES).same(&[
@@ -2724,6 +2837,18 @@ fn declared_reads_follow_their_binding_freshness() {
         (Read::Type("typeof d42"), r#"{ v: string; }"#),
         (Read::Type("typeof d43"), r#"{ v: "a"; }"#),
         (Read::Type("typeof d44"), r#"string[]"#),
+        (Read::Type("typeof d46"), r#"{ v: string; }"#),
+        (Read::Type("(typeof d48)[typeof u]"), r#"string"#),
+        (Read::Type("(typeof d49)[typeof u]"), r#""a""#),
+        (Read::Type("(typeof d50)[typeof u]"), r#"string | number"#),
+        (
+            Read::Type("typeof d51"),
+            r#"(string | number)[] | ("a" | boolean)[]"#,
+        ),
+        (
+            Read::Type("typeof d52"),
+            r#"(string | (string | number)[])[] | boolean[]"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
@@ -3406,4 +3531,176 @@ fn a_self_returning_method_inference_terminates() {
         verdict.class,
         verdict.lane
     );
+}
+
+/// The fixture of [`intersection_with_a_mapped_type_over_the_inferred_parameter`].
+const VALIDATED_INTERSECTION: &str = r##"
+declare function validated<C>(reducers: C & { [K in keyof C]: C[K] extends { prepare: any } ? { reducer: unknown } : {} }): C;
+export const plain = validated({ a: 1 });
+export const annotated = validated({ a: (s: number) => {} });
+export const method = validated({ a(s: number) { return s; } });
+"##;
+
+/// A parameter typed as the inferred parameter intersected with a mapped
+/// type over its keys infers from the naked arm, eager and context
+/// sensitive arguments alike, and the argument relates to the mapped arm
+/// once the mapped type is instantiated over the inferred object.
+#[test]
+fn intersection_with_a_mapped_type_over_the_inferred_parameter() {
+    let failures = Matrix::new(VALIDATED_INTERSECTION).types(&[
+        ("typeof plain", "{ a: number; }"),
+        ("typeof annotated", "{ a: (s: number) => void; }"),
+        ("typeof method", "{ a(s: number): number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_mapped_parameter_over_closed_keys_relates_as_its_members`].
+const MAPPED_PARAMETER_MEMBERS: &str = r##"
+declare function dup<K extends PropertyKey>(x: { [P in K]: P }, k: K): "first";
+declare function dup<K>(x: unknown, k: K): "second";
+export const sameSpelling = dup<1 | "1">({ 1: "1" }, 1);
+declare function req<T>(x: { [K in keyof T]-?: T[K] | null }, t: T): "first";
+declare function req<T>(x: unknown, t: T): "second";
+export const required = req<{ a?: number }>({ a: undefined }, {});
+type Spelled = { [P in 1 | "1"]: P };
+declare function spelled(x: Spelled): "first";
+declare function spelled(x: unknown): "second";
+export const spelledAlias = spelled({ 1: "1" });
+type Optional = { a?: number };
+type NotOptional = { [K in keyof Optional]-?: Optional[K] | null };
+declare function notOptional(x: NotOptional): "first";
+declare function notOptional(x: unknown): "second";
+export const requiredAlias = notOptional({ a: undefined });
+"##;
+
+/// A mapped type over a closed key domain, as an alias or as a parameter
+/// once its type arguments are given, relates the argument to the members
+/// the mapped type has: `-?` drops the `undefined` an optional source
+/// member adds under `strictNullChecks`, and keys of one spelling (`1` and
+/// `"1"`) are one member holding both productions. The explicitly
+/// instantiated same-spelling call is not answered yet, but never with the
+/// overload the checker rejects.
+#[test]
+fn a_mapped_parameter_over_closed_keys_relates_as_its_members() {
+    let failures = Matrix::new(MAPPED_PARAMETER_MEMBERS).four(&[
+        (
+            Read::Type("typeof spelledAlias"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof requiredAlias"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof required"),
+            "\"second\"",
+            "\"first\"",
+            "\"second\"",
+            "\"first\"",
+        ),
+        (
+            Read::Type("typeof sameSpelling"),
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+            "\"first\"",
+        ),
+    ]);
+    let wrong: Vec<&String> = failures
+        .iter()
+        .filter(|failure| {
+            !failure.contains("`typeof sameSpelling`") || !failure.starts_with("GAP ")
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{}",
+        wrong
+            .iter()
+            .map(|failure| failure.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// [`a_mapped_parameter_over_closed_keys_relates_as_its_members`]'s
+/// same-spelling call, answered.
+#[test]
+#[ignore = "typed gap in the lane: an argument to an explicitly instantiated mapped parameter degrades by UnresolvedValue"]
+fn pinned_same_spelling_mapped_parameter_call() {
+    let failures =
+        Matrix::new(MAPPED_PARAMETER_MEMBERS).types(&[("typeof sameSpelling", "\"first\"")]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The fixture of [`a_fresh_literal_against_a_closed_mapped_type_is_excess_checked`].
+const MAPPED_EXCESS: &str = r##"
+type Enumerated = { [K in "a" | "b"]: K };
+declare function enumerated(x: Enumerated): "first";
+declare function enumerated(x: unknown): "second";
+export const enumeratedExcess = enumerated({ a: "a", b: "b", c: 1 });
+export const enumeratedExact = enumerated({ a: "a", b: "b" });
+type Valued = { [K in "a"]: number };
+declare function valued(x: Valued): "first";
+declare function valued(x: unknown): "second";
+export const valuedExcess = valued({ a: 1, z: 2 });
+type Face = { a: number };
+declare function partial(x: Partial<Face>): "first";
+declare function partial(x: unknown): "second";
+export const partialExcess = partial({ a: 1, z: 2 });
+declare function plain(x: { a: "a"; b: "b" }): "first";
+declare function plain(x: unknown): "second";
+export const plainExcess = plain({ a: "a", b: "b", c: 1 });
+declare function one(x: Enumerated): void;
+export function single() { return one({ a: "a", b: "b", c: 1 }); }
+declare function onePartial(x: Partial<Face>): void;
+export function singlePartial() { return onePartial({ a: 1, z: 2 }); }
+"##;
+
+/// A mapped type over a closed key domain is an object target of the fresh
+/// excess-property check, as the object its keys map to: a fresh literal
+/// with a property the mapped type has no key for selects the next
+/// overload, as it does against the object written out, while the literal
+/// with exactly its keys selects the mapped overload. A single signature
+/// reports the excess property (TS2353) at it.
+#[test]
+fn a_fresh_literal_against_a_closed_mapped_type_is_excess_checked() {
+    let mut failures = Matrix::new(MAPPED_EXCESS).types(&[
+        ("typeof enumeratedExcess", "\"second\""),
+        ("typeof enumeratedExact", "\"first\""),
+        ("typeof valuedExcess", "\"second\""),
+        ("typeof partialExcess", "\"second\""),
+        ("typeof plainExcess", "\"second\""),
+    ]);
+    let host = super::signature_predicate_inference_tests::host_with(MAPPED_EXCESS);
+    let rows: &[(&str, &str)] = &[
+        ("single", "(19,57): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type 'Enumerated'."),
+        ("singlePartial", "(21,61): error TS2353: Object literal may only specify known properties, and 'z' does not exist in type 'Partial<Face>'."),
+    ];
+    for root in [
+        super::signature_predicate_inference_tests::STRICT_ROOT,
+        super::signature_predicate_inference_tests::LOOSE_ROOT,
+    ] {
+        for (function, expected) in rows {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                function,
+                MAPPED_EXCESS,
+            );
+            if reported != [*expected] {
+                failures.push(format!(
+                    "`{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

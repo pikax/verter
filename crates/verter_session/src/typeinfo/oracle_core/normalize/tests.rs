@@ -40,6 +40,7 @@ fn intersection(arms: Vec<TypeExpr>) -> TypeExpr {
 }
 fn obj(members: Vec<ObjectMember>) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: members,
     }))
 }

@@ -243,6 +243,30 @@ impl DeferredCallable {
         mapped
     }
 
+    /// Normalize inferred parameter initializers without demanding the return
+    /// or changing the callable's occurrence, binders or lexical images.
+    pub(crate) fn map_parameter_types(
+        &self,
+        mut map: impl FnMut(SemanticNodeId) -> SemanticNodeId,
+    ) -> Self {
+        let mut mapped = self.clone();
+        mapped.params = self
+            .params
+            .iter()
+            .map(|param| {
+                let mut mapped = param.copy();
+                mapped.ty = map(param.ty);
+                mapped
+            })
+            .collect();
+        mapped
+    }
+
+    /// Visit the parameter children only, without reading the return deferral.
+    pub(crate) fn for_each_parameter_type(&self, mut visit: impl FnMut(SemanticNodeId)) {
+        self.params.iter().for_each(|param| visit(param.ty));
+    }
+
     /// Retain the result substitution after explicit instantiation consumed
     /// this header's own clause. Lexical capture remains a separate producer step.
     pub(crate) fn with_instantiated_clause(

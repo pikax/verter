@@ -79,6 +79,7 @@ use verter_type_expr::OwnedStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::{exact_reading, ConditionalReading};
+use super::declared_read_widening::literal_primitive;
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
     FlowReturnPendingOutcome, InferenceOccurrence, ObligationFrameDomain, ObligationIdentity,
@@ -120,6 +121,15 @@ pub(super) type LiteralUnionIndexes =
 
 #[derive(Hash, PartialEq, Eq)]
 struct LiteralUnionIndexKey(SemanticNodeId);
+
+/// Where a membership index is prepared: inside a relation frame, whose
+/// refusal it records on that frame, or ahead of any relation frame (a pair
+/// question), where a refusal falls back to the relation authority.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexPreparation {
+    InRelation,
+    AheadOfRelation,
+}
 
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
@@ -214,6 +224,7 @@ enum NakedUnionInference {
 }
 
 /// The `infer` declarations a pattern holds, as the relation infers them.
+#[derive(Debug)]
 pub(crate) enum InferInventory {
     /// Each declaration, in discovery order, reached through structure the
     /// relation infers through: object members and their signatures and
@@ -250,6 +261,17 @@ enum ReverseSourceShape {
     Object,
     Array { readonly: bool },
     Tuple { readonly: bool },
+}
+
+/// Whether `primitive` is one a literal type belongs to.
+fn holds_literals(primitive: PrimitiveKind) -> bool {
+    matches!(
+        primitive,
+        PrimitiveKind::String
+            | PrimitiveKind::Number
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::Boolean
+    )
 }
 
 fn reverse_optional(observed: bool, modifier: OptionalityMod) -> Option<bool> {
@@ -534,7 +556,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             source: SemanticNodeId,
             target: SemanticNodeId,
         ) -> RelationStep {
-            if let Some(step) = self.literal_pair_relation_of(source, target) {
+            if let Some(step) = self
+                .literal_pair_relation_of(source, target, RelationKind::Assignable)
+                .or_else(|| self.literal_union_membership_of(source, target))
+            {
                 self.graph().record_relation_check();
                 return step;
             }
@@ -551,7 +576,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             target: SemanticNodeId,
             relation: RelationKind,
         ) -> RelationStep {
-            if let Some(step) = self.literal_pair_relation_of(source, target) {
+            if let Some(step) = self.literal_pair_relation_of(source, target, relation) {
                 self.graph().record_relation_check();
                 return step;
             }
@@ -1259,6 +1284,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // their outer session context even though their immediate target is
         // no longer the mapped root.
         self.upgrade_relation_key_with_inference(key);
+        // inferTypes does no structural work when neither operand can
+        // contribute to this collector. This is empty candidate collection,
+        // not an assignability proof: it returns before opening a memo frame.
+        if self.relation_session_reads_candidates_only() {
+            let parameters = self.type_params_within(&[key.source, key.target]);
+            let txn = self.dispatch_txn.borrow();
+            if txn.active_session().is_some_and(|session| {
+                parameters
+                    .iter()
+                    .all(|parameter| !session.infers(*parameter))
+            }) {
+                return Some(RelationStep::Assignable {
+                    bindings: Arc::from([]),
+                });
+            }
+        }
         // (0) Two literal types relate exactly when they are one value.
         if let Some(step) = self.literal_pair_relation(key) {
             return Some(step);
@@ -1323,7 +1364,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(relation_step_from_payload(&payload));
             }
         }
-        let served = self.graph().get_relation_payload(self.ctx, key)?;
+        let served = match self.graph().get_relation_payload(self.ctx, key) {
+            Some(served) => served,
+            // A relation the request completed for itself — a root nested
+            // in another computation, or a member of its component — is
+            // kept in the request's tier, never the memo.
+            None => self.kept_value_read(&key.to_query_key(), |value| match value {
+                SemanticQueryValue::Relation(payload) => Some(payload),
+                _ => None,
+            })?,
+        };
         let payload = served.value;
         if measurement {
             if !self.admits_served_as_own_check(&served.receipt) {
@@ -1661,12 +1711,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // A prepared literal index proves there are no alias arms to
             // flatten. Re-scanning that same target just to classify the
             // checker's small-union recursion exemption is quadratic too.
-            let literal_only = self
-                .literal_union_indexes
-                .borrow()
-                .get(&node)
-                .is_some_and(|index| index.values.is_some());
-            if literal_only {
+            if self.literal_union_index_proves_literal_only(node) {
                 members.len() < 4
             } else {
                 self.relation_union_members(&members.members_arc()).len() < 4
@@ -2449,17 +2494,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// A pair of literal types relates, under every relation kind and
     /// policy, exactly when the two are one value (`"a"` to `"a"`, never
-    /// `"a"` to `"b"` or `1` to `"1"`), and deciding it reads nothing and
-    /// cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
-    /// answers it by identity. So it is decided before the reentry
-    /// intercept, the memo and the cold build, whose query machinery a
-    /// guard filtering a wide literal union otherwise paid twice per
-    /// remaining arm. The operands' file roots are deposited as the cold
-    /// build's read would record them. `None` for any other pair, and while
-    /// an inference session collects (its candidate bookkeeping runs the
-    /// ordinary path).
+    /// `"a"` to `"b"` or `1` to `"1"`). A literal against one of the four
+    /// primitives literals belong to (`string`, `number`, `bigint`,
+    /// `boolean`) is decided as plainly under every directional relation and
+    /// comparability: it relates to its own primitive (`"a"` to `string`)
+    /// and to no other (`"a"` to `number`). Deciding either reads nothing
+    /// and cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
+    /// answers both from the two types' flags. So they are decided before
+    /// the reentry intercept, the memo and the cold build, whose query
+    /// machinery a guard filtering a wide literal union otherwise paid twice
+    /// per remaining arm, and a template capture checked against its implied
+    /// `string` constraint once per capture. The operands' file roots are
+    /// deposited as the cold build's read would record them. `None` for any
+    /// other pair — a primitive against a literal, and a literal against a
+    /// primitive under [`RelationKind::Identity`], whose structural axis the
+    /// relation leaves undecided, included — and while an inference session
+    /// collects (its candidate bookkeeping runs the ordinary path).
     fn literal_pair_relation(&self, key: &RelateMemoKey) -> Option<RelationStep> {
-        self.literal_pair_relation_of(key.source, key.target)
+        self.literal_pair_relation_of(key.source, key.target, key.relation)
     }
 
     /// [`Self::literal_pair_relation`] over a node pair, decided before a
@@ -2471,6 +2523,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
+        relation: RelationKind,
     ) -> Option<RelationStep> {
         if self.dispatch_txn.borrow().active_session().is_some() {
             return None;
@@ -2483,6 +2536,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             (Some(SemanticNodeData::Literal(source)), Some(SemanticNodeData::Literal(target))) => {
                 source == target
             }
+            (
+                Some(SemanticNodeData::Literal(literal)),
+                Some(SemanticNodeData::Primitive(primitive)),
+            ) if relation != RelationKind::Identity && holds_literals(*primitive) => {
+                literal_primitive(literal) == *primitive
+            }
             _ => return None,
         };
         self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
@@ -2493,6 +2552,83 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             RelationStep::NotAssignable
         })
+    }
+
+    /// A literal related to a literal-only union is decided without a
+    /// relation frame or memo entry of its own, as a literal pair is: a
+    /// distributive conditional over a wide literal union asks it once per
+    /// member. A memoized answer for the pair is replayed first, paying its
+    /// receipt, so a pair asked again in a later operation does not rebuild
+    /// the index; otherwise the union's operation-scoped membership index
+    /// ([`Self::literal_members_in_union`]) answers, its lookup depositing
+    /// the roots it inspected and consuming the index's receipt in the asking
+    /// build. The pair takes this path whenever its operands are these
+    /// shapes, never according to what an earlier read prepared. Any other
+    /// pair, a pair asked inside an open relation chain, an open inference
+    /// session and a preparation the connected demand refuses take the
+    /// relation authority's ordinary path, whose frame records that
+    /// refusal.
+    fn literal_union_membership_of(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<RelationStep> {
+        if self.relation_session_active() {
+            return None;
+        }
+        // A pair asked while a relation frame is on top joins that frame's
+        // chain: the ordinary path weighs it against the chain's overflow,
+        // depth and comparison limits, which can answer false where
+        // membership answers true. Only a pair that starts a chain of its
+        // own skips the relation.
+        if self.current_relation_chain().is_some() {
+            return None;
+        }
+        // Only these shapes may skip the relation: the guard also keeps
+        // every other pair from building a memo key here.
+        let graph = self.graph();
+        if !matches!(
+            (
+                graph.node_data(source).as_deref(),
+                graph.node_data(target).as_deref(),
+            ),
+            (
+                Some(SemanticNodeData::Literal(_)),
+                Some(SemanticNodeData::Union(_))
+            )
+        ) {
+            return None;
+        }
+        let key = self.relate_key_for(source, target);
+        // A pair already open lower on the obligation stack is the
+        // relation's coinductive assumption, never a membership verdict.
+        let reentered = self
+            .dispatch_txn
+            .borrow()
+            .reentry()
+            .find(&ObligationIdentity::Relate {
+                key: key.clone(),
+                occurrence: InferenceOccurrence::ARGUMENT_COVARIANT,
+            })
+            .is_some();
+        if reentered {
+            return None;
+        }
+        if let Some(step) = self.relation_warm_step(&key, false) {
+            return Some(step);
+        }
+        match self.literal_members_in_union(
+            &[source],
+            target,
+            &[],
+            IndexPreparation::AheadOfRelation,
+        )? {
+            Ok(RelationResult::Assignable { bindings }) => {
+                Some(RelationStep::Assignable { bindings })
+            }
+            Ok(RelationResult::NotAssignable) => Some(RelationStep::NotAssignable),
+            Ok(RelationResult::Unknown) | Err(_) => None,
+        }
     }
 
     pub(super) fn relation_redischarge_active(&self) -> bool {
@@ -2786,7 +2922,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 },
             };
         }
-        if redischarge {
+        if redischarge
+            || key.inference_context.as_ref().is_some_and(|context| {
+                context.verdict_use == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+            })
+        {
             txn.note_session_delta_range(idx, idx + 1);
         }
         if wants_session {
@@ -4220,6 +4360,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Keep a relation root the request completed for itself
+    /// ([`super::completes_request_locally`]) in the request's completion
+    /// tier together with every member its component completed, under the
+    /// root's carrier, receipt and edit clocks — the members a published
+    /// root's batched publish would admit to the family memo, and none it
+    /// would not. The component is kept whole or not at all: a root that is
+    /// not kept (partial, unpriced, cancelled, or `carrier` absent because
+    /// it is not admissible), a member that is not a decided binary relation
+    /// or whose value is no longer live, or a refused reservation keeps
+    /// nothing. Either way each member's flight ends unpublished: a joiner
+    /// computes again, and a reader in this request finds the kept member.
+    pub(super) fn relation_keep_completed_component(
+        &self,
+        key: &SemanticQueryKey,
+        read: &crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
+        carrier: Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        computed_at: super::WorkspaceEdit,
+    ) {
+        let (members, flow_members, call_members) = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
+            (
+                {
+                    txn.relation.settled.clear();
+                    std::mem::take(&mut txn.relation.completed_members)
+                },
+                std::mem::take(&mut txn.flow.completed_members),
+                std::mem::take(&mut txn.call.completed_members),
+            )
+        };
+        let graph = self.graph();
+        let component = carrier
+            .filter(|_| !read.result_is_partial() && read.receipt.priced().is_some())
+            .and_then(|carrier| {
+                let member_read = |value: SemanticQueryValue| {
+                    graph
+                        .completed_member_read(value, read.receipt.clone())
+                        .ok()
+                };
+                let mut kept = vec![(key.clone(), read.clone())];
+                for member in members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if !matches!(
+                        member.payload.outcome,
+                        RelationOutcome::Assignable | RelationOutcome::NotAssignable
+                    ) {
+                        return None;
+                    }
+                    kept.push((
+                        member.key.to_query_key(),
+                        member_read(SemanticQueryValue::Relation(member.payload.clone()))?,
+                    ));
+                }
+                for member in flow_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if member.result.key() != &member.key {
+                        return None;
+                    }
+                    kept.push((
+                        SemanticQueryKey::FlowReturn(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::FlowReturn(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.value().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                for member in call_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    kept.push((
+                        SemanticQueryKey::ResolveCall(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::ResolveCall(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.get().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                Some((kept, carrier))
+            });
+        if let Some((kept, carrier)) = component {
+            self.completions
+                .keep_component(graph, kept, &carrier, computed_at);
+        }
+        for member in &members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &flow_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &call_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+    }
+
     fn relation_publication_roots(
         &self,
         root_key: &RelateMemoKey,
@@ -4372,6 +4613,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if key.relation != RelationKind::Assignable {
             return;
         }
+        // Candidate collection answers a different question even when this
+        // pair deposits nothing. Its whole context must survive on every
+        // child key, or an empty inference can poison the pure relation memo.
+        if let Some(context) = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .filter(|session| {
+                session.context_key().verdict_use
+                    == crate::semantic_query::InferenceVerdictUse::CandidatesOnly
+            })
+            .map(|session| session.context_key().clone())
+        {
+            key.inference_context = Some(context);
+            return;
+        }
         // Only upgrade when a binding could actually occur: the pattern
         // scan is cached per target node on the transaction.
         let Some(pattern) = self.relation_pattern_info(key.target) else {
@@ -4424,8 +4681,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The `infer` declarations `pattern` holds ([`InferInventory`]): one
     /// walk over the pattern, each node read once. A declaration's
     /// constraint is read where the conditional is written, so no
-    /// declaration of the pattern sits in it.
-    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> InferInventory {
+    /// declaration of the pattern sits in it. Cached per pattern node on the
+    /// transaction.
+    pub(super) fn infer_inventory(&self, pattern: SemanticNodeId) -> Arc<InferInventory> {
+        if let Some(cached) = self
+            .dispatch_txn
+            .borrow()
+            .relation
+            .inventory_cache
+            .get(&pattern)
+        {
+            return Arc::clone(cached);
+        }
+        let computed = Arc::new(self.infer_inventory_uncached(pattern));
+        self.dispatch_txn
+            .borrow_mut()
+            .relation
+            .inventory_cache
+            .insert(pattern, Arc::clone(&computed));
+        computed
+    }
+
+    fn infer_inventory_uncached(&self, pattern: SemanticNodeId) -> InferInventory {
         let graph = self.graph();
         let mut sites = Vec::new();
         let mut visited: FxHashSet<SemanticNodeId> = FxHashSet::default();
@@ -4434,6 +4711,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             if !visited.insert(node) {
                 continue;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            super::conditional_decision::note_operand_walk_visit();
             let Some(data) = graph.node_data(node) else {
                 continue;
             };
@@ -4532,6 +4811,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                 }
+                // A payload with no child holds no declaration below it.
+                other if !super::conditional_decision::has_children(other) => {}
                 _ if self.subtree_contains_infer(node) => return InferInventory::Unsupported,
                 _ => {}
             }
@@ -4571,11 +4852,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }],
             ));
         }
-        let InferInventory::Sites(nodes) = self.infer_inventory(target) else {
+        let inventory = self.infer_inventory(target);
+        let InferInventory::Sites(nodes) = inventory.as_ref() else {
             return None;
         };
         let sites: Vec<InferParamSite> = nodes
-            .into_iter()
+            .iter()
+            .copied()
             .filter_map(|node| match graph.node_data(node).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Some(InferParamSite {
                     node,
@@ -4652,7 +4935,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// opens a nested real frame; ordinary structural frames read their
     /// occurrence from the nearest open RELATE ancestor on the shared
     /// reentry stack.
-    fn relation_current_occurrence(&self) -> InferenceOccurrence {
+    pub(super) fn relation_current_occurrence(&self) -> InferenceOccurrence {
         let txn = self.dispatch_txn.borrow();
         if let Some((virtual_depth, occurrence)) = txn.relation.redischarge_occurrence {
             if txn.reentry().depth() <= virtual_depth {
@@ -5101,6 +5384,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.relate_member(source, target, bindings, position)
                 }
             };
+        if self.relation_session_reads_candidates_only() {
+            for &(source, target) in alternatives {
+                if !self.charge_relation_work(1) {
+                    return RelationResult::Unknown;
+                }
+                let _ = relate(source, target, bindings);
+            }
+            return assignable(bindings);
+        }
         let session = self.relation_session_active();
         // Inference visits every union constituent; a successful constructor
         // cannot hide a stronger candidate from a callable constituent.
@@ -5366,8 +5658,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         );
     }
 
-    /// The source signature a relation of `source` to the signature
-    /// `target` compares. A generic source relates as it is instantiated
+    /// The signature pair compared by the relation. A generic source relates as it is instantiated
     /// in the target's context (`compareSignaturesRelated`); a relation of
     /// comparability (which erases generics) keeps the source as it is.
     /// Under an inference session a generic source infers as its base
@@ -5379,40 +5670,47 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// one (`callWith(id, 3)` over `callWith<T>(f: <U>(x: U) => U, x: T)`).
     /// A session read for its candidates alone (`inferTypes` inside
     /// `instantiateSignatureInContextOf`) reads the base signature against
-    /// a generic target too, as `inferFromSignatures` does: instantiating
+    /// an erased generic target too, as `inferFromSignatures` does: instantiating
     /// the source in the target's context would open one more inference per
     /// generic method the pair's members hold — a thenable's `then` over
     /// another's, each callback's return naming the thenable again — one
     /// native level deeper each. `None` when the base signature cannot be
     /// read.
-    fn signature_relation_source(
+    fn signature_relation_pair(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         kind: crate::semantic_query::SignatureKind,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
         if self.current_relation_kind() == RelationKind::Comparable {
-            return Some(source);
+            return Some((source, target));
         }
         if !self.relation_session_active()
             || (self.signature_is_generic(target) && !self.relation_session_reads_candidates_only())
         {
-            return Some(
+            return Some((
                 self.instantiate_signature_in_context_of(source, target, kind)
                     .unwrap_or(source),
-            );
+                target,
+            ));
         }
-        if self.signature_is_generic(source) {
-            return self.base_signature(source);
-        }
-        Some(source)
+        // inferFromSignatures compares the source's base signature with
+        // the target's erased signature. Target-local parameters are not
+        // sites of the enclosing collector, even when a recursive method
+        // reads the same declaration through another owner instantiation.
+        let source = if self.signature_is_generic(source) {
+            self.base_signature(source)?
+        } else {
+            source
+        };
+        Some((source, self.erased_signature(target)))
     }
 
     /// Whether the active inference session reads its relations for their
     /// candidates alone ([`InferenceVerdictUse::CandidatesOnly`]).
     ///
     /// [`InferenceVerdictUse::CandidatesOnly`]: crate::semantic_query::InferenceVerdictUse::CandidatesOnly
-    fn relation_session_reads_candidates_only(&self) -> bool {
+    pub(super) fn relation_session_reads_candidates_only(&self) -> bool {
         self.dispatch_txn
             .borrow()
             .active_session()
@@ -7725,6 +8023,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
         };
+        // An effect-free program is already complete. Relate its ordinary
+        // empty surface so primitive and nullable rules use the same authority
+        // as an authored `{}` type, rather than requiring two object branches.
+        let regular_target = self.regularized_empty_object_program(target);
+        // A fresh empty literal has an inferable index signature even in the
+        // strict subtype relation. Keep its program for object comparisons:
+        // the correlated projection proves its empty domain, whereas an empty
+        // ordinary surface cannot distinguish it from a declared `{}` type.
+        let keep_literal_source = self.strict_subtype_mode()
+            && matches!(
+                self.graph().node_data(source).as_deref(),
+                Some(SemanticNodeData::ObjectSpreadProgram(program))
+                    if program.is_literal && program.effects.is_empty()
+            )
+            && matches!(
+                self.graph().node_data(regular_target).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            );
+        let regular_source = if keep_literal_source {
+            source
+        } else {
+            self.regularized_empty_object_program(source)
+        };
+        if regular_source != source || regular_target != target {
+            return Some(self.relate_member(
+                regular_source,
+                regular_target,
+                bindings,
+                InferPosition::Covariant,
+            ));
+        }
         // Top/bottom rules apply before projection: `any` / `unknown` accept
         // from either side, `never` is bottom, an error type swallows, and the
         // `object` nonprimitive accepts every program (a construction program
@@ -8987,14 +9316,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The checker's `recursiveTypeRelatedTo` entry, judged on the
         // operands the carriers stand for.
         let concrete_read = self.observe_read(|| {
-            [source, target].map(|operand| {
-                match self.unwrap_identity_carrier_for_relation(operand) {
-                    IdentityCarrierUnwrap::Concrete(id) => id,
-                    IdentityCarrierUnwrap::Unresolvable => operand,
-                }
-            })
+            [source, target].map(|operand| self.unwrap_identity_carrier_for_relation(operand))
         });
-        let concrete = *concrete_read.value();
+        let [source_unwrap, target_unwrap] = *concrete_read.value();
+        let concrete = [(source, source_unwrap), (target, target_unwrap)].map(
+            |(operand, unwrap)| match unwrap {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => operand,
+            },
+        );
         // Without `strictNullChecks` a union of one type and `null` /
         // `undefined` is that type to the checker: the pair relates as the
         // pair of its member, one recursion entry, not a union and then its
@@ -9070,14 +9400,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
-        // verbatim and resolves at the bound's own demand points).
-        let source = match self.unwrap_identity_carrier_for_relation(source) {
+        // verbatim and resolves at the bound's own demand points). The
+        // operands' unwraps are the ones read above, whose observations
+        // this judgement has already adopted.
+        let source = match source_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        let target = match self.unwrap_identity_carrier_for_relation(target) {
+        let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
@@ -9336,6 +9668,105 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         .then_some(PairStep::Assignable)
     }
 
+    fn infer_union_candidates(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        if !self.relation_session_reads_candidates_only() {
+            return None;
+        }
+        let reverse = self.relation_current_occurrence().variance == VariancePhase::Contravariant;
+        let (from, into) = if reverse {
+            (target, source)
+        } else {
+            (source, target)
+        };
+        let graph = self.graph();
+        let from_members = match graph.node_data(from).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                self.relation_union_members(&members.members_arc()).to_vec()
+            }
+            _ => vec![from],
+        };
+        let into_members = match graph.node_data(into).as_deref() {
+            Some(SemanticNodeData::Union(members)) => {
+                Some(self.relation_union_members(&members.members_arc()))
+            }
+            _ if from_members.len() == 1 => return None,
+            _ => None,
+        };
+        let relate = |from, into, bindings: &mut Vec<InferBinding>| {
+            let (source, target) = if reverse { (into, from) } else { (from, into) };
+            self.relate_member(source, target, bindings, InferPosition::Covariant)
+        };
+        match self.union_source_inferred_to_naked_parameter(&from_members, into) {
+            Some(NakedUnionInference::Relate {
+                closely,
+                inferred,
+                parameter,
+            }) => {
+                for (from, into) in closely {
+                    let _ = relate(from, into, bindings);
+                }
+                let _ = relate(inferred, parameter, bindings);
+            }
+            Some(NakedUnionInference::Matched {
+                closely,
+                source,
+                parameter,
+            }) => {
+                for (from, into) in closely {
+                    let _ = relate(from, into, bindings);
+                }
+                let _ = self.matched_union_inference(source, parameter, bindings);
+            }
+            None => {
+                for from in from_members {
+                    if let Some(into_members) = &into_members {
+                        for &into in into_members.iter() {
+                            let _ = relate(from, into, bindings);
+                        }
+                    } else {
+                        let _ = relate(from, into, bindings);
+                    }
+                }
+            }
+        }
+        Some(assignable(bindings))
+    }
+
+    /// A fixed union member matches only when the shared inference walk
+    /// actually reaches the naked variable at this priority. Declaration
+    /// shape alone says nothing about which members inference can reach.
+    pub(super) fn infers_into_fixed_member(
+        &self,
+        member: SemanticNodeId,
+        fixed: SemanticNodeId,
+        parameter: SemanticNodeId,
+    ) -> bool {
+        let Some(checkpoint) = self.relation_session_checkpoint() else {
+            return false;
+        };
+        let occurrence = self.relation_current_occurrence();
+        let priority = occurrence.priority;
+        let (source, target) = if occurrence.variance == VariancePhase::Contravariant {
+            (fixed, member)
+        } else {
+            (member, fixed)
+        };
+        let step =
+            self.execute_relate_with_occurrence(self.relate_key_for(source, target), occurrence);
+        let reached = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.inferred_since(&checkpoint, parameter, priority));
+        self.relation_session_rollback(&Some(checkpoint));
+        reached && !matches!(step, super::dispatch_txn::RelationStep::BudgetExceeded(_))
+    }
+
     /// The inference the members of `source` make against a union `target`
     /// holding exactly one type variable the collecting session infers (the
     /// checker's `inferToMultipleTypes` with one naked type variable, after
@@ -9353,7 +9784,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// generic interface or class, against a fixed member referencing one
     /// whose type arguments mention the variable, pairs with that member
     /// the same way: the checker infers into it, never into the variable
-    /// ([`Self::infers_into_fixed_reference`]). When every member matched, the
+    /// ([`Self::infers_into_fixed_member`]). When every member matched, the
     /// whole source is a lower-priority inference to the variable
     /// ([`NakedUnionInference::Matched`]). `None` when no inference session
     /// collects or the target is no such union — a type parameter the
@@ -9463,7 +9894,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for target_member in &fixed {
             let (paired, rest): (Vec<_>, Vec<_>) = unmatched.into_iter().partition(|member| {
                 member != target_member
-                    && self.infers_into_fixed_reference(*member, *target_member, *parameter)
+                    && self.infers_into_fixed_member(*member, *target_member, *parameter)
             });
             closely.extend(paired.into_iter().map(|member| (member, *target_member)));
             unmatched = rest;
@@ -9999,17 +10430,114 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         target: SemanticNodeId,
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
+        self.literal_members_in_union(&[source], target, bindings, IndexPreparation::InRelation)
+            .map(|verdict| verdict.unwrap_or_else(|undecided| undecided))
+    }
+
+    /// Whether this operation's membership index of `node` proves every arm
+    /// a literal, without reading the arms again. It only spares rereading
+    /// arms whose answer it already holds: a read it shortcuts gives the
+    /// same value and charges nothing either way.
+    pub(super) fn literal_union_index_proves_literal_only(&self, node: SemanticNodeId) -> bool {
+        self.literal_union_indexes
+            .borrow()
+            .get(&node)
+            .is_some_and(|index| index.values.is_some())
+    }
+
+    /// Each literal of a literal-only union source related to a union
+    /// target through the target's membership index, in member order
+    /// (`eachTypeRelatedToSomeType` over `containsType`): the first member
+    /// the target lacks decides the source unrelated, and no later member is
+    /// read. It answers exactly as relating each member through
+    /// [`Self::relate_literal_to_union`] does, and deposits the same roots
+    /// in the same first-inspection order, without a work item per member.
+    /// `None` for any other source, a target that is not literal-only, an
+    /// open inference session, and a preparation the connected demand
+    /// refuses: the members then relate one by one, and each reports the
+    /// refusal.
+    fn relate_literal_union_to_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        self.literal_members_in_union(members, target, bindings, IndexPreparation::InRelation)?
+            .ok()
+    }
+
+    /// The one membership test behind every literal-against-literal-union
+    /// path: each of `members`, in order, looked up in `target`'s index
+    /// until the first the target lacks. It deposits the index's roots and,
+    /// in first-inspection order, the roots of the first member, the target
+    /// and every later member it read. `None` when a member is not a
+    /// literal, the target is not a literal-only union, or an inference
+    /// session is open; `Some(Err(undecided))` when the connected demand
+    /// refused the index's preparation.
+    fn literal_members_in_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+        preparation: IndexPreparation,
+    ) -> Option<Result<RelationResult, RelationResult>> {
         use super::canonical_algebra::LiteralValueIdentity;
-        use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
 
         if self.relation_session_active() {
             return None;
         }
         let graph = self.graph();
-        let source_data = graph.node_data(source)?;
-        if !matches!(source_data.as_ref(), SemanticNodeData::Literal(_)) {
+        let literal = |member: &SemanticNodeId| {
+            matches!(
+                graph.node_data(*member).as_deref(),
+                Some(SemanticNodeData::Literal(_))
+            )
+        };
+        if !members.iter().all(literal) {
             return None;
         }
+        let (&first, rest) = members.split_first()?;
+        let index = match self.literal_union_index(target, preparation)? {
+            Ok(index) => index,
+            Err(undecided) => return Some(Err(undecided)),
+        };
+        let values = index.values.as_ref()?;
+        let missing = members.iter().position(|member| {
+            graph
+                .node_data(*member)
+                .is_none_or(|data| !values.contains(&LiteralValueIdentity::new(data)))
+        });
+        let inspected = missing.map_or(members.len(), |missing| missing + 1);
+        self.deposit_operand_self_roots(&index.roots);
+        self.deposit_operand_self_roots(
+            &self.observed_self_roots_from_nodes(
+                [first, target]
+                    .into_iter()
+                    .chain(rest.iter().copied().take(inspected - 1)),
+            ),
+        );
+        Some(Ok(match missing {
+            None => assignable(bindings),
+            Some(_) => RelationResult::NotAssignable,
+        }))
+    }
+
+    /// The operation's membership index of the union `target`, prepared on
+    /// first use; `Err` carries the undecided result of a preparation the
+    /// connected demand refused. `None` when `target` is not a union or
+    /// the preparation's receipt could not be finished. A preparation ahead
+    /// of any relation frame records no budget edge (the frame on top, if
+    /// any, never asked for it) and starts only when the demand can pay for
+    /// every arm, so the relation it falls back to is not charged twice.
+    fn literal_union_index(
+        &self,
+        target: SemanticNodeId,
+        preparation: IndexPreparation,
+    ) -> Option<Result<Arc<LiteralUnionIndex>, RelationResult>> {
+        use super::canonical_algebra::LiteralValueIdentity;
+        use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
+
+        let graph = self.graph();
         let target_data = graph.node_data(target)?;
         let SemanticNodeData::Union(members) = target_data.as_ref() else {
             return None;
@@ -10028,6 +10556,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // released the index. Rebuild without paying it twice, but
                 // preserve its full cold price for future independent demands.
                 let already_paid = self.connected_demand.is_paid(&identity);
+                if preparation == IndexPreparation::AheadOfRelation
+                    && !already_paid
+                    && self
+                        .connected_demand
+                        .work_available()
+                        .map_or(true, |available| available < members.len())
+                {
+                    return Some(Err(RelationResult::Unknown));
+                }
+                let refused = || {
+                    if preparation == IndexPreparation::InRelation {
+                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+                    }
+                    Some(Err(RelationResult::Unknown))
+                };
                 let recording =
                     (!already_paid).then(|| self.connected_demand.record_cost(identity.clone()));
                 let mut usage = LogicalUsage::default();
@@ -10036,8 +10579,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 for member in members.iter() {
                     #[cfg(any(test, feature = "test-support"))]
                     RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
-                    if !self.charge_relation_work(u64::from(!already_paid)) {
-                        return Some(RelationResult::Unknown);
+                    if self
+                        .connected_demand
+                        .charge_units(usize::from(!already_paid))
+                        .is_err()
+                    {
+                        return refused();
                     }
                     usage.work += 1;
                     let Some(data) = graph.node_data(*member) else {
@@ -10055,8 +10602,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .reserve_bytes(if already_paid { 0 } else { entry_bytes })
                         .is_err()
                     {
-                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
-                        return Some(RelationResult::Unknown);
+                        return refused();
                     }
                     usage.bytes += entry_bytes as u64;
                     values
@@ -10089,16 +10635,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 index
             }
         };
-        let values = index.values.as_ref()?;
-        self.deposit_operand_self_roots(&index.roots);
-        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
-        Some(
-            if values.contains(&LiteralValueIdentity::new(source_data)) {
-                assignable(bindings)
-            } else {
-                RelationResult::NotAssignable
-            },
-        )
+        Some(Ok(index))
     }
 
     /// An intersection source: a member that relates alone, else the one
@@ -11171,14 +11708,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // A homomorphic mapped type over a closed object is the
                 // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
                 // the checker resolves its members, so a relation compares
-                // them. Any other mapped type stays the operand it is.
+                // them. A mapped type over a closed key domain (a
+                // signature's mapped parameter once its type arguments
+                // are substituted) is the object its keys map to. One
+                // over an open source stays the operand it is.
                 SemanticNodeData::Mapped { source, mapper } => {
                     let (source, mapper) = (*source, mapper.clone());
                     drop(data);
-                    match self
-                        .identity_mapped_object_for_relation(source, &mapper)
-                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                    {
+                    match self.mapped_object_for_relation(source, &mapper, transit) {
                         Some(object) if object != current => {
                             current = object;
                             continue;
@@ -11255,6 +11792,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             current = unwrapped;
         }
         IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// The object a mapped type resolves to for a relation, when its source
+    /// and key domain are closed: an identity mapping over an object
+    /// ([`Self::identity_mapped_object_for_relation`]), a key domain holding
+    /// an index key ([`Self::index_key_mapped_object_for_relation`]), or an
+    /// enumerable key domain
+    /// ([`Self::enumerated_mapped_object_for_relation`]). `None` when the
+    /// mapped type stays the carrier it is. The ordinary relation and the
+    /// fresh excess-property check both read a mapped operand through it,
+    /// so the check runs on the object the relation decides against.
+    pub(super) fn mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        self.identity_mapped_object_for_relation(source, mapper)
+            .or_else(|| self.index_key_mapped_object_for_relation(mapper, transit))
+            .or_else(|| self.enumerated_mapped_object_for_relation(source, mapper, transit))
     }
 
     /// The object an identity mapped type over a closed object surface
@@ -11363,6 +11920,239 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     produced,
                     Some(mapper.key_space),
                 ))),
+        )
+    }
+
+    /// The object a mapped type over a closed, enumerable key domain
+    /// resolves to (the checker's `resolveMappedTypeMembers` for a
+    /// non-generic mapped type): `{ [K in keyof { a: 1 }]: [K] }` IS
+    /// `{ a: ["a"] }`. Each key reads the template with the binder bound
+    /// to it; a `Keep` modifier takes the member of the modifiers type
+    /// (the source of a homomorphic mapping) of that key. Productions of one
+    /// property spelling join and each value settles under the modifiers
+    /// through the mapped build's own rules
+    /// ([`Self::join_mapped_production`], [`Self::settle_mapped_member_value`]):
+    /// `{ [K in 1 | "1"]: K }` IS `{ 1: 1 | "1" }`, and `-?` drops the
+    /// `undefined` an optional source member adds.
+    ///
+    /// `None` (the operand stays the carrier it is, undecided) for a key
+    /// remap, a source, key domain or template that is still open, a
+    /// homomorphic source that is no plain object surface (a union
+    /// distributes, an array or tuple maps elementwise), a key domain with an
+    /// index key (see [`Self::index_key_mapped_object_for_relation`]) or a
+    /// unique-symbol key, and a template the binder substitution cannot read.
+    /// The object is interned for the relation only: no member is published,
+    /// so no member edge is recorded.
+    fn enumerated_mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        if mapper.name_remap.is_some()
+            || super::raise::mapped_type_is_open_or_unknown(self, source, mapper)
+        {
+            return None;
+        }
+        let graph = self.graph();
+        let homomorphic = matches!(
+            graph.node_data(mapper.key_space).as_deref(),
+            Some(SemanticNodeData::KeyOf { base }) if *base == source
+        );
+        let modifier_members = match (homomorphic, mapper.modifiers_type) {
+            (true, _) => Some(self.plain_object_members_for_relation(source)?),
+            (false, Some(modifiers)) => Some(self.plain_object_members_for_relation(modifiers)?),
+            (false, None) => None,
+        };
+        // `-?` reads whether the SOURCE member was optional; a homomorphic
+        // mapping's modifiers type is its source.
+        let source_members = if homomorphic {
+            None
+        } else if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
+            self.plain_object_members_for_relation(source)
+        } else {
+            None
+        };
+        fn index(
+            members: &[crate::semantic_query::SurfaceMember],
+        ) -> FxHashMap<crate::semantic_query::PropertyKey, &crate::semantic_query::SurfaceMember>
+        {
+            let mut index = FxHashMap::default();
+            for member in members {
+                if let Some(key) = member.key.cloned_known() {
+                    index.entry(key).or_insert(member);
+                }
+            }
+            index
+        }
+        let modifier_index = modifier_members.as_deref().map(index);
+        let own_source_index = source_members.as_deref().map(index);
+        let source_index = if homomorphic {
+            modifier_index.as_ref()
+        } else {
+            own_source_index.as_ref()
+        };
+        let value_reads_modifiers_member = modifier_index.is_some()
+            && mapper.modifiers_type.is_some_and(|modifiers| {
+                crate::semantic_query::MapperKind::classify_value_expr(
+                    graph,
+                    mapper.value_expr,
+                    modifiers,
+                    mapper.parameter_node,
+                ) == crate::semantic_query::MapperKind::Identity
+            });
+        let keys = match (&modifier_members, homomorphic) {
+            (Some(members), true) => super::enumerate::KeyDomainKey::from_keys(
+                members
+                    .iter()
+                    .filter(|member| {
+                        member.visibility == verter_type_expr::MemberVisibility::Public
+                    })
+                    .map(|member| member.key.cloned_known())
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            _ => self.key_literals_from_keyspace_node(mapper.key_space)?,
+        };
+        let mut produced = super::build::MappedProducedMembers::with_capacity(keys.len());
+        for key in keys {
+            key.literal.as_ref()?;
+            let binder = self.key_domain_binder(&key)?;
+            let substituted = self.substitute_semantic_type_param(
+                mapper.value_expr,
+                mapper.parameter_node,
+                binder,
+            );
+            let value = self
+                .evaluate_deferred_semantic_node_with_context(substituted, transit)
+                .into_active_query_build_node(self);
+            if matches!(
+                graph.node_data(value).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            ) {
+                return None;
+            }
+            let modifier = modifier_index
+                .as_ref()
+                .and_then(|index| index.get(&key.key).copied());
+            let optional = match mapper.optionality {
+                crate::semantic_query::OptionalityMod::Add => true,
+                crate::semantic_query::OptionalityMod::Remove => false,
+                crate::semantic_query::OptionalityMod::Keep => {
+                    modifier.is_some_and(|member| member.optional)
+                }
+            };
+            let kept_optional_read = modifier.filter(|_| value_reads_modifiers_member && optional);
+            // The modifiers settle the value the checker reads at this key,
+            // so each arm of a union value is read first: `O[K] | null`
+            // reads `O["a"]` as the optional member's `number | undefined`,
+            // the `undefined` that `-?` then removes.
+            let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove
+                || kept_optional_read.is_some()
+            {
+                self.read_union_arms_for_relation(value, transit)?
+            } else {
+                value
+            };
+            let value =
+                self.settle_mapped_member_value(mapper, value, source, kept_optional_read, || {
+                    source_index
+                        .and_then(|index| index.get(&key.key))
+                        .map(|member| member.optional)
+                });
+            if self.join_mapped_production(&mut produced, &key.key, value) {
+                continue;
+            }
+            produced.push(crate::semantic_query::SurfaceMember {
+                key: crate::semantic_query::AuthoredPropertyKey::from_known(key.key),
+                value,
+                optional,
+                readonly: match mapper.readonly {
+                    crate::semantic_query::ReadonlyMod::Add => true,
+                    crate::semantic_query::ReadonlyMod::Remove => false,
+                    crate::semantic_query::ReadonlyMod::Keep => {
+                        modifier.is_some_and(|member| member.readonly)
+                    }
+                },
+                method_kind: None,
+                has_implementation_body: false,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                declared_in_macro_type_arg: crate::semantic_query::MacroOwnBodyStamp::NEUTRAL,
+                merge_role: crate::semantic_query::MergeRoleStamp::NEUTRAL,
+                spans: verter_type_expr::MemberSpans::default(),
+                declaration_origin: None,
+            });
+        }
+        Some(
+            graph.intern_node(SemanticNodeData::Object(SurfaceView::from_members(
+                produced.into_members(),
+                Some(mapper.key_space),
+            ))),
+        )
+    }
+
+    /// `value` with each arm of it read at `Navigate` the way a relation
+    /// reads that arm (an indexed access over a settled object reads the
+    /// member's type), the arms re-united; `value` itself when no arm reads
+    /// further, and `None` when an arm reads as a miss.
+    fn read_union_arms_for_relation(
+        &self,
+        value: SemanticNodeId,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        let arms = self.union_arms(value);
+        let read: Vec<SemanticNodeId> = arms
+            .iter()
+            .map(|&arm| {
+                self.evaluate_deferred_semantic_node_with_context(
+                    arm,
+                    transit.with_mode(crate::semantic_query::ProjectionMode::Navigate),
+                )
+                .into_active_query_build_node(self)
+            })
+            .collect();
+        if read.iter().any(|&arm| {
+            matches!(
+                self.graph().node_data(arm).as_deref(),
+                Some(SemanticNodeData::Opaque(_))
+            )
+        }) {
+            return None;
+        }
+        if read == arms {
+            return Some(value);
+        }
+        Some(self.intern_normalized_union_or_intersection(&read, true))
+    }
+
+    /// The members of a plain object surface `node` names for a relation:
+    /// `None` for an open carrier, a non-object, and an object with call,
+    /// construct or index signatures.
+    fn plain_object_members_for_relation(
+        &self,
+        node: SemanticNodeId,
+    ) -> Option<Vec<crate::semantic_query::SurfaceMember>> {
+        let IdentityCarrierUnwrap::Concrete(object) =
+            self.unwrap_identity_carrier_for_relation(node)
+        else {
+            return None;
+        };
+        let data = self.graph().node_data(object)?;
+        let SemanticNodeData::Object(view) = &*data else {
+            return None;
+        };
+        if !view.call_signatures.is_empty()
+            || !view.construct_signatures.is_empty()
+            || !view.index_signatures.is_empty()
+        {
+            return None;
+        }
+        Some(
+            view.closed()
+                .complete_members()
+                .iter()
+                .map(crate::semantic_query::SurfaceMember::clone)
+                .collect(),
         )
     }
 
@@ -12186,7 +12976,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         result_of(target)?;
         // The method's source signature is the one any signature relation
         // compares (a generic source instantiated or read at its base).
-        let Some(source) = self.signature_relation_source(
+        let Some((source, target)) = self.signature_relation_pair(
             source,
             target,
             crate::semantic_query::SignatureKind::Call,
@@ -12652,6 +13442,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         method_target: bool,
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
+        let candidates_only = self.relation_session_reads_candidates_only();
         let Ok(plan) =
             self.signature_comparison_plan(source, target, kind, self.strict_subtype_mode())
         else {
@@ -12672,13 +13463,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 bindings,
                 InferPosition::ContravariantParam,
             );
-            if matches!(this_rel, RelationResult::NotAssignable) {
+            if !candidates_only && matches!(this_rel, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
         }
         // A source that demands more arguments than a rest-less target can
         // supply rejects unconditionally.
-        if plan.source_has_more_parameters {
+        if !candidates_only && plan.source_has_more_parameters {
             return RelationResult::NotAssignable;
         }
         let bivariant = {
@@ -12710,7 +13501,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 bindings,
                 InferPosition::ContravariantParam,
             );
-            let pair = if bivariant
+            let pair = if !candidates_only
+                && bivariant
                 && !matches!(contravariant, RelationResult::Assignable { .. })
                 && !self.parameters_relate_as_callbacks(s_param, t_param)
             {
@@ -12729,7 +13521,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 contravariant
             };
             acc = result_and(acc, pair);
-            if matches!(acc, RelationResult::NotAssignable) {
+            if !candidates_only && matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
         }
@@ -12741,7 +13533,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 InferPosition::ContravariantParam,
             );
             acc = result_and(acc, rest);
-            if matches!(acc, RelationResult::NotAssignable) {
+            if !candidates_only && matches!(acc, RelationResult::NotAssignable) {
                 return RelationResult::NotAssignable;
             }
         }
@@ -13150,6 +13942,7 @@ enum FramePop {
 
 /// Outcome of the identity-carrier unwrap performed before relation
 /// dispatch.
+#[derive(Clone, Copy)]
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
@@ -13963,6 +14756,12 @@ trait RelationDemandDriver {
         target: SemanticNodeId,
         bindings: &[InferBinding],
     ) -> Option<RelationResult>;
+    fn relate_literal_union_to_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult>;
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -14129,12 +14928,12 @@ trait RelationDemandDriver {
     fn relation_session_checkpoint(&self) -> Option<SessionCheckpoint>;
     fn relation_session_rollback(&self, checkpoint: &Option<SessionCheckpoint>);
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]>;
-    fn signature_relation_source(
+    fn signature_relation_pair(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         kind: crate::semantic_query::SignatureKind,
-    ) -> Option<SemanticNodeId>;
+    ) -> Option<(SemanticNodeId, SemanticNodeId)>;
     fn strict_subtype_mode(&self) -> bool;
     fn string_mapping_relation(
         &self,
@@ -14178,6 +14977,12 @@ trait RelationDemandDriver {
         occurrence: InferenceOccurrence,
     ) -> Option<RelationResult>;
     fn tuple_slots(&self, elements: &[crate::semantic_query::TupleElement]) -> Vec<TupleSlot>;
+    fn infer_union_candidates(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult>;
     fn union_source_inferred_to_naked_parameter(
         &self,
         source: &[SemanticNodeId],
@@ -14206,6 +15011,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
         bindings: &[InferBinding],
     ) -> Option<RelationResult> {
         ProjectSemanticDispatch::relate_literal_to_union(self, source, target, bindings)
+    }
+    fn relate_literal_union_to_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        ProjectSemanticDispatch::relate_literal_union_to_union(self, members, target, bindings)
     }
     fn apparent_source_step(
         &self,
@@ -14500,13 +15313,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
         ProjectSemanticDispatch::relation_union_members(self, members)
     }
-    fn signature_relation_source(
+    fn signature_relation_pair(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         kind: crate::semantic_query::SignatureKind,
-    ) -> Option<SemanticNodeId> {
-        ProjectSemanticDispatch::signature_relation_source(self, source, target, kind)
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        ProjectSemanticDispatch::signature_relation_pair(self, source, target, kind)
     }
     fn strict_subtype_mode(&self) -> bool {
         ProjectSemanticDispatch::strict_subtype_mode(self)
@@ -14575,6 +15388,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     fn tuple_slots(&self, elements: &[crate::semantic_query::TupleElement]) -> Vec<TupleSlot> {
         ProjectSemanticDispatch::tuple_slots(self, elements)
     }
+    fn infer_union_candidates(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        ProjectSemanticDispatch::infer_union_candidates(self, source, target, bindings)
+    }
+
     fn union_source_inferred_to_naked_parameter(
         &self,
         source: &[SemanticNodeId],
@@ -14633,6 +15455,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> Option<RelationResult> {
         self.driver
             .relate_literal_to_union(source, target, bindings)
+    }
+    fn relate_literal_union_to_union(
+        &self,
+        members: &[SemanticNodeId],
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        self.driver
+            .relate_literal_union_to_union(members, target, bindings)
     }
     fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
         &self.arena
@@ -14938,13 +15769,13 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn relation_union_members(&self, members: &Arc<[SemanticNodeId]>) -> Arc<[SemanticNodeId]> {
         self.driver.relation_union_members(members)
     }
-    fn signature_relation_source(
+    fn signature_relation_pair(
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
         kind: crate::semantic_query::SignatureKind,
-    ) -> Option<SemanticNodeId> {
-        self.driver.signature_relation_source(source, target, kind)
+    ) -> Option<(SemanticNodeId, SemanticNodeId)> {
+        self.driver.signature_relation_pair(source, target, kind)
     }
     fn strict_subtype_mode(&self) -> bool {
         self.driver.strict_subtype_mode()
@@ -15016,6 +15847,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn tuple_slots(&self, elements: &[crate::semantic_query::TupleElement]) -> Vec<TupleSlot> {
         self.driver.tuple_slots(elements)
     }
+    fn infer_union_candidates(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &mut Vec<InferBinding>,
+    ) -> Option<RelationResult> {
+        self.driver.infer_union_candidates(source, target, bindings)
+    }
+
     fn union_source_inferred_to_naked_parameter(
         &self,
         source: &[SemanticNodeId],
@@ -16392,6 +17232,14 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         }
 
         // ── Union/Intersection distribution ────────────────────────────
+        if matches!(&*source_data, SemanticNodeData::Union(_))
+            || matches!(&*target_data, SemanticNodeData::Union(_))
+        {
+            if let Some(result) = self.infer_union_candidates(source, target, bindings) {
+                results.push(result);
+                return;
+            }
+        }
         if let SemanticNodeData::Union(members) = &*source_data {
             let target_is_union = matches!(&*target_data, SemanticNodeData::Union(_));
             let members = members.members_arc();
@@ -16439,6 +17287,11 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             // an `isRelatedTo` of its own (`eachTypeRelatedToType`).
             if target_is_union {
                 if let Some(result) = self.relate_indexed_object_unions(&members, target, bindings)
+                {
+                    results.push(result);
+                    return;
+                }
+                if let Some(result) = self.relate_literal_union_to_union(&members, target, bindings)
                 {
                     results.push(result);
                     return;
@@ -16735,9 +17588,11 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             };
             drop(source_data);
             drop(target_data);
-            match self.signature_relation_source(source, target, kind) {
-                Some(compared) if compared != source => {
-                    work.push(RelateWork::Eval(compared, target));
+            match self.signature_relation_pair(source, target, kind) {
+                Some((compared_source, compared_target))
+                    if (compared_source, compared_target) != (source, target) =>
+                {
+                    work.push(RelateWork::Eval(compared_source, compared_target));
                     return;
                 }
                 Some(_) => {}
@@ -17038,4 +17893,111 @@ fn surface_is_weak(surface: &SurfaceView) -> bool {
         && surface.construct_signatures.is_empty()
         && surface.index_signatures.is_empty()
         && !surface.closed().has_index_signature()
+}
+
+/// Batched negative assignability proofs over plain closed object types: a
+/// source lacking a property the target requires is not assignable to it,
+/// whatever else the two declare (the checker's `getUnmatchedProperty`). A
+/// caller relating many sources to one target reads the target's
+/// [`ProjectSemanticDispatch::assignability_refuting_keys`] once and each
+/// source's [`ProjectSemanticDispatch::closed_object_own_string_keys`] once,
+/// and relates through the authority only the sources the keys leave
+/// undecided.
+impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The string keys of the properties `target` requires that no source
+    /// can supply but by declaring them itself: every required string-keyed
+    /// property of the object surface `target` stands for that the global
+    /// `Object` interface of `canonical`'s project does not declare (an
+    /// object type's apparent type carries `Object`'s members, so a source
+    /// lacking `toString` still has it). A plain closed object source
+    /// ([`Self::closed_object_own_string_keys`]) lacking any of them is not
+    /// assignable to `target`.
+    ///
+    /// `None` when `target` is no object surface or the `Object` interface
+    /// does not settle: no refutation is proved.
+    pub(super) fn assignability_refuting_keys(
+        &self,
+        target: SemanticNodeId,
+        canonical: &str,
+    ) -> Option<Vec<Arc<str>>> {
+        let target = match self.unwrap_identity_carrier_for_relation(target) {
+            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        let graph = self.graph();
+        let data = graph.node_data(target)?;
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            return None;
+        };
+        let apparent = match self.global_wrapper_surface("Object", &[], canonical) {
+            super::apparent_type::GlobalWrapper::Surface(node) => Some(graph.node_data(node)?),
+            super::apparent_type::GlobalWrapper::Absent => None,
+            super::apparent_type::GlobalWrapper::Unsettled => return None,
+        };
+        let apparent = match apparent.as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some(view),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(
+            surface
+                .positive_members()
+                .iter()
+                .filter(|member| !member.optional)
+                .filter_map(|member| match &member.key {
+                    crate::semantic_query::AuthoredPropertyKey::String(key) => Some(key),
+                    _ => None,
+                })
+                .filter(|key| {
+                    apparent.is_none_or(|view| {
+                        matches!(
+                            view.project_known_key(&crate::semantic_query::PropertyKey::String(
+                                (*key).clone()
+                            )),
+                            crate::semantic_query::SurfaceKeyProjection::AbsentProven
+                        )
+                    })
+                })
+                .map(|key| Arc::from(key.as_ref()))
+                .collect(),
+        )
+    }
+
+    /// Every property key of the object surface `source` stands for, when
+    /// that surface is a plain closed object: string-keyed members only, no
+    /// index signature (which supplies keys no member names) and no call or
+    /// construct signature (which gives it the apparent `Function`
+    /// members). Such a source has exactly these properties and the
+    /// apparent `Object` interface's, so a key absent here that
+    /// [`Self::assignability_refuting_keys`] names refutes its
+    /// assignability. `None` for any other source.
+    pub(super) fn closed_object_own_string_keys(
+        &self,
+        source: SemanticNodeId,
+    ) -> Option<Vec<Arc<str>>> {
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(concrete) => concrete,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
+        let data = self.graph().node_data(source)?;
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            return None;
+        };
+        if !surface.key_domain_is_closed()
+            || !surface.call_signatures().is_empty()
+            || !surface.construct_signatures().is_empty()
+        {
+            return None;
+        }
+        surface
+            .positive_members()
+            .iter()
+            .map(|member| match &member.key {
+                crate::semantic_query::AuthoredPropertyKey::String(key) => {
+                    Some(Arc::from(key.as_ref()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }

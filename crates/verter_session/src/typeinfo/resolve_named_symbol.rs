@@ -707,7 +707,6 @@ pub(crate) fn resolve_named_symbol_in_current_view(
         whole_hash: shallow.whole_hash,
         local_scope: None,
     };
-    let _ = &scope_node;
     let base = dispatch.type_slot_for(Arc::clone(&scope_arc), entry_owner, Arc::from(name));
 
     let instantiate_key =
@@ -735,7 +734,7 @@ pub(crate) fn resolve_named_symbol_in_current_view(
     let final_node = if matches!(effective_mode, ProjectionMode::Identity) {
         node
     } else {
-        match materialize_through_aliases(host, dispatch, node, effective_mode) {
+        match materialize_through_aliases(host, dispatch, node, effective_mode, &scope_node) {
             Ok(materialized) => materialized,
             // A hard dispatch fault during nested materialization
             // propagates as `Err` rather than silently degrading to
@@ -799,11 +798,37 @@ pub(crate) fn classify_dispatch_error(
 /// hang the resolver — the dispatch's own cycle detection catches
 /// genuine alias cycles and returns `Opaque(AliasCycle)` long
 /// before this loop runs out of steps.
+///
+/// A published `Expanded` answer a root access read is projected as a
+/// body written in place is, in `scope`'s file, so the closed operators
+/// inside the member it read reduce there too.
 pub(crate) fn materialize_through_aliases(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     start: SemanticNodeId,
     mode: ProjectionMode,
+    scope: &verter_type_engine::semantic_query::NodeScopeId,
+) -> Result<SemanticNodeId, TypeResolutionRequestError> {
+    let mut read_access = false;
+    let node = materialize_alias_chain(host, dispatch, start, mode, &mut read_access)?;
+    // Projected after the chain's reader scope closes, so the request's
+    // own builder owns what the projection constructs.
+    Ok(if read_access && mode == ProjectionMode::Expanded {
+        dispatch.published_answer_read(node, scope)
+    } else {
+        node
+    })
+}
+
+/// The alias / placeholder / operator chain [`materialize_through_aliases`]
+/// walks. `read_access` records whether the answer is a member a root
+/// access read.
+fn materialize_alias_chain(
+    host: &VerterHost,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    start: SemanticNodeId,
+    mode: ProjectionMode,
+    read_access: &mut bool,
 ) -> Result<SemanticNodeId, TypeResolutionRequestError> {
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
@@ -889,6 +914,7 @@ pub(crate) fn materialize_through_aliases(
                 match classify_operator_reduction_step(store, step_result, current)? {
                     MaterializationStep::Continue(next) => {
                         current = next;
+                        *read_access = true;
                         continue;
                     }
                     MaterializationStep::Stop(node) => return Ok(node),
@@ -1059,6 +1085,15 @@ pub(crate) fn materialize_through_aliases(
                     }
                     MaterializationStep::Stop(node) => return Ok(node),
                 }
+            }
+            // A declaration the access named stays the reference it is.
+            Some(
+                SemanticNodeData::DeclRef { .. }
+                | SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Opaque(_),
+            ) => {
+                *read_access = false;
+                return Ok(current);
             }
             // An intersection written at the alias root is the type the
             // checker constructs from it (`getTypeFromIntersectionTypeNode`):

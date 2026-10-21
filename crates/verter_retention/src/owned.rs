@@ -310,7 +310,7 @@ impl<T: Measured> Node for Cell<T> {
 /// reached.
 /// The children's registration is allocated with the first charge and
 /// lives as long as the cell, so it is part of that charge.
-fn measure(node: &dyn Node, block_shared: bool) -> (usize, Vec<Arc<dyn Node>>) {
+fn measure(node: &dyn Node, block_shared: bool) -> (usize, crate::allocation::Children) {
     let mut aliases = AliasSet::for_cell();
     let heap = node.value_heap_bytes(&mut aliases);
     let block = if block_shared { 0 } else { node.block_bytes() };
@@ -448,7 +448,7 @@ const MERGE_SCAN_LIMIT: usize = 64;
 /// holds, so each is charged by its own cell.
 #[must_use = "an owned allocation an owner reaches must be pinned or held"]
 #[derive(Default)]
-pub struct OwnedHandles(Vec<Arc<dyn Node>>);
+pub struct OwnedHandles(crate::allocation::Children);
 
 impl OwnedHandles {
     /// These handles and `other`'s, each allocation once.
@@ -482,7 +482,7 @@ impl OwnedHandles {
         Self(merged)
     }
 
-    pub(crate) fn from_children(children: Vec<Arc<dyn Node>>) -> Self {
+    pub(crate) fn from_children(children: crate::allocation::Children) -> Self {
         Self(children)
     }
 

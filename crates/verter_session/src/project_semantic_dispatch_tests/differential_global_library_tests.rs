@@ -609,29 +609,12 @@ fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
 /// its callback parameters are unions with `undefined` and `null` whose
 /// returns name the interface again under the method's own defaulted type
 /// parameters.
-const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\ninterface PP2<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PP2<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PP2<TResult2>) | undefined | null): PP2<TResult1 | TResult2>; }\n";
+pub(super) const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\ninterface PP2<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PP2<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PP2<TResult2>) | undefined | null): PP2<TResult1 | TResult2>; }\n";
 
-/// Relating the library `Promise<1>` to a thenable interface of its own
-/// shape infers each `then` in the other's context: `TResult1 |
-/// PL<TResult1>` against `TResult1 | PromiseLike<TResult1>` infers the
-/// variable from `PL<TResult1>` through `PromiseLike<TResult1>` and from
-/// `TResult1` alone, as the checker's `inferToMultipleTypes` does. The
-/// read finishes: no level instantiates the next with a candidate holding
-/// the previous level's reference (`TResult1 | PL<TResult1>` nesting once
-/// more per `then`, past the lane's deadline). The inference that
-/// instantiates one `then` in the other's context reads its candidates
-/// alone, so it infers from each nested `then` at its base signature, as
-/// the checker's `inferFromSignatures` does, never by instantiating it in
-/// turn: each such instantiation opens one more inference, one native
-/// level deeper per `then`, past the lane thread's stack before the
-/// checker's depth limit stops it. Two user-declared thenables of that
-/// shape relate as the checker relates them (`[PP2<1>] extends [PL<1>]` is
-/// `0`). The library read is held to termination only: the lane reads it
-/// `0`.
-///
-/// Mutation: inferring a reference to another declaration into the naked
-/// variable exhausts the deadline; instantiating a generic `then` in the
-/// other's context inside that inference overflows the lane's stack.
+/// Cyclic authored and library thenables complete through shared inference.
+/// The library reference infers one layer; the two authored interfaces keep
+/// the checker's negative result. Both rows assert the answer, not merely
+/// termination. The named-alias controls also run on a 1 MiB stack.
 #[test]
 fn a_mirrored_thenable_relation_terminates() {
     let rows = [
@@ -646,12 +629,32 @@ fn a_mirrored_thenable_relation_terminates() {
         .settings(&[STRICT]);
     let verdicts = matrix.verdicts(&rows);
     let library = &verdicts[0][0];
-    assert!(
-        !matches!(library.class, "HANG" | "PANIC"),
-        "{}: {}",
-        library.class,
-        library.lane
-    );
+    assert!(library.matched, "{}: {}", library.class, library.lane);
     let user = &verdicts[1][0];
     assert!(user.matched, "{}: {}", user.class, user.lane);
+}
+
+#[test]
+fn unrelated_generic_references_remain_naked_union_candidates() {
+    let matrix = Matrix::new(
+        "interface Box<T> { x: number }\n\
+         interface Th<T> { then(cb: (v: T) => void): void }\n\
+         declare const v: string | Box<1>;\n\
+         declare function h<T>(x: T | Th<T>): T;\n\
+         declare function f<T>(x: T | PromiseLike<T>): T;\n\
+         export function authored() { return h(v); }\n\
+         export function library() { return f(v); }\n",
+    )
+    .lib(GLOBALS_LIB)
+    .settings(&[STRICT]);
+    let failures = matrix.types(&[(
+        "(string | Box<1>) extends Th<infer T> | infer T ? T : 0",
+        "string | Box<1>",
+    )]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let failures = matrix.returns(&[
+        ("authored", "string | Box<1>"),
+        ("library", "string | Box<1>"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

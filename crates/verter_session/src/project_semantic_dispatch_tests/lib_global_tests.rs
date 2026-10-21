@@ -643,3 +643,59 @@ fn a_named_alias_conditional_over_a_library_collection_decides() {
         assert_eq!(rendered, expected, "{alias}");
     }
 }
+
+#[test]
+fn named_promise_aliases_infer_one_layer() {
+    let host = library_host(super::differential_global_library_tests::GLOBALS_LIB);
+    let canonical = format!("{PROJECT_ROOT}/promises.ts");
+    upsert(
+        &host,
+        &canonical,
+        "type Nested = Promise<Promise<1>> extends PromiseLike<infer U> ? U : 0;\n\
+        type Single = Promise<1> extends PromiseLike<infer U> ? U : 0;\n\
+        type Wrapped = [Promise<1>] extends [PromiseLike<infer U>] ? U : 0;\nexport {};\n",
+    );
+    for (alias, expected) in [("Nested", "Promise<1>"), ("Single", "1"), ("Wrapped", "1")] {
+        let node = host
+            .resolve_named_symbol(&canonical, alias, None)
+            .expect("alias resolves");
+        let expr = host
+            .project_node_to_type_expr_for_test(node.id())
+            .expect("alias projects");
+        let rendered = verter_type_expr::render_type_expr_display(&expr)
+            .expect("alias renders")
+            .text;
+        assert_eq!(rendered, expected, "{alias}");
+    }
+}
+
+#[test]
+fn named_cyclic_thenables_fit_a_small_stack() {
+    std::thread::Builder::new()
+        .stack_size(1024 * 1024)
+        .spawn(|| {
+            let canonical = format!("{PROJECT_ROOT}/cyclic.ts");
+            let source = format!(
+                "{}\ntype Library = Promise<1> extends PL<infer U> ? U : 0;\n\
+            type Authored = [PP2<1>] extends [PL<1>] ? 1 : 0;\nexport {{}};\n",
+                super::differential_global_library_tests::MIRRORED_THENABLE
+            );
+            for (alias, expected) in [("Library", "1"), ("Authored", "0")] {
+                let host = library_host(super::differential_global_library_tests::GLOBALS_LIB);
+                upsert(&host, &canonical, &source);
+                let node = host
+                    .resolve_named_symbol(&canonical, alias, None)
+                    .expect("alias resolves");
+                let expr = host
+                    .project_node_to_type_expr_for_test(node.id())
+                    .expect("alias projects");
+                let rendered = verter_type_expr::render_type_expr_display(&expr)
+                    .expect("alias renders")
+                    .text;
+                assert_eq!(rendered, expected, "{alias}");
+            }
+        })
+        .expect("small stack thread starts")
+        .join()
+        .expect("small stack demand completes");
+}

@@ -1788,6 +1788,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
+        if object.empty_literal && object.properties.is_empty() {
+            return LowerStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                lowering.scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             match member {
                 ObjectMember::Property(prop) => {
@@ -2825,9 +2836,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 else {
                     return self.opaque(QueryError::Miss);
                 };
-                let Some(key) =
-                    self.typeof_reference_key(canonical_id, *owner, value_ref, reduction_context)
-                else {
+                let Some(key) = self.typeof_reference_key_in_scope(
+                    canonical_id,
+                    *owner,
+                    Some(name_resolution),
+                    scope_payload,
+                    value_ref,
+                    reduction_context,
+                ) else {
                     return self.opaque(QueryError::Miss);
                 };
                 let mut result = match self.execute_type_node(key) {

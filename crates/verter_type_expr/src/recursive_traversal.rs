@@ -94,6 +94,7 @@ fn drop_leaf_arc() -> Arc<TypeExpr> {
 fn drop_leaf_object() -> Arc<ObjectExpr> {
     static LEAF: LazyLock<Arc<ObjectExpr>> = LazyLock::new(|| {
         Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: Vec::new(),
         })
     });
@@ -526,6 +527,9 @@ fn hash_node<'a, H: Hasher>(node: &'a TypeExpr, state: &mut H, stack: &mut Vec<H
         // -- Object: len, each member --
         TypeExpr::Object(obj) => {
             obj.properties.len().hash(state);
+            if obj.empty_literal {
+                stack.push(HashStep::Bool(true));
+            }
             for member in obj.properties.iter().rev() {
                 stack.push(HashStep::Member(member));
             }

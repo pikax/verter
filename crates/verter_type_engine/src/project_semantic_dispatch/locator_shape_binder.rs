@@ -110,6 +110,41 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ),
         };
 
+        // Owner arguments may contain this method's very declaration slots.
+        // Freshen before lowering the clause so its base/erased signature
+        // cannot erase a surrounding variable passed back through the owner.
+        let mut visible = rustc_hash::FxHashSet::default();
+        let mut surrounding = Vec::new();
+        for frame in base.binders.innermost_first() {
+            for (name, slot) in &frame.names {
+                if visible.insert(Arc::clone(name)) {
+                    if let BinderSlot::Usable(node) = slot {
+                        surrounding.push(*node);
+                    }
+                }
+            }
+        }
+        let surrounding = self.type_params_within(&surrounding);
+        let mut identities: Vec<_> = specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| mint_identity(&spec.name, index))
+            .collect();
+        let captures = !matches!(identity, BinderIdentityMode::DeclHeader { .. })
+            && identities.iter().any(|(origin, index)| {
+                surrounding.iter().any(|node| {
+                    matches!(graph.node_data(*node).as_deref(),
+                    Some(SemanticNodeData::TypeParam { decl, param_index, .. })
+                        if decl == origin && param_index == index)
+                })
+            });
+        if captures {
+            for (decl, index) in &mut identities {
+                *decl = self.capture_avoiding_parameter_decl(decl, *index, &surrounding);
+            }
+        }
+        let mint_identity = |_: &Arc<str>, index: usize| identities[index].clone();
+
         // Phase 1: predeclare every sibling as a bound-free binder node. In
         // the embedded-bound modes these are the SHELLS the per-position
         // frames expose for self / forward constraint references; in the
@@ -369,9 +404,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // import shadowing. Absence (no prepared declaration for the
         // anchor) degrades to the payload-aware in-scope resolver.
         let bundle = self.ctx.prepared_decl_bundle(canonical.as_ref());
-        let scope_payload = bundle
-            .as_ref()
-            .map(|bundle| DeclarationScopePayload::from_bundle(bundle, anchor.owner));
+        let scope_payload = bundle.as_ref().map(|bundle| match key.locator() {
+            AuthoredBodyLocator::DeclBody(_) => self.declaration_scope_payload(
+                bundle,
+                canonical.as_ref(),
+                anchor.owner,
+                anchor_symbol.as_ref(),
+            ),
+            _ => DeclarationScopePayload::from_bundle(bundle, anchor.owner),
+        });
         let prepared_anchor: Option<AnchorPreparedDecl> = match key.locator() {
             AuthoredBodyLocator::DeclBody(slot) => match slot.anchor.space {
                 verter_type_expr::locators::LocatorSymbolSpace::Type => bundle

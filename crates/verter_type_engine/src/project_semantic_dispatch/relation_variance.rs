@@ -165,6 +165,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if !self.relation_session_active() {
             return None;
         }
+        let candidates_only = self.relation_session_reads_candidates_only();
+        let reverse = candidates_only
+            && self.relation_current_occurrence().variance
+                == crate::semantic_query::VariancePhase::Contravariant;
+        let (source, target) = if reverse {
+            (target, source)
+        } else {
+            (source, target)
+        };
         let source_ref = self.generic_reference(source);
         let target_ref = self.generic_reference(target);
         let (declaration, source_args) = source_ref?;
@@ -278,31 +287,35 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let checkpoint = self.relation_session_checkpoint();
         let bindings_len = bindings.len();
         let mut acc = assignable(bindings);
+        let relate = |from, into, bindings: &mut Vec<InferBinding>, position| {
+            let (from, into) = if reverse { (into, from) } else { (from, into) };
+            self.relate_member(from, into, bindings, position)
+        };
         for ((&source, &target), variance) in
             source_args.iter().zip(target_args.iter()).zip(&variances)
         {
             let related = match variance.mask {
                 Variance::CONTRAVARIANT => {
-                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam)
+                    relate(target, source, bindings, InferPosition::ContravariantParam)
                 }
                 Variance::INDEPENDENT => {
                     // Inferred from all the same; no argument decides the
                     // relation.
-                    let _ = self.relate_member(source, target, bindings, InferPosition::Covariant);
+                    let _ = relate(source, target, bindings, InferPosition::Covariant);
                     continue;
                 }
                 Variance::INVARIANT => result_and(
-                    self.relate_member(source, target, bindings, InferPosition::Covariant),
-                    self.relate_member(target, source, bindings, InferPosition::ContravariantParam),
+                    relate(source, target, bindings, InferPosition::Covariant),
+                    relate(target, source, bindings, InferPosition::ContravariantParam),
                 ),
-                _ => self.relate_member(source, target, bindings, InferPosition::Covariant),
+                _ => relate(source, target, bindings, InferPosition::Covariant),
             };
             acc = result_and(acc, related);
-            if !matches!(acc, RelationResult::Assignable { .. }) {
+            if !candidates_only && !matches!(acc, RelationResult::Assignable { .. }) {
                 break;
             }
         }
-        if !matches!(acc, RelationResult::Assignable { .. }) {
+        if !candidates_only && !matches!(acc, RelationResult::Assignable { .. }) {
             self.relation_session_rollback(&checkpoint);
             bindings.truncate(bindings_len);
             return None;
@@ -933,46 +946,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 })
         };
         matches!((raw(left), raw(right)), (Some(a), Some(b)) if same_declaration(&a, &b))
-    }
-
-    /// Whether the checker infers from the union source member `member` into
-    /// the fixed target member `fixed` rather than into the target's naked
-    /// type variable `parameter` (`inferToMultipleTypes` marks a source
-    /// matched once inferring it into a fixed member reaches the variable, or
-    /// meets a circularity that leaves the variable uninferred): both are
-    /// references to generic interfaces or classes — a runtime nominal
-    /// through the global declaration it refers to — and `fixed`'s type
-    /// arguments mention `parameter`. `R1 | Thenable<R1>` against `T |
-    /// PromiseLike<T>` infers `T` from `Thenable<R1>` through
-    /// `PromiseLike<T>`'s members and from `R1` alone, never as `R1 |
-    /// Thenable<R1>`.
-    pub(super) fn infers_into_fixed_reference(
-        &self,
-        member: SemanticNodeId,
-        fixed: SemanticNodeId,
-        parameter: SemanticNodeId,
-    ) -> bool {
-        use verter_session_query::declarations::TypeDeclKind;
-        let declaration = |node| {
-            let (declaration, args) = self.raw_generic_reference(node)?;
-            let declaration = self
-                .runtime_nominal_declaration(node, &declaration)
-                .unwrap_or(declaration);
-            let prepared = self.ctx.prepared_type_decl_return_only(
-                declaration.canonical_id.as_ref(),
-                declaration.owner,
-                declaration.decl_name.as_ref(),
-            )?;
-            matches!(prepared.kind, TypeDeclKind::Interface | TypeDeclKind::Class)
-                .then_some((declaration, args))
-        };
-        let (Some((_, _)), Some((_, fixed_args))) = (declaration(member), declaration(fixed))
-        else {
-            return false;
-        };
-        fixed_args
-            .iter()
-            .any(|argument| self.mentions_node(*argument, parameter))
     }
 
     /// The global declaration a runtime-nominal application (`Promise<T>`,

@@ -18,6 +18,38 @@ use crate::semantic_query::{
 };
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// A target signature read for inference: its own parameters erase to
+    /// `any`, leaving the enclosing session's sites intact.
+    pub(super) fn erased_signature(&self, signature: SemanticNodeId) -> SemanticNodeId {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(signature) else {
+            return signature;
+        };
+        let SemanticNodeData::Signature {
+            type_parameters, ..
+        } = data.as_ref()
+        else {
+            return signature;
+        };
+        if type_parameters.is_empty() {
+            return signature;
+        }
+        let any = graph.intern_node(SemanticNodeData::Primitive(
+            crate::semantic_query::PrimitiveKind::Any,
+        ));
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(
+            graph,
+            type_parameters
+                .iter()
+                .map(|decl| (decl.param, any))
+                .collect(),
+        );
+        self.substitute_canonical(
+            self.signature_without_type_parameters(signature),
+            &substitution,
+        )
+    }
+
     /// `source` instantiated in the context of `target` when `source` is a
     /// generic signature `target` does not share its type parameters with:
     /// each type parameter fixes, as a call's does, from the candidates the

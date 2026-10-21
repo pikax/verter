@@ -729,6 +729,61 @@ fn evaluate_caches_when_cacheable_true() {
 }
 
 #[test]
+fn evaluate_never_caches_an_answer_whose_access_read_stopped() {
+    let host = make_host_with_audit();
+    upsert_ts(
+        &host,
+        "/scope.ts",
+        "export type Y = { c: 1 };\nexport type X = { a: { b: Y['c'] } };\n",
+    );
+    let req = || EvaluateTypeExpressionRequest {
+        scope: "/scope.ts".to_string(),
+        expression: "X['a']".to_string(),
+        extra_imports: Vec::new(),
+        mode: ProjectionMode::Expanded,
+        cacheable: true,
+    };
+
+    let (_stopped, stopped_record) = {
+        let _partial = verter_type_engine::project_semantic_dispatch::evaluate::force_partial_closed_operator_evaluation_for_tests();
+        parts(host.evaluate_type_expression_with_audit(req()))
+    };
+    assert!(!stopped_record.from_cache);
+
+    let (complete, record) = parts(host.evaluate_type_expression_with_audit(req()));
+    assert!(
+        !record.from_cache,
+        "an answer whose read stopped must not serve a later request from the scratch cache"
+    );
+    let store = host.project_type_store().semantic_graph();
+    let data = store.node_data(complete.expect("the complete read resolves").id());
+    let Some(SemanticNodeData::Object(view)) = data.as_deref() else {
+        panic!("the access reads its member object, got {data:?}");
+    };
+    let member = view
+        .entries()
+        .iter()
+        .find_map(|entry| match entry {
+            verter_type_engine::semantic_query::SurfaceEntry::Member(member) => Some(member.value),
+            _ => None,
+        })
+        .expect("the member `b`");
+    assert!(
+        !matches!(
+            store.node_data(member).as_deref(),
+            Some(SemanticNodeData::IndexedAccess { .. })
+        ),
+        "the complete read reduces the nested access"
+    );
+
+    let (_, warm) = parts(host.evaluate_type_expression_with_audit(req()));
+    assert!(
+        warm.from_cache,
+        "the complete answer warms the scratch cache"
+    );
+}
+
+#[test]
 fn evaluate_skips_cache_when_cacheable_false() {
     let host = make_host_with_audit();
     upsert_ts(&host, "/scope.ts", "export type Anchor = number;\n");

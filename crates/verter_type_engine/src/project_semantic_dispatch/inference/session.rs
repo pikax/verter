@@ -406,6 +406,20 @@ impl InferenceSession {
         }
     }
 
+    /// Whether this attempt reached `param` at the caller's inference priority.
+    pub(crate) fn inferred_since(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        param: SemanticNodeId,
+        priority: InferenceCandidatePriority,
+    ) -> bool {
+        self.info_positions.get(&param).is_some_and(|&position| {
+            self.infos[position].candidates[checkpoint.candidate_lens[position]..]
+                .iter()
+                .any(|candidate| candidate.priority == priority)
+        })
+    }
+
     /// Truncate every parameter's candidate list back to `checkpoint`
     /// (discarding the deposits a failed alternative made). A checkpoint
     /// taken on THIS session always matches the info count; a mismatched

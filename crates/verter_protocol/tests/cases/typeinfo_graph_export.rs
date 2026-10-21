@@ -106,6 +106,7 @@ fn prop(name: &str, ty: TypeExpr) -> ObjectMember {
 
 fn object(members: Vec<ObjectMember>) -> TypeExpr {
     TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: members,
     }))
 }

@@ -1792,12 +1792,12 @@ fn inline_no_value_close_folds_the_no_surface_rails() {
     });
 }
 
-/// A mixed relation <-> flow component's batched member publish rides the
-/// UNION carrier: the published flow member's family entry self-roots on
-/// every component file — its own file AND the files of the relation
-/// members' nodes. Mutation recipe: publishing the member with the root's
-/// relation-only self-root set (the pre-union behavior) drops its own
-/// file from the carrier.
+/// A mixed relation <-> flow component's members ride the UNION carrier:
+/// the flow member's carrier covers every component file — its own file AND
+/// the files of the relation members' nodes. The decision reads its
+/// relation nested in its own evaluation, so the relation completes for the
+/// request with its whole component, which the request keeps on the root's
+/// carrier.
 ///
 /// The conditional relates object types holding the classes: a decision
 /// instantiates operands that name declarations before it relates them,
@@ -1842,28 +1842,34 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             .static_resolution(),
         aliases: Vec::new(),
     });
-    let (expr, _) = host
-        .evaluate_type_expression_with_audit(
-            crate::typeinfo::types::EvaluateTypeExpressionRequest {
-                scope: "/ws/root.ts".to_string(),
-                expression: "RootAssign".to_string(),
-                extra_imports: Vec::new(),
-                mode: verter_type_engine::semantic_query::ProjectionMode::Expanded,
-                cacheable: false,
-            },
-        )
-        .into_parts();
-    let node = expr.ok().flatten().expect("RootAssign resolves");
-    let projected = host
-        .project_node_to_type_expr_for_test(node.id())
-        .expect("RootAssign projects");
-    assert_eq!(
-        projected,
-        verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
-            "yes".to_string()
-        ))
-    );
     with_dispatch(&host, |dispatch| {
+        let root =
+            SemanticQueryKey::Instantiate(verter_type_engine::semantic_query::InstantiateKey::new(
+                dispatch.type_slot_for(
+                    "/ws/root.ts",
+                    verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                    "RootAssign",
+                ),
+                Arc::from(Vec::new().into_boxed_slice()),
+                dispatch.instantiate_context_for(
+                    "/ws/root.ts",
+                    verter_type_engine::semantic_query::ProjectionReductionContext::published(
+                        verter_type_engine::semantic_query::ProjectionMode::Expanded,
+                    ),
+                ),
+            ));
+        let verter_type_engine::semantic_query::QueryResult::Value(node) =
+            dispatch.execute_read(root).value().clone()
+        else {
+            panic!("RootAssign resolves");
+        };
+        assert_eq!(
+            host.project_node_to_type_expr_for_test(node)
+                .expect("RootAssign projects"),
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::String(
+                "yes".to_string()
+            ))
+        );
         let key = FlowReturnKey {
             function: dispatch.flow_function_slot_for(
                 verter_type_expr::OwnedStr::from("/ws/mixed_c.ts"),
@@ -1880,10 +1886,15 @@ fn mixed_component_member_entry_self_roots_cover_all_component_files() {
             input: verter_type_engine::semantic_query::FlowInputContext::empty(),
             result_contract: super::flow_solve::flow_return_result_contract_id(),
         };
+        let key = SemanticQueryKey::FlowReturn(Box::new(key));
+        assert_eq!(
+            dispatch.graph().slot_candidate_count_for_tests(&key),
+            0,
+            "a member of a component the request completed never enters the family memo"
+        );
         let roots = dispatch
-            .graph()
-            .entry_self_root_canonicals_for_tests(&SemanticQueryKey::FlowReturn(Box::new(key)))
-            .expect("the batched flow member's family entry is published");
+            .request_kept_canonicals_for_tests(&key)
+            .expect("the request keeps the component's flow member");
         // The member's own file AND every relation member's node file
         // (the relation root's own demanding file is not a relation input
         // and is not part of the component's roots).
@@ -8954,14 +8965,16 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
-        // edge. `Chain3 | string` under `instanceof Chain1` runs the
-        // guard over a THREE-level hierarchy, and the depth is invisible
-        // to the bound — the recursive walk lives in the heritage
-        // authority behind the single read and is memoized per dispatch,
-        // so the guard pays one read for `Chain3`, one for the tested
-        // class, and NONE for the declaration-less `string` arm, on each
-        // of the two edges the guard applies. Nothing is charged per
-        // ancestor, per member, per relation, or per re-ask.
+        // evaluation, and one for the tested class per edge. `Chain3 |
+        // string` under `instanceof Chain1` runs the guard over a
+        // THREE-level hierarchy, and the depth is invisible to the bound —
+        // the recursive walk lives in the heritage authority behind the
+        // single read and is memoized per dispatch, so the guard pays one
+        // read for `Chain3`, which the subject's arm index takes once for
+        // both edges, NONE for the declaration-less `string` arm, and one
+        // for the tested class on each of the two edges the guard applies.
+        // Nothing is charged per ancestor, per member, per relation, or per
+        // re-ask.
         let key = whole_return_key(dispatch, CANONICAL, "chain");
         INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
         let result = flow_result_value(dispatch, key.clone());
@@ -8973,7 +8986,7 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
         assert_eq!(
             cold_reads, COLD_CHAIN_HERITAGE_READS,
-            "the cold guard reads heritage once per arm per edge"
+            "the cold guard reads each arm's heritage once and the tested class's once per edge"
         );
         assert_eq!(
             dispatch
@@ -9021,16 +9034,17 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
 /// D10-AC4's cold bound, as case (6) of
 /// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
-/// measures it: one heritage read per ARM per cold EDGE.
+/// measures it: one heritage read per ARM per cold evaluation, and one for
+/// the tested class per EDGE.
 ///
-/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// The `Chain3` arm once + two edges × the tested class `Chain1` = 3; the
 /// `string` arm carries no declaration and asks nothing. The subject's
 /// three-level hierarchy does NOT appear in this number — that is the
 /// point of the bound, and of putting the recursive ancestry walk behind
 /// one memoized heritage-authority read. A guard that starts charging per
 /// ancestor, per member, per relation or per re-ask fails here rather
 /// than silently paying for it.
-const COLD_CHAIN_HERITAGE_READS: usize = 4;
+const COLD_CHAIN_HERITAGE_READS: usize = 3;
 
 /// A heritage hop this generation can neither ROOT nor READ — a
 /// cross-file base whose declaration the walk's `ReturnOnly` accessor
@@ -11798,6 +11812,37 @@ fn flow_expr_cold_warm(
         .project_node_to_type_expr_for_test(cold.return_type())
         .expect("return node must project to TypeExpr");
     (expr, cold.degradation())
+}
+
+#[test]
+fn const_context_empty_spread_keeps_complete_readonly_members() {
+    for (expression, count, literal) in [
+        ("{ ...{} } as const", 0, false),
+        ("{ ...{}, value: 1 } as const", 1, true),
+        ("{ value: 1, ...{} } as const", 1, true),
+        ("{ ...{ value: 1 } } as const", 1, false),
+    ] {
+        let (expr, degradation) =
+            flow_expr_cold_warm(&format!("function makeProps() {{ return {expression}; }}"));
+        assert_eq!(degradation, None, "{expression}: {expr:?}");
+        let verter_type_expr::TypeExpr::Object(object) = &expr else {
+            panic!("expected an object for {expression}: {expr:?}");
+        };
+        assert_eq!(object.properties.len(), count);
+        if count == 0 {
+            continue;
+        }
+        let verter_type_expr::ObjectMember::Property(property) = &object.properties[0] else {
+            panic!("expected a property for {expression}: {object:?}");
+        };
+        assert!(property.readonly);
+        let expected = if literal {
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        } else {
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        };
+        assert_eq!(property.ty, expected, "{expression}");
+    }
 }
 
 /// A switch case's dispatch-edge refinement rides the reaching-TYPE

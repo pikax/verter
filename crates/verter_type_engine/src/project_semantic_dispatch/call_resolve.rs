@@ -303,6 +303,22 @@ impl CallSuspension {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// The resolution the request kept for `key` — a member of a relation
+    /// component the request completed for itself — read where the family
+    /// memo's warm entry would be. Its receipt is not admitted yet.
+    pub(super) fn kept_call_result(
+        &self,
+        key: &ResolveCallKey,
+    ) -> Option<crate::semantic_query::CacheRead<crate::semantic_query::ResolvedCallResult>> {
+        self.kept_value_read(
+            &SemanticQueryKey::ResolveCall(Box::new(key.clone())),
+            |value| match value {
+                SemanticQueryValue::ResolveCall(result) => Some(result.as_ref().clone()),
+                _ => None,
+            },
+        )
+    }
+
     /// `value` with its polymorphic `this` bound to the call's `receiver`,
     /// when the call has one.
     fn receiver_bound_return(
@@ -352,7 +368,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return (ResolveCallStep::Complete(result.clone()), None);
             }
         }
-        if let Some(served) = self.graph().get_resolve_call_result(self.ctx, &key) {
+        if let Some(served) = self
+            .graph()
+            .get_resolve_call_result(self.ctx, &key)
+            .or_else(|| self.kept_call_result(&key))
+        {
             if self.admits_served(&served.receipt) {
                 self.fold_cache_read_rails(
                     served.result_is_partial(),
