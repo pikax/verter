@@ -252,7 +252,10 @@ fn cold_lower_locator_dispatches_zero_reduction_queries() {
     let ctx = RequestContext::new(1, Arc::from(OWNER_ID), false, None);
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let node = match dispatch.lower_locator(decl_body_locator(OWNER_ID, "Deferred")) {
         QueryResult::Value(id) => id,
         other => panic!("cold lower_locator must produce a value, got {other:?}"),

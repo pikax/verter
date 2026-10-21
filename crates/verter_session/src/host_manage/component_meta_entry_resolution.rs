@@ -966,6 +966,7 @@ impl VerterHost {
 }
 
 /// Select the exact currently authoritative artifact at the warm template reload boundary.
+///
 /// [`reload_component_meta_template_snapshot_in`] adopting the mode the installed request carries.
 pub(crate) fn reload_component_meta_template_snapshot(
     host: &crate::VerterHost,
@@ -977,6 +978,9 @@ pub(crate) fn reload_component_meta_template_snapshot(
     })
 }
 
+/// Compiled for the calling execution unit's capture mode `M`; a
+/// unit outside one calls the plain form, which adopts the installed
+/// request's mode.
 pub(crate) fn reload_component_meta_template_snapshot_in<M: verter_audit::observe::ObserveExec>(
     host: &crate::VerterHost,
     canonical_id: &str,

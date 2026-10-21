@@ -87,6 +87,7 @@ impl SemanticGraphStore {
             #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
             {
                 let _ = (result, kind, sources, meta, builder_fence);
+                let _ = std::marker::PhantomData::<M>;
             }
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
             {

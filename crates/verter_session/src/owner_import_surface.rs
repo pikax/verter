@@ -183,10 +183,9 @@ impl OwnerImportSurfaceDb {
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
-        self.lookup_owner_hash_candidate::<verter_audit::observe::Uncaptured>(
-            owner_canonical,
-            expected_owner_whole_hash,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.lookup_owner_hash_candidate::<M>(owner_canonical, expected_owner_whole_hash)
+        })
     }
 
     /// Look up the owner surface for `owner_canonical` and validate

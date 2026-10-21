@@ -186,8 +186,8 @@ pub(super) fn request(mode: ProjectionMode) -> SemanticOperandForceRequest {
     SemanticOperandForceRequest::new_for_tests(ProjectionReductionContext::published(mode))
 }
 
-pub(super) fn mint(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn mint<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     locator: AuthoredBodyLocator,
 ) -> SemanticOperand {
     dispatch
@@ -195,16 +195,16 @@ pub(super) fn mint(
         .expect("fixture operand must mint")
 }
 
-pub(super) fn force(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+pub(super) fn force<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     operand: &SemanticOperand,
     mode: ProjectionMode,
 ) -> SemanticNodeId {
     force_result(dispatch, operand, mode).node()
 }
 
-fn force_result(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn force_result<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     operand: &SemanticOperand,
     mode: ProjectionMode,
 ) -> ForcedSemanticOperand {
@@ -1343,7 +1343,10 @@ fn cancellation_before_entry_performs_zero_semantic_work() {
 fn force_boundary_and_nested_dispatches_are_budget_charged() {
     let host = make_host();
     upsert(&host, SOURCE_V1);
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let operand = mint(&dispatch, whole("Owned"));
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
         8,

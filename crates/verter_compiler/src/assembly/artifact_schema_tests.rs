@@ -445,6 +445,8 @@ fn schema_construction_preserves_unavailable_and_opaque_content_without_compile_
     let allocator = oxc_allocator::Allocator::default();
     let mut transform = crate::code_transform::CodeTransform::new("x", &allocator);
     transform.overwrite(0, 1, "y");
+    // The transform publishes its operation tally once, when it drops.
+    drop(transform);
     assert!(observer.0.load(Ordering::SeqCst) > 0);
 }
 

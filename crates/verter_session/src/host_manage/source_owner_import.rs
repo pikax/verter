@@ -35,6 +35,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
     #[must_use]
     /// [`Self::get_with_view_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn get_with_view<V>(
         &self,
         host: &crate::VerterHost,
@@ -50,6 +51,9 @@ impl<'a> OwnerImportRequestDriver<'a> {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_with_view_in<V, M: verter_audit::observe::ObserveExec>(
         &self,
         host: &crate::VerterHost,

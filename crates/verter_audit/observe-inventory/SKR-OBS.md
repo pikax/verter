@@ -204,10 +204,28 @@ default builds, or work this sweep could not finish, with the reason.
 2. The compile result's wall-clock durations are public result fields read
    only by the `ffi-bench` measurement; removing the clock reads changes the
    compile result and FFI shapes, which compiler attribution owns.
-3. In an instrumented binary an uncaptured request still reads the empty
-   observer slot at each `observe!` emission and the request-context slot at
-   each `observe_request!`; the selected mode suppresses every write, but the
-   emission sites are not specialised over the mode.
+3. Resolved: emission is specialised over the execution mode
+   (`ObserveExec`, `Captured` / `Uncaptured`; see the observation policy's
+   "Concrete execution modes"). Evidence is the generated code of an
+   instrumented release build,
+   `cargo rustc --profile release -p verter_session --lib --features semantic-observe -- --emit=asm -C symbol-mangling-version=v0`.
+   Of its functions monomorphised for uncaptured execution (named with
+   `Uncaptured`, or with a mode-carrying capability type at its uncaptured
+   default), none calls the observer slot (`current_observer`), the
+   accumulator (`current_accumulator`), the captured-context accessor, the
+   timing flag or the structured-event push; their captured twins do. For
+   example `NodeArena::try_intern_with_fingerprint::<Captured>` reads the
+   timing flag and the captured context, and `::<Uncaptured>` reads neither.
+   The only request-context read left in uncaptured code is the scheduler's
+   job-context carriage (`verter_execution::request_context::current_context`),
+   which binds the request's required budget and cancellation across a
+   resumption. Outside the specialised execution, two kinds of optional read
+   remain, each once per call and never per emission. A plain-form adapter
+   adopts the installed mode with one request-context read, and reads the
+   observer slot only when no request is installed. Request entries, cache
+   publication and eviction, and per-file production keep an untyped
+   emission that reads the accumulator or observer slot and builds no
+   payload when it is empty.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a
@@ -231,7 +249,8 @@ default builds, or work this sweep could not finish, with the reason.
    `compat_one_napi_call_audit`.
 7. Relation explanations lease their operands for the dispatcher's lifetime
    only for a captured request: a dispatcher selects its explanation buffer
-   once, at construction, from the installed request context's mode, so the
+   once, at construction, from the execution mode it is compiled for
+   (`C::Observe`), so the
    public-carrier drain proof
    (`a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it`)
    runs in both builds. The explanation state is relation-owned and recorded

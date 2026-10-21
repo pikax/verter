@@ -221,7 +221,7 @@ impl VerterHost {
     ///
     /// Builds a fresh `HostStoreView` at every call. Production
     /// resolver-tier code on the per-component-meta hot path MUST use
-    /// [`Self::prepared_decl_bundle_with_store_view`] instead so the view
+    /// [`Self::prepared_decl_bundle_with_store_view_in`] instead so the view
     /// is built ONCE at the request boundary and threaded down (per the
     /// per-request hoist). This entry point survives for
     /// integration tests + the test-only arm on `impl ResolverContext
@@ -241,22 +241,24 @@ impl VerterHost {
         // known-stale (`ReturnOnly`) read fails the warm validation closed
         // and the bundle materialises cold, never validating a warm entry
         // against a superseded snapshot.
-        let view = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
-            self,
-            &view,
-            Arc::clone(&overlay),
-        );
-        self.prepared_decl_bundle_with_context(
-            &ctx,
-            SourceRequestServices {
-                session_view: None,
-                completion_overlay: Some(&overlay),
-                base_view: None,
-            },
-            canonical_id,
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let view = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &view,
+                Arc::clone(&overlay),
+            );
+            self.prepared_decl_bundle_with_context(
+                &ctx,
+                SourceRequestServices {
+                    session_view: None,
+                    completion_overlay: Some(&overlay),
+                    base_view: None,
+                },
+                canonical_id,
+            )
+        })
     }
 
     /// Attribute a prepared-decl bundle warm-read rejection to one of
@@ -337,8 +339,10 @@ impl VerterHost {
     /// — the request-world reuse tier. `None` means "no request scope":
     /// the read still serves correctly, it just cannot reuse a value the
     /// shared cache is not allowed to hold.
+    ///
     /// [`Self::prepared_decl_bundle_with_store_view_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn prepared_decl_bundle_with_store_view(
         &self,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -352,6 +356,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn prepared_decl_bundle_with_store_view_in<M: verter_audit::observe::ObserveExec>(
         &self,
         view: &dyn verter_session_query::facts::store_view::StoreView,
@@ -1546,25 +1553,27 @@ impl VerterHost {
     > {
         // Cold-seed-routed (see [`Self::prepared_decl_bundle`]): a stale
         // read fails the warm probe closed and the bundle materialises cold.
-        let view = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx = crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(
-            self,
-            &view,
-            Arc::clone(&overlay),
-        );
-        self.prepared_type_decl_in_with_context(
-            &ctx,
-            SourceRequestServices {
-                session_view: None,
-                completion_overlay: Some(&overlay),
-                base_view: None,
-            },
-            canonical_id,
-            verter_type_expr::TopLevelOwnerId::ordinary_file(),
-            symbol_name,
-        )
-        .expect("prepared type declaration failed")
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let view = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(
+                self,
+                &view,
+                Arc::clone(&overlay),
+            );
+            self.prepared_type_decl_in_with_context(
+                &ctx,
+                SourceRequestServices {
+                    session_view: None,
+                    completion_overlay: Some(&overlay),
+                    base_view: None,
+                },
+                canonical_id,
+                verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                symbol_name,
+            )
+            .expect("prepared type declaration failed")
+        })
     }
 
     pub(crate) fn prepared_type_decl_in_with_store_view<M: verter_audit::observe::ObserveExec>(
@@ -2174,6 +2183,7 @@ impl VerterHost {
     /// On cache hit, returns the cached `IndexedReady` without any I/O.
     /// On miss, reads the file, parses, builds analysis/snapshot/eval, constructs
     /// `ShallowFileState`, and publishes to `FileArtifactStore`.
+    ///
     /// [`Self::ensure_indexed_ready_serve_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn ensure_indexed_ready_serve(
@@ -2185,6 +2195,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn ensure_indexed_ready_serve_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
@@ -2296,6 +2309,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     fn ensure_indexed_ready_serve_uninstrumented_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
@@ -3749,18 +3765,20 @@ impl VerterHost {
         // `_with_store_view` reads through the cold-seed-aware
         // `RequestStoreView`, so a stale read fails the warm validation
         // closed and the direct import re-resolves cold.
-        let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let ctx =
-            crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::from_cold_seed(self, &cold_seed, overlay);
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let cold_seed = self.resolver_store_view_read().into_cold_seed_view();
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let ctx =
+                crate::resolver_core::HostResolverContext::<'_, M>::from_cold_seed(self, &cold_seed, overlay);
 
-        self.resolve_owner_direct_import_with_store_view(
-            &ctx,
-            None,
-            &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
-            owner_canonical,
-            local_name,
-        )
+            self.resolve_owner_direct_import_with_store_view(
+                &ctx,
+                None,
+                &verter_type_engine::resolver_core::fact_validation_port::FactValidationView::new(&ctx),
+                owner_canonical,
+                local_name,
+            )
+        })
     }
 
     /// View-bound variant of [`Self::resolve_owner_direct_import`].

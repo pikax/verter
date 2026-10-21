@@ -982,5 +982,7 @@ fn construction_is_metadata_only_and_unknown_absent_cells_do_zero_work() {
     let allocator = oxc_allocator::Allocator::default();
     let mut transform = crate::code_transform::CodeTransform::new("x", &allocator);
     transform.overwrite(0, 1, "y");
+    // The transform publishes its operation tally once, when it drops.
+    drop(transform);
     assert!(observer.0.load(Ordering::SeqCst) > 0);
 }

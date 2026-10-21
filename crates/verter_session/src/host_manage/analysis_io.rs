@@ -129,6 +129,7 @@ impl VerterHost {
     ///
     /// [`HostResolverContext`]: crate::resolver_core::HostResolverContext
     /// [`SessionResolverContext`]: crate::resolver_core::SessionResolverContext
+    ///
     /// [`Self::build_template_class_semantic_facts_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn build_template_class_semantic_facts(
@@ -145,6 +146,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn build_template_class_semantic_facts_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,
@@ -982,6 +986,7 @@ impl VerterHost {
     }
 
     /// Get the current whole_hash for a file.
+    ///
     /// [`Self::get_whole_hash_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
@@ -990,6 +995,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn get_whole_hash_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,
@@ -1239,6 +1247,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn observe_content_pinned_indexed_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,
@@ -2005,6 +2016,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn resolve_dep_source_in<M: verter_audit::observe::ObserveExec>(
         &self,
         owner_canonical: &str,

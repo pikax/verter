@@ -150,13 +150,19 @@ impl VerterHost {
             .resolver_store_view_read()
             .into_cold_seed_view()
             .into_inner();
-        self.resolve_imported_type_root_with_facts_with_store_view(
-            self,
-            None,
-            &view,
-            dep_canonical,
-            imported_name,
-        )
+        // A fixture call starts outside any typed execution, so it adopts
+        // the installed request's capture mode like every plain entry.
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.with_base_resolver_context::<_, M>(|ctx| {
+                self.resolve_imported_type_root_with_facts_with_store_view(
+                    ctx,
+                    None,
+                    &view,
+                    dep_canonical,
+                    imported_name,
+                )
+            })
+        })
     }
 
     /// View-bound variant of [`Self::resolve_imported_type_root_with_facts`].

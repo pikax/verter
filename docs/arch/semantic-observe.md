@@ -166,18 +166,72 @@ only the optional capture differs. The context carries the selected mode
 (`RequestContext::observe_mode`), and every scheduler resumption and task
 dispatcher reinstalls that same context, so background work runs in the mode
 its submitting request selected. A captured context plants the audit observer
-and the footprint accumulator; an uncaptured one clears the observer slot,
-records nothing through `observe_request!` or the request's counters, starts
-no stopwatch and captures no relation explanation (a dispatcher selects its
-explanation buffer once, at construction, from the installed context). An LSP
-handler is an async window that may resume on any runtime worker, so neither
-mode installs a governing request context there: the requests the handler
-issues install their own exactly as they do uncaptured, and a captured LSP
-session plants only the observer slot. Specialization is bounded to these two
-modes, not every host/counter combination. Emission sites use the `observe!`
-and `observe_request!` macros and the zero-size observed types below; there
-are no per-operation enabled checks, no `NoOpObserver` virtual calls and no
-observer TLS polling in default builds.
+and the footprint accumulator; an uncaptured one clears the observer slot.
+An LSP handler is an async window that may resume on any runtime worker, so
+neither mode installs a governing request context there: the requests the
+handler issues install their own exactly as they do uncaptured, and a captured
+LSP session plants only the observer slot.
+
+### Concrete execution modes
+
+The selected mode becomes a type. `verter_audit::observe::ObserveExec` is a
+sealed trait with exactly two implementors, `Captured` and `Uncaptured`, and
+`verter_audit::specialise!(mode => M, { ... })` expands its body once per mode
+with `M` naming that mode's type (only the `Uncaptured` expansion in a default
+build). Code compiled for `M` emits through the typed forms
+`observe!(M => |obs| ...)`, `observe_request!(M => |ctx| ...)`,
+`component_meta_trace_structured!(M => ...)` and
+`component_meta_trace_custom!(M => ...)`, each a branch on the constant
+`M::CAPTURED`: the uncaptured expansion reads no observer, request-context,
+accumulator or timing slot and builds no payload. Specialization is bounded
+to these two modes, not every host/counter combination.
+
+The mode rides the structures an execution unit already carries:
+
+- The engine's capability family, `ResolverCapabilities::Observe`. A
+  `ProjectSemanticDispatch<C>` is compiled for `C::Observe`; its evaluators
+  (`ArenaOps`, `RelationCx`, `FlowCx`, `InferenceTxn`) carry the driver's mode.
+- The semantic graph store as a unit reaches it, `GraphIn<'_, M>`
+  (`ProjectSemanticDispatch::graph`). Interning (shard-lock timing), memo
+  reads and publishes (per-request cache counters and cache events),
+  dependency-signature interning and origin-edge recording are compiled for
+  the unit's mode. `record_origin_edge!` builds an edge's arguments only when
+  `GraphIn::records_origin_edges` is true: always in test and `test-support`
+  builds, otherwise only for captured execution.
+- The session's request contexts. `HostCapabilities<M>` is the host family
+  for mode `M`; `HostRequestLifecycle<'a, M>` and
+  `SessionRequestLifecycle<'a, M>` carry it (`RequestBoundLifecycle::Observe`),
+  so every request port the dispatcher calls is compiled for the unit's mode
+  and reaches the shared stores' typed lookups (`get_any_in`, `get_route_in`,
+  `ensure_indexed_ready_serve_in`, ...). Session code between a root entry and
+  a dispatcher is generic over `M`.
+
+A unit adopts the carried mode once, where it starts: an audited root entry
+from its own selection (`capture::entry_mode` when the body arrives as a
+closure), any other unit — a context or dispatcher built inside a request, a
+scheduler job, an upsert, an invalidation — from the installed request
+(`capture::installed_mode`, over
+`request_context::installed_observe_mode`). A shared store or host operation
+called from outside a unit keeps a plain entry (`get_any`, `get_route`, ...)
+that adopts the installed mode once and runs the typed `_in` form; units call
+the typed form directly. A surface that installs a context only to arm the
+projection budget, with no audit registration, selects its mode by the same
+rule: with no request installed, captured exactly when an observer is planted. Once-per-request and once-per-phase emission — a
+root entry's record, a compile phase's timing, a cold cache write, a
+workspace maintenance pass — may use the untyped forms, which read the slot
+once. A scheduler job carries its submitting request's context from
+submission, and its dispatch publishes only when that carried context
+reports `RequestContextLike::captured`; the worker never polls a slot to
+decide. A `CodeTransform` counts its operations in a plain per-transform
+tally and publishes the count once, when dropped.
+
+In a debug instrumented build a dispatcher bound to a request context asserts
+its compiled mode equals the mode the installed root entry selected, so a
+misrouted unit fails in the instrumentation lane rather than dropping a
+request's observations. The process-wide work-attribution table
+(`verter_audit::attribute!`, `count_resolver_context_call!`) and the hosts'
+provenance counters are selected by the instrumented build as a whole, not per
+request, and are outside this specialisation.
 
 A default build has no audit envelope at all. The observer slot, the
 per-request accumulator, the record store, the scheduler and VFS audit sinks
@@ -195,8 +249,10 @@ capability, independent of the profile and of whether a request asks for
 capture. `ObserveMode::{Uncaptured, Captured}` is the execution vocabulary;
 `ObserveMode::select(requested)` picks the mode for a root entry and is always
 `Uncaptured` in a default build; its production caller is
-`verter_session::capture::select_mode`. `verter_session::capture::availability()`
-re-exports the build's answer for the host layer.
+`verter_session::capture::select_mode`. `ObserveExec`, `Captured`,
+`Uncaptured` and `specialise!` turn the selection into a type (see "Concrete
+execution modes"). `verter_session::capture::availability()` re-exports the
+build's answer for the host layer.
 
 `observe::capture(|| payload)` returns `None` when the feature is off without
 calling the collector. With it on it calls the collector once and returns

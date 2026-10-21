@@ -702,7 +702,7 @@ impl VerterHost {
     pub(in crate::host_manage) fn finalize_analysis_snapshot(
         &self,
         canonical: &str,
-        mut snapshot: FileAnalysisSnapshot,
+        snapshot: FileAnalysisSnapshot,
         needs_template_analysis: bool,
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
@@ -712,6 +712,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(in crate::host_manage) fn finalize_analysis_snapshot_in<
         M: verter_audit::observe::ObserveExec,
     >(
@@ -777,6 +780,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     fn current_eval_state_uncached_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
@@ -1615,7 +1621,7 @@ impl VerterHost {
                                 match (ctx.output_path.is_empty(), macro_type_arg.as_ref()) {
                                     (true, _) | (_, None) => {
                                         component_meta_trace_custom!(
-                                    "macro_projection_failover",
+                                    M => "macro_projection_failover",
                                     format!(
                                         "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
                                         ctx.macro_index, ctx.kind,
@@ -1740,7 +1746,7 @@ impl VerterHost {
                                                         } => {
                                                             produced_node_id = Some(id);
                                                             component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                                M => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_raise_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1750,7 +1756,7 @@ impl VerterHost {
                                                         }
                                                         MacroPathOutputExpansion::ProjectionMiss => {
                                                             component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                                M => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_projection_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1760,7 +1766,7 @@ impl VerterHost {
                                                         }
                                                         MacroPathOutputExpansion::CarrierMiss => {
                                                             component_meta_trace_custom!(
-                                                                "macro_projection_failover",
+                                                                M => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                                     ctx.macro_index, ctx.kind,
@@ -1785,7 +1791,7 @@ impl VerterHost {
                                                     // cannot produce, so the trace
                                                     // ordering is unobservable.
                                                     component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                        M => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=slot_binding_unexpected_path",
                                                             ctx.macro_index, ctx.kind,
@@ -1845,7 +1851,7 @@ impl VerterHost {
                                                 } => {
                                                     produced_node_id = Some(id);
                                                     component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                        M => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=raise_failed",
                                                             ctx.macro_index, ctx.kind,
@@ -1855,7 +1861,7 @@ impl VerterHost {
                                                 }
                                                 MacroPathOutputExpansion::ProjectionMiss => {
                                                     component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                        M => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=projection_unknown",
                                                             ctx.macro_index, ctx.kind,
@@ -1865,7 +1871,7 @@ impl VerterHost {
                                                 }
                                                 MacroPathOutputExpansion::CarrierMiss => {
                                                     component_meta_trace_custom!(
-                                                        "macro_projection_failover",
+                                                        M => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                             ctx.macro_index, ctx.kind,

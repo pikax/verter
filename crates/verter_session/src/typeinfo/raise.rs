@@ -298,17 +298,19 @@ impl VerterHost {
         &self,
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::TypeExpr> {
-        let current_view = crate::typeinfo::current_store_view_for_query(self)?;
-        let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-        let host_ctx = crate::resolver_core::HostResolverContext::<
-            '_,
-            verter_audit::observe::Uncaptured,
-        >::from_current(self, &current_view, overlay);
-        let dispatch = ProjectSemanticDispatch::new(&host_ctx);
-        let cap = TypeinfoRaiseOutputCap::new(&dispatch);
-        Some(
-            cap.materialize_output_type_expr(node)?
-                .into_type_expr(cap.authority()),
-        )
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            let current_view = crate::typeinfo::current_store_view_for_query(self)?;
+            let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx = crate::resolver_core::HostResolverContext::<
+                '_,
+                M,
+            >::from_current(self, &current_view, overlay);
+            let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+            let cap = TypeinfoRaiseOutputCap::new(&dispatch);
+            Some(
+                cap.materialize_output_type_expr(node)?
+                    .into_type_expr(cap.authority()),
+            )
+        })
     }
 }

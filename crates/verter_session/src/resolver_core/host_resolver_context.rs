@@ -28,6 +28,20 @@ pub struct HostRequestLifecycle<'a, M: ObserveExec = Uncaptured> {
 /// lifecycle-specific construction and observation hooks.
 pub type HostResolverContext<'a, M = Uncaptured> = RequestBoundAdapter<HostRequestLifecycle<'a, M>>;
 
+// The tests that read optional capture compile only with it.
+#[cfg(all(test, feature = "semantic-observe"))]
+impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a, verter_audit::observe::Captured>> {
+    /// A fixture context over `base` compiled for captured execution: the
+    /// execution that records into the installed request's counters and
+    /// accumulator.
+    pub(crate) fn captured_for_tests(
+        inner: &'a crate::VerterHost,
+        base: &'a HostStoreView,
+    ) -> Self {
+        Self::new(inner, base, Arc::new(CanonicalCompletionOverlay::new()))
+    }
+}
+
 impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
     #[must_use]
     #[cfg(any(test, feature = "test-support", feature = "oracle-gen"))]

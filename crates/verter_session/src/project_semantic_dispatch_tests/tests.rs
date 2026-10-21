@@ -22984,7 +22984,10 @@ fn dispatch_mask_records_execute_read_only_nested_normalize_intersection() {
     let ctx = RequestContext::new(1, Arc::from("/c.vue"), false, None);
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
 
-    let dispatch = ProjectSemanticDispatch::new(&host);
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
     let owner = synthetic_macro_owner(&host, "/c.vue");
     let result = dispatch.execute_type_node(SemanticQueryKey::ResolveMacroPayload {
         owner,

@@ -400,7 +400,11 @@ fn post_trip_typeof_early_exit_attributes_to_typeof_cold_counter() {
     );
     let _ctx_guard = RequestContextGuard::install(ctx);
     let _completeness_scope = ColdComputeCompletenessScope::enter();
-    let dispatch = host.semantic_dispatch();
+    // Captured execution: only it records into the request counters read below.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch =
+        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&captured);
 
     // Trip the projection-op fuse: 1st KeyOf lands within budget,
     // 2nd trips it.

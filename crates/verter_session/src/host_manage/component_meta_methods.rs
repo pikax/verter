@@ -123,19 +123,19 @@ impl VerterHost {
         if verter_type_engine::request_context::current_request_context().is_some() {
             return None;
         }
-        // A surface without an audit registration publishes no record, so
-        // its context is uncaptured: it carries only the required budget,
-        // canonical and cancellation.
-        let _ = timing_capture;
+        // No context is installed, so the mode is the one the thread already
+        // selects: captured exactly when an observer is planted. Without an
+        // audit registration the context carries no accumulator either way.
+        let mode = crate::capture::installed_mode();
         Some(
             verter_type_engine::request_context::RequestContextGuard::install(
                 verter_type_engine::request_context::RequestContext::for_root_entry(
                     request_id,
                     std::sync::Arc::<str>::from(canonical_id),
                     || verter_audit::RequestKind::ComponentMeta,
-                    verter_audit::observe::ObserveMode::Uncaptured,
+                    mode,
                     false,
-                    false,
+                    timing_capture,
                     None,
                     self.config.projection_op_budget,
                     verter_execution::cancellation::CancellationToken::new(),
@@ -759,6 +759,7 @@ impl VerterHost {
     /// [`SessionResolverContext`](crate::resolver_core::SessionResolverContext)
     /// observe the overlay candidate via
     /// [`FileArtifactStore`](crate::file_artifact_store::FileArtifactStore).
+    ///
     /// [`Self::capture_component_meta_inputs_with_view_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn capture_component_meta_inputs_with_view(
@@ -771,6 +772,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn capture_component_meta_inputs_with_view_in<
         M: verter_audit::observe::ObserveExec,
     >(
@@ -2495,6 +2499,7 @@ impl VerterHost {
     /// files, reads from `FileArtifactStore` (materializing on miss). Both paths enrich
     /// the snapshot with resolved imports, destructured bindings, and template
     /// analysis.
+    ///
     /// [`Self::get_raw_analysis_snapshot_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn get_raw_analysis_snapshot(
@@ -2506,6 +2511,9 @@ impl VerterHost {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub(crate) fn get_raw_analysis_snapshot_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical: &str,

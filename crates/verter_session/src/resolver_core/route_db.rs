@@ -316,6 +316,7 @@ impl RouteDb {
     // -----------------------------------------------------------------------
 
     /// Look up a cached route for `key` if valid in the view.
+    ///
     /// [`Self::get_route_in`] for a caller outside a captured or uncaptured
     /// execution unit: adopts the mode the installed request carries.
     pub fn get_route<V: StoreView>(
@@ -328,6 +329,9 @@ impl RouteDb {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_route_in<V: StoreView, M: verter_audit::observe::ObserveExec>(
         &self,
         key: &RouteNameKey,

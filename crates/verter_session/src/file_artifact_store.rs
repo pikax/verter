@@ -1677,6 +1677,9 @@ impl FileArtifactStore {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
@@ -1787,6 +1790,9 @@ impl FileArtifactStore {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_overlay_scoped_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,
@@ -1879,6 +1885,9 @@ impl FileArtifactStore {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_any_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,

@@ -5217,11 +5217,12 @@ fn structural_carrier_producer_lowerer_is_module_private() {
     // is MODULE-scoped (a same-module second producer that NAMES these builders is
     // representable), so widening ANY of the three re-opens a producer surface.
     for builder in STRUCTURAL_CARRIER_PRODUCER_PRIVATE_BUILDERS {
-        let needle = format!("fn {builder}(");
+        let heads = structural_builder_definition_heads(builder);
+        let defines = |src: &str| heads.iter().any(|head| src.contains(head.as_str()));
         // (a) Anti-vacuity: the owner module must exist at this path and carry the
         // builder's definition — its absence means the owner re-home regressed.
         assert!(
-            body.contains(&needle),
+            defines(&body),
             "anti-vacuity: the producer builder `{builder}` (`fn {builder}(`) must live at \
              `{rel}` (`{STRUCTURAL_CARRIER_PRODUCER_LOWERER_MODULE}`) — its absence means the \
              structural-carrier-producer owner re-home regressed"
@@ -5230,7 +5231,7 @@ fn structural_carrier_producer_lowerer_is_module_private() {
         // definition, in `macro_arg_producer.rs`.
         let definitions: Vec<String> = production_files
             .iter()
-            .filter(|(_, src)| src.contains(&needle))
+            .filter(|(_, src)| defines(src))
             .map(|(rel, _)| rel.clone())
             .collect();
         assert_eq!(
@@ -5289,7 +5290,7 @@ fn macro_arg_producer_has_no_production_expansion_surface() {
     // Anti-vacuity: the producer module must exist and carry the lowerer — its
     // absence means the owner re-home regressed.
     assert!(
-        src.contains("fn lower_type_expr_structural("),
+        src.contains("fn lower_type_expr_structural<"),
         "anti-vacuity: the producer module `{rel}` must carry the structural lowerer"
     );
     let violations = macro_arg_producer_expansion_surface_violations(&src);

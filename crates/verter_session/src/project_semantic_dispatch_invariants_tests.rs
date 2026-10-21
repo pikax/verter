@@ -2141,7 +2141,7 @@ fn type_expr_lowering_has_exactly_two_single_definition_producers() {
     // second eager lowering implementation under another type is not caught
     // by that; the two assertions below are the oracle for this test.
     let legacy = count_def_in_crates("fn shallow_lower_type_expr(");
-    let structural = count_def_in_crates("fn lower_type_expr_structural(");
+    let structural = count_def_in_crates("fn lower_type_expr_structural<");
     assert_eq!(
         legacy, 0,
         "the bare-mode `fn shallow_lower_type_expr(` wrapper is retired; \

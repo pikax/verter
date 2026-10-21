@@ -1741,9 +1741,12 @@ fn relation_modeless_warm_hit_bumps_unified_hit_counter() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
+    // Captured execution: only it records into the per-request counters.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    > = &host;
+        crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+    > = &captured;
     let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7781, Arc::from("/w/modeless_counter.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
@@ -1806,9 +1809,12 @@ fn relation_modeless_probe_miss_leaves_single_miss_to_cold_build() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
+    // Captured execution: only it records into the per-request counters.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let ctx: &dyn verter_type_engine::resolver_core::ResolverContext<
-        crate::resolver_core::HostCapabilities,
-    > = &host;
+        crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+    > = &captured;
     let store = SemanticGraphStore::new();
     let rctx = RequestContext::new(7783, Arc::from("/w/modeless_miss.ts"), false, None);
     let _g = RequestContextGuard::install(Arc::clone(&rctx));
@@ -4476,6 +4482,9 @@ fn concurrent_stress_16_threads_retry_counters_consistent() {
 #[test]
 fn execute_cooperative_warm_hit_skips_admission_overhead() {
     let host = ctx_host();
+    // Captured execution: only it records into the per-request counters.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     use verter_type_engine::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS;
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
@@ -4490,7 +4499,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
 
     // Cold build to populate the warm slot. Records one Miss.
     let _ = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -4528,7 +4537,7 @@ fn execute_cooperative_warm_hit_skips_admission_overhead() {
     // Warm call — must skip the build closure (panic indicates a
     // miscount) and route through the fast path.
     let _ = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || -> (QueryResult<SemanticNodeId>, DepSignature) {
@@ -4819,6 +4828,9 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = ctx_host();
+    // Captured execution: only it records into the per-request counters.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let store = SemanticGraphStore::new();
     let key = SemanticQueryKey::ResolveDecl(ResolveDeclKey {
         scope: scope("/w/dep.ts"),
@@ -4836,7 +4848,7 @@ fn cold_abort_sweep_attributes_to_per_request_context() {
     let _force_guard = store.test_force_cold_abort_sweep();
 
     let result = store.execute_cooperative(
-        &host,
+        &captured,
         key.clone(),
         || store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
         || {
@@ -4917,11 +4929,14 @@ fn inflight_aborted_retry_attributes_to_per_request_context() {
     let joiner_ctx = Arc::clone(&ctx);
     let joiner = thread::spawn(move || {
         let host = ctx_host();
+        // Captured execution: only it records into the per-request counters.
+        let view = host.resolver_store_view_read().into_owned_view();
+        let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
         // Install the context on the JOINER thread — that's where
         // the retry-bump helper runs.
         let _ctx_guard = RequestContextGuard::install(Arc::clone(&joiner_ctx));
         joiner_store.execute_cooperative(
-            &host,
+            &captured,
             joiner_key,
             || joiner_store.intern_node(SemanticNodeData::Opaque(QueryError::Miss)),
             || {

@@ -876,6 +876,31 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
+/// [`with_dispatch`] compiled for captured execution, for the tests that
+/// read the request's flow counters: only captured execution records them.
+#[cfg(feature = "semantic-observe")]
+fn with_captured_dispatch<R>(
+    host: &Arc<VerterHost>,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+        >,
+    ) -> R,
+) -> R {
+    let store_view = host.resolver_store_view_read().into_owned_view();
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx =
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
+            host,
+            &store_view,
+            overlay,
+        );
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _builder = dispatch.enter_construction_scope();
+    f(&dispatch)
+}
+
 fn flow_result_for_file(
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     host: &VerterHost,
@@ -899,8 +924,8 @@ fn flow_result_for_file(
     flow_result(dispatch, host, key)
 }
 
-fn flow_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn flow_key<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     name: &str,
     part: FunctionPartIdentity,
     overload_ordinal: u32,
@@ -921,8 +946,8 @@ fn flow_key(
     }
 }
 
-fn execute_flow(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn execute_flow<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     key: FlowReturnKey,
 ) -> QueryResult<SemanticQueryOutput<SemanticQueryValue>> {
     dispatch.execute(SemanticQueryKey::FlowReturn(Box::new(key)))
@@ -2657,8 +2682,8 @@ fn flow_return_nested_value_self_name_shadowed_by_inner_declaration_reads_it() {
 // layer, the sole warm rail (SCC-9), and the recorded materialised point.
 // ────────────────────────────────────────────────────────────────────────
 
-fn flow_result_value(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn flow_result_value<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     key: FlowReturnKey,
 ) -> verter_type_engine::semantic_query::FlowReturnResult {
     let QueryResult::Value(SemanticQueryOutput {
@@ -4817,8 +4842,8 @@ fn make_scc_host() -> Arc<VerterHost> {
     host
 }
 
-fn scc_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+fn scc_key<M: verter_audit::observe::ObserveExec>(
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
     name: &str,
 ) -> FlowReturnKey {
     FlowReturnKey {
@@ -6925,7 +6950,7 @@ fn production_missing_obligation_returns_only_and_recomputes() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = make_host();
-    with_dispatch(&host, |dispatch| {
+    with_captured_dispatch(&host, |dispatch| {
         let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
         let _guard = RequestContextGuard::install(ctx);
         let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
@@ -6977,7 +7002,7 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
 
     // Root leg.
     let host = make_host();
-    with_dispatch(&host, |dispatch| {
+    with_captured_dispatch(&host, |dispatch| {
         let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
         let _guard = RequestContextGuard::install(ctx);
         let key = flow_key(
@@ -7038,7 +7063,7 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
 
     // SCC leg: a degraded component publishes NEITHER member.
     let scc_host = make_scc_host();
-    with_dispatch(&scc_host, |dispatch| {
+    with_captured_dispatch(&scc_host, |dispatch| {
         let root = scc_key(dispatch, "scDegradedA");
         let peer = scc_key(dispatch, "scDegradedB");
         let result = flow_result_value(dispatch, root.clone());

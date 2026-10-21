@@ -492,6 +492,9 @@ impl AnalysisReadyDb {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn get_in<M: verter_audit::observe::ObserveExec>(
         &self,
         key: &AnalysisArtifactKey,
@@ -534,6 +537,9 @@ impl AnalysisReadyDb {
         })
     }
 
+    /// Compiled for the calling execution unit's capture mode `M`; a
+    /// unit outside one calls the plain form, which adopts the installed
+    /// request's mode.
     pub fn find_satisfying_in<M: verter_audit::observe::ObserveExec>(
         &self,
         canonical_id: &str,

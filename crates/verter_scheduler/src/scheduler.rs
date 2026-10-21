@@ -14201,6 +14201,9 @@ mod tests {
             fn capture_enabled(&self) -> bool {
                 true
             }
+            fn captured(&self) -> bool {
+                true
+            }
             fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
                 let ctx_guard = verter_execution::request_context::OpaqueContextGuard::install(
                     OpaqueRequestContext(Arc::clone(&self) as Arc<dyn RequestContextLike>),

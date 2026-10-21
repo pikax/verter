@@ -605,15 +605,21 @@ fn a_wrapper_member_read_without_a_wrapper_is_an_admitted_miss() {
     assert_eq!(graph.slot_candidate_count_for_tests(&path_key(string)), 0);
 }
 
-/// Run `f` over a dispatch on a fresh store view of `host`.
+/// Run `f` over a dispatch on a fresh store view of `host`, compiled for
+/// captured execution so the flow counters some of these tests read record.
 fn with_fresh_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+    f: impl FnOnce(
+        &ProjectSemanticDispatch<
+            '_,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+        >,
+    ) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
-        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
             host,
             &store_view,
             overlay,
@@ -645,7 +651,7 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
     for name in ["readArrayLength", "readStringLength"] {
         let key = |dispatch: &ProjectSemanticDispatch<
             '_,
-            crate::resolver_core::HostCapabilities,
+            crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
         >| {
             verter_type_engine::semantic_query::FlowReturnKey {
             function: dispatch.flow_function_slot_for(
@@ -664,7 +670,10 @@ fn a_flow_reading_a_wrapper_member_is_admitted_and_reused_warm() {
         }
         };
         let with_dispatch = |f: &dyn Fn(
-            &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+            &ProjectSemanticDispatch<
+                '_,
+                crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>,
+            >,
         ) -> Option<String>| { with_fresh_dispatch(&host, f) };
         let request = verter_type_engine::request_context::RequestContext::new(
             1,

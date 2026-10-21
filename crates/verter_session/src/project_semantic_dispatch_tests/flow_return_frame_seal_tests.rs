@@ -98,14 +98,18 @@ fn make_seal_host() -> Arc<VerterHost> {
     host
 }
 
+/// These tests read the request's flow counters, which only captured
+/// execution records.
+type CapturedCaps = crate::resolver_core::HostCapabilities<verter_audit::observe::Captured>;
+
 fn with_dispatch<R>(
     host: &Arc<VerterHost>,
-    f: impl FnOnce(&ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>) -> R,
+    f: impl FnOnce(&ProjectSemanticDispatch<'_, CapturedCaps>) -> R,
 ) -> R {
     let store_view = host.resolver_store_view_read().into_owned_view();
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     let host_ctx =
-        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Uncaptured>::new(
+        crate::resolver_core::HostResolverContext::<'_, verter_audit::observe::Captured>::new(
             host,
             &store_view,
             overlay,
@@ -115,10 +119,7 @@ fn with_dispatch<R>(
     f(&dispatch)
 }
 
-fn key_for(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+fn key_for(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(SEAL_CANONICAL),
@@ -164,7 +165,7 @@ fn evaluate(host: &Arc<VerterHost>, name: &str) -> Option<Outcome> {
 
 #[track_caller]
 fn member(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     key: &str,
 ) -> SemanticNodeId {
@@ -182,7 +183,7 @@ fn member(
 
 #[track_caller]
 fn assert_marker(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -204,7 +205,7 @@ fn assert_marker(
 /// positional marker.
 #[track_caller]
 fn assert_string_or_marker_array(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -240,7 +241,7 @@ fn assert_string_or_marker_array(
 
 #[track_caller]
 fn assert_string_label(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>,
     node: SemanticNodeId,
     what: &str,
 ) {
@@ -571,10 +572,7 @@ fn make_product_host() -> Arc<VerterHost> {
 }
 
 #[cfg(feature = "semantic-observe")]
-fn product_key(
-    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
-    name: &str,
-) -> FlowReturnKey {
+fn product_key(dispatch: &ProjectSemanticDispatch<'_, CapturedCaps>, name: &str) -> FlowReturnKey {
     FlowReturnKey {
         function: dispatch.flow_function_slot_for(
             verter_type_expr::OwnedStr::from(PRODUCT_CANONICAL),

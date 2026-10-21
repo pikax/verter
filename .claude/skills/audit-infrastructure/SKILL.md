@@ -29,8 +29,17 @@ through `verter_session::capture::select_mode`; `capture::root_entry_context`
 builds the REQUIRED request context (canonical, host `projection_op_budget`,
 cancellation) identically for both modes and `RequestContext::observe_mode`
 carries the choice through every resumption. An uncaptured context clears the
-observer slot and records nothing (`observe_request!`, cache-event and
-dispatch-intent counters, relation explanations, `Stopwatch::start_for`).
+observer slot and records nothing. The selection becomes a type: execution
+units (a `ProjectSemanticDispatch<C>` over `C::Observe`, the `GraphIn<'_, M>`
+store handle, the session's `HostCapabilities<M>` request contexts) are
+compiled for `observe::Captured` or `observe::Uncaptured`, adopt the carried
+mode once where they start (`verter_audit::specialise!`,
+`capture::installed_mode`), and emit through the typed forms
+`observe!(M => ..)` / `observe_request!(M => ..)` /
+`component_meta_trace_structured!(M => ..)`, which test the constant
+`M::CAPTURED` and read no slot. Untyped forms are for once-per-request and
+once-per-phase boundaries only. See docs/arch/semantic-observe.md →
+"Concrete execution modes".
 The whole audit envelope compiles only under `semantic-observe`: the observer
 TLS, `HostAuditRuntime`, the record store, the per-request accumulator, the
 scheduler and VFS audit sinks and the request context's audit counters are

@@ -239,11 +239,11 @@ pub fn dispatch_inject_parse_fact_for_tests(
 /// — a recursion result included, which is an allocated opaque node — so a
 /// failed rooting is a lost handoff and panics rather than leaving the caller
 /// an ordinal nothing owns.
-fn hand_to_caller_scope<'h>(
+fn hand_to_caller_scope<'h, M: verter_audit::observe::ObserveExec>(
     host: &'h crate::VerterHost,
     dispatch: verter_type_engine::project_semantic_dispatch::ThreadDispatch<
         'h,
-        crate::resolver_core::HostCapabilities,
+        crate::resolver_core::HostCapabilities<M>,
     >,
     builder: verter_type_engine::semantic_query_memo::node_roots::NodeRootScope,
     nodes: impl IntoIterator<Item = verter_type_engine::semantic_query::SemanticNodeId>,
@@ -302,17 +302,23 @@ pub fn dispatch_execute_type_node_for_tests(
     >,
 > {
     use verter_type_engine::semantic_query::SemanticQueryApi;
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let read = dispatch.execute_type_node(key);
-    let node = match &read {
-        verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
-        verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
-        verter_type_engine::semantic_query::QueryResult::Error(_) => None,
-    };
-    hand_to_caller_scope(host, dispatch, builder, node);
-    read
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let read = dispatch.execute_type_node(key);
+            let node = match &read {
+                verter_type_engine::semantic_query::QueryResult::Value(output) => Some(output.value),
+                verter_type_engine::semantic_query::QueryResult::Recursive(node) => Some(*node),
+                verter_type_engine::semantic_query::QueryResult::Error(_) => None,
+            };
+            hand_to_caller_scope(host, dispatch, builder, node);
+            read
+        })
+    })
 }
 
 /// Production-shaped, NON-DECONSTRUCTABLE builder of a sealed
@@ -382,12 +388,18 @@ pub fn dispatch_lower_type_expr_in_scope_with_context_for_tests(
     expr: &verter_type_expr::TypeExpr,
     context: verter_type_engine::semantic_query::ProjectionReductionContext,
 ) -> Option<verter_type_engine::semantic_query::SemanticNodeId> {
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
-    hand_to_caller_scope(host, dispatch, builder, node);
-    node
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let node = dispatch.lower_type_expr_in_scope_with_context(scope_canonical_id, expr, context);
+            hand_to_caller_scope(host, dispatch, builder, node);
+            node
+        })
+    })
 }
 
 /// Relate the type named `source` to the type named `target`, both declared
@@ -508,12 +520,18 @@ pub fn dispatch_substitute_for_tests(
     parameter_node: verter_type_engine::semantic_query::SemanticNodeId,
     arg: verter_type_engine::semantic_query::SemanticNodeId,
 ) -> verter_type_engine::semantic_query::SemanticNodeId {
-    let dispatch =
-        verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(host);
-    let builder = dispatch.enter_construction_scope();
-    let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
-    hand_to_caller_scope(host, dispatch, builder, [node]);
-    node
+    // A test entry starts outside any typed execution, so it adopts the
+    // installed request's capture mode like every plain entry.
+    verter_audit::specialise!(crate::capture::installed_mode() => M, {
+        host.with_base_resolver_context::<_, M>(|ctx| {
+            let dispatch =
+                verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(ctx);
+            let builder = dispatch.enter_construction_scope();
+            let node = dispatch.substitute_semantic_type_param_for_tests(node, parameter_node, arg);
+            hand_to_caller_scope(host, dispatch, builder, [node]);
+            node
+        })
+    })
 }
 
 /// Integration-test shim that drives the
