@@ -461,6 +461,9 @@ fn copies_keep_exactly_the_measured_charge_through_retirement_in_either_order() 
     }
 }
 
+/// A corruption applied to an observed transfer at one entry.
+type Corruption = fn(&mut Vec<AllocationCharge>, usize);
+
 /// A transfer corrupted the same way in two identical executions still
 /// fails the oracle in each: the expectation is each allocation's own
 /// measurement, so two transfers that agree with each other prove nothing.
@@ -494,7 +497,7 @@ fn dropped_doubled_and_partial_transfers_fail_even_when_two_transfers_agree() {
             .position(|entry| entry.reach == Reach::Direct)
             .expect("a carrier is observed")
     };
-    let controls: [(&str, fn(&mut Vec<AllocationCharge>, usize)); 3] = [
+    let controls: [(&str, Corruption); 3] = [
         ("dropped", |entries, at| {
             entries.remove(at);
         }),
