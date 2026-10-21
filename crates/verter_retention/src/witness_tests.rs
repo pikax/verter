@@ -213,3 +213,52 @@ fn a_caller_hold_is_observed_by_its_shared_charge() {
     drop((cache, hold, clone));
     assert_eq!(totals(&account), (0, 0, 0));
 }
+
+/// An allocation that keeps its own charge beside its value is observed by
+/// its identity with the cells its charge holds as nested children, once;
+/// sections that exclude an earlier observation stay disjoint.
+#[test]
+fn a_self_charged_allocation_and_its_held_children_are_observed_once_per_witness() {
+    let account = account();
+    let ctx = ChargeCtx::new(&account);
+    let name = OwnedStr::new("held-by-the-charge");
+    let handles = OwnedHandles::of(|aliases| name.offer(aliases));
+    let measured = 48 + crate::owned::HeldHandles::backing_bytes_for(handles.len());
+    let charge = match account.reserve(ChargeClass::Retained, 48) {
+        crate::RetentionAdmission::Admitted(charge) => charge,
+        crate::RetentionAdmission::Refused(refusal) => panic!("{refusal:?}"),
+    };
+    let charge = OwnedHandles::of(|aliases| name.offer(aliases))
+        .retained_with(charge, ctx)
+        .expect("admitted");
+    let receipt = Arc::new(7_u64);
+
+    let mut observer = ChargeObserver::new();
+    assert!(observer.self_charged(&receipt, Reach::Direct, Some(&charge), measured, &handles));
+    assert!(
+        !observer.self_charged(&receipt, Reach::Direct, Some(&charge), measured, &handles),
+        "a closure walk visits each allocation once"
+    );
+    let first = observer.finish();
+    assert_eq!(
+        first.len(),
+        2,
+        "the allocation and the name its charge holds"
+    );
+    assert!(first.is_exact(), "{first:#?}");
+    assert_eq!(
+        first.charged_bytes_in(ChargeClass::Retained),
+        first.charged_bytes(),
+        "the charge and its hold on the name are retained"
+    );
+
+    let mut later = ChargeObserver::new();
+    later.exclude(&first);
+    later.owned_handles(&handles);
+    assert!(
+        later.finish().is_empty(),
+        "a later section skips what an earlier one observed"
+    );
+    drop((charge, handles, name));
+    assert_eq!(totals(&account), (0, 0, 0));
+}

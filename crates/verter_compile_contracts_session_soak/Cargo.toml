@@ -24,3 +24,6 @@ trybuild = "1.0"
 # forwarding alone.
 verter_session = { path = "../verter_session", features = ["soak-support"] }
 verter_type_engine = { path = "../verter_type_engine" }
+# The fixtures name the function whose return they request through the
+# query vocabulary's own identity carriers.
+verter_type_expr = { path = "../verter_type_expr" }

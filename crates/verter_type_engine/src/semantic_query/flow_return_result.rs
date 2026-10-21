@@ -415,6 +415,15 @@ impl FlowReturnResult {
         self.owner.0.node_ref(self.return_type)?.to_root()
     }
 
+    /// The delivery that owns this result's graph nodes, for an observation
+    /// of its bookkeeping charges.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    pub(crate) fn delivery(
+        &self,
+    ) -> &crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease {
+        &self.owner.0
+    }
+
     /// The typed degradation reason, or `None` for the warm-admissible arm.
     #[must_use]
     pub fn degradation(&self) -> Option<FlowReturnDegradation> {

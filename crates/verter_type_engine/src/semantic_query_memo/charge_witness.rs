@@ -1,8 +1,9 @@
 //! Allocation-specific charge observations of a held delivered answer.
 //!
-//! A [`HeldChargeWitness`] is read from a real held read — a
-//! [`CacheRead`] a public dispatch returned — and names, allocation by
-//! allocation, what that answer keeps charged. It reads the allocations'
+//! A [`HeldChargeWitness`] is read from a real held answer — a delivered
+//! [`FlowReturnResult`] a public host request returned, or a [`CacheRead`] a
+//! dispatch returned — and names, allocation by allocation, what that answer
+//! keeps charged. It reads the allocations'
 //! own charges through the retention account's observer
 //! ([`verter_session_query::retention::witness`]); it estimates nothing,
 //! keeps no ledger of its own and mints no root.
@@ -12,14 +13,16 @@
 //! Three disjoint sections, each allocation in exactly one of them — the
 //! first, in this order, that reaches it:
 //!
-//! * **Payload** — the self-charged carriers the read hands its caller and
-//!   every clone of it shares: its walker diagnostic list, its dependency
-//!   rail and the owned names its value holds, with the owned children they
-//!   answer for (a rail's canonicals, a diagnostic's names). Each is charged
+//! * **Payload** — the self-charged carriers the answer hands its caller and
+//!   every clone of it shares, with the owned children they answer for: a
+//!   read's walker diagnostic list, dependency rail (its canonicals) and the
+//!   owned names its value holds; a flow return's fresh-literal and
+//!   checker-diagnostic slices (a diagnostic's printed arguments) and
+//!   independence proofs. Each is charged
 //!   by its own cell: pinned by the delivery that minted it, retained while
 //!   a cache candidate holds it, pinned again for the readers that outlive
 //!   every cache, released by its last handle.
-//! * **Cost receipts** — the read's priced cost receipt and, once each, the
+//! * **Cost receipts** — a read's priced cost receipt and, once each, the
 //!   receipts of its closure, with the owned names their charges hold. A
 //!   receipt is reserved, retained, by the first store that retains a
 //!   result it costs and keeps that reservation until its own last holder
@@ -44,10 +47,12 @@
 //! and keeps no handle: the account's classes and totals, and every
 //! allocation's lifetime, are what they were before the read.
 
+use verter_session_query::retention::owned::OwnedHandles;
 use verter_session_query::retention::witness::{ChargeObservation, ChargeObserver};
 use verter_session_query::retention::ChargeClass;
 
-use crate::semantic_query::{CacheRead, QueryResult, SemanticNodeId};
+use crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt;
+use crate::semantic_query::{CacheRead, FlowReturnResult, QueryResult, SemanticNodeId};
 
 /// What a held read keeps charged. See the module docs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,21 +67,52 @@ impl HeldChargeWitness {
     #[must_use]
     pub fn of_read(read: &CacheRead<QueryResult<SemanticNodeId>>) -> Self {
         use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        Self::observe(
+            |observer| {
+                if let Some(diagnostics) = read.walker_diagnostics.owned() {
+                    observer.owned(diagnostics);
+                }
+                if let Some(rail) = read.dep_signature.owned() {
+                    observer.owned(rail);
+                }
+                observer.owned_handles(&OwnedHandles::of(|aliases| {
+                    read.value.owned_heap_bytes(aliases)
+                }));
+            },
+            read.receipt.priced(),
+            &read.lease,
+        )
+    }
+
+    /// Observe what a delivered flow return keeps charged now: its owned
+    /// slices (fresh literal arms, checker diagnostics, independence
+    /// proofs) as payload, no receipt, and its delivery's bookkeeping.
+    #[must_use]
+    pub fn of_flow_return(result: &FlowReturnResult) -> Self {
+        use crate::semantic_query::allocation_footprint::OwnedHeap as _;
+        Self::observe(
+            |observer| {
+                observer.owned_handles(&OwnedHandles::of(|aliases| {
+                    result.owned_heap_bytes(aliases)
+                }));
+            },
+            None,
+            result.delivery(),
+        )
+    }
+
+    fn observe(
+        payload: impl FnOnce(&mut ChargeObserver),
+        receipt: Option<&std::sync::Arc<DemandCostReceipt>>,
+        lease: &super::delivery_lease::SemanticDeliveryLease,
+    ) -> Self {
         let mut observer = ChargeObserver::new();
-        if let Some(diagnostics) = read.walker_diagnostics.owned() {
-            observer.owned(diagnostics);
-        }
-        if let Some(rail) = read.dep_signature.owned() {
-            observer.owned(rail);
-        }
-        observer.owned_handles(&verter_session_query::retention::owned::OwnedHandles::of(
-            |aliases| read.value.owned_heap_bytes(aliases),
-        ));
+        payload(&mut observer);
         let payload = observer.finish();
 
         let mut observer = ChargeObserver::new();
         observer.exclude(&payload);
-        if let Some(receipt) = read.receipt.priced() {
+        if let Some(receipt) = receipt {
             receipt.observe_retention(&mut observer);
         }
         let cost_receipts = observer.finish();
@@ -84,7 +120,7 @@ impl HeldChargeWitness {
         let mut observer = ChargeObserver::new();
         observer.exclude(&payload);
         observer.exclude(&cost_receipts);
-        read.lease.observe_metadata(&mut observer);
+        lease.observe_metadata(&mut observer);
         Self {
             payload,
             cost_receipts,

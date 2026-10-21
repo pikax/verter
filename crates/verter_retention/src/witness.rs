@@ -1,8 +1,9 @@
 //! Read-only observations of allocation-owned charges.
 //!
 //! A held semantic answer keeps allocations that carry their own charge
-//! ([`super::owned::Owned`] cells) and owner metadata charged through a
-//! [`CallerHold`]. The account's totals cannot say which of those bytes a
+//! ([`super::owned::Owned`] cells, and allocations such as cost receipts that
+//! keep a [`RetentionCharge`] beside their value) and owner metadata charged
+//! through a [`CallerHold`]. The account's totals cannot say which of those bytes a
 //! given answer keeps: other holders, other hosts and unrelated work share
 //! the one process account. A [`ChargeObservation`] reads the charges of the
 //! exact allocations a holder reaches instead, one entry per allocation.

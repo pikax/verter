@@ -23,4 +23,7 @@ fn main() {
     // A delivered flow return materialized through its own lease in the same
     // capture-off profile.
     tests.pass(fixture_root.join("flow_return_root_positive_through_soak_support.rs"));
+    // A held flow return's allocation charges observed through the public
+    // request and close in the same capture-off profile.
+    tests.pass(fixture_root.join("held_charge_witness_through_soak_support.rs"));
 }
