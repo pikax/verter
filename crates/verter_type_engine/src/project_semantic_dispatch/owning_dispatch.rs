@@ -340,6 +340,13 @@ impl ConstructionResult for Arc<crate::semantic_query::ArgumentLiteralProvenance
                 visit(*literal);
             }
         }
+        for read in self.fresh_reads.iter() {
+            for step in read.iter() {
+                if let crate::semantic_query::ArgumentPathStep::Member(key) = step {
+                    visit(*key);
+                }
+            }
+        }
     }
 }
 impl ConstructionResult for SurfaceMember {

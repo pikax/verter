@@ -672,31 +672,30 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The checker's `isConstTypeVariable` over the call's declared type
     /// parameters: `contextual` is a `const` type parameter, or a union or
     /// intersection holding one at any depth (`(T & {}) | undefined`).
+    /// TypeScript's routine (`checker.ts`, TypeScript 5.4) visits a union's
+    /// or intersection's members at the depth of the composite; its bound of
+    /// five counts only indexed-access, conditional and mapped hops, which
+    /// this walk does not take, so no composite nesting stops it.
     fn is_const_type_variable(
         &self,
         contextual: SemanticNodeId,
         declared: &[TypeParamDecl],
     ) -> bool {
-        // The checker's own depth bound on the walk.
-        const MAX_DEPTH: usize = 5;
         let graph = self.graph();
-        let mut pending = vec![(contextual, 0)];
-        while let Some((node, depth)) = pending.pop() {
+        let mut pending = vec![contextual];
+        while let Some(node) = pending.pop() {
             if declared
                 .iter()
                 .any(|decl| decl.is_const && decl.param == node)
             {
                 return true;
             }
-            if depth == MAX_DEPTH {
-                continue;
-            }
             if let Some(members) = graph
                 .node_data(node)
                 .as_deref()
                 .and_then(SemanticNodeData::composite_members)
             {
-                pending.extend(members.iter().map(|&member| (member, depth + 1)));
+                pending.extend(members.iter().copied());
             }
         }
         false

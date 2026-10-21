@@ -147,7 +147,9 @@ fn resolve_deferred(mut ty: TypeExpr, positions: &[Deferred]) -> TypeExpr {
 /// object member by its known key and authored declaration, or by its
 /// authored declaration alone under a computed key, inside the
 /// operand of a spread the object holds as well, an array's element type,
-/// through each member of a union.
+/// through each member of a union — a conditional arm's position through
+/// every member, since a position resolved here reads its bindings as
+/// regular and widens only the literals written fresh.
 fn rewrite_at(
     ty: TypeExpr,
     path: &[DeclaredReadStep],
@@ -191,6 +193,7 @@ fn rewrite_at(
             element: Arc::new(rewrite_at(TypeExpr::clone(element), rest, rewrite)),
             readonly: *readonly,
         },
+        (_, DeclaredReadStep::Arm { .. }) => rewrite_at(ty, rest, rewrite),
         _ => ty,
     }
 }
@@ -213,7 +216,7 @@ fn addresses(
                     .is_none_or(|declaration| declaration == *at)
         }
         DeclaredReadStep::ComputedMember { at } => spans.declaration == Some(*at),
-        DeclaredReadStep::Element => false,
+        DeclaredReadStep::Element | DeclaredReadStep::Arm { .. } => false,
     }
 }
 
@@ -758,7 +761,10 @@ fn value<'a>(
 /// branch's member widens leaves an equal literal another branch's member
 /// holds as it is (`c ? { v: s, k: 1 } : { v: sl, k: "z" }` with `const s =
 /// "a"` and `let sl: "a"` is `{ v: string; k: number } | { v: "a"; k: string
-/// }`).
+/// }`), an array branch's elements by the arm holding them, so a read one
+/// branch's element widens leaves an equal literal another branch's
+/// element holds as it is (`c ? [s, 1] : [sl, true]` is `(string |
+/// number)[] | ("a" | boolean)[]`).
 fn join_branches(consequent: Typed, alternate: Typed) -> Typed {
     let regular: Vec<LiteralValue> = top_level_literals(&consequent.ty)
         .filter(|literal| !consequent.fresh.contains(literal))
@@ -779,8 +785,8 @@ fn join_branches(consequent: Typed, alternate: Typed) -> Typed {
             reads.push(read);
         }
     }
-    let mut nested = consequent.nested;
-    nested.extend(alternate.nested);
+    let mut nested = under_arm(consequent.nested, &consequent.ty);
+    nested.extend(under_arm(alternate.nested, &alternate.ty));
     let mut members = Vec::new();
     append_union_members(&mut members, consequent.ty);
     append_union_members(&mut members, alternate.ty);
@@ -790,6 +796,30 @@ fn join_branches(consequent: Typed, alternate: Typed) -> Typed {
         reads,
         nested,
     }
+}
+
+/// The positions a conditional arm of type `arm` nests, each a position of
+/// the union members the arm holds when no member step's declaration span
+/// already tells it apart from another arm's.
+fn under_arm(nested: Vec<Deferred>, arm: &TypeExpr) -> Vec<Deferred> {
+    let mut step = None;
+    nested
+        .into_iter()
+        .map(|mut deferred| {
+            if deferred.path.iter().all(|step| {
+                matches!(
+                    step,
+                    DeclaredReadStep::Element | DeclaredReadStep::Arm { .. }
+                )
+            }) {
+                let step = step.get_or_insert_with(|| DeclaredReadStep::Arm {
+                    written: Arc::new(arm.clone()),
+                });
+                deferred.path.insert(0, step.clone());
+            }
+            deferred
+        })
+        .collect()
 }
 
 /// The literals at `ty`'s top level: itself, or the members of the union
@@ -929,11 +959,26 @@ fn spread_element_types(
 ) {
     let (elements, own): (Vec<Deferred>, Vec<Deferred>) = std::mem::take(&mut source.nested)
         .into_iter()
-        .partition(|deferred| deferred.path.first() == Some(&DeclaredReadStep::Element));
+        .partition(|deferred| {
+            deferred
+                .path
+                .iter()
+                .find(|step| !matches!(step, DeclaredReadStep::Arm { .. }))
+                == Some(&DeclaredReadStep::Element)
+        });
     source.nested = own;
     if let Some(types) = collect_array_element_types_from_type(&source.into_resolved()) {
         element_types.extend(types);
-        deferred.extend(elements);
+        // The spread arms' elements join the one element type.
+        deferred.extend(elements.into_iter().map(|mut element| {
+            let arms = element
+                .path
+                .iter()
+                .take_while(|step| matches!(step, DeclaredReadStep::Arm { .. }))
+                .count();
+            element.path.drain(..arms);
+            element
+        }));
     } else {
         element_types.push(TypeExpr::Primitive(PrimitiveName::Any));
     }

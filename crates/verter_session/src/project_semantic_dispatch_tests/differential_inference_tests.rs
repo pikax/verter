@@ -2548,6 +2548,7 @@ declare const u: unique symbol;
 let d48 = { [u]: s };
 let d49 = { [u]: c ? "a" : sl };
 let d50 = c ? { [u]: s } : { [u]: 1 };
+let d51 = c ? [s, 1] : [sl, true];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2648,6 +2649,10 @@ fn declared_reads_follow_their_binding_freshness() {
         (Read::Type("(typeof d48)[typeof u]"), r#"string"#),
         (Read::Type("(typeof d49)[typeof u]"), r#""a""#),
         (Read::Type("(typeof d50)[typeof u]"), r#"string | number"#),
+        (
+            Read::Type("typeof d51"),
+            r#"(string | number)[] | ("a" | boolean)[]"#,
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
