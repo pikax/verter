@@ -86,6 +86,10 @@ pub struct TypeDeclInfo {
     /// exactly `unique symbol`. Copied onto a value whose annotation names
     /// this type so `typeof C.K` keeps the member's own identity.
     pub unique_symbol_members: Arc<[String]>,
+    /// Whether this contributor is a type alias whose authored body is the
+    /// `intrinsic` keyword: the compiler-provided type its name selects
+    /// (`type NoInfer<T> = intrinsic`).
+    pub intrinsic: bool,
 }
 
 /// An ordered group of same-name type declaration contributors, in

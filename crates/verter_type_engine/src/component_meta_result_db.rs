@@ -33,11 +33,12 @@
 //! - **`options_fingerprint` is a stable `Hash16`** produced from a
 //!   manually-stable serialization of output-affecting fields only —
 //!   never request ids, trace flags, or caller metadata.
-//! - Successful candidates are complete facts only. A certified divergence,
-//!   an operation-profile refusal, or an isolated-root ledger refusal is
-//!   retained in the refusal ledger with its original status and recovery,
-//!   never as a successful candidate. Any other approximation, a missing
-//!   input, and an execution abort are not retained.
+//! - Successful candidates are complete facts only. An operation-profile
+//!   refusal or an isolated-root ledger refusal is retained in the refusal
+//!   ledger with its original status and recovery, never as a successful
+//!   candidate. A certified divergence is no refusal: its recovery is a
+//!   complete answer, admitted as one. Any other approximation, a missing
+//!   input, a same-path recursion and an execution abort are not retained.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -164,8 +165,6 @@ impl<P> Clone for ComponentMetaResultEntry<P> {
 /// These stay refusals. A retained recovery is never a successful candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ComponentMetaRefusalClass {
-    /// The producer's deterministic divergence certificate.
-    CertifiedDivergence,
     /// The demand stopped under this operation profile.
     OperationProfile,
     /// An isolated root stopped under this profile, allowance and context.
@@ -173,9 +172,8 @@ pub enum ComponentMetaRefusalClass {
 }
 
 /// The request axes a refusal was sealed under, already normalized for its
-/// class. Certified divergence ignores profile. Every class keeps the entry
-/// allowance of the demand that sealed it: a different allowance is a
-/// different refusal. An isolated-root refusal also keeps profile.
+/// class. Every class keeps the profile and the entry allowance of the
+/// demand that sealed it: a different allowance is a different refusal.
 ///
 /// `profile` is the full budget profile (work, bytes, depth, tail,
 /// request operations, relation comparisons, cost-model revision).
@@ -209,9 +207,8 @@ pub struct ComponentMetaRefusalQuery {
 impl ComponentMetaRefusalQuery {
     /// The ledger identities this demand may reuse, in class order.
     #[must_use]
-    pub fn reusable_identities(&self) -> [ComponentMetaRefusalIdentity; 3] {
+    pub fn reusable_identities(&self) -> [ComponentMetaRefusalIdentity; 2] {
         [
-            refusal_identity_for(ComponentMetaRefusalClass::CertifiedDivergence, self),
             refusal_identity_for(ComponentMetaRefusalClass::OperationProfile, self),
             refusal_identity_for(ComponentMetaRefusalClass::IsolatedRoot, self),
         ]
@@ -219,31 +216,19 @@ impl ComponentMetaRefusalQuery {
 }
 
 /// Normalize `class` onto `query`. A different root, context, or entry
-/// allowance produces a different identity. Certified divergence ignores
-/// profile. An operation-profile or isolated-root refusal also keeps profile.
-/// A higher entry allowance does not reuse a refusal sealed at a lower one.
+/// allowance produces a different identity, and so does a different
+/// profile. A higher entry allowance does not reuse a refusal sealed at a lower one.
 #[must_use]
 pub fn refusal_identity_for(
     class: ComponentMetaRefusalClass,
     query: &ComponentMetaRefusalQuery,
 ) -> ComponentMetaRefusalIdentity {
-    match class {
-        ComponentMetaRefusalClass::CertifiedDivergence => ComponentMetaRefusalIdentity {
-            class,
-            profile: BudgetProfileSpec::ignored(),
-            root: Arc::clone(&query.root),
-            entry_allowance: query.entry_allowance,
-            context: query.context,
-        },
-        ComponentMetaRefusalClass::OperationProfile | ComponentMetaRefusalClass::IsolatedRoot => {
-            ComponentMetaRefusalIdentity {
-                class,
-                profile: query.profile,
-                root: Arc::clone(&query.root),
-                entry_allowance: query.entry_allowance,
-                context: query.context,
-            }
-        }
+    ComponentMetaRefusalIdentity {
+        class,
+        profile: query.profile,
+        root: Arc::clone(&query.root),
+        entry_allowance: query.entry_allowance,
+        context: query.context,
     }
 }
 
@@ -260,17 +245,17 @@ pub enum FinalComponentRetention {
 
 /// Proof that a final-component outcome is one of the retained classes.
 ///
-/// A same-path recursion bit is not a divergence certificate: the graph
-/// also records a cross-task wait cycle under that bit. Certified
-/// divergence requires `divergence_certificate`. A schedule cut is the
-/// wait cycle's accounting signal and admits nothing. `entered_isolated`
+/// A same-path recursion bit proves nothing: a deferred position meets
+/// itself on its path, and the graph also records a cross-task wait cycle
+/// under that bit. A certified divergence is a complete answer, never a
+/// partial to retain. A schedule cut is the wait cycle's accounting signal
+/// and admits nothing. `entered_isolated`
 /// is true only when the demand entered alone and its own spend was the
 /// request's spend. `request_spend_owned` is that same ownership for an
 /// operation-profile refusal: a sibling thread's spend is not this
 /// compute's allowance, and the refusal is not retained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalComponentAdmissionProof {
-    pub divergence_certificate: bool,
     pub schedule_cut: bool,
     pub entered_isolated: bool,
     /// This compute's recorded request spend was its own, or there was no
@@ -280,24 +265,12 @@ pub struct FinalComponentAdmissionProof {
 }
 
 impl FinalComponentAdmissionProof {
-    /// Depth may be an isolated root. No divergence certificate.
+    /// Depth may be an isolated root.
     #[must_use]
     pub const fn isolated(entered_isolated: bool) -> Self {
         Self {
-            divergence_certificate: false,
             schedule_cut: false,
             entered_isolated,
-            request_spend_owned: true,
-        }
-    }
-
-    /// A producer certificate with no schedule cut.
-    #[must_use]
-    pub const fn certified() -> Self {
-        Self {
-            divergence_certificate: true,
-            schedule_cut: false,
-            entered_isolated: false,
             request_spend_owned: true,
         }
     }
@@ -340,10 +313,8 @@ impl Default for ComponentMetaRefusalEffects {
 /// [`PartialReason::ConnectedMemoryLimit`] is context-dependent: it is not
 /// an operation-profile reason, and it vetoes retention even when a real
 /// operation reason is also present. [`PartialReason::SamePathRecursion`]
-/// is certified divergence only when `proof.divergence_certificate` is set
-/// and no schedule cut, operation, depth, or other reason is present.
-/// Without that certificate the recursion bit vetoes, including when it is
-/// the wait-cycle the graph records under the same bit.
+/// always vetoes: a same-path re-entry is no proof of divergence, and a
+/// certified divergence never reaches this function as a partial.
 #[must_use]
 pub fn classify_final_component_retention(
     completeness: ResultCompleteness,
@@ -383,9 +354,6 @@ pub fn classify_final_component_retention(
             | PartialReason::FlowReturnNoSurface
             | PartialReason::UndecidedConditional => other = true,
         }
-    }
-    if proof.divergence_certificate && !other && !operation && !depth {
-        return FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence);
     }
     if other || recursion || (!operation && !depth) {
         return FinalComponentRetention::NotAdmitted;
@@ -1230,16 +1198,6 @@ mod refusal_ledger_tests {
             FinalComponentRetention::NotAdmitted,
             "an operation refusal whose spend was a sibling's is not retained"
         );
-        let mut certified = FinalComponentAdmissionProof::certified();
-        certified.request_spend_owned = false;
-        assert_eq!(
-            classify_final_component_retention(
-                ResultCompleteness::partial(PartialReasonSet::SAME_PATH_RECURSION),
-                certified
-            ),
-            FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence),
-            "certified divergence does not consult spend ownership"
-        );
         let mixed = ResultCompleteness::partial(
             PartialReasonSet::BUDGET_EXCEEDED.union(PartialReasonSet::MISSING_DEPENDENCY),
         );
@@ -1304,21 +1262,7 @@ mod refusal_ledger_tests {
                 FinalComponentAdmissionProof::isolated(true)
             ),
             FinalComponentRetention::NotAdmitted,
-            "a recursion bit without a certificate is not certified divergence"
-        );
-        assert_eq!(
-            classify_final_component_retention(
-                recursion,
-                FinalComponentAdmissionProof::certified()
-            ),
-            FinalComponentRetention::Retain(ComponentMetaRefusalClass::CertifiedDivergence)
-        );
-        let mut cut = FinalComponentAdmissionProof::certified();
-        cut.schedule_cut = true;
-        assert_eq!(
-            classify_final_component_retention(recursion, cut),
-            FinalComponentRetention::NotAdmitted,
-            "a schedule cut is not a certified divergence"
+            "a same-path recursion is never a retained refusal"
         );
         let mut operation_cut = FinalComponentAdmissionProof::isolated(true);
         operation_cut.schedule_cut = true;
