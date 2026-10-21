@@ -51,6 +51,7 @@ mod conditional_tail_tests;
 mod connected_demand_tests;
 mod const_literal_widening_tests;
 mod constrained_infer_tests;
+mod contextual_call_inference_tests;
 mod continuation_depth_tests;
 mod cost_receipt_tests;
 mod cycle_gate_tests;

@@ -36,7 +36,7 @@ use verter_type_engine::semantic_query::{
 pub(super) struct Setting {
     pub(super) root: &'static str,
     pub(super) label: &'static str,
-    options: &'static str,
+    pub(super) options: &'static str,
 }
 
 /// `strict`.
