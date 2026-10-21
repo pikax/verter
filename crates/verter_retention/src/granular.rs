@@ -104,7 +104,9 @@ impl RetentionCharge {
     /// # Panics
     ///
     /// When the two charges belong to different accounts or classes: merging
-    /// them would release bytes from an account that never charged them.
+    /// them would release bytes from an account that never charged them. Also
+    /// when the class is [`ChargeClass::Active`]: in-flight work is never
+    /// merged, so the merge moves no ACTIVE attribution.
     pub fn absorb(&mut self, mut other: RetentionCharge) {
         let same_account = match (self.account.as_ref(), other.account.as_ref()) {
             (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
@@ -114,16 +116,17 @@ impl RetentionCharge {
             same_account && self.class == other.class,
             "absorb merges charges of one class on one account"
         );
+        assert_ne!(
+            self.class,
+            ChargeClass::Active,
+            "absorb merges settled charges, never in-flight ACTIVE work"
+        );
+        let merged = self.provenance.merged(other.provenance);
         self.bytes += other.bytes;
+        self.provenance = merged;
         // The absorbed charge's bytes are this charge's now: it must not
         // release them.
         other.account = None;
-        let class = self.class;
-        verter_debug_assert::verter_debug_assert_ne!(
-            class,
-            ChargeClass::Active,
-            "absorb merges settled charges, never in-flight work"
-        );
     }
 }
 

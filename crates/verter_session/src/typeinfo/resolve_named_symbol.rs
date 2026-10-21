@@ -617,7 +617,7 @@ pub(crate) fn deliver_resolved_root(
 /// [`compute_effective_mode`] before view acquisition, so the request body's
 /// early-miss returns and this path report the SAME mode).
 #[allow(clippy::type_complexity)]
-fn resolve_named_symbol_in_current_view(
+pub(crate) fn resolve_named_symbol_in_current_view(
     host: &VerterHost,
     dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
     canonical_id: &str,
@@ -782,7 +782,9 @@ pub(crate) fn classify_dispatch_error(
 /// `SemanticNodeData::Opaque(QueryError::DeclPlaceholder { … })`
 /// carriers, AND to REDUCE operator-bodied top-level aliases
 /// (`type X = Y[K]` / `type X = keyof Y`) through the shared
-/// `IndexedAccess` / `KeyOf` reducer under the publication modes.
+/// `IndexedAccess` / `KeyOf` reducer under the publication modes, and
+/// written unions / intersections (`type X = "a" | string`) through the
+/// canonical union / intersection algebra.
 ///
 /// This is the SINGLE canonical materializer for every typeinfo
 /// resolution entry-point — both the named-resolve path
@@ -831,7 +833,7 @@ fn materialize_alias_chain(
     verter_debug_assert!(!matches!(mode, ProjectionMode::Identity));
     let store = host.project_type_store().semantic_graph();
     // A construction reader: the scope owns every ordinal it reads.
-    let _scope = dispatch.enter_construction_scope();
+    let scope = dispatch.enter_construction_scope();
     let mut current = start;
     for _ in 0..16 {
         let data = store.read_in_scope(current);
@@ -1116,16 +1118,10 @@ fn materialize_alias_chain(
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                let nullability = match store.node_scope_in_scope(current) {
-                    Some(NodeScopeId::File { canonical_id, .. }) => {
-                        dispatch.nullability_for(&canonical_id)
-                    }
-                    _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                };
                 let key = SemanticQueryKey::reduce_written_intersection_operands(
                     store,
                     members,
-                    nullability,
+                    root_nullability(store, dispatch, current),
                 );
                 let step_result = match dispatch.execute_type_node(key) {
                     QueryResult::Value(SemanticQueryOutput { value: node, .. }) => {
@@ -1133,6 +1129,36 @@ fn materialize_alias_chain(
                     }
                     QueryResult::Recursive(node) => QueryResult::Recursive(node),
                     QueryResult::Error(err) => QueryResult::Error(err),
+                };
+                match classify_operator_reduction_step(store, step_result, current)? {
+                    MaterializationStep::Continue(next) => {
+                        current = next;
+                        continue;
+                    }
+                    MaterializationStep::Stop(node) => return Ok(node),
+                }
+            }
+            // A union written at the alias root publishes the type the
+            // checker constructs from it when that construction absorbs a
+            // literal (`type X = "a" | string` is `string`, also when the
+            // literal or its supertype is written through an alias), reduced
+            // by the shared `ReduceUnion` algebra under the root file's
+            // `strictNullChecks`, as the intersection below. Any other written union
+            // stays as written, and so does one the reducer misses; a reducer
+            // fault propagates through the same fault/miss split as the
+            // operator bridge. `Skeleton` / `Identity` keep it.
+            Some(SemanticNodeData::Union(_))
+                if matches!(
+                    mode,
+                    ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
+                ) =>
+            {
+                let Some(step_result) = dispatch
+                    .owning()
+                    .reduced_written_union(current, root_nullability(store, dispatch, current))
+                    .into_value_in(&scope)
+                else {
+                    return Ok(current);
                 };
                 match classify_operator_reduction_step(store, step_result, current)? {
                     MaterializationStep::Continue(next) => {
@@ -1213,6 +1239,20 @@ pub(crate) fn classify_base_surfacing(
             Ok(fallback) => Ok(fallback.unwrap_or(base)),
             Err(fault) => Err(fault),
         },
+    }
+}
+
+/// The `null` / `undefined` algebra a composite written in `node`'s file
+/// is constructed under: that file's `strictNullChecks`, and the strict
+/// algebra for a node no file owns.
+fn root_nullability(
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities>,
+    node: SemanticNodeId,
+) -> verter_session_query::flow::policy::NullabilityPolicy {
+    match store.node_scope_in_scope(node) {
+        Some(NodeScopeId::File { canonical_id, .. }) => dispatch.nullability_for(&canonical_id),
+        _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
     }
 }
 

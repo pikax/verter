@@ -635,17 +635,25 @@ fn observe_feature_closure_is_off_for_production_and_its_dev_unification() {
         // closure applies to default/dev, debug, release and no-debug-assertions.
         // Checking cfg(profile) with metadata would falsely claim build proof;
         // the repository's build lanes independently compile those profiles.
-        // The flight-rendezvous seam is test machinery its own crates' test
-        // edges carry, so only the normal/build closures must stay free of it.
-        let support_seeds: BTreeSet<(String, String)> = metadata
+        // The soak-support seams (the flight rendezvous, the ACTIVE-occupancy
+        // window) are test machinery their own crates' test edges carry, so
+        // only the normal/build closures must stay free of them.
+        // The retention account's window also compiles under its own
+        // `test-support`, so that feature is a seed too.
+        let mut support_seeds: BTreeSet<(String, String)> = metadata
             .packages
             .iter()
             .filter(|package| package.features.contains_key("soak-support"))
             .map(|package| (package.name.clone(), "soak-support".into()))
             .collect();
+        support_seeds.insert(("verter_retention".into(), "test-support".into()));
         assert!(
             support_seeds.contains(&("verter_type_engine".into(), "soak-support".into())),
             "the engine declares the soak-support seam"
+        );
+        assert!(
+            support_seeds.contains(&("verter_retention".into(), "soak-support".into())),
+            "the retention account declares the soak-support seam"
         );
         let shipped_union: BTreeSet<PackageFeature> = production
             .iter()

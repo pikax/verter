@@ -36,6 +36,11 @@
 //! allocation, charged by whichever owner keeps it, and the pool simply
 //! loses dedup for it. Shedding only drops the POOL's reference — every
 //! string previously handed out stays alive, valid and charged.
+//!
+//! Lifecycle: a host close (and a completed host release boundary) sheds
+//! the pool-only entries too ([`IdentityInterner::shed_pool_only`]), so the
+//! identities a released workload minted stop occupying the account while
+//! the pool itself stays usable for the reused host.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -156,6 +161,22 @@ impl IdentityInterner {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.inner.lock().entries.is_empty()
+    }
+
+    /// Drop every entry only the pool still references, releasing their
+    /// memory and charges, and return how many entries it shed.
+    ///
+    /// Strings a caller still holds stay pooled, valid and charged. This is
+    /// the lifecycle half of the pressure shed: a host close calls it so
+    /// identities its released workload minted stop occupying the shared
+    /// account while the pool itself stays usable.
+    pub fn shed_pool_only(&self) -> usize {
+        let mut inner = self.inner.lock();
+        let before = inner.entries.len();
+        Self::shed_pool_only_locked(&mut inner);
+        // A lifecycle shed also gives back the table's peak backing.
+        inner.entries.shrink_to_fit();
+        before - inner.entries.len()
     }
 
     /// Hold `value` and reserve its slot against the shared account, and
@@ -410,6 +431,48 @@ mod tests {
         // usable, content-equal string.
         let re = pool.intern(&strings[0]);
         assert_eq!(re.as_str(), strings[0].as_str());
+    }
+
+    /// A lifecycle shed releases exactly the entries only the pool still
+    /// references, keeps a held identity pooled and charged, and is
+    /// idempotent: a second shed finds nothing more.
+    #[test]
+    fn a_lifecycle_shed_releases_pool_only_entries_and_keeps_held_ones() {
+        let account = unbounded();
+        let pool = IdentityInterner::new(Arc::clone(&account));
+        let held = pool.intern("/src/components/Held.vue");
+        let released = "/src/components/Released.vue";
+        drop(pool.intern(released));
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            pooled_entry_bytes(held.len()) + pooled_entry_bytes(released.len())
+        );
+
+        assert_eq!(pool.shed_pool_only(), 1, "only the released identity sheds");
+        assert_eq!(
+            account.snapshot().retained_bytes,
+            pooled_entry_bytes(held.len()),
+            "the shed released the released identity's charges and nothing else"
+        );
+        assert!(
+            pool.with_entries_for_test(|entries| entries.capacity()) <= 3,
+            "a sparse pool gives back its surplus backing"
+        );
+        assert!(
+            OwnedStr::ptr_eq(&pool.intern("/src/components/Held.vue"), &held),
+            "a held identity stays pooled"
+        );
+        assert_eq!(pool.shed_pool_only(), 0, "a repeated shed finds nothing");
+
+        drop(held);
+        assert_eq!(pool.shed_pool_only(), 1);
+        assert!(pool.is_empty());
+        assert_eq!(
+            pool.with_entries_for_test(|entries| entries.capacity()),
+            0,
+            "an emptied pool releases its backing table"
+        );
+        assert_eq!(account.snapshot().total_bytes(), 0);
     }
 
     #[test]

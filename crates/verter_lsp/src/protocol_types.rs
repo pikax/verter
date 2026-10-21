@@ -414,6 +414,8 @@ pub struct RetentionStatistics {
     /// entries) across the process-wide semantic identity indexes.
     pub identity_index_records: usize,
     pub identity_index_backing_slots: usize,
+    /// Strings pooled by the process-wide semantic identity indexes.
+    pub identity_pool_entries: usize,
     /// Destroyed semantic nodes whose sidecar entries wait for cleanup:
     /// the bounded pending log.
     pub pending_destroyed_nodes: usize,
@@ -481,6 +483,7 @@ impl From<verter_session::HostRetentionSnapshot> for RetentionStatistics {
             stable_key_classes: snapshot.stable_key_classes,
             identity_index_records: snapshot.identity_indexes.records(),
             identity_index_backing_slots: snapshot.identity_indexes.backing_slots(),
+            identity_pool_entries: snapshot.identity_pool_entries,
             pending_destroyed_nodes: snapshot.pending_destroyed_nodes,
             resolved_import_facts: snapshot.resolved_import_facts,
             component_meta_states: snapshot.component_meta_states,

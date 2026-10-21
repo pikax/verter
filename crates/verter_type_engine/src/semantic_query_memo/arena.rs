@@ -243,6 +243,12 @@ fn assert_retained_multiset(data: &SemanticNodeData, mut retained: SmallVec<[u64
         }
     }
     retained.retain(|held| *held < UNALLOCATABLE_ID_FLOOR);
+    // The walk and the printed form usually visit the operands in the same
+    // order, and equal sequences are equal multisets: only a differing
+    // order is sorted before the multiset comparison.
+    if retained == expected {
+        return;
+    }
     sort_small(&mut retained);
     sort_small(&mut expected);
     assert_eq!(
@@ -378,6 +384,7 @@ fn chunk_storage_bytes() -> usize {
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<usize>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<bool>())
         + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<std::sync::atomic::AtomicBool>())
+        + heap_block_bytes(CHUNK_LEN * std::mem::size_of::<u64>())
         + std::mem::size_of::<Option<Box<Chunk>>>()
 }
 
@@ -581,6 +588,9 @@ struct Chunk {
     /// sidecar cleanup. Atomic so a sidecar writer marks a slot under the
     /// arena's read lock.
     tracked: Box<[std::sync::atomic::AtomicBool]>,
+    /// Each live slot's dedup fingerprint, recorded when it was interned:
+    /// a release finds the slot's bucket without hashing its payload again.
+    fingerprints: Box<[u64]>,
     /// Slots of this chunk still holding a payload; the chunk is dropped
     /// when it reaches zero.
     live: usize,
@@ -596,6 +606,7 @@ impl Chunk {
             tracked: (0..CHUNK_LEN)
                 .map(|_| std::sync::atomic::AtomicBool::new(false))
                 .collect(),
+            fingerprints: vec![0; CHUNK_LEN].into_boxed_slice(),
             live: 0,
         }
     }
@@ -629,33 +640,52 @@ struct ChunkTable {
     older: std::collections::BTreeMap<u64, Box<Chunk>>,
     /// The chunk number of `window[0]`.
     base: u64,
-    window: Vec<Option<Box<Chunk>>>,
+    /// A boxed slice rather than a `Vec`: a read indexes it in place, with
+    /// no slice conversion, which a debug build would otherwise call out
+    /// for on every node read. `window[window_len..]` is empty headroom:
+    /// the slice grows geometrically when a chunk lands past its end, so
+    /// adding a chunk costs amortised constant time, and shrinks only once
+    /// the headroom exceeds the entries in use several times over.
+    window: Box<[Option<Box<Chunk>>]>,
+    /// Entries of `window` in use: every live window chunk sits below it.
+    window_len: usize,
     /// Live chunks in `window`.
     window_live: usize,
 }
 
 impl ChunkTable {
-    // Every node read resolves its chunk here, so the lookup is written as
-    // one indexed match rather than a chain of option adaptors.
-    #[inline]
+    // Every node read resolves its chunk here, so the lookup is written
+    // with integer operators and a direct index — no adaptor or conversion
+    // a debug build would call out for.
+    #[inline(always)]
     fn get(&self, key: &u64) -> Option<&Chunk> {
-        let Some(offset) = key.checked_sub(self.base) else {
-            return self.older.get(key).map(Box::as_ref);
-        };
-        match self.window.get(usize::try_from(offset).ok()?) {
-            Some(Some(chunk)) => Some(chunk),
-            _ => None,
+        let key = *key;
+        if key < self.base {
+            return self.older.get(&key).map(Box::as_ref);
+        }
+        let offset = key - self.base;
+        if offset >= self.window.len() as u64 {
+            return None;
+        }
+        match &self.window[offset as usize] {
+            Some(chunk) => Some(chunk),
+            None => None,
         }
     }
 
-    #[inline]
+    #[inline(always)]
     fn get_mut(&mut self, key: &u64) -> Option<&mut Chunk> {
-        let Some(offset) = key.checked_sub(self.base) else {
-            return self.older.get_mut(key).map(Box::as_mut);
-        };
-        match self.window.get_mut(usize::try_from(offset).ok()?) {
-            Some(Some(chunk)) => Some(chunk),
-            _ => None,
+        let key = *key;
+        if key < self.base {
+            return self.older.get_mut(&key).map(Box::as_mut);
+        }
+        let offset = key - self.base;
+        if offset >= self.window.len() as u64 {
+            return None;
+        }
+        match &mut self.window[offset as usize] {
+            Some(chunk) => Some(chunk),
+            None => None,
         }
     }
 
@@ -668,8 +698,12 @@ impl ChunkTable {
         };
         let index = usize::try_from(offset).expect("chunk number fits the address space");
         if self.window.len() <= index {
-            self.window.resize_with(index + 1, || None);
+            let capacity = (index + 1)
+                .max(self.window.len() * 2)
+                .max(CHUNK_WINDOW_SLACK);
+            self.resize_window(capacity);
         }
+        self.window_len = self.window_len.max(index + 1);
         let slot = &mut self.window[index];
         if slot.is_none() {
             self.window_live += 1;
@@ -695,15 +729,15 @@ impl ChunkTable {
     }
 
     /// Move the window's leading entries out while it is sparse: an empty
-    /// entry is dropped, a live chunk moves to `older`. One drain per
-    /// compaction, and a compaction runs only once the empty entries exceed
-    /// the live ones, so its cost is amortised over the releases that made
-    /// the window sparse.
+    /// entry is dropped, a live chunk moves to `older`. One in-place
+    /// rotation per compaction, and a compaction runs only once the empty
+    /// entries exceed the live ones, so its cost is amortised over the
+    /// releases that made the window sparse.
     fn compact_window(&mut self) {
-        if self.window.len() <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
+        if self.window_len <= 2 * self.window_live + CHUNK_WINDOW_SLACK {
             return;
         }
-        let len = self.window.len();
+        let len = self.window_len;
         let mut leading = 0;
         let mut live_left = self.window_live;
         while len - leading > 2 * live_left + CHUNK_WINDOW_SLACK / 2 {
@@ -713,16 +747,30 @@ impl ChunkTable {
             }
             leading += 1;
         }
-        self.window.drain(..leading);
+        // The leading entries are all empty now: rotating them to the end
+        // turns them into headroom.
+        self.window[..len].rotate_left(leading);
+        self.window_len = len - leading;
         self.base += leading as u64;
         self.window_live = live_left;
+        let wanted = 2 * self.window_len.max(CHUNK_WINDOW_SLACK);
+        if self.window.len() > 2 * wanted {
+            self.resize_window(wanted);
+        }
+    }
+
+    /// Reallocate the window to `capacity` entries, keeping the ones in use.
+    fn resize_window(&mut self, capacity: usize) {
+        let mut resized = std::mem::take(&mut self.window).into_vec();
+        resized.resize_with(capacity, || None);
+        self.window = resized.into_boxed_slice();
     }
 
     /// Live chunk numbers in ascending order.
     fn keys(&self) -> impl Iterator<Item = u64> + '_ {
         let base = self.base;
         self.older.keys().copied().chain(
-            self.window
+            self.window[..self.window_len]
                 .iter()
                 .enumerate()
                 .filter(|(_, chunk)| chunk.is_some())
@@ -731,20 +779,28 @@ impl ChunkTable {
     }
 
     fn values(&self) -> impl Iterator<Item = &Chunk> {
-        self.older
-            .values()
-            .map(Box::as_ref)
-            .chain(self.window.iter().filter_map(Option::as_deref))
+        self.older.values().map(Box::as_ref).chain(
+            self.window[..self.window_len]
+                .iter()
+                .filter_map(Option::as_deref),
+        )
     }
 
     fn len(&self) -> usize {
         self.older.len() + self.window_live
     }
 
-    /// Entries the table holds, live or empty: what it costs to keep.
+    /// Entries the table holds, live, empty or headroom: what it costs to
+    /// keep.
     #[cfg(test)]
     fn held_entries(&self) -> usize {
         self.older.len() + self.window.len()
+    }
+
+    /// Entries the table addresses, live or empty, headroom excluded.
+    #[cfg(test)]
+    fn entries_in_use(&self) -> usize {
+        self.older.len() + self.window_len
     }
 
     #[cfg(test)]
@@ -966,6 +1022,7 @@ impl Drop for ArenaInner {
 }
 
 impl ArenaInner {
+    #[inline(always)]
     fn slot(&self, id: SemanticNodeId) -> Slot<'_> {
         if id.0 >= self.next_id {
             return Slot::Unallocated;
@@ -986,6 +1043,7 @@ impl ArenaInner {
         &mut self,
         payload: NodeData,
         scope: NodeScopeId,
+        fingerprint: u64,
         account: &Arc<verter_session_query::retention::SemanticRetentionAccount>,
     ) -> SemanticNodeId {
         let id = SemanticNodeId(self.next_id);
@@ -1003,6 +1061,7 @@ impl ArenaInner {
         let index = (id.0 & CHUNK_MASK) as usize;
         chunk.nodes[index] = Some(payload);
         chunk.scopes[index] = Some(scope);
+        chunk.fingerprints[index] = fingerprint;
         chunk.live += 1;
         self.live += 1;
         id
@@ -1548,13 +1607,37 @@ impl NodeArenaCore {
         self.destroyed.lock().ids.len()
     }
 
+    /// Give back the table of every dedup shard that indexes no node, and
+    /// its charge. Returns the tables released.
+    ///
+    /// A shard's table keeps the capacity its busiest moment needed after
+    /// its candidates are removed, so a released workload would otherwise
+    /// leave one charged granule per shard it ever touched. A shard that
+    /// still indexes a live node keeps its table: dropping it would free
+    /// nothing a reader could not reach again.
+    pub(super) fn release_idle_dedup_tables(&self) -> usize {
+        let mut released = 0;
+        for shard in &self.shards {
+            let mut shard = shard.lock();
+            if shard.index.is_empty() && shard.index.capacity() > 0 {
+                shard.index = HashMap::with_hasher(FingerprintKeys);
+                shard.settle(self.retention_account(), 0);
+                released += 1;
+            }
+        }
+        released
+    }
+
     pub(super) fn retain(
         &self,
         ids: &[SemanticNodeId],
     ) -> Result<(), crate::semantic_query::QueryError> {
         let mut inner = self.inner.write();
-        for id in ids {
-            match inner.slot(*id) {
+        // Index loops: every rooted delivery retains here, and a debug
+        // build runs them without an iterator call per id.
+        let mut index = 0;
+        while index < ids.len() {
+            match inner.slot(ids[index]) {
                 Slot::Live(..) => {}
                 Slot::Released => {
                     return Err(crate::semantic_query::QueryError::StaleSemanticOperand)
@@ -1563,10 +1646,16 @@ impl NodeArenaCore {
                     return Err(crate::semantic_query::QueryError::ForeignSemanticOperand)
                 }
             }
+            index += 1;
         }
-        for id in ids {
-            inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap().owners
-                [(id.0 & CHUNK_MASK) as usize] += 1;
+        let mut index = 0;
+        while index < ids.len() {
+            let id = ids[index];
+            match inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) {
+                Some(chunk) => chunk.owners[(id.0 & CHUNK_MASK) as usize] += 1,
+                None => unreachable!("a live slot's chunk is held"),
+            }
+            index += 1;
         }
         Ok(())
     }
@@ -1584,41 +1673,29 @@ impl NodeArenaCore {
     }
 
     pub(super) fn release_roots(&self, ids: &[SemanticNodeId]) {
-        let mut pending = SmallVec::<[SemanticNodeId; 16]>::from_slice(ids);
-        let mut retired = SmallVec::<[(SemanticNodeId, u64, bool); 4]>::new();
+        // Most releases only drop a count; the stack of dying nodes' children
+        // and the retired list allocate only once a node reaches zero.
+        let mut pending: Vec<SemanticNodeId> = Vec::new();
+        let mut retired: Vec<(SemanticNodeId, u64, bool)> = Vec::new();
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeRootRelease {
             blocked: self.inner.try_write().is_none(),
         });
         let mut inner = self.inner.write();
-        while let Some(id) = pending.pop() {
-            let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
-                continue;
-            };
-            let index = (id.0 & CHUNK_MASK) as usize;
-            if chunk.nodes[index].is_none() {
-                continue;
+        // Last id first, each dying node's descendants before the next id:
+        // the order of one stack seeded with `ids`.
+        for &id in ids.iter().rev() {
+            Self::release_root_locked(&mut inner, id, &mut pending, &mut retired);
+            while let Some(child) = pending.pop() {
+                Self::release_root_locked(&mut inner, child, &mut pending, &mut retired);
             }
-            assert!(chunk.owners[index] > 0, "live root released twice");
-            chunk.owners[index] -= 1;
-            if chunk.owners[index] != 0 || chunk.permanent[index] {
-                continue;
-            }
-            let data = chunk.nodes[index].as_ref().unwrap();
-            data.for_each_retained_child(|child| {
-                if child.0 < UNALLOCATABLE_ID_FLOOR {
-                    pending.push(child);
-                }
-            });
-            let fingerprint = structural_fingerprint(data, chunk.scopes[index].as_ref().unwrap());
-            let tracked = inner
-                .release(id)
-                .expect("the slot was live under the held lock");
-            retired.push((id, fingerprint, tracked));
         }
         drop(inner);
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::AfterRootRelease);
+        if retired.is_empty() {
+            return;
+        }
         // Intern always confirms slot liveness under `inner` after a weak
         // upgrade. Removing the index after the tombstone cannot resurrect it.
         let mut logged = Vec::new();
@@ -1642,6 +1719,41 @@ impl NodeArenaCore {
                 }
             }
         }
+    }
+
+    /// Drop one count of `id` under the held arena lock. A node whose last
+    /// count goes, and is not permanent, is released: its allocatable
+    /// children go on `pending` and it joins `retired` with its
+    /// fingerprint and whether a sidecar tracks it.
+    fn release_root_locked(
+        inner: &mut ArenaInner,
+        id: SemanticNodeId,
+        pending: &mut Vec<SemanticNodeId>,
+        retired: &mut Vec<(SemanticNodeId, u64, bool)>,
+    ) {
+        let Some(chunk) = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)) else {
+            return;
+        };
+        let index = (id.0 & CHUNK_MASK) as usize;
+        if chunk.nodes[index].is_none() {
+            return;
+        }
+        assert!(chunk.owners[index] > 0, "live root released twice");
+        chunk.owners[index] -= 1;
+        if chunk.owners[index] != 0 || chunk.permanent[index] {
+            return;
+        }
+        let data = chunk.nodes[index].as_ref().unwrap();
+        data.for_each_retained_child(|child| {
+            if child.0 < UNALLOCATABLE_ID_FLOOR {
+                pending.push(child);
+            }
+        });
+        let fingerprint = chunk.fingerprints[index];
+        let tracked = inner
+            .release(id)
+            .expect("the slot was live under the held lock");
+        retired.push((id, fingerprint, tracked));
     }
 }
 
@@ -1811,8 +1923,12 @@ impl NodeArena {
                             .unwrap()
                             .owners[(child.0 & CHUNK_MASK) as usize] += 1;
                     }
-                    let id =
-                        inner.allocate(payload.clone(), scope.clone(), self.retention_account());
+                    let id = inner.allocate(
+                        payload.clone(),
+                        scope.clone(),
+                        fingerprint,
+                        self.retention_account(),
+                    );
                     let chunk = inner.chunks.get_mut(&(id.0 >> CHUNK_BITS)).unwrap();
                     let index = (id.0 & CHUNK_MASK) as usize;
                     chunk.owners[index] = 1;
@@ -2364,6 +2480,45 @@ mod arena_intern_tests {
             structural_fingerprint(&a, &NodeScopeId::Global),
             structural_fingerprint(&b, &NodeScopeId::Global),
             "structurally-equal nodes must fingerprint equal (Hash/Eq consistency)",
+        );
+    }
+
+    /// A released node leaves the dedup bucket it was interned into, even
+    /// when that bucket's key is not its payload's structural fingerprint:
+    /// the release uses the fingerprint recorded at intern rather than
+    /// hashing the payload again, so no stale candidate survives it.
+    #[test]
+    fn released_node_leaves_the_bucket_it_was_interned_into() {
+        let arena = NodeArena::default();
+        let payload =
+            SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("forced".into()));
+        // The fingerprint hasher is keyed per process, so a fixed forced
+        // fingerprint shares the payload's shard in some runs. Flipping the
+        // lowest shard bit of the payload's own fingerprint never does.
+        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ 1;
+        assert_ne!(
+            forced_fp & SHARD_MASK,
+            structural_fingerprint(&payload, &NodeScopeId::Global) & SHARD_MASK,
+            "the forced bucket must sit in another shard than the payload's own"
+        );
+        let id = arena
+            .try_intern_with_fingerprint(payload, NodeScopeId::Global, forced_fp)
+            .expect("a fresh literal interns");
+        let holds_candidate = |arena: &NodeArena| {
+            arena.shards.iter().any(|shard| {
+                shard
+                    .lock()
+                    .index
+                    .values()
+                    .any(|bucket| bucket.iter().any(|(_, _, candidate)| *candidate == id))
+            })
+        };
+        assert!(holds_candidate(&arena));
+        arena.release_roots(&[id]);
+        assert!(!arena.is_live(id));
+        assert!(
+            !holds_candidate(&arena),
+            "the released node's candidate must leave its interned bucket"
         );
     }
 

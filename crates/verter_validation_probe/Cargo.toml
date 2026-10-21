@@ -25,6 +25,13 @@ external-corpus = []
 name = "validation-probe-summary"
 path = "src/bin/summary.rs"
 
+# The observation capture drives the complete selected corpus, so it is a
+# lane driver bounded by its job timeout rather than a test.
+[[bin]]
+name = "validation-probe-observe"
+path = "src/bin/observe.rs"
+required-features = ["external-corpus"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

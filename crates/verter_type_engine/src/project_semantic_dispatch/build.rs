@@ -37,6 +37,69 @@ pub fn mapped_name_remap_evaluations_for_tests() -> u64 {
     MAPPED_NAME_REMAP_EVALUATIONS.get()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static WRITTEN_UNION_ARM_CLASSIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Written-union arms classified for literal absorption on this thread, for
+/// growth tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn written_union_arm_classifications_for_tests() -> u64 {
+    WRITTEN_UNION_ARM_CLASSIFICATIONS.get()
+}
+
+/// What a written-union arm can take part in when the checker absorbs
+/// literals into their supertypes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AbsorptionRole {
+    /// A literal no other arm is absorbed into.
+    Literal,
+    /// A pattern template: a literal itself, and a supertype of the literals
+    /// it matches.
+    PatternTemplate,
+    /// A supertype a literal may be absorbed into: its primitive, `any` or
+    /// `unknown`.
+    Supertype,
+    /// Anything else.
+    Inert,
+}
+
+/// Whether some literal arm of `arms` has a supertype arm other than itself
+/// that may absorb it, deciding each arm's `role` once in one pass: a plain
+/// literal beside any supertype, or a pattern template beside a second,
+/// distinct supertype.
+fn may_absorb_a_literal(
+    arms: &[SemanticNodeId],
+    mut role: impl FnMut(SemanticNodeId) -> AbsorptionRole,
+) -> bool {
+    let mut literal = false;
+    let mut template = false;
+    let mut supertype: Option<SemanticNodeId> = None;
+    let mut distinct_supertypes = false;
+    for &arm in arms {
+        #[cfg(any(test, feature = "test-support"))]
+        WRITTEN_UNION_ARM_CLASSIFICATIONS.set(WRITTEN_UNION_ARM_CLASSIFICATIONS.get() + 1);
+        let arm_role = role(arm);
+        match arm_role {
+            AbsorptionRole::Literal => literal = true,
+            AbsorptionRole::PatternTemplate | AbsorptionRole::Supertype => {
+                template |= arm_role == AbsorptionRole::PatternTemplate;
+                match supertype {
+                    None => supertype = Some(arm),
+                    Some(first) if first != arm => distinct_supertypes = true,
+                    Some(_) => {}
+                }
+            }
+            AbsorptionRole::Inert => {}
+        }
+        if supertype.is_some() && (literal || (template && distinct_supertypes)) {
+            return true;
+        }
+    }
+    false
+}
+
 #[path = "tuple_product.rs"]
 mod tuple_product;
 pub(super) use tuple_product::ExpressionSplice;
@@ -557,6 +620,64 @@ thread_local! {
 pub(super) struct InferScan {
     pub(super) infers: Vec<SemanticNodeId>,
     pub(super) binder_scope: bool,
+}
+
+/// The dispatcher's witness that every step of the computation it is
+/// building was a complete function of its state: nothing it read was a
+/// partial (a refused child, a recursion carrier, a missing input) or a
+/// result its memo would not keep, and the request was not cancelled. Only
+/// [`ProjectSemanticDispatch::exact_steps`] and
+/// [`ProjectSemanticDispatch::exact_steps_since`] mint one, and a divergence
+/// is certified only with it
+/// ([`CertifiedDivergence`](crate::semantic_query::checker_policy::CertifiedDivergence)).
+pub(crate) struct ExactSteps {
+    _proof: (),
+}
+
+/// The dispatcher's witness that a conditional tail run grows without end:
+/// one argument is wrapped in the same structural constructor at every
+/// step, the others pass through unchanged, and the conditional selects the
+/// recursive branch for EVERY argument that constructor can hold — decided
+/// by the checker's own definitely-true / definitely-false tests over the
+/// wrapped type parameter, not by the steps taken so far. Only
+/// [`ProjectSemanticDispatch::uniform_growth`] mints one
+/// ([`CertifiedDivergence::uniform_growth`](crate::semantic_query::checker_policy::CertifiedDivergence::uniform_growth)).
+pub(crate) struct UniformGrowth {
+    _proof: (),
+}
+
+/// A declaration that grows one of its type parameters uniformly
+/// ([`ProjectSemanticDispatch::read_growth_shape`]): its recursive branch
+/// passes `wrapper` — a structural constructor over `parameter`, the type
+/// parameter at clause position `index` — and the conditional selects
+/// that branch for every instantiation of the wrapper.
+#[derive(Debug, Clone, Copy)]
+struct GrowthShape {
+    index: usize,
+    parameter: SemanticNodeId,
+    wrapper: SemanticNodeId,
+}
+
+/// Whether a build frame's steps so far are exact: it holds no partial and
+/// nothing its memo would refuse to keep.
+fn frame_is_exact(frame: &super::BuildLocalTaint) -> bool {
+    !frame.result_is_partial && !frame.cache_suppress
+}
+
+/// Whether the frame on `frames` producing the instantiation `identity`
+/// and every frame built on top of it are exact. `false` when no frame on
+/// the stack produces it: frames below the producer belong to its callers
+/// and are not consulted.
+fn exact_since_producer(frames: &[super::BuildLocalTaint], identity: u64) -> bool {
+    for frame in frames.iter().rev() {
+        if !frame_is_exact(frame) {
+            return false;
+        }
+        if frame.produces == Some(identity) {
+            return true;
+        }
+    }
+    false
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
@@ -5484,6 +5605,58 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
         }
 
+        // A built-in utility's instantiation, once a gate below has proved its
+        // identity.
+        let builtin_utility_output = |builtin_utility: Option<BuiltinUtility>| {
+            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
+            // `ReturnType<F>`, …) inspects its argument nodes to form the
+            // result — `build_builtin_utility` reads `X`'s Object surface,
+            // enumerates `K`'s key space, walks `F`'s call signature, etc.
+            // The result therefore transitively depends on the file
+            // content each file-derived argument was lowered from. Derive
+            // the self-roots from the `args` node set (the same
+            // file-derived-input rooting `KeyOf` / `MappedType` /
+            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
+            // contributes one `(canonical, observed_hash)` self-root so an
+            // edit to that file rejects this utility memo entry on the
+            // strict warm-read validator. Structural args (`Global`-scoped
+            // primitives, literal-union key sets) contribute nothing.
+            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
+            // Builtin-utility results are NEVER macro-T own-body (by
+            // design): `defineProps<Omit<Vendor, K>>()` surfaces
+            // members that came from `Vendor` via the utility, none of
+            // which the author wrote in the macro T body. Downgrade the
+            // provenance to structural so the utility's produced members
+            // report `declared_in_macro_type_arg = false`. (A carrier
+            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
+            // direct-decl case: CarrierProps's own body is stamped below
+            // and only its `extends`-reached members go through this
+            // utility path as structural.)
+            // `builtin_utility` is the identity the gate proved; builders never
+            // resolve a spelling themselves.
+            let (utility_result, utility_fence, utility_is_partial, approximation) = self
+                .build_builtin_utility(
+                    base,
+                    decl_name.as_ref(),
+                    builtin_utility,
+                    args,
+                    context.into_structural_provenance(),
+                );
+            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
+                (utility_result, utility_fence).into();
+            // Two-signal fold: a mapper-utility surface whose
+            // nested KeyOf/MappedType subquery was genuinely incomplete
+            // (budget / recursion / walker-fatal) surfaces here as a
+            // complete-looking `Value` shell — carry its partiality
+            // through the published value so the component-meta + shape /
+            // materialize warm gates refuse it. Benign non-cacheability of
+            // the nested read does NOT taint this (it is `cache_suppress`
+            // on the inner memo only).
+            output.fold_partial(utility_is_partial);
+            output.approximation = approximation;
+            output.with_observed_self_roots(observed_self_roots)
+        };
+
         // 2. Built-in utility dispatch.
         // A utility name (Partial, Pick, ReturnType, etc.) that the user
         // has NOT shadowed routes through the utility-specific dispatch
@@ -5515,55 +5688,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(builtin_application_carrier(builtin_identity)));
             }
 
-            // A built-in utility instantiation (`Pick<X, K>`, `Omit<X, K>`,
-            // `ReturnType<F>`, …) inspects its argument nodes to form the
-            // result — `build_builtin_utility` reads `X`'s Object surface,
-            // enumerates `K`'s key space, walks `F`'s call signature, etc.
-            // The result therefore transitively depends on the file
-            // content each file-derived argument was lowered from. Derive
-            // the self-roots from the `args` node set (the same
-            // file-derived-input rooting `KeyOf` / `MappedType` /
-            // `IndexedAccess` use): each `NodeScopeId::File`-scoped arg
-            // contributes one `(canonical, observed_hash)` self-root so an
-            // edit to that file rejects this utility memo entry on the
-            // strict warm-read validator. Structural args (`Global`-scoped
-            // primitives, literal-union key sets) contribute nothing.
-            let observed_self_roots = self.observed_self_roots_from_nodes(args.iter().copied());
-            // Builtin-utility results are NEVER macro-T own-body (by
-            // design): `defineProps<Omit<Vendor, K>>()` surfaces
-            // members that came from `Vendor` via the utility, none of
-            // which the author wrote in the macro T body. Downgrade the
-            // provenance to structural so the utility's produced members
-            // report `declared_in_macro_type_arg = false`. (A carrier
-            // `CarrierProps extends Omit<Vendor, K>` is the SEPARATE
-            // direct-decl case: CarrierProps's own body is stamped below
-            // and only its `extends`-reached members go through this
-            // utility path as structural.)
-            // `builtin_utility` is the identity the gate above proved; builders
-            // never resolve a spelling themselves.
-            let (utility_result, utility_fence, utility_is_partial, approximation) = self
-                .build_builtin_utility(
-                    base,
-                    decl_name.as_ref(),
-                    builtin_utility,
-                    args,
-                    context.into_structural_provenance(),
-                );
-            let mut output: crate::project_semantic_dispatch::walk::QueryBuildOutput =
-                (utility_result, utility_fence).into();
-            // Two-signal fold: a mapper-utility surface whose
-            // nested KeyOf/MappedType subquery was genuinely incomplete
-            // (budget / recursion / walker-fatal) surfaces here as a
-            // complete-looking `Value` shell — carry its partiality
-            // through the published value so the component-meta + shape /
-            // materialize warm gates refuse it. Benign non-cacheability of
-            // the nested read does NOT taint this (it is `cache_suppress`
-            // on the inner memo only).
-            output.fold_partial(utility_is_partial);
-            output.approximation = approximation;
-            return InstantiateStart::Done(Box::new(
-                output.with_observed_self_roots(observed_self_roots),
-            ));
+            return InstantiateStart::Done(Box::new(builtin_utility_output(builtin_utility)));
         }
 
         // 3. Resolve prepared type decl via `SessionDispatchHost` — the adapter
@@ -5657,6 +5782,44 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return InstantiateStart::Done(Box::new(out));
             }
         };
+
+        // 3b. A type alias whose authored body is the `intrinsic` keyword is
+        // the compiler-provided type its name selects (the checker's
+        // `intrinsicTypeKinds`), whether the lib declares it or the user does:
+        // a local `type NoInfer<T> = intrinsic` is `NoInfer`. A name that
+        // selects no implemented intrinsic is that unsupported intrinsic, never
+        // the body it spells: the keyword is not a reference to evaluate.
+        if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
+            let mut output = match adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
+                Some(utility) => builtin_utility_output(Some(utility)),
+                None => (
+                    QueryResult::Value(self.opaque(QueryError::UnsupportedIntrinsic {
+                        name: verter_type_expr::OwnedStr::from(decl_name.as_ref()),
+                    })),
+                    self.project_generation_signature(),
+                )
+                    .into(),
+            };
+            // The answer exists because the declaring file spells the alias
+            // `intrinsic`: root it on that file's observed version, as the
+            // ordinary declaration path does, so an edit to the alias misses
+            // the warm read. A non-file base has no version.
+            if !is_non_file_base {
+                output.dep_signature = output
+                    .dep_signature
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.dep_signature_for(decl_canonical, decl_whole_hash)
+                            .iter()
+                            .cloned(),
+                    )
+                    .collect();
+                output =
+                    output.with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
+            }
+            return InstantiateStart::Done(Box::new(output));
+        }
 
         // 4. Bind type parameters to args (positional). When a
         // parameter has no explicit arg but carries a default
@@ -5860,6 +6023,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             tail: crate::semantic_query::checker_policy::ConditionalTail::resumed(0),
             tail_arguments: std::iter::once(Arc::clone(args)).collect(),
+            tail_current: Arc::clone(args),
+            growth: None,
             conditional_body: None,
             generic,
             suspend,
@@ -5877,6 +6042,209 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // named refs, an interface's `extends` heritage) go structural.
         build.body = self.begin_instantiated_body(&mut build);
         InstantiateStart::Build(build)
+    }
+
+    /// [`ExactSteps`] for the computation being built, when its steps so far
+    /// are exact: its build frame holds no partial and nothing its memo
+    /// would refuse to keep, and the request is live. `None` is no proof —
+    /// the caller evaluates on under its budget instead of certifying.
+    fn exact_steps(&self) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let frames = self.build_local_taint.borrow();
+        let frame = frames.last()?;
+        frame_is_exact(frame).then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`ExactSteps`] for every step since the instantiation `claimed` began
+    /// on this path: the frame producing it is on this thread's build stack
+    /// ([`super::BuildLocalTaint::produces`]) and neither it nor any frame
+    /// built on top of it holds a partial or a result its memo would not
+    /// keep, and the request is live. `None` — the producer's frame is not
+    /// on the stack (a suspended continuation's), or a step read a partial —
+    /// is no proof.
+    fn exact_steps_since(&self, claimed: &SemanticQueryKey) -> Option<ExactSteps> {
+        if self.cancellation.is_cancelled() {
+            return None;
+        }
+        let identity = super::instantiation_frame_identity(claimed)?;
+        exact_since_producer(&self.build_local_taint.borrow(), identity)
+            .then_some(ExactSteps { _proof: () })
+    }
+
+    /// [`UniformGrowth`] for the tail run of `build` stepping from its
+    /// current arguments to `next`: exactly one argument changed, the
+    /// declaration grows that parameter uniformly ([`GrowthShape`]), the
+    /// current argument holds no type parameter (so neither does any later
+    /// one, and no later step defers), and `next`'s argument IS the wrapper
+    /// over the current one — this step took the recursive branch. Every
+    /// later step is then that branch again over a wrapped argument, with
+    /// no end. `None` is no proof.
+    fn uniform_growth(
+        &self,
+        build: &mut InstantiateBuild,
+        next: &[SemanticNodeId],
+    ) -> Option<UniformGrowth> {
+        let current = Arc::clone(&build.tail_current);
+        if current.len() != next.len() {
+            return None;
+        }
+        let mut changed = (0..next.len()).filter(|&position| current[position] != next[position]);
+        let index = changed.next()?;
+        if changed.next().is_some() {
+            return None;
+        }
+        let shape = self.growth_shape(build)?;
+        if shape.index != index || !self.type_params_within(&[current[index]]).is_empty() {
+            return None;
+        }
+        (self.substitute_semantic_type_param(shape.wrapper, shape.parameter, current[index])
+            == next[index])
+            .then_some(UniformGrowth { _proof: () })
+    }
+
+    /// The declaration's [`GrowthShape`], read once per build.
+    fn growth_shape(&self, build: &mut InstantiateBuild) -> Option<GrowthShape> {
+        if let Some(known) = build.growth {
+            return known;
+        }
+        let shape = self.read_growth_shape(build);
+        build.growth = Some(shape);
+        shape
+    }
+
+    /// The uniform growth `build`'s declaration declares, when its body is
+    /// a conditional `P extends E ? X : Y` over one of its own type
+    /// parameters `P`, written bare, where:
+    ///
+    /// - `E` is closed: no type parameter, no `infer`;
+    /// - exactly one branch applies the declaration again, passing every
+    ///   other parameter through unchanged and `P` wrapped in one structural
+    ///   constructor — a tuple without rest elements, an array or an object
+    ///   type, never a union, a spread or `never` whatever it holds — that
+    ///   mentions no other type variable;
+    /// - the checker's own generic test selects that branch for EVERY
+    ///   instantiation of the wrapper: definitely true when the wrapper over
+    ///   the parameter without its constraint relates to `E`
+    ///   (`getRestrictiveInstantiation`), definitely false when the wrapper
+    ///   over the wildcard does not (`getPermissiveInstantiation`).
+    ///
+    /// The decision reads the declaration and `E` only, never the run's
+    /// arguments, and its reads are this build's dependencies. Anything
+    /// else — a check that is not the bare parameter (`Acc["length"]`), an
+    /// open `E`, a branch the test leaves undecided — is no shape.
+    fn read_growth_shape(&self, build: &InstantiateBuild) -> Option<GrowthShape> {
+        let identity = crate::semantic_query::DeclIdentity {
+            canonical_id: build.decl_canonical.clone(),
+            owner: build.decl_owner,
+            whole_hash: build.decl_whole_hash,
+            decl_name: build.decl_name.clone(),
+        };
+        let body = self.declared_alias_body(&identity)??;
+        let graph = self.graph();
+        let (check, extends, true_branch, false_branch) = match graph.node_data(body).as_deref() {
+            Some(SemanticNodeData::Conditional {
+                check,
+                extends,
+                true_branch_ref,
+                false_branch_ref,
+                pending: None,
+                ..
+            }) => (*check, *extends, *true_branch_ref, *false_branch_ref),
+            _ => return None,
+        };
+        let own_parameter = |node: SemanticNodeId| match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                decl, param_index, ..
+            }) if decl.canonical_id == build.decl_canonical
+                && decl.owner == build.decl_owner
+                && decl.decl_name == build.decl_name =>
+            {
+                Some(usize::from(*param_index))
+            }
+            _ => None,
+        };
+        let index = own_parameter(check)?;
+        let applies = |branch: SemanticNodeId| {
+            self.conditional_tail_arguments(
+                branch,
+                &build.decl_canonical,
+                build.decl_owner,
+                &build.decl_name,
+            )
+        };
+        let (recurs_when_true, arguments) = match (applies(true_branch), applies(false_branch)) {
+            (Some(arguments), None) => (true, arguments),
+            (None, Some(arguments)) => (false, arguments),
+            _ => return None,
+        };
+        let passes_through = arguments.iter().enumerate().all(|(position, argument)| {
+            position == index || own_parameter(*argument) == Some(position)
+        });
+        let wrapper = *arguments.get(index)?;
+        if !passes_through
+            || !self.is_growth_constructor(wrapper)
+            || self.type_params_within(&[wrapper]) != [check]
+            || !self.type_params_within(&[extends]).is_empty()
+            || self.declares_or_reads_infer(wrapper)
+            || self.declares_or_reads_infer(extends)
+        {
+            return None;
+        }
+        let decided = if recurs_when_true {
+            matches!(
+                self.restrictive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::Assignable { .. }
+            )
+        } else {
+            matches!(
+                self.permissive_relation(wrapper, extends, &[check]),
+                super::dispatch_txn::RelationStep::NotAssignable
+            )
+        };
+        decided.then_some(GrowthShape {
+            index,
+            parameter: check,
+            wrapper,
+        })
+    }
+
+    /// Whether `node` is a structural constructor whose instantiation is
+    /// never a union, a spread or `never`, whatever it holds: a tuple
+    /// without rest elements, an array or an object type.
+    fn is_growth_constructor(&self, node: SemanticNodeId) -> bool {
+        match self.graph().node_data(node).as_deref() {
+            Some(SemanticNodeData::Tuple { elements, .. }) => {
+                elements.iter().all(|element| !element.rest)
+            }
+            Some(SemanticNodeData::Array { .. } | SemanticNodeData::Object(_)) => true,
+            _ => false,
+        }
+    }
+
+    /// Whether `node` declares or reads an `infer` type variable anywhere
+    /// below it.
+    fn declares_or_reads_infer(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(node) = stack.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                continue;
+            };
+            if matches!(
+                data.as_ref(),
+                SemanticNodeData::Infer { .. } | SemanticNodeData::InferRef { .. }
+            ) {
+                return true;
+            }
+            let _ = data.for_each_child(|child| stack.push(child));
+        }
+        false
     }
 
     /// Carry an instantiation's build on as far as it can go. `delivery` is
@@ -5927,7 +6295,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // compatibility policy. The run fails with the checker's TS2589 at
             // Verter's tail budget, far past the checker's tail limit, or at
             // once, as a certified divergence, when the arguments come round
-            // again. Each step is charged to the
+            // again through exact steps. Each step is charged to the
             // connected-work ledger; a trip leaves the step's back-edge as a
             // typed partial.
             let next = build
@@ -5957,18 +6325,32 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 result = checker_policy::circular_type_alias_recovery(self.graph(), alias);
             } else if let Some(next) = next {
-                // A run that comes back to arguments it already took is in
-                // the state it was in then, and each step is a function of
-                // that state: it repeats forever, a certified divergence.
-                if build.tail_arguments.contains(&next) {
-                    self.connected_demand.note_divergence_certificate();
-                    result = checker_policy::divergence_recovery(
-                        self.graph(),
-                        checker_policy::CertifiedDivergence::exact_recurrence(
-                            CheckerDiagnosticOperation::ConditionalTail,
-                        ),
-                        None,
-                    );
+                // A run that comes back to arguments it already took — the
+                // same declaration, context and phase, this build's — is in
+                // the state it was in then, and when each step was a complete
+                // function of that state it repeats forever: a certified
+                // divergence. So is a run that wraps one argument in the
+                // same constructor at every step when the conditional takes
+                // its recursive branch for whatever the constructor holds
+                // (`Self::uniform_growth`). Arguments that came round, or
+                // grew, after a step read a partial prove nothing, and the
+                // run goes on under its budget.
+                let operation = CheckerDiagnosticOperation::ConditionalTail;
+                let certificate = if build.tail_arguments.contains(&next) {
+                    self.exact_steps().map(|exact| {
+                        checker_policy::CertifiedDivergence::exact_recurrence(operation, exact)
+                    })
+                } else {
+                    self.uniform_growth(build, &next).and_then(|growth| {
+                        self.exact_steps().map(|exact| {
+                            checker_policy::CertifiedDivergence::uniform_growth(
+                                operation, exact, growth,
+                            )
+                        })
+                    })
+                };
+                if let Some(certificate) = certificate {
+                    result = checker_policy::divergence_recovery(self.graph(), certificate, None);
                 } else if let Err(refusal) = self
                     .connected_demand
                     .tail_step(&mut build.tail, CheckerDiagnosticOperation::ConditionalTail)
@@ -5983,6 +6365,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.fold_local_partial_completeness(reasons);
                 } else {
                     build.tail_arguments.insert(Arc::clone(&next));
+                    build.tail_current = Arc::clone(&next);
                     build.substitutions.clear();
                     let (next_env, _) = self.bind_instantiate_arguments(build, &next);
                     build.env = next_env;
@@ -11489,7 +11872,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // query build's taint frame (refusing warm admission) instead of
         // silently returning an intermediate carrier the signature-utility
         // caller would classify as settled.
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         // Bounded loop: exact-identity cycle detection plus the shared
         // connected work envelope, both typed-partial on trip.
         loop {
@@ -13497,9 +13880,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             node
         };
         let node = match data.as_deref() {
-            Some(SemanticNodeData::Primitive(PrimitiveKind::Null | PrimitiveKind::Undefined)) => {
-                self.primitive_node(PrimitiveKind::Never)
-            }
+            // The non-primitive `object` declares no member, so it has no
+            // key (`keyof object` is `never`), as nullish types have none.
+            Some(SemanticNodeData::Primitive(
+                PrimitiveKind::Null | PrimitiveKind::Undefined | PrimitiveKind::Object,
+            )) => self.primitive_node(PrimitiveKind::Never),
             // `keyof ClassType` yields only public keys (TS semantics): a
             // private/protected member is not part of the keyspace. Filter
             // non-public members out here, the direct-Object keyof chokepoint.
@@ -13631,6 +14016,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .build_key_of(merged, context)
                     .with_observed_self_roots(observed_self_roots);
             }
+            // A function or constructor type has no properties: its call
+            // and construct signatures name no key.
+            Some(SemanticNodeData::Signature { .. }) => self.primitive_node(PrimitiveKind::Never),
             Some(SemanticNodeData::Mapped { .. }) => self
                 .key_of_through_carrier(base, context)
                 .unwrap_or_else(|| self.graph().intern_node(SemanticNodeData::KeyOf { base })),
@@ -14098,6 +14486,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         key: &super::enumerate::KeyDomainKey,
     ) -> Option<SemanticNodeId> {
+        if let Some(binder) = key.binder {
+            return Some(binder);
+        }
         match (&key.literal, &key.key) {
             (Some(literal), _) => Some(
                 self.graph()
@@ -14279,7 +14670,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             QueryResult::Value(id) => id,
             QueryResult::Recursive(_) | QueryResult::Error(_) => return None,
         };
-        match self.graph().node_data(node).as_deref() {
+        let projected = match self.graph().node_data(node).as_deref() {
             Some(SemanticNodeData::Object(view)) => Some((
                 public_members(view.positive_members()),
                 read_partial_classes,
@@ -14307,6 +14698,93 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )
                 }),
             _ => None,
+        };
+        // A surface that projected no member and no index signature may be
+        // a type whose properties the shallow surface does not carry: read
+        // what the source declares.
+        let projected_nothing = projected
+            .as_ref()
+            .is_none_or(|(members, _, _, signatures)| members.is_empty() && signatures.is_empty());
+        if projected_nothing {
+            if let Some(declared) = self.declared_non_object_projection(source, source_context) {
+                return Some(declared);
+            }
+        }
+        projected
+    }
+
+    /// The surface of a source that declares a function or constructor
+    /// type, an array or a tuple — kinds whose properties the shallow
+    /// projection does not list. A function type has no properties and no
+    /// index signatures (`keyof (() => void)` is `never`); an array or tuple
+    /// maps the properties of its apparent type, a tuple's positions and
+    /// `length` over the `Array` wrapper's members and index signature
+    /// (`{ [K in keyof [1, 'a'] as …]: … }`). `None` for any other kind.
+    fn declared_non_object_projection(
+        &self,
+        source: SemanticNodeId,
+        source_context: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<(
+        Vec<SurfaceMember>,
+        crate::semantic_query::PartialReasonSet,
+        bool,
+        Vec<crate::semantic_query::IndexSignature>,
+    )> {
+        let declared = self.resolve_signature_source_carrier(source, source_context);
+        let apparent = match self.graph().node_data(declared).as_deref()? {
+            SemanticNodeData::Signature { .. } => {
+                return Some((
+                    Vec::new(),
+                    crate::semantic_query::PartialReasonSet::empty(),
+                    true,
+                    Vec::new(),
+                ));
+            }
+            SemanticNodeData::Tuple { .. } | SemanticNodeData::Array { .. } => {
+                self.array_like_apparent_object(declared)?
+            }
+            _ => return None,
+        };
+        match self.graph().node_data(apparent).as_deref() {
+            Some(SemanticNodeData::Object(view)) => Some((
+                view.positive_members()
+                    .iter()
+                    .filter(|member| member.visibility.is_public())
+                    .map(crate::semantic_query::SurfaceMember::clone)
+                    .collect(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                view.index_signatures
+                    .iter()
+                    .map(crate::semantic_query::IndexSignature::clone)
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The apparent object type of the array or tuple `node`
+    /// (`getApparentType`): a tuple's own positions and `length` over the
+    /// project's `Array` / `ReadonlyArray` wrapper, an array that wrapper
+    /// alone. `None` when the wrapper read does not settle, or an array's
+    /// project declares none.
+    fn array_like_apparent_object(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
+        let (name, args) = self.apparent_wrapper_of(node)?;
+        let canonical = self
+            .graph()
+            .node_scope(node)
+            .and_then(|scope| scope.canonical_file())
+            .or_else(|| self.wrapper_demand_canonical())?;
+        let wrapper = match self.global_wrapper_surface(name, &args, canonical.as_ref()) {
+            super::apparent_type::GlobalWrapper::Surface(surface) => Some(surface),
+            super::apparent_type::GlobalWrapper::Absent => None,
+            super::apparent_type::GlobalWrapper::Unsettled => return None,
+        };
+        match self.graph().node_data(node).as_deref()? {
+            SemanticNodeData::Tuple { elements, readonly } => {
+                Some(self.tuple_apparent_surface(wrapper, elements, *readonly))
+            }
+            _ => wrapper,
         }
     }
 
@@ -14368,6 +14846,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// - a primitive, a literal, `object`, `null` and `undefined` pass
     ///   through unchanged (`Partial<string>` is `string`), with or without
     ///   an `as` clause; `never` is `never`, and `unknown` maps to `{}`;
+    /// - a function or constructor type, having no properties, maps to `{}`;
     /// - without an `as` clause, an array maps its element (`Partial<number[]>`
     ///   is `(number | undefined)[]`) and a tuple each element, the
     ///   modifiers applying to the element flags (`Partial<[1, 2?]>` is
@@ -14407,6 +14886,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::TypeOfNominal(_) => {
                 drop(data);
                 Some(finish(resolved, false))
+            }
+            // A function or constructor type is an object with no properties
+            // and no index signatures: its signatures are not mapped, so the
+            // mapping is `{}` (`Partial<() => void>`).
+            SemanticNodeData::Signature { .. } => {
+                drop(data);
+                Some(finish(self.empty_object(), false))
             }
             SemanticNodeData::Union(members) => {
                 let members = members.members_arc();
@@ -14992,8 +15478,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             _ => source,
         };
-        if let Some(absorbed) = self.absorb_mapped(reduced_source) {
-            return absorbed;
+        // A mapping over `keyof S` (homomorphic) whose `S` is `any` maps the
+        // one key type the checker reads off `any`, `string`
+        // (`forEachMappedTypePropertyKeyTypeAndIndexSignatureKeyType`): it
+        // is `{ [x: string]: … }` (`{ [K in keyof T]: T[K] }` over `any` is
+        // `{ [x: string]: any }`), never `any`.
+        let homomorphic_over_any = (mapper.over_type_variable || mapper.key_space != source)
+            && matches!(
+                self.graph().node_data(reduced_source).as_deref(),
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Any))
+            );
+        if !homomorphic_over_any {
+            if let Some(absorbed) = self.absorb_mapped(reduced_source) {
+                return absorbed;
+            }
         }
         let graph = self.graph();
         let fence = self.project_generation_signature();
@@ -15107,7 +15605,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // through the source's heritage) is not re-lifted as the
         // anonymous `PROPAGATED` bridge downstream.
         let mut mapped_partial_reasons = crate::semantic_query::PartialReasonSet::empty();
-        let source_projection = self.source_projection_with_key_domain(source, context);
+        let source_projection = if homomorphic_over_any {
+            Some((
+                Vec::new(),
+                crate::semantic_query::PartialReasonSet::empty(),
+                true,
+                vec![crate::semantic_query::IndexSignature {
+                    key_type: self.primitive_node(PrimitiveKind::String),
+                    value_type: source,
+                    readonly: false,
+                    spans: verter_type_expr::IndexSignatureSpans::default(),
+                    declaration_origin: None,
+                }],
+            ))
+        } else {
+            self.source_projection_with_key_domain(source, context)
+        };
         // A source that RESOLVED (to any surface, including an EMPTY one)
         // is distinct from a source that did NOT project: only the latter
         // defers a homomorphic mapping — see the resolved-empty arm below.
@@ -15959,21 +16472,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// Substitute one selected key, then evaluate its value through the
     /// shared continuation runtime. Instantiation and conditional reduction
     /// retain the full publication context and typed completion outcome.
-    pub(super) fn materialize_selected_key_mapped_value(
-        &self,
-        mapper: &crate::semantic_query::MapperKey,
-        key_literal: &LiteralValue,
-        context: crate::semantic_query::ProjectionReductionContext,
-    ) -> SemanticNodeId {
-        let key_arg = self
-            .graph()
-            .intern_node(SemanticNodeData::Literal(key_literal.clone()));
-        self.materialize_selected_key_mapped_value_with_node(mapper, key_arg, context)
-    }
-
-    /// Node-keyed selected value; numeric and nominal keys retain their
-    /// original identity during substitution. The active build adopts the
-    /// typed evaluation rails before receiving a node.
+    /// Numeric, enum-member and nominal keys retain their original identity
+    /// during substitution. The active build adopts the typed evaluation
+    /// rails before receiving a node.
     pub(super) fn materialize_selected_key_mapped_value_with_node(
         &self,
         mapper: &crate::semantic_query::MapperKey,
@@ -15995,7 +16496,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         resolved_source: SemanticNodeId,
     ) -> Result<Vec<SemanticNodeId>, crate::semantic_query::PartialReasonSet> {
         let mut reads = Vec::new();
-        let mut seen = FxHashSet::default();
+        let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut pending = vec![mapper.value_expr];
         while let Some(node) = pending.pop() {
             if !seen.insert(node) {
@@ -16192,6 +16693,40 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let substituted_remap =
             self.substitute_semantic_type_param(remap_node, mapper.parameter_node, key_literal);
+        // A remap whose conditional the relation engine cannot decide
+        // (`T[K] extends Function` over an operand it has no judgement for)
+        // leaves this key's name unknown: the key domain is unknown, so the
+        // mapped type stays its deferred carrier, as it does over an open
+        // domain, instead of a gap. The undecided reading is declined, but
+        // its roots stay, and the carrier it led to is never warm-admitted.
+        // Any other partial (a budget, a missing dependency alone, a
+        // degraded read) joins the build as it would unobserved.
+        let read = self.observe_read(|| self.evaluate_remap_outcome(substituted_remap, context));
+        let undecided = crate::semantic_query::PartialReasonSet::UNDECIDED_CONDITIONAL;
+        let reasons = read.result_completeness().reasons();
+        if matches!(read.value(), MappedKeyRemapOutcome::DeferCarrier)
+            && reasons.contains(undecided)
+            && undecided
+                .union(crate::semantic_query::PartialReasonSet::MISSING_DEPENDENCY)
+                .contains(reasons)
+        {
+            read.preserve_reuse_evidence(self);
+            self.fold_into_top_build_local_taint(false, true);
+            return read
+                .discard()
+                .unwrap_or(MappedKeyRemapOutcome::DeferCarrier);
+        }
+        read.adopt(self)
+            .unwrap_or(MappedKeyRemapOutcome::DeferCarrier)
+    }
+
+    /// The `as`-clause outcome of one substituted remap: its evaluation,
+    /// a helper application bound and re-evaluated, then classified.
+    fn evaluate_remap_outcome(
+        &self,
+        substituted_remap: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+    ) -> MappedKeyRemapOutcome {
         let evaluated_remap = self
             .evaluate_deferred_semantic_node_with_context(substituted_remap, context)
             .into_active_query_build_node(self);
@@ -17078,7 +17613,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> SemanticNodeId {
-        let mut visited = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut current = self
             .evaluate_deferred_semantic_node_with_context(node, context)
             .into_active_query_build_node(self);
@@ -17943,17 +18478,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// ([`Self::lib_awaited_node`]); this read is a root. When
     /// `Awaited<argument>` is a root whose evaluation is ALREADY in progress
     /// on this path, the conditional has come back to itself with the same
-    /// argument and can never reach a value — a certified divergence: the
-    /// checker reports TS2589 and continues with its error type, which
-    /// dominates each union and branch on the way. That recovery is the
-    /// answer, a complete one.
+    /// argument: through exact steps it can never reach a value — a
+    /// certified divergence: the checker reports TS2589 and continues with
+    /// its error type, which dominates each union and branch on the way.
+    /// That recovery is the answer, a complete one
+    /// ([`Self::lib_awaited_recurs`]). The steps are every step since that
+    /// application began, in its own frame and each frame built on top of
+    /// it ([`Self::exact_steps_since`]), so a partial read anywhere on the
+    /// cycle proves nothing.
     fn lib_awaited_read(&self, argument: SemanticNodeId) -> Option<Option<SemanticNodeId>> {
         let application = self.declaration_carrier_key(self.lib_awaited_carrier(argument))?;
         if self
             .graph()
             .is_same_path_claim_at(&application, self.checking_site.get())
         {
-            return Some(Some(self.lib_awaited_recurs()));
+            return match self.lib_awaited_recurs(self.exact_steps_since(&application)) {
+                LibAwaited::Reduced(recovery) => Some(Some(recovery)),
+                _ => None,
+            };
         }
         let body = match self.execute_read(application).value {
             QueryResult::Value(body) => body,
@@ -18015,19 +18557,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.lib_awaited_run(operand, &mut walk, 0)
     }
 
-    /// The TS2589 recovery of the lib conditional re-entering itself with
-    /// an argument it is still evaluating on this path: the same
-    /// application under the same context, so a certified divergence — a
-    /// complete answer, kept.
-    fn lib_awaited_recurs(&self) -> SemanticNodeId {
-        self.connected_demand.note_divergence_certificate();
-        crate::semantic_query::checker_policy::divergence_recovery(
+    /// Exercise the library walk under the caller's build-local observations.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lib_awaited_for_tests(&self, operand: SemanticNodeId) -> Option<SemanticNodeId> {
+        match self.lib_awaited_node(operand) {
+            LibAwaited::Reduced(node) => Some(node),
+            LibAwaited::Deferred | LibAwaited::Refused => None,
+        }
+    }
+
+    /// The lib conditional re-entering itself with an argument it is still
+    /// evaluating on this path: the same application under the same
+    /// context. Through `exact` steps that is a certified divergence, its
+    /// TS2589 recovery a complete answer, kept. Without that witness — a
+    /// step on the cycle read a partial, or the frame that began the
+    /// application is not on this stack — it proves nothing: the
+    /// cross-query application stops as a same-path partial, never kept.
+    /// A local walk with an executable transition instead continues through
+    /// `lib_awaited_resolved` under its work and depth allowances.
+    fn lib_awaited_recurs(&self, exact: Option<ExactSteps>) -> LibAwaited {
+        let Some(exact) = exact else {
+            self.fold_local_partial_completeness(
+                crate::semantic_query::PartialReasonSet::SAME_PATH_RECURSION,
+            );
+            return LibAwaited::Refused;
+        };
+        LibAwaited::Reduced(crate::semantic_query::checker_policy::divergence_recovery(
             self.graph(),
             crate::semantic_query::checker_policy::CertifiedDivergence::exact_recurrence(
                 crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+                exact,
             ),
             None,
-        )
+        ))
     }
 
     /// The TS2589 recovery of the lib conditional after `refusal`.
@@ -18138,10 +18700,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return LibStep::Done(LibAwaited::Reduced(resolved));
         }
         if walk.on_path.contains(&resolved) {
-            return LibStep::Done(LibAwaited::Reduced(self.lib_awaited_recurs()));
+            if let Some(exact) = self.exact_steps() {
+                return LibStep::Done(self.lib_awaited_recurs(Some(exact)));
+            }
+            // No proof: evaluate the transition again. Tail transitions
+            // remain charged by the run; synchronous carrier transitions
+            // also need a depth rail, since they can recur without
+            // returning a tail step to that run.
+            let within = walk.depth.enter(
+                1,
+                crate::semantic_query::CheckerDiagnosticOperation::LibAwaited,
+            );
+            let result = if let Err(refusal) = within {
+                LibStep::Done(LibAwaited::Reduced(self.lib_awaited_too_deep(refusal)))
+            } else if let Err(reasons) = self.charge_connected_work() {
+                self.fold_local_partial_completeness(reasons);
+                LibStep::Done(LibAwaited::Refused)
+            } else {
+                self.lib_awaited_resolved(resolved, walk)
+            };
+            walk.depth.leave(1);
+            return result;
         }
         walk.path.push(resolved);
         walk.on_path.insert(resolved);
+        self.lib_awaited_resolved(resolved, walk)
+    }
+
+    /// Evaluate one resolved operand. Active membership belongs to the
+    /// first run that entered it; a repeated transition adds no duplicate
+    /// path entry that could remove an enclosing run's membership on exit.
+    fn lib_awaited_resolved(&self, resolved: SemanticNodeId, walk: &mut LibAwaitedWalk) -> LibStep {
         let Some(data) = self.graph().node_data(resolved) else {
             return LibStep::Done(LibAwaited::Refused);
         };
@@ -19591,6 +20180,205 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    construction_ordinal_seam! {
+        /// The type the checker constructs from a WRITTEN union
+        /// (`getUnionType` over its arms) when that construction absorbs a
+        /// literal: `"a" | string` is `string`, `1 | number | "x"` is
+        /// `number | "x"`, `"a1" | `a${number}` | "ab"` is
+        /// `"ab" | `a${number}``.
+        ///
+        /// An alias is transparent to that construction, so a named arm
+        /// (`type A = "a"`) is resolved before absorption is decided: an arm
+        /// resolving to a literal, primitive or pattern template stands for
+        /// its resolution, and one resolving to a union contributes that
+        /// union's arms, resolved the same way. Any other named arm stays
+        /// written by its name. A canonical union is offered too: the
+        /// canonical algebra keeps a named arm unresolved, so only its named
+        /// arms can still absorb or be absorbed.
+        ///
+        /// `None` for any other node and for a written union with no literal
+        /// beside a primitive or pattern template that could absorb it: such
+        /// a union is not re-decided here and stays the authored display form
+        /// in its written order (`"a" | "b" | never`, `A | "b"`).
+        ///
+        /// Otherwise the shared `ReduceUnion` query decides the resolved arms
+        /// under `nullability`, the root file's `null` / `undefined`
+        /// algebra, and the outcome is
+        /// returned typed: the reduced type when it absorbed a literal, the
+        /// written node itself when it absorbed none, and the reducer's (or a
+        /// named arm's resolution) error or opaque result verbatim, for the
+        /// caller to classify as a fault or a miss.
+        fn reduced_written_union(
+            &self,
+            node: SemanticNodeId,
+            nullability: verter_session_query::flow::policy::NullabilityPolicy,
+        ) -> Option<QueryResult<SemanticNodeId>> {
+            use crate::semantic_query::composite::CompositeOriginCategory as Category;
+            let graph = self.graph();
+            let arms = match graph.node_data(node)?.as_ref() {
+                SemanticNodeData::Union(arms)
+                    if matches!(
+                        arms.origin_category(),
+                        Category::AuthoredShell
+                            | Category::PreservingRebuild
+                            | Category::Canonical(_)
+                            | Category::CanonicalUnproven
+                    ) =>
+                {
+                    arms.members_arc()
+                }
+                _ => return None,
+            };
+            // A named arm: a declaration reference, an alias shell or a
+            // declaration placeholder.
+            let is_named = |arm: SemanticNodeId| {
+                matches!(
+                    graph.node_data(arm).as_deref(),
+                    Some(
+                        SemanticNodeData::DeclRef { .. }
+                            | SemanticNodeData::Alias(_)
+                            | SemanticNodeData::Opaque(crate::semantic_query::QueryError::DeclPlaceholder { .. })
+                    )
+                )
+            };
+            // The arm a named arm stands for when deciding absorption: its
+            // resolution through the whole alias chain, unless that is
+            // neither a union nor a literal, primitive or pattern template. A
+            // chain is finite, as the declarations it names are; one that
+            // comes back to a node it already passed is a recursive alias,
+            // which stays written by its name. A resolution that fails is
+            // returned for the caller to classify.
+            let resolve_named = |arm: SemanticNodeId| -> Result<SemanticNodeId, QueryResult<SemanticNodeId>> {
+                let mut resolved = arm;
+                let mut passed: FxHashSet<SemanticNodeId> = FxHashSet::default();
+                loop {
+                    if !passed.insert(resolved) {
+                        return Ok(arm);
+                    }
+                    let key = match graph.node_data(resolved).as_deref() {
+                        Some(SemanticNodeData::Alias(inner)) => {
+                            resolved = *inner;
+                            continue;
+                        }
+                        Some(SemanticNodeData::DeclRef { identity }) => {
+                            SemanticQueryKey::ResolveDecl(super::resolve_decl_key(
+                                &identity.canonical_id,
+                                identity.owner,
+                                &identity.decl_name,
+                            ))
+                        }
+                        Some(SemanticNodeData::Opaque(
+                            crate::semantic_query::QueryError::DeclPlaceholder {
+                                canonical_id,
+                                owner,
+                                name,
+                                ..
+                            },
+                        )) => SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                            self.type_slot_for(canonical_id.clone(), *owner, name.clone()),
+                            Arc::from(Vec::new().into_boxed_slice()),
+                            self.instantiate_context_for(
+                                canonical_id,
+                                crate::semantic_query::ProjectionReductionContext::published(
+                                    ProjectionMode::Navigate,
+                                ),
+                            ),
+                        )),
+                        Some(
+                            SemanticNodeData::Union(_)
+                            | SemanticNodeData::Literal(_)
+                            | SemanticNodeData::TemplateLiteral { .. }
+                            | SemanticNodeData::Primitive(_),
+                        ) => return Ok(resolved),
+                        Some(SemanticNodeData::Opaque(_)) if resolved != arm => {
+                            return Err(QueryResult::Value(resolved));
+                        }
+                        _ => return Ok(arm),
+                    };
+                    match self.execute_read(key).value {
+                        QueryResult::Value(next) => resolved = next,
+                        // A recursive alias stays written by its name.
+                        QueryResult::Recursive(_) => return Ok(arm),
+                        error @ QueryResult::Error(_) => return Err(error),
+                    }
+                }
+            };
+            // The written arms, nested and named unions flattened as the
+            // reducer reads them, and named arms standing for their
+            // resolution.
+            let mut flat = Vec::with_capacity(arms.len());
+            let mut seen_names: FxHashSet<SemanticNodeId> = FxHashSet::default();
+            let mut pending: Vec<SemanticNodeId> = arms.iter().rev().copied().collect();
+            while let Some(arm) = pending.pop() {
+                let arm = if is_named(arm) {
+                    if !seen_names.insert(arm) {
+                        flat.push(arm);
+                        continue;
+                    }
+                    match resolve_named(arm) {
+                        Ok(resolved) => resolved,
+                        Err(outcome) => return Some(outcome),
+                    }
+                } else {
+                    arm
+                };
+                match graph.node_data(arm).as_deref() {
+                    Some(SemanticNodeData::Union(inner)) => {
+                        pending.extend(inner.iter().rev().copied());
+                    }
+                    _ => flat.push(arm),
+                }
+            }
+            // Each arm's part in absorption: a literal, a pattern template, or a
+            // supertype a literal may be absorbed into (its primitive, `any` or
+            // `unknown`).
+            let role = |arm: SemanticNodeId| match graph.node_data(arm).as_deref() {
+                Some(SemanticNodeData::Literal(_)) => AbsorptionRole::Literal,
+                Some(SemanticNodeData::TemplateLiteral { .. }) => AbsorptionRole::PatternTemplate,
+                Some(SemanticNodeData::Primitive(
+                    PrimitiveKind::String
+                    | PrimitiveKind::Number
+                    | PrimitiveKind::BigInt
+                    | PrimitiveKind::Boolean
+                    | PrimitiveKind::Any
+                    | PrimitiveKind::Unknown,
+                )) => AbsorptionRole::Supertype,
+                _ => AbsorptionRole::Inert,
+            };
+            let reducible = may_absorb_a_literal(&flat, role);
+            if !reducible {
+                return None;
+            }
+            let members: Arc<[SemanticNodeId]> = Arc::from(flat.as_slice());
+            let key = SemanticQueryKey::ReduceUnion {
+                members,
+                nullability,
+            };
+            let reduced = match self.execute_read(key).value {
+                QueryResult::Value(reduced) => reduced,
+                other => return Some(other),
+            };
+            let is_literal = |arm: SemanticNodeId| {
+                matches!(
+                    role(arm),
+                    AbsorptionRole::Literal | AbsorptionRole::PatternTemplate
+                )
+            };
+            let absorbed = match graph.node_data(reduced).as_deref() {
+                // An opaque reduction is the caller's to classify.
+                Some(SemanticNodeData::Opaque(_)) => true,
+                Some(SemanticNodeData::Union(kept)) => {
+                    let kept: FxHashSet<SemanticNodeId> = kept.iter().copied().collect();
+                    flat.iter()
+                        .any(|&arm| is_literal(arm) && !kept.contains(&arm))
+                }
+                Some(_) => flat.iter().any(|&arm| is_literal(arm) && arm != reduced),
+                None => false,
+            };
+            Some(QueryResult::Value(if absorbed { reduced } else { node }))
+        }
+    }
+
     /// Whether a member-wise composite REBUILD may re-decide its arm list
     /// through the canonical authority — the carrier-semantics dispatch for
     /// projection/expansion/realization rebuild sites, driven by the
@@ -20278,6 +21066,11 @@ pub(super) struct InstantiateBuild {
     /// Every argument list the tail run has taken, for the recurrence that
     /// never reaches a value.
     tail_arguments: rustc_hash::FxHashSet<Arc<[SemanticNodeId]>>,
+    /// The arguments of the tail run's current step.
+    tail_current: Arc<[SemanticNodeId]>,
+    /// The declaration's uniform growth ([`GrowthShape`]), once read
+    /// (`Some(None)` when its body has none).
+    growth: Option<Option<GrowthShape>>,
     /// Whether the declaration's body is a conditional type, once read
     /// (`Some(None)` when it could not be recovered).
     conditional_body: Option<Option<bool>>,
@@ -20608,6 +21401,60 @@ fn modified_readonly(readonly: bool, modifier: crate::semantic_query::ReadonlyMo
         crate::semantic_query::ReadonlyMod::Add => true,
         crate::semantic_query::ReadonlyMod::Remove => false,
         crate::semantic_query::ReadonlyMod::Keep => readonly,
+    }
+}
+
+#[cfg(test)]
+mod same_path_witness_tests {
+    use super::exact_since_producer;
+    use crate::project_semantic_dispatch::BuildLocalTaint;
+
+    const CLAIMED: u64 = 7;
+
+    fn frame(produces: Option<u64>, partial: bool) -> BuildLocalTaint {
+        BuildLocalTaint {
+            produces,
+            result_is_partial: partial,
+            ..BuildLocalTaint::default()
+        }
+    }
+
+    /// A same-path claim on an application an enclosing build produces is
+    /// proved only through every frame from that build's to the top: a
+    /// partial in the producer's frame or in any frame between refuses the
+    /// proof even when the innermost frame is clean, a partial below the
+    /// producer (its callers') does not, and a producer that is not on the
+    /// stack (a suspended continuation's) proves nothing.
+    #[test]
+    fn a_same_path_claim_is_exact_only_through_every_frame_since_its_producer() {
+        let cases = [
+            (vec![frame(Some(CLAIMED), false), frame(None, false)], true),
+            (vec![frame(Some(CLAIMED), true), frame(None, false)], false),
+            (
+                vec![
+                    frame(Some(CLAIMED), false),
+                    frame(Some(3), true),
+                    frame(None, false),
+                ],
+                false,
+            ),
+            (
+                vec![
+                    frame(None, true),
+                    frame(Some(CLAIMED), false),
+                    frame(None, false),
+                ],
+                true,
+            ),
+            (vec![frame(Some(3), false), frame(None, false)], false),
+        ];
+        for (index, (frames, exact)) in cases.iter().enumerate() {
+            assert_eq!(
+                exact_since_producer(frames, CLAIMED),
+                *exact,
+                "case {index}"
+            );
+        }
     }
 }
 

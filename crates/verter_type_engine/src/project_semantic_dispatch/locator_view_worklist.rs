@@ -1413,13 +1413,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 .args
                                 .iter()
                                 .map(|argument| {
-                                    let context = self.argument_operand_context(
+                                    let operand_context = self.argument_operand_context(
                                         *argument,
                                         state.argument_context,
                                     );
-                                    self.canonical_argument_carrier(self.answer_member(
-                                        projected(memo, *argument, context),
+                                    self.canonical_argument_carrier(self.answer_argument(
+                                        projected(memo, *argument, operand_context),
                                         context,
+                                        state.argument_context,
+                                        operand_context,
                                         inputs,
                                     ))
                                 })
@@ -2294,6 +2296,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 }
 
 mod finish;
+#[cfg(any(test, feature = "test-support"))]
+pub use finish::count_answer_member_reads_for_tests;
+pub(super) use finish::AnswerReads;
 fn projection_finish_may_dispatch(
     data: &SemanticNodeData,
     context: ProjectionReductionContext,

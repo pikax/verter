@@ -7,7 +7,9 @@
 //! through the SHARED `SemanticQueryKey::IndexedAccess` / `KeyOf` reducer
 //! (which canonicalises to `ProjectPath` / the keyof builder), and PRESERVES
 //! the operator carrier under `Skeleton` (the mode gate) and for symbolic
-//! objects the reducer cannot resolve.
+//! objects the reducer cannot resolve. A written union or intersection body
+//! publishes the type the checker constructs from it, reduced by the
+//! canonical union / intersection algebra.
 
 use super::support::*;
 use verter_type_engine::semantic_query::{
@@ -323,5 +325,312 @@ fn evaluate_keyof_reduces_on_cold_navigate_dispatch() {
         "cold Navigate FFI evaluate of `keyof KeySurface` must reduce IDENTICALLY \
          to the named-resolve of `ConcreteKeys` — a `DeclRef` operand must defer \
          to the bridge, not degrade to a semanticMiss terminal"
+    );
+}
+
+// ── Written unions and intersections publish the type the checker builds ──
+
+/// The checker's lib declarations the semantic benchmark's
+/// template-literal scenario carries beside its probe.
+const BENCH_LIB_PRELUDE: &str = "type Exclude<T, U> = T extends U ? never : T;\n\
+     type Extract<T, U> = T extends U ? T : never;\n\
+     type Uppercase<S extends string> = intrinsic;\n\
+     type Lowercase<S extends string> = intrinsic;\n\
+     type Capitalize<S extends string> = intrinsic;\n\
+     type Uncapitalize<S extends string> = intrinsic;\n";
+
+/// `__Probe` in `canonical`, demanded as the semantic benchmark demands it:
+/// resolved by name in the host's default mode and projected to its wire
+/// answer.
+fn published_probe(host: &crate::VerterHost, canonical: &str) -> TypeExpr {
+    let (outcome, _) = host
+        .resolve_named_symbol_with_audit(canonical, "__Probe", None)
+        .into_parts();
+    let node = outcome
+        .expect("the named demand completes")
+        .expect("the probe exists");
+    let bytes = host
+        .project_node_to_type_expr_json_bytes(&node)
+        .expect("the answer projects");
+    serde_json::from_slice(&bytes).expect("a wire answer")
+}
+
+/// The constituents of `answer` as rendered text, sorted: a union's member
+/// order is not part of its identity. Any other type is its own single
+/// constituent, rendered whole.
+fn constituents(answer: &TypeExpr) -> Vec<String> {
+    let arms: Vec<&TypeExpr> = match answer {
+        TypeExpr::Union(arms) => arms.iter().collect(),
+        other => vec![other],
+    };
+    let mut texts: Vec<String> = arms.into_iter().map(render).collect();
+    texts.sort_unstable();
+    texts
+}
+
+/// `answer` as rendered text.
+fn render(answer: &TypeExpr) -> String {
+    verter_type_expr::render_type_expr_display(answer)
+        .expect("the answer renders")
+        .text
+}
+
+/// A written union absorbs the literals its primitives and pattern
+/// templates already hold, also when a literal or its supertype is written
+/// through an alias, and a written intersection of a literal and its
+/// primitive is the literal; every other written union publishes exactly as
+/// written, in its written order and by its written names. A written
+/// composite nested in a published member or element stays shallow there,
+/// and walking to it publishes the absorbed type.
+///
+/// Measured on TypeScript 7.0.2 with `declare const p: <probe>; const s:
+/// never = p;` read off the TS2322 message (all four `strictNullChecks` ×
+/// `noImplicitAny` settings agree): `"a1" | `a${number}` | "ab"` is `"ab" |
+/// `a${number}``, `"a" | string` is `string`, `1 | number | "x"` is `number
+/// | "x"`, `string & "a"` is `"a"`, and with `type A = "a"`, `type AB = "a" |
+/// "b"`, `type S = string`: `A | string` is `string`, `AB | S | 1` is
+/// `string | 1`, while `A | "b"` keeps `A` by its name. A literal named
+/// through a long alias chain (`type A0 = "a"; type A1 = A0; …; type A20 =
+/// A19`) is absorbed the same way: `A20 | string` is `string`.
+#[test]
+fn a_written_composite_publishes_the_type_the_checker_constructs() {
+    let host = make_host_with_footprint();
+    let alias_chain: String = std::iter::once("type A0 = \"a\";\n".to_owned())
+        .chain((1..=20).map(|hop| format!("type A{hop} = A{};\n", hop - 1)))
+        .collect();
+    let absorbed: [(&str, &str, &[&str]); 7] = [
+        (
+            BENCH_LIB_PRELUDE,
+            "\"a1\" | `a${number}` | \"ab\"",
+            &["'ab'", "`a${number}`"],
+        ),
+        ("", "\"a\" | string", &["string"]),
+        ("", "1 | number | \"x\"", &["'x'", "number"]),
+        ("", "string & \"a\"", &["'a'"]),
+        ("type A = \"a\";\n", "A | string", &["string"]),
+        (
+            "type AB = \"a\" | \"b\";\ntype S = string;\n",
+            "AB | S | 1",
+            &["1", "string"],
+        ),
+        (alias_chain.as_str(), "A20 | string", &["string"]),
+    ];
+    // Unions with no literal to absorb: the declarations beside the probe,
+    // the written probe and its published text.
+    let kept = [
+        ("", "\"a\" | \"b\"", "'a' | 'b'"),
+        ("", "\"a\" | (\"b\" | \"c\")", "'a' | 'b' | 'c'"),
+        ("", "\"a\" | \"b\" | never", "'a' | 'b' | never"),
+        ("", "\"a\" | null | undefined", "'a' | null | undefined"),
+    ];
+    let mut failures = Vec::new();
+    for (index, (prelude, probe, expected)) in kept.iter().enumerate() {
+        let canonical = format!("/probes/kept{index}.ts");
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!("{prelude}type __Probe = {probe};\n"),
+        );
+        let published = render(&published_probe(&host, &canonical));
+        if published != *expected {
+            failures.push(format!(
+                "`{probe}`: kept as {expected}, published {published}"
+            ));
+        }
+    }
+    // A named arm with nothing to absorb it stays by its name.
+    upsert_ts(
+        &host,
+        "/probes/kept_named.ts",
+        "type A = \"a\";\ntype __Probe = A | \"b\";\n",
+    );
+    let published = constituents(&published_probe(&host, "/probes/kept_named.ts"));
+    if published != ["'b'", "A"] {
+        failures.push(format!(
+            "`A | \"b\"`: kept as [\"'b'\", \"A\"], published {published:?}"
+        ));
+    }
+    for (index, (container, walk)) in [
+        ("{ x: \"a\" | string }", "__Probe[\"x\"]"),
+        ("(\"a\" | string)[]", "__Probe[number]"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let canonical = format!("/probes/nested{index}.ts");
+        upsert_ts(&host, &canonical, &format!("type __Probe = {container};\n"));
+        let (walked, _r) = evaluate_expr(&host, &canonical, walk, ProjectionMode::Navigate);
+        if constituents(&walked) != ["string"] {
+            failures.push(format!(
+                "`{walk}` of `{container}`: the checker answers string, published {}",
+                render(&walked)
+            ));
+        }
+    }
+    for (index, (prelude, probe, expected)) in absorbed.iter().enumerate() {
+        let canonical = format!("/probes/p{index}.ts");
+        upsert_ts(
+            &host,
+            &canonical,
+            &format!("{prelude}type __BenchInit = 0;\ntype __Probe = {probe};\n"),
+        );
+        let published = constituents(&published_probe(&host, &canonical));
+        if published != *expected {
+            failures.push(format!(
+                "`{probe}`: the checker answers {expected:?}, published {published:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+    // The FFI evaluate entry reduces through the same materializer.
+    let (evaluated, _r) = evaluate_expr(
+        &host,
+        "/probes/p1.ts",
+        "\"a\" | string",
+        ProjectionMode::Expanded,
+    );
+    assert_eq!(constituents(&evaluated), ["string"]);
+
+    // `Skeleton` keeps the authored shell.
+    let (skeleton, _r) = resolve_expr(
+        &host,
+        "/probes/p1.ts",
+        "__Probe",
+        &[],
+        ProjectionMode::Skeleton,
+    );
+    assert_eq!(constituents(&skeleton), ["'a'", "string"]);
+}
+
+/// A reducer fault while a written composite is published fails the request,
+/// never delivering the unreduced composite as a success: a cancellation that
+/// lands on the reduction fails the publication, and the same publication
+/// uncancelled absorbs the literal.
+#[test]
+fn a_reducer_fault_during_composite_publication_fails_the_request() {
+    use crate::host_resolve_type_audit::TypeResolutionRequestError;
+    use crate::typeinfo::resolve_named_symbol::{
+        materialize_through_aliases, resolve_named_symbol_in_current_view,
+    };
+    use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    const FILE: &str = "/probes/fault.ts";
+    let host = make_host_with_footprint();
+    upsert_ts(&host, FILE, "type __Probe = \"a\" | string;\n");
+    let view = crate::typeinfo::current_store_view_for_query(&host).expect("a current view");
+    let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+    let host_ctx = crate::resolver_core::HostResolverContext::from_current(&host, &view, overlay);
+    let dispatch = ProjectSemanticDispatch::new(&host_ctx);
+    let _scope = dispatch.enter_construction_scope();
+    // `Skeleton` delivers the written composite unreduced.
+    let (written, _mode) = resolve_named_symbol_in_current_view(
+        &host,
+        &dispatch,
+        FILE,
+        "__Probe",
+        &[],
+        ProjectionMode::Skeleton,
+    );
+    let written = written
+        .expect("the skeleton demand completes")
+        .expect("the probe exists");
+    let scope = verter_type_engine::semantic_query::NodeScopeId::File {
+        canonical_id: verter_type_expr::OwnedStr::from(FILE),
+        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+        whole_hash: host
+            .shallow_file_state(FILE)
+            .expect("the probe's file is indexed")
+            .whole_hash,
+        local_scope: None,
+    };
+
+    let cancelled = RequestContext::new(7101, Arc::from(FILE), false, None);
+    cancelled.cancel();
+    let outcome = {
+        let _guard = RequestContextGuard::install(cancelled);
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded, &scope)
+    };
+    assert!(
+        matches!(outcome, Err(TypeResolutionRequestError::Cancelled)),
+        "a cancelled reduction fails the publication; got {outcome:?}"
+    );
+
+    let published =
+        materialize_through_aliases(&host, &dispatch, written, ProjectionMode::Expanded, &scope)
+            .expect("the uncancelled publication completes");
+    assert_ne!(
+        published, written,
+        "the uncancelled publication absorbs the literal"
+    );
+}
+
+/// The `null` / `undefined` algebra a written union is constructed under is
+/// its file's `strictNullChecks`, as for a written intersection: measured on
+/// TypeScript 7.0.2, `"a" | string | null` is `string | null` with
+/// `strictNullChecks` on and `string` with it off.
+#[test]
+fn a_written_union_absorbs_under_its_files_strict_null_checks() {
+    for (strict_null_checks, expected) in
+        [(true, &["null", "string"][..]), (false, &["string"][..])]
+    {
+        let host = Arc::new(crate::VerterHost::new_standalone_with_tsconfig_projects(
+            crate::HostConfig {
+                analysis_level: crate::types::AnalysisLevel::Full,
+                audit_enabled: true,
+                ..crate::HostConfig::default()
+            },
+            &[(
+                "/snc",
+                &format!(
+                    r#"{{ "compilerOptions": {{ "strict": true, "strictNullChecks": {strict_null_checks} }} }}"#
+                ),
+            )],
+        ));
+        upsert_ts(
+            &host,
+            "/snc/probe.ts",
+            "type __Probe = \"a\" | string | null;\n",
+        );
+        let published = constituents(&published_probe(&host, "/snc/probe.ts"));
+        assert_eq!(
+            published, expected,
+            "strictNullChecks {strict_null_checks}: published {published:?}"
+        );
+    }
+}
+
+/// Deciding whether a written union may absorb a literal reads each arm
+/// once: a union of literals with nothing to absorb them, which publishes as
+/// written, classifies four times the arms when it holds four times the
+/// literals, never the square of them.
+#[test]
+fn a_literal_union_decides_absorption_in_linear_work() {
+    use verter_type_engine::project_semantic_dispatch::build::written_union_arm_classifications_for_tests as classifications;
+    let host = make_host_with_footprint();
+    let work = |arms: usize| {
+        let canonical = format!("/probes/linear{arms}.ts");
+        let probe = (0..arms)
+            .map(|arm| format!("\"k{arm}\""))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        upsert_ts(&host, &canonical, &format!("type __Probe = {probe};\n"));
+        let before = classifications();
+        let published = published_probe(&host, &canonical);
+        let classified = classifications() - before;
+        assert_eq!(
+            constituents(&published).len(),
+            arms,
+            "a union with nothing to absorb publishes every literal"
+        );
+        classified
+    };
+    let small = work(64);
+    let large = work(256);
+    assert!(small >= 64, "every arm is classified: {small} for 64 arms");
+    assert!(
+        large <= 5 * small,
+        "four times the arms costs about four times the work: {small} for 64 arms, {large} for 256"
     );
 }

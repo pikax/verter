@@ -304,10 +304,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let projected_args: Arc<[SemanticNodeId]> = Arc::from(
             args.iter()
                 .map(|argument| {
-                    let context = self.argument_operand_context(*argument, argument_context);
-                    self.canonical_argument_carrier(self.answer_member(
-                        projected(memo, *argument, context),
+                    let operand_context =
+                        self.argument_operand_context(*argument, argument_context);
+                    self.canonical_argument_carrier(self.answer_argument(
+                        projected(memo, *argument, operand_context),
                         context,
+                        argument_context,
+                        operand_context,
                         inputs,
                     ))
                 })
@@ -495,6 +498,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// over `type X = { a: { b: X['a'] } }`) keeps it as written there:
     /// the re-entry reads the dispatcher's in-progress record, never a
     /// depth limit.
+    ///
+    /// One operator is read once per demand ([`AnswerReads`]), however
+    /// many places of the answer hold it. Reads nest on the native stack, so
+    /// one more read past the connected demand's nesting bound is refused:
+    /// the operator stays as written and the demand is a partial.
     fn read_answer_operator(
         &self,
         operator: SemanticNodeId,
@@ -502,20 +510,61 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         then: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
     ) -> Option<SemanticNodeId> {
-        if self.carrier_normalizing.borrow().contains(&operator) {
+        if self.carrier_normalizing_holds(operator) {
             return None;
         }
-        let read = self.reduce_closed_answer_operator(operator, context)?;
-        self.carrier_normalizing.borrow_mut().push(operator);
-        let answer = match read {
-            ClosedOperatorRead::Named(node) => Some(node),
-            ClosedOperatorRead::Evaluated(node) => {
-                self.project_operator_read(node, context, inputs)
-            }
+        let open = self.answer_reads.borrow().open;
+        if let Some(reasons) = self.connected_demand().nesting_trip(open) {
+            self.fold_local_partial_completeness(reasons);
+            return None;
         }
-        .map(then);
-        self.carrier_normalizing.borrow_mut().pop();
+        let build = self.build_local_taint.borrow().len();
+        let key = (operator, context, inputs.scope.clone());
+        let frame = self.answer_reads.borrow_mut().open(build);
+        let memoized = self.answer_reads.borrow().memoized(&key, build);
+        let read = memoized.unwrap_or_else(|| {
+            let cycle_hits = self.answer_reads.borrow().cycle_hits;
+            let read = match self.reduce_closed_answer_operator(operator, context) {
+                None => None,
+                Some(ClosedOperatorRead::Named(node)) => Some(node),
+                Some(ClosedOperatorRead::Evaluated(node)) => {
+                    self.carrier_normalizing.borrow_mut().push(operator);
+                    let projected = self.with_closed_read_inputs(inputs.scope, |read_inputs| {
+                        self.project_operator_read(node, context, read_inputs)
+                    });
+                    self.carrier_normalizing.borrow_mut().pop();
+                    projected
+                }
+            };
+            self.answer_reads
+                .borrow_mut()
+                .settle(key, read, cycle_hits, build);
+            read
+        });
+        let answer = read.map(|read| {
+            self.carrier_normalizing.borrow_mut().push(operator);
+            let answer = then(read);
+            self.carrier_normalizing.borrow_mut().pop();
+            answer
+        });
+        self.answer_reads.borrow_mut().close(frame);
         answer
+    }
+
+    /// Whether `node` is already being normalized or read on this
+    /// dispatcher's call chain: the in-progress record every carrier,
+    /// composite and answer read consults before it enters a node. A hit
+    /// makes what the chain computes depend on where it was entered from,
+    /// so it is counted ([`AnswerReads`]).
+    pub(in crate::project_semantic_dispatch) fn carrier_normalizing_holds(
+        &self,
+        node: SemanticNodeId,
+    ) -> bool {
+        let holds = self.carrier_normalizing.borrow().contains(&node);
+        if holds {
+            self.answer_reads.borrow_mut().record_cycle_hit();
+        }
+        holds
     }
 
     /// `read` projected at `context` as a root of its own, in place. A
@@ -527,6 +576,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         context: ProjectionReductionContext,
         inputs: &LocatorViewInputs<'_>,
     ) -> Option<SemanticNodeId> {
+        #[cfg(any(test, feature = "test-support"))]
+        ANSWER_MEMBER_READS_FOR_TESTS.with(|reads| reads.set(reads.get() + 1));
         // The operator is closed, so what it reads binds nothing of the
         // body being projected.
         let mut substitutions = Vec::new();
@@ -577,12 +628,30 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         scope: &NodeScopeId,
     ) -> SemanticNodeId {
         let _operation = self.enter_operation(false);
-        // A member read through a closed access names nothing of the
-        // answering file: its references are already resolved.
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        self.with_closed_read_inputs(scope, |inputs| {
+            match self.project_operator_read(read, context, inputs) {
+                Some(projected) => self.reduce_answer_constituents(projected, context, inputs),
+                None => read,
+            }
+        })
+    }
+
+    /// The inputs a member read through a closed operator projects with,
+    /// answered in `scope`'s file. The member names nothing of the body
+    /// holding the operator — its references are already resolved — so no
+    /// type-parameter binding, script-setup generic, shadowing or authored
+    /// resolution debt of that body reaches it, and the read depends on
+    /// `scope` alone, which is what [`AnswerReads`] keys it by.
+    fn with_closed_read_inputs<R>(
+        &self,
+        scope: &NodeScopeId,
+        read: impl FnOnce(&LocatorViewInputs<'_>) -> R,
+    ) -> R {
         let env = rustc_hash::FxHashMap::default();
         let name_resolution = rustc_hash::FxHashMap::default();
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
-        let inputs = LocatorViewInputs {
+        read(&LocatorViewInputs {
             env: &env,
             scope,
             name_resolution: &name_resolution,
@@ -590,12 +659,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             shadowing: &shadowing,
             authored_resolution_debt: None,
             self_value: None,
-        };
-        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
-        match self.project_operator_read(read, context, &inputs) {
-            Some(projected) => self.reduce_answer_constituents(projected, context, &inputs),
-            None => read,
-        }
+        })
     }
 
     /// A projected child as the composite holding it keeps it: a closed
@@ -618,6 +682,249 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
                 .unwrap_or(child),
             _ => child,
+        }
+    }
+
+    /// A projected type argument as the application holding it keeps it,
+    /// read at `read_context`. An application that defers its arguments
+    /// projects them at navigation altitude, so the closed accesses they
+    /// hold anywhere inside — an object's member, a tuple or array element,
+    /// a signature's parameter or return, a union or intersection arm, the
+    /// argument of a nested deferring application — are still carriers; the
+    /// checker builds the reference over what they read
+    /// (`Promise<{ x: V["a"] }>` answers `Promise<{ x: 1 }>`). A name the
+    /// argument holds stays that name, and an alias's application keeps the
+    /// identity its body substitutes.
+    pub(super) fn answer_argument(
+        &self,
+        projected: SemanticNodeId,
+        holder: ProjectionReductionContext,
+        argument_context: ProjectionReductionContext,
+        operand_context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        if may_reduce_operator(argument_context) {
+            return self.answer_member(projected, operand_context, inputs);
+        }
+        if holder.mode != ProjectionMode::Expanded || !may_reduce_operator(holder) {
+            return projected;
+        }
+        // Post-order over the argument's composite parts, each part read
+        // once however many places of the argument share it. A part met
+        // again while its own parts are pending keeps itself there.
+        let graph = self.graph();
+        let mut answered = rustc_hash::FxHashMap::<SemanticNodeId, SemanticNodeId>::default();
+        let mut entered = rustc_hash::FxHashSet::<SemanticNodeId>::default();
+        let mut stack = vec![(projected, false)];
+        while let Some((node, parts_answered)) = stack.pop() {
+            if answered.contains_key(&node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                answered.insert(node, node);
+                continue;
+            };
+            if !parts_answered {
+                if !entered.insert(node) {
+                    continue;
+                }
+                let mut pending = Vec::new();
+                self.for_each_argument_part(&data, |part| {
+                    if !answered.contains_key(&part) && !entered.contains(&part) {
+                        pending.push(part);
+                    }
+                });
+                if !pending.is_empty() {
+                    stack.push((node, true));
+                    stack.extend(pending.into_iter().map(|part| (part, false)));
+                    continue;
+                }
+            }
+            let answer = self.rebuild_argument_part(node, &data, &answered, holder, inputs);
+            answered.insert(node, answer);
+        }
+        answered.get(&projected).copied().unwrap_or(projected)
+    }
+
+    /// The parts of a type argument whose closed accesses the holder reads:
+    /// the children an answer composite reads at its own altitude
+    /// ([`Self::finish_projection_structure`]), and the arguments of a
+    /// nested application that defers them.
+    fn for_each_argument_part(
+        &self,
+        data: &SemanticNodeData,
+        mut visit: impl FnMut(SemanticNodeId),
+    ) {
+        match data {
+            SemanticNodeData::Union(arms) => arms.iter().copied().for_each(visit),
+            SemanticNodeData::Intersection(arms) => arms.iter().copied().for_each(visit),
+            SemanticNodeData::Array { element, .. } => visit(*element),
+            SemanticNodeData::Tuple { elements, .. } => {
+                elements.iter().for_each(|element| visit(element.value));
+            }
+            SemanticNodeData::Object(view) => {
+                for entry in view.entries.iter() {
+                    match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => visit(member.value),
+                        crate::semantic_query::SurfaceEntry::CallSignature(signature)
+                        | crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                            visit(*signature);
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                            visit(signature.key_type);
+                            visit(signature.value_type);
+                        }
+                    }
+                }
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                ..
+            } => {
+                params.iter().for_each(|parameter| visit(parameter.ty));
+                visit(*return_type);
+            }
+            SemanticNodeData::InstantiationRef { base, args }
+                if self.defers_type_arguments(base) =>
+            {
+                args.iter().copied().for_each(visit);
+            }
+            _ => {}
+        }
+    }
+
+    /// `node` rebuilt over its parts as [`Self::answer_argument`] answered
+    /// them, or, for a closed access, the member it reads.
+    fn rebuild_argument_part(
+        &self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        answered: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let answer = |part: SemanticNodeId| answered.get(&part).copied().unwrap_or(part);
+        let mut changed = false;
+        self.for_each_argument_part(data, |part| changed |= answer(part) != part);
+        if !changed {
+            return match data {
+                SemanticNodeData::IndexedAccess { .. } => self.answer_member(node, context, inputs),
+                _ => node,
+            };
+        }
+        match data {
+            SemanticNodeData::Union(arms) => {
+                let ids = arms.iter().map(|arm| answer(*arm)).collect();
+                let nullability = self.answer_nullability(context, inputs);
+                self.rebuild_projected_union(node, arms.origin_category(), ids, nullability)
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let ids = arms.iter().map(|arm| answer(*arm)).collect();
+                self.rebuild_projected_intersection(node, arms.origin_category(), ids)
+            }
+            SemanticNodeData::Array { element, readonly } => graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Array {
+                    element: answer(*element),
+                    readonly: *readonly,
+                },
+            ),
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let elements: Vec<_> = elements
+                    .iter()
+                    .map(|element| TupleElement {
+                        value: answer(element.value),
+                        ..element.copy()
+                    })
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Tuple {
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements.into_boxed_slice(),
+                        ),
+                        readonly: *readonly,
+                    },
+                )
+            }
+            SemanticNodeData::Object(view) => {
+                use crate::semantic_query::SurfaceEntry;
+                let entries = view
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SurfaceEntry::Member(member) => SurfaceEntry::Member(SurfaceMember {
+                            value: answer(member.value),
+                            ..member.clone()
+                        }),
+                        SurfaceEntry::CallSignature(signature) => {
+                            SurfaceEntry::CallSignature(answer(*signature))
+                        }
+                        SurfaceEntry::ConstructSignature(signature) => {
+                            SurfaceEntry::ConstructSignature(answer(*signature))
+                        }
+                        SurfaceEntry::IndexSignature(signature) => {
+                            SurfaceEntry::IndexSignature(IndexSignature {
+                                key_type: answer(signature.key_type),
+                                value_type: answer(signature.value_type),
+                                ..signature.clone()
+                            })
+                        }
+                    })
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Object(SurfaceView::from_entries(
+                        entries,
+                        view.keyspace,
+                        view.has_known_index_signature(),
+                    )),
+                )
+            }
+            SemanticNodeData::Signature { .. } => {
+                let mut rebuilt = data.clone();
+                if let SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    return_carrier,
+                    ..
+                } = &mut rebuilt
+                {
+                    let answered_params: Vec<_> = params
+                        .iter()
+                        .map(|parameter| FunctionParam {
+                            ty: answer(parameter.ty),
+                            ..parameter.copy()
+                        })
+                        .collect();
+                    *params = crate::semantic_query::PayloadArray::from(
+                        answered_params.into_boxed_slice(),
+                    );
+                    *return_type = answer(*return_type);
+                    if let crate::semantic_query::SignatureReturnCarrier::Declared(declared) =
+                        return_carrier
+                    {
+                        *declared = *return_type;
+                    }
+                }
+                graph.intern_preserving_scope(node, rebuilt)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|argument| self.canonical_argument_carrier(answer(*argument)))
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::InstantiationRef {
+                        base: base.clone(),
+                        args: crate::semantic_query::PayloadArray::from(args.into_boxed_slice()),
+                    },
+                )
+            }
+            _ => node,
         }
     }
 
@@ -1278,6 +1585,93 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
         }
     }
+}
+
+/// The closed operators one demand's answer has read, so each is read once
+/// however many places hold it.
+///
+/// A read is reused only where it would be recomputed identically: in the
+/// build that read it (whose taint, partiality and facts it already
+/// carries), and only when nothing it computed met the in-progress record,
+/// since a read that stopped at a cycle answers by where it was entered
+/// from. The record lives while a read is open and is dropped when the
+/// outermost read closes.
+#[derive(Default)]
+pub(in crate::project_semantic_dispatch) struct AnswerReads {
+    /// Reads open on the native stack.
+    open: usize,
+    /// The build-local taint depth the outermost open read runs in.
+    build: usize,
+    /// In-progress-record hits on the dispatcher so far, wrapping.
+    cycle_hits: u64,
+    read: rustc_hash::FxHashMap<AnswerReadKey, Option<SemanticNodeId>>,
+}
+
+type AnswerReadKey = (SemanticNodeId, ProjectionReductionContext, NodeScopeId);
+
+/// One open read's place in [`AnswerReads`].
+#[must_use = "an opened read is closed"]
+struct AnswerReadFrame(());
+
+impl AnswerReads {
+    fn record_cycle_hit(&mut self) {
+        self.cycle_hits = self.cycle_hits.wrapping_add(1);
+    }
+
+    fn open(&mut self, build: usize) -> AnswerReadFrame {
+        if self.open == 0 {
+            self.build = build;
+        }
+        self.open += 1;
+        AnswerReadFrame(())
+    }
+
+    fn close(&mut self, AnswerReadFrame(()): AnswerReadFrame) {
+        self.open -= 1;
+        if self.open == 0 {
+            self.read.clear();
+        }
+    }
+
+    /// What `key` read earlier in this demand's build, if it did.
+    fn memoized(&self, key: &AnswerReadKey, build: usize) -> Option<Option<SemanticNodeId>> {
+        if build == self.build {
+            self.read.get(key).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Keep what `key` read, unless the read met the in-progress record
+    /// after `cycle_hits` or ran in another build.
+    fn settle(
+        &mut self,
+        key: AnswerReadKey,
+        read: Option<SemanticNodeId>,
+        cycle_hits: u64,
+        build: usize,
+    ) {
+        if self.cycle_hits == cycle_hits && build == self.build {
+            self.read.insert(key, read);
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Member reads projected on this thread.
+    static ANSWER_MEMBER_READS_FOR_TESTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Run `run` and count the member reads closed operators in its answers
+/// projected on this thread. Test-only.
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_answer_member_reads_for_tests<R>(run: impl FnOnce() -> R) -> (R, usize) {
+    let before = ANSWER_MEMBER_READS_FOR_TESTS.with(std::cell::Cell::get);
+    let value = run();
+    let after = ANSWER_MEMBER_READS_FOR_TESTS.with(std::cell::Cell::get);
+    (value, after - before)
 }
 
 /// What a closed answer operator read: the declaration an access names,
