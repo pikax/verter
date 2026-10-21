@@ -168,6 +168,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         node: SemanticNodeId,
         widening: &DeclaredWidening<'_>,
     ) -> Option<&'p [DeclaredReadStep]> {
+        let mut canonical_node: Option<SemanticNodeId> = None;
         while let Some((DeclaredReadStep::Arm { written }, rest)) = path.split_first() {
             let cached = widening
                 .arms
@@ -201,10 +202,22 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             };
             let graph = self.graph();
             let held = members.is_some_and(|members| {
-                members.iter().any(|&member| {
-                    member == node
-                        || crate::semantic_query::stable_key::provably_equal(graph, member, node)
-                })
+                let holds = |node: SemanticNodeId| {
+                    members.iter().any(|&member| {
+                        member == node
+                            || crate::semantic_query::stable_key::provably_equal(
+                                graph, member, node,
+                            )
+                    })
+                };
+                // A union nested in `node` keeps the origin its lowering
+                // gave it (`[1, "x"]`'s element as authored), so `node`
+                // matches the arm reduced the same way.
+                holds(node) || {
+                    let canonical =
+                        *canonical_node.get_or_insert_with(|| self.canonical_written(node));
+                    canonical != node && holds(canonical)
+                }
             });
             if !held {
                 return None;

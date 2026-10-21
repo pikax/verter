@@ -2740,6 +2740,7 @@ let d48 = { [u]: s };
 let d49 = { [u]: c ? "a" : sl };
 let d50 = c ? { [u]: s } : { [u]: 1 };
 let d51 = c ? [s, 1] : [sl, true];
+let d52 = c ? [s, [1, "x"]] : [true];
 "##;
 
 /// A declaration's initializer keeps each literal's freshness per authored
@@ -2843,6 +2844,10 @@ fn declared_reads_follow_their_binding_freshness() {
         (
             Read::Type("typeof d51"),
             r#"(string | number)[] | ("a" | boolean)[]"#,
+        ),
+        (
+            Read::Type("typeof d52"),
+            r#"(string | (string | number)[])[] | boolean[]"#,
         ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
