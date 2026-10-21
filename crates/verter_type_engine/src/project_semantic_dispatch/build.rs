@@ -18835,16 +18835,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The arguments of the next step of a generic declaration's tail run:
-    /// `result`, its body as lowered, is an application of this very
-    /// declaration (`canonical`, `owner`, `name`) — as the recursive
-    /// back-edge the lowering mints while the declaration is being
-    /// instantiated, or as the application carrier a carrier-preserving
-    /// demand keeps. A generic declaration whose type is an application of
-    /// itself is a conditional that selected that branch; a non-generic
-    /// one names itself directly, which the checker reports as a circular
-    /// alias, and its back-edge stays the recursive reference. `None` for
-    /// any other result, an application nested inside a type included.
     /// Whether the declaration an instantiation builds declares a
     /// conditional type as its body (through `Alias` wrappers): only then
     /// is its body applying the declaration again a step of the checker's
@@ -18871,6 +18861,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         known
     }
 
+    /// The next arguments of this declaration's tail run, directly or
+    /// through aliases that only forward their own bare parameters.
+    /// Applications nested inside constructors and conditional alias bodies
+    /// stay on the ordinary evaluation path, never a guessed tail edge.
     fn conditional_tail_arguments(
         &self,
         result: SemanticNodeId,
@@ -18879,21 +18873,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &verter_type_expr::OwnedStr,
     ) -> Option<Arc<[SemanticNodeId]>> {
         let graph = self.graph();
-        match graph.node_data(result).as_deref() {
-            Some(SemanticNodeData::Opaque(QueryError::RecursiveRef { name: edge, args })) => {
-                let declared_here = matches!(
-                    graph.node_scope(result),
-                    Some(NodeScopeId::File { canonical_id, owner: edge_owner, .. })
-                        if canonical_id == *canonical && edge_owner == owner
-                );
-                (edge == name && declared_here)
-                    .then(|| Arc::<[SemanticNodeId]>::from(args.operands()))
-            }
-            Some(SemanticNodeData::InstantiationRef { base, args }) => {
-                (base.canonical_id == *canonical && base.owner == owner && base.decl_name == *name)
-                    .then(|| Arc::clone(args.as_arc()))
-            }
+        let reference = |node| match graph.node_data(node).as_deref() {
+            Some(
+                SemanticNodeData::InstantiationRef { .. }
+                | SemanticNodeData::Opaque(QueryError::RecursiveRef { .. }),
+            ) => self.raw_generic_reference(node),
             _ => None,
+        };
+        let (mut declaration, mut arguments) = reference(result)?;
+        let mut seen = rustc_hash::FxHashSet::default();
+        loop {
+            if declaration.canonical_id == *canonical
+                && declaration.owner == owner
+                && declaration.decl_name == *name
+            {
+                return Some(arguments);
+            }
+            if self.cancellation.is_cancelled() || !seen.insert(declaration.clone()) {
+                return None;
+            }
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                declaration.canonical_id.as_ref(),
+                declaration.owner,
+                declaration.decl_name.as_ref(),
+            )?;
+            if prepared.kind != verter_session_query::declarations::TypeDeclKind::Alias {
+                return None;
+            }
+            // A forwarding alias changes no type: `Wrap<T> = Grow<T>`
+            // takes Grow's selected branch back to Grow with the same
+            // arguments. Read only that declared application, never
+            // evaluate another conditional or descend into a constructor.
+            let body = self.declared_alias_body(&declaration)??;
+            let (next, parameters) = reference(body)?;
+            let forwarded = parameters
+                .iter()
+                .map(|parameter| match graph.node_data(*parameter).as_deref() {
+                    Some(SemanticNodeData::TypeParam {
+                        decl, param_index, ..
+                    }) if decl.canonical_id == declaration.canonical_id
+                        && decl.owner == declaration.owner
+                        && decl.decl_name == declaration.decl_name =>
+                    {
+                        arguments.get(usize::from(*param_index)).copied()
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            declaration = next;
+            arguments = forwarded.into();
         }
     }
 

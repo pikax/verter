@@ -187,16 +187,28 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         {
             return None;
         }
+        let call_inference = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| {
+                session.context_key().pass_kind
+                    == crate::semantic_query::InferencePassKind::CallApplicability
+            });
         // A fixed annotated slot is a relation constraint even when another
         // slot or union arm owns an inference site. Check it before collecting
         // candidates; open slots retain their ordinary inference path.
-        if let Some(result) = self.relate_fixed_annotated_arguments(
-            &declaration,
-            &source_args,
-            &target_args,
-            bindings,
-        ) {
-            return Some(result);
+        // A call collects candidates independently of applicability, which
+        // the instantiated signature checks afterwards.
+        if !call_inference {
+            if let Some(result) = self.relate_fixed_annotated_arguments(
+                &declaration,
+                &source_args,
+                &target_args,
+                bindings,
+            ) {
+                return Some(result);
+            }
         }
         if !target_args
             .iter()
@@ -294,6 +306,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         for ((&source, &target), variance) in
             source_args.iter().zip(target_args.iter()).zip(&variances)
         {
+            if call_inference && !self.holds_inference_site(target) {
+                continue;
+            }
             let related = match variance.mask {
                 Variance::CONTRAVARIANT => {
                     self.relate_member(target, source, bindings, InferPosition::ContravariantParam)
@@ -1081,7 +1096,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    fn raw_generic_reference(
+    pub(super) fn raw_generic_reference(
         &self,
         node: SemanticNodeId,
     ) -> Option<(DeclIdentity, Arc<[SemanticNodeId]>)> {

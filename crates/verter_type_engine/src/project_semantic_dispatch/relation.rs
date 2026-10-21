@@ -9041,14 +9041,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // The checker's `recursiveTypeRelatedTo` entry, judged on the
         // operands the carriers stand for.
         let concrete_read = self.observe_read(|| {
-            [source, target].map(|operand| {
-                match self.unwrap_identity_carrier_for_relation(operand) {
-                    IdentityCarrierUnwrap::Concrete(id) => id,
-                    IdentityCarrierUnwrap::Unresolvable => operand,
-                }
-            })
+            [source, target].map(|operand| self.unwrap_identity_carrier_for_relation(operand))
         });
-        let concrete = *concrete_read.value();
+        let [source_unwrap, target_unwrap] = *concrete_read.value();
+        let concrete = [(source, source_unwrap), (target, target_unwrap)].map(
+            |(operand, unwrap)| match unwrap {
+                IdentityCarrierUnwrap::Concrete(id) => id,
+                IdentityCarrierUnwrap::Unresolvable => operand,
+            },
+        );
         // Without `strictNullChecks` a union of one type and `null` /
         // `undefined` is that type to the checker: the pair relates as the
         // pair of its member, one recursion entry, not a union and then its
@@ -9153,15 +9154,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
-        // verbatim and resolves at the bound's own demand points).
-        let source = match self.unwrap_identity_carrier_for_relation(source) {
+        // verbatim and resolves at the bound's own demand points). The
+        // operands' unwraps are the ones read above, whose observations
+        // this judgement has already adopted.
+        let source = match source_unwrap {
             IdentityCarrierUnwrap::Concrete(_) if preserve_source_reference => source_reference,
             IdentityCarrierUnwrap::Concrete(id) if target_is_binder && !intrinsic(id) => source,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        let target = match self.unwrap_identity_carrier_for_relation(target) {
+        let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
@@ -13297,6 +13300,7 @@ enum FramePop {
 
 /// Outcome of the identity-carrier unwrap performed before relation
 /// dispatch.
+#[derive(Clone, Copy)]
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,

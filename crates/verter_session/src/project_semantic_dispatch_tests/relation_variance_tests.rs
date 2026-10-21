@@ -197,20 +197,38 @@ fn fixed_annotations_are_checked_before_inference() {
 
 /// An alias whose body re-applies itself on a growing argument mints a
 /// fresh application at every step, so a relation unwrapping it never meets
-/// a node it has seen: the walk stops at the instantiation budget with the
-/// checker's TS2589 recovery and the decision reads `any`, as the checker
-/// does, instead of unwrapping the alias forever. The budget is lowered so
-/// the production budget's path is reached quickly.
+/// a node it has seen. The shared tail engine proves its uniform growth and
+/// returns TS2589 recovery, so the decision reads `any`. A forwarding alias
+/// whose conditional stops after one step still returns its finite value.
 #[test]
-fn a_circular_alias_operand_stops_at_the_instantiation_depth() {
-    let _budget = super::connected_demand::InstantiationBudgetForTests::install(64);
+fn a_circular_alias_operand_recovers_without_unbounded_normalization() {
     assert_named_answers(
         "interface Cell<in out T> { get(): T }\n\
          type Grow<T> = T extends never ? 0 : Wrap<[T]>;\n\
-         type Wrap<T> = Grow<T>;\n",
+         type Wrap<T> = Grow<T>;\n\
+         type Stop<T> = T extends string ? Back<[T]> : T;\n\
+         type Back<T> = Stop<T>;\n",
         &[
             ("Cell<'a'> extends Wrap<'a'> ? 1 : 0", "any"),
             ("{ x: 1 } extends Wrap<'a'> ? 1 : 0", "any"),
+            ("Back<'a'> extends ['a'] ? 1 : 0", "1"),
+        ],
+    );
+}
+
+#[test]
+fn an_argument_error_preserves_inference_from_other_type_arguments() {
+    assert_named_answers(
+        "interface Mixed<in out T, U> { value: T; other: U }\n\
+         declare const ma: Mixed<'a', 1>;\n\
+         declare function g<U>(x: Mixed<string, U>): U;\n\
+         declare function w<U>(x: Mixed<string, U>, y: U): U;\n\
+         const gr = g(ma);\n\
+         const wr = w(ma, 2);\n",
+        &[
+            ("typeof gr", "1"),
+            ("typeof wr extends 1 | 2 ? 1 : 0", "1"),
+            ("1 | 2 extends typeof wr ? 1 : 0", "1"),
         ],
     );
 }
