@@ -9,7 +9,7 @@ Commands (run on the candidate; this file is not an execution transcript):
 
 Retired routes: the heartbeat every 5s to every client, and the carrier-store ping after every carrier publication to every client. Real Lapce captures (WSP1L, WSP1B) log each heartbeat as an unhandled host notification. Both are now subscriptions declared in `initializationOptions.subscriptions`; the VS Code extension declares both.
 
-AC1: opening and publishing documents for a client that declared nothing puts only those open documents' diagnostics on the wire. Workspace-scale answers (project overview, component parents, route tree, statistics, audit) exist only as request handlers. The 50k-source corpus run is unavailable here.
+AC1: the workspace scan starts only on demand (the references/rename frontier or a workspace-wide enumeration), never at initialize, didOpen or didChange; workspace-wide answers are pending until the scan settles, never complete-empty (`the_workspace_scan_starts_only_on_frontier_demand`, `workspace_wide_requests_demand_the_scan_and_answer_pending_until_it_settles`). Opening and publishing documents for a client that declared nothing puts only those open documents' diagnostics on the wire. Workspace-scale answers (project overview, component parents, route tree, statistics, audit) exist only as request handlers. The 50k-source corpus run is unavailable here.
 
 AC2: with analysis, trace and subscriptions off: no heartbeat task or message, no carrier-store ping, no semantic task or semantic host, no statistics allocation, no trace records. Analysis-only provider requests (`getBindingTypes`) occur only on client request.
 

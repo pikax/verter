@@ -28,6 +28,7 @@ import {
   State as LanguageClientState,
   TransportKind,
   RevealOutputChannelOn,
+  ResponseError,
 } from "vscode-languageclient/node";
 
 import { basename, join, normalize, resolve, sep } from "path";
@@ -2290,6 +2291,18 @@ function addVerterAnalysis(getClient: GetClient, lifetime: Lifetime) {
         await client.sendRequest(RequestType.GetAnalysis, { uri });
         const snapshot = await client.sendRequest(RequestType.GetStatistics, {});
         return snapshot.diagnostics?.[uri];
+      }),
+      // The workspace-wide enumeration is the demand for the complete
+      // inventory; the server answers LSP `RequestFailed` (-32803) until the
+      // scan it starts has settled.
+      commands.registerCommand("verter._workspaceInventoryReady", async () => {
+        try {
+          await getClient().sendRequest(RequestType.GetProjectOverview, {});
+          return true;
+        } catch (error) {
+          if (error instanceof ResponseError && error.code === -32803) return false;
+          throw error;
+        }
       }),
       commands.registerCommand("verter._getDecorationState", () => ({
         bindingColors: bindingColorProvider.getState(),

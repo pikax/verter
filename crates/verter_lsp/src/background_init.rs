@@ -466,21 +466,32 @@ pub(super) async fn background_init(args: BackgroundInitArgs) -> Result<()> {
         }
     }
 
-    // The previous generation's scanner (if a frontier demand started one)
-    // reads a superseded snapshot: retire it. A scan the client has demanded
-    // is re-armed under this generation; otherwise nothing walks the
+    // A scan started over a superseded generation or snapshot is retired; one
+    // this generation already started over its own published snapshot (a
+    // demand that arrived during this init) keeps running. A client-demanded
+    // scan is re-armed under this generation; otherwise nothing walks the
     // workspace — an open document is served by its own import-dependency
-    // publication, and the complete carrier frontier is built only when a
-    // closed-file references/rename request asks for it.
+    // publication, and the complete carrier inventory is built only when a
+    // request that needs it (frontier, workspace-wide enumeration) asks.
     {
+        let published_basis = vfs_workspace
+            .read()
+            .as_ref()
+            .and_then(|ws| ws.load_published())
+            .map(|root| Arc::clone(&root.snapshot));
         let mut guard = workspace_scanner.lock().await;
-        if let Some(old) = guard.take() {
-            old.stop();
+        if guard
+            .as_ref()
+            .is_some_and(|scan| !scan.is_current_for(my_gen, published_basis.as_ref()))
+        {
+            if let Some(old) = guard.take() {
+                old.stop();
+            }
+            server
+                .sync_coordinator
+                .set_workspace_scan_in_progress(false);
+            server.workspace_scan_settled.notify_waiters();
         }
-        server
-            .sync_coordinator
-            .set_workspace_scan_in_progress(false);
-        server.workspace_scan_settled.notify_waiters();
     }
     if server
         .workspace_scan_demanded
@@ -629,12 +640,16 @@ pub(super) async fn finish_post_scan(server: std::sync::Weak<ServerCore>, my_gen
 
 impl super::VerterLanguageServer {
     /// Start the workspace scanner — idempotently — because a request needs
-    /// the owning project's COMPLETE carrier frontier (closed-file
-    /// references/rename). Nothing else starts it: initialization, document
-    /// open and edits never walk the workspace.
+    /// the complete workspace inventory: the owning project's carrier frontier
+    /// (references/rename) or a workspace-wide enumeration (workspace symbols,
+    /// auto-import candidates, project overview, route tree, component
+    /// parents, global CSS classes). Nothing else starts it: initialization,
+    /// document open and edits never walk the workspace.
     ///
     /// The demand is sticky for the server's lifetime: a later init
-    /// generation re-arms the scan over its own snapshot.
+    /// generation re-arms the scan over its own snapshot. Before the first
+    /// snapshot is published only the demand is recorded; the init that
+    /// publishes arms the scan.
     pub(super) async fn activate_workspace_scan(&self) {
         use std::sync::atomic::Ordering;
         self.workspace_scan_demanded.store(true, Ordering::Release);
@@ -657,12 +672,15 @@ impl super::VerterLanguageServer {
         }
         // Snapshot-driven scanner classification: ownership-based tier
         // classification replaces glob patterns.
-        let scanner_snapshot = self
+        let Some(scanner_snapshot) = self
             .vfs_workspace
             .read()
             .as_ref()
             .and_then(|ws| ws.load_published())
-            .map(|root| Arc::clone(&root.snapshot));
+            .map(|root| Arc::clone(&root.snapshot))
+        else {
+            return;
+        };
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
         let scanner = crate::workspace_scanner::spawn_workspace_scanner(
             crate::workspace_scanner::WorkspaceScannerConfig {
@@ -679,7 +697,8 @@ impl super::VerterLanguageServer {
                 pending_snapshot_provider_sync: Arc::clone(&self.pending_snapshot_provider_sync),
                 tsx_profile: self.documents.tsx_profile.read().clone(),
                 tsconfig_patterns: Vec::new(),
-                workspace_snapshot: scanner_snapshot,
+                workspace_snapshot: Some(scanner_snapshot),
+                generation: my_gen,
                 done_tx: Some(done_tx),
                 handler_activity: Arc::clone(&self.handler_activity),
             },
@@ -725,6 +744,32 @@ impl super::VerterLanguageServer {
             server.rearm_open_document_diagnostics();
             server.refresh_deferred_decorations();
         });
+    }
+
+    /// Whether the complete workspace inventory is built, demanding it as a
+    /// side effect. A workspace-wide answer built while this is `false` would
+    /// come from a partially populated host, so callers answer pending
+    /// ([`Self::workspace_inventory_pending_error`]) or mark their result
+    /// incomplete — never complete-empty. A workspace with no folders has
+    /// nothing to scan and is always complete.
+    pub(super) async fn workspace_inventory_ready(&self) -> bool {
+        self.activate_workspace_scan().await;
+        if self.workspace_roots.lock().await.is_empty() {
+            return true;
+        }
+        self.workspace_scanner.lock().await.is_some()
+            && !self.sync_coordinator.workspace_scan_in_progress()
+    }
+
+    /// The protocol answer for a workspace-wide request issued while the
+    /// inventory is still being built: LSP `RequestFailed` (-32803), retryable
+    /// once the scan settles.
+    pub(super) fn workspace_inventory_pending_error() -> tower_lsp_server::jsonrpc::Error {
+        tower_lsp_server::jsonrpc::Error {
+            code: tower_lsp_server::jsonrpc::ErrorCode::ServerError(-32803),
+            message: "the workspace inventory is still being built; retry once it settles".into(),
+            data: None,
+        }
     }
 
     /// Owe every provider-settled open document a fresh diagnostics publication.
