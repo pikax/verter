@@ -347,6 +347,8 @@ pub(super) struct ActiveInstantiations {
 }
 
 impl ActiveInstantiations {
+    /// Read only by optional capture and the test-support request-state probe.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn len(&self) -> usize {
         self.order.len()
     }
