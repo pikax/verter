@@ -115,6 +115,10 @@ impl VerterHost {
                         verter_workspace::ResolutionPublication::Admitted(admitted) => {
                             admitted.into_result()
                         }
+                        // The optimization is returned, never stored.
+                        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                            unretained.into_result()
+                        }
                         verter_workspace::ResolutionPublication::Refused(_) => {
                             return CrossFileResult::default();
                         }

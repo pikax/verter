@@ -25,7 +25,7 @@ use crate::semantic_query::{
 /// The free type variables below one semantic node, binder-aware: the type
 /// parameters written below it that no generic signature within declares
 /// over the position they are written in, and whether an `infer` reference
-/// sits below it. A node's summary is a function of its immutable payload
+/// or declaration sits below it. A node's summary is a function of its immutable payload
 /// and its children's summaries, so it holds for as long as the node id
 /// does.
 #[derive(Clone, Default)]
@@ -36,6 +36,9 @@ pub(super) struct FreeTypeVariables {
     /// Whether an `InferRef` sits below, the constraints and defaults of the
     /// type parameters written there included.
     infer_ref: bool,
+    /// Infer declaration presence, used only where an operand reads the
+    /// declaration as a still-unbound variable rather than a pattern site.
+    infer_declaration: bool,
 }
 
 /// The dispatcher's summaries of [`FreeTypeVariables`] by node, kept for
@@ -2070,9 +2073,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// Whether `node` holds a type variable free in it: a type parameter no
     /// signature within declares, or a reference to an enclosing `infer`.
-    fn mentions_free_type_variable(&self, node: SemanticNodeId) -> bool {
+    fn mentions_generic_operand_variable(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
         let summary = self.free_type_variables(node);
-        summary.params.is_some() || summary.infer_ref
+        summary.params.is_some()
+            || summary.infer_ref
+            || (infer_operand && summary.infer_declaration)
     }
 
     /// The free type parameters `roots` hold anywhere below them — not
@@ -2109,6 +2114,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
                         .then(|| Arc::from([root])),
                     infer_ref: matches!(data.as_ref(), SemanticNodeData::InferRef { .. }),
+                    infer_declaration: matches!(data.as_ref(), SemanticNodeData::Infer { .. }),
                 };
                 self.free_type_variables
                     .borrow_mut()
@@ -2151,10 +2157,13 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     children.clear();
                     let _ = data.for_each_child(|child| children.push(child));
                     let mut infer_ref = matches!(data.as_ref(), SemanticNodeData::InferRef { .. });
+                    let mut infer_declaration =
+                        matches!(data.as_ref(), SemanticNodeData::Infer { .. });
                     let mut params = ParamUnion::default();
                     for child in &children {
                         if let Some(below) = computed.get(child) {
                             infer_ref |= below.infer_ref;
+                            infer_declaration |= below.infer_declaration;
                             params.add(&below.params);
                         }
                     }
@@ -2169,7 +2178,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                             .finish_without(type_parameters.iter().map(|declared| declared.param)),
                         _ => params.finish(),
                     };
-                    FreeTypeVariables { params, infer_ref }
+                    FreeTypeVariables {
+                        params,
+                        infer_ref,
+                        infer_declaration,
+                    }
                 }
             };
             computed.insert(node, summary);
@@ -2195,7 +2208,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         check: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> bool {
-        if self.type_is_generic(check) || self.type_is_generic(extends) {
+        if self.type_is_generic_operand(check, true) || self.type_is_generic(extends) {
             return true;
         }
         let graph = self.graph();
@@ -2215,10 +2228,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             _ => None,
         };
         match (simple_tuple(check), simple_tuple(extends)) {
-            (Some(check), Some(extends)) if check.len() == extends.len() => check
-                .into_iter()
-                .chain(extends)
-                .any(|element| self.type_is_generic(element)),
+            (Some(check), Some(extends)) if check.len() == extends.len() => {
+                check
+                    .into_iter()
+                    .any(|element| self.type_is_generic_operand(element, true))
+                    || extends
+                        .into_iter()
+                        .any(|element| self.type_is_generic(element))
+            }
             _ => false,
         }
     }
@@ -2235,11 +2252,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// in (`NonNullable<T[K]>` is, `Pick<T, "a">` is not). Read from an
     /// explicit stack.
     pub(super) fn type_is_generic(&self, node: SemanticNodeId) -> bool {
+        self.type_is_generic_operand(node, false)
+    }
+
+    /// An infer declaration substituted into a conditional's check acts as
+    /// an unbound type variable. At its declaration site in `extends` it is
+    /// instead a pattern to infer, so genericness must retain that position.
+    fn type_is_generic_operand(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
         let graph = self.graph();
-        let mut pending = vec![node];
-        let mut seen: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
-        while let Some(node) = pending.pop() {
-            if !seen.insert(node) {
+        let mut pending = vec![(node, infer_operand)];
+        // One visited set per operand position: a node met as an infer
+        // operand and as an ordinary operand is visited once in each.
+        let mut seen = [
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+            crate::semantic_query::small_node_set::SmallNodeSet::default(),
+        ];
+        while let Some((node, infer_operand)) = pending.pop() {
+            if !seen[usize::from(infer_operand)].insert(node) {
                 continue;
             }
             let Some(data) = graph.node_data(node) else {
@@ -2251,7 +2280,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 drop(data);
                 if !args
                     .iter()
-                    .any(|arg| self.mentions_free_type_variable(*arg))
+                    .any(|arg| self.mentions_generic_operand_variable(*arg, infer_operand))
                 {
                     continue;
                 }
@@ -2268,20 +2297,26 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         _ => &[],
                     };
                     if generic_in.is_empty() {
-                        pending.extend(args.iter().copied());
+                        pending.extend(args.iter().map(|arg| (*arg, infer_operand)));
                     } else {
-                        pending.extend(generic_in.iter().filter_map(|index| args.get(*index)));
+                        pending.extend(
+                            generic_in
+                                .iter()
+                                .filter_map(|index| args.get(*index))
+                                .map(|arg| (*arg, infer_operand)),
+                        );
                     }
                     continue;
                 }
                 match self.alias_application_instantiated(&base, &args) {
                     Some(named) if named == node => return true,
-                    Some(named) => pending.push(named),
+                    Some(named) => pending.push((named, infer_operand)),
                     None => {}
                 }
                 continue;
             }
             match &*data {
+                SemanticNodeData::Infer { .. } if infer_operand => return true,
                 SemanticNodeData::TypeParam { .. } | SemanticNodeData::InferRef { .. } => {
                     return true;
                 }
@@ -2289,26 +2324,40 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 // `keyof O`) is generic only over a generic operand; the
                 // checker resolved it.
                 SemanticNodeData::IndexedAccess { object, index } => {
-                    pending.push(*object);
+                    pending.push((*object, infer_operand));
                     if let crate::semantic_query::IndexKey::Computed(index) = index {
-                        pending.push(*index);
+                        pending.push((*index, infer_operand));
                     }
                 }
-                SemanticNodeData::KeyOf { base } => pending.push(*base),
+                SemanticNodeData::KeyOf { base } => pending.push((*base, infer_operand)),
                 SemanticNodeData::Conditional { check, extends, .. } => {
-                    pending.extend([*check, *extends]);
+                    pending.extend([(*check, true), (*extends, false)]);
                 }
                 SemanticNodeData::IntrinsicApplication { args, .. } => {
-                    pending.extend(args.iter());
+                    pending.extend(args.iter().map(|arg| (*arg, infer_operand)));
                 }
-                SemanticNodeData::Alias(inner) => pending.push(*inner),
-                SemanticNodeData::Mapped { source, .. } => pending.push(*source),
-                SemanticNodeData::Union(members) => pending.extend(members.members_arc().iter()),
+                SemanticNodeData::Alias(inner) => pending.push((*inner, infer_operand)),
+                SemanticNodeData::Mapped { source, .. } => pending.push((*source, infer_operand)),
+                SemanticNodeData::Union(members) => pending.extend(
+                    members
+                        .members_arc()
+                        .iter()
+                        .map(|member| (*member, infer_operand)),
+                ),
                 SemanticNodeData::Intersection(members) => {
-                    pending.extend(members.members_arc().iter());
+                    pending.extend(
+                        members
+                            .members_arc()
+                            .iter()
+                            .map(|member| (*member, infer_operand)),
+                    );
                 }
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
-                    pending.extend(expressions.iter());
+                    pending.extend(
+                        expressions
+                            .iter()
+                            .map(|expression| (*expression, infer_operand)),
+                    );
                 }
                 SemanticNodeData::Tuple { elements, .. } => pending.extend(
                     elements
@@ -2320,7 +2369,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                                 graph.node_data(*value).as_deref(),
                                 Some(SemanticNodeData::TypeParam { .. })
                             )
-                        }),
+                        })
+                        .map(|value| (value, infer_operand)),
                 ),
                 _ => {}
             }

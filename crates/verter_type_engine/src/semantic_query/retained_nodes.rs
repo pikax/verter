@@ -81,8 +81,11 @@ impl SemanticQueryValue {
                     substitution,
                     return_type,
                     fresh_literal_returns,
-                    recovery_diagnostic: _,
+                    recovery_diagnostic,
                 } => {
+                    if let Some(recipe) = recovery_diagnostic {
+                        recipe.arguments.for_each_node(&mut visit);
+                    }
                     visit(*selected_signature);
                     for &(parameter, argument) in substitution.bindings() {
                         visit(parameter);

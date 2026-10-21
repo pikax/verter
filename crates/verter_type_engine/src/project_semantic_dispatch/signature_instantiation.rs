@@ -188,7 +188,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// The fixation inputs of `type_parameters` after relating every
     /// `(from, into)` pair under one collecting session; `None` when a
     /// relation does not settle.
-    fn signature_inference_inputs(
+    pub(super) fn signature_inference_inputs(
         &self,
         type_parameters: &[TypeParamDecl],
         pairs: &[(SemanticNodeId, SemanticNodeId)],
@@ -342,12 +342,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
 
     /// `signature` declaring no type parameters: an instantiated generic
     /// signature, whose parameters were all substituted.
-    fn signature_without_type_parameters(&self, signature: SemanticNodeId) -> SemanticNodeId {
+    pub(super) fn signature_without_type_parameters(
+        &self,
+        signature: SemanticNodeId,
+    ) -> SemanticNodeId {
         self.signature_with_type_parameters(signature, Vec::new())
     }
 
     /// `signature` declaring `type_parameters` in place of its own clause.
-    fn signature_with_type_parameters(
+    pub(super) fn signature_with_type_parameters(
         &self,
         signature: SemanticNodeId,
         type_parameters: Vec<TypeParamDecl>,

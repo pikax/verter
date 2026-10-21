@@ -324,6 +324,7 @@ impl VerterHost {
             .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
             .into_publication();
         crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
         publication
     }
 
@@ -602,6 +603,21 @@ impl VerterHost {
     /// Rust allocator to free the backing memory so that NAPI-RS-backed
     /// hosts don't keep the Node.js process alive waiting for GC
     /// finalisation.
+    ///
+    /// Close releases every owner the host's caches hold, then gives back
+    /// the storage those owners leave behind: retired artifact versions no
+    /// live root reaches, the semantic store's destroyed-node sidecars,
+    /// drained dependency-rail and dedup tables, and identity strings only
+    /// the pool still references. Results a caller still holds stay valid
+    /// and charged until the caller drops them; nothing is revoked, and
+    /// another host's data and charges are untouched.
+    ///
+    /// Close does NOT wait for the retained-parse releases it issues: a
+    /// lease drop only records its release for the owning worker. A caller
+    /// that needs those releases applied — a retention measurement, a
+    /// test comparing the account to its pre-workload baseline — waits on
+    /// [`Self::release_completion`] after the close and after dropping the
+    /// results it held.
     pub fn close(&self) {
         let _block_content_fence = self.block_content.admission_fence.lock();
         // Notify the workspace for each tracked file so overlays AND
@@ -668,7 +684,56 @@ impl VerterHost {
         // regressing close()'s memory-release contract. Clearing releases
         // it now.
         self.store_view_manager().clear();
+        // Every owner above is released; give back what only they reached.
+        self.reclaim_released_storage();
         self.bump_store_view_epoch();
+    }
+
+    /// Give back the storage released owners leave behind, without touching
+    /// anything a live owner or reader still reaches.
+    ///
+    /// Retired artifact versions go first, once nothing roots them: their
+    /// decl memos hold parse leases and their prepared declarations pooled
+    /// identities. Then the semantic store's destroyed-node sidecars,
+    /// drained dependency-rail and dedup tables, and the identity strings
+    /// only the pool still references. Each step frees only storage whose
+    /// last referent is gone, so it is idempotent and safe on a live host.
+    fn reclaim_released_storage(&self) {
+        let _ = self.project_type_store.indexed().reclaim_retired_versions();
+        let _ = self
+            .project_type_store
+            .semantic_graph()
+            .release_drained_storage();
+        let _ = self.project_type_store.identity_interner().shed_pool_only();
+    }
+
+    /// Open a completion boundary over the releases this host has issued
+    /// so far.
+    ///
+    /// Dropping a parse lease (an artifact version, a decl memo) never
+    /// blocks: the release is recorded for the decl-lowering worker that
+    /// owns the snapshot, which applies it — freeing the parse and its pin
+    /// — before its next job. Opening the boundary reclaims retired
+    /// artifact versions nothing roots any more (so their leases are
+    /// covered) and marks every worker shard; [`HostReleaseCompletion::wait`]
+    /// returns once every shard has applied every release recorded before
+    /// the boundary opened, then gives back the pool and sidecar storage
+    /// those releases and any reader dropped before the boundary left
+    /// behind. Releases issued after the boundary opened (a later close, a
+    /// reader dropped concurrently) are covered only by a later boundary;
+    /// an empty or repeated boundary completes at once.
+    ///
+    /// Close does not wait on its own releases. A caller measuring a closed
+    /// host closes it, drops the results it held, then waits on this
+    /// boundary before reading [`Self::retention_snapshot`]; readers dropped
+    /// after the close are covered the same way. Never call it from work
+    /// running on a decl-lowering worker.
+    pub fn release_completion(&self) -> HostReleaseCompletion<'_> {
+        let _ = self.project_type_store.indexed().reclaim_retired_versions();
+        HostReleaseCompletion {
+            host: self,
+            parse: self.decl_lowering.release_completion(),
+        }
     }
 
     /// Configure project-scoped path alias resolution.
@@ -858,6 +923,51 @@ impl VerterHost {
         self.bump_store_view_epoch();
     }
 
+    /// Mint a workload identity bound to the aggregate account this host's
+    /// semantic stores charge — the same account [`Self::retention_snapshot`]
+    /// reads. ACTIVE reservations made through it
+    /// (`SemanticRetentionAccount::reserve_as`, reached with
+    /// `self.project_type_store().retention_account()`) are the workload an
+    /// ACTIVE-occupancy window measures.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    #[must_use]
+    pub fn mint_active_occupancy_owner(
+        &self,
+    ) -> verter_session_query::retention::active_window::ActiveOwner {
+        self.project_type_store
+            .retention_account()
+            .mint_active_owner()
+    }
+
+    /// Open an ACTIVE-occupancy measurement window for `owner` on the
+    /// aggregate account this host's semantic stores charge.
+    ///
+    /// The window reports the most ACTIVE bytes `owner` held at once between
+    /// its opening and its finish; other identified owners are excluded and
+    /// unknown or mixed provenance rejects the witness (see
+    /// [`verter_session_query::retention::active_window`]). Optional
+    /// test/tooling state: present only under `test`, `test-support` or the
+    /// default-off `soak-support` feature
+    /// ([`verter_session_query::retention::ACTIVE_OCCUPANCY_WINDOW_AVAILABLE`]).
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    #[must_use = "a window measures only until it is finished or dropped"]
+    pub fn open_active_occupancy_window(
+        &self,
+        owner: &verter_session_query::retention::active_window::ActiveOwner,
+    ) -> verter_session_query::retention::active_window::ActiveOccupancyWindow {
+        self.project_type_store
+            .retention_account()
+            .open_active_window(owner)
+    }
+
+    /// Bytes the retained parse snapshots pin against the account. An
+    /// observation that retains nothing.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn parse_pin_bytes_for_tests(&self) -> usize {
+        self.decl_lowering.snapshot_pin_bytes_for_tests()
+    }
+
     /// What the host retains right now, as object counts and aggregate
     /// bytes ([`HostRetentionSnapshot`]).
     ///
@@ -937,6 +1047,7 @@ impl VerterHost {
                 .resolved_import_facts()
                 .entry_count(),
             component_meta_states: self.resolver.runtime.component_meta_state_count(),
+            identity_pool_entries: self.project_type_store.identity_interner().len(),
             registered_sources: self.carrier_publication.source_authority.len(),
             signature_records: self
                 .project_type_store
@@ -1434,5 +1545,28 @@ impl VerterHost {
         for alias in new_aliases {
             alias_map.insert(alias.clone(), canonical_id.to_string());
         }
+    }
+}
+
+/// A host release boundary ([`VerterHost::release_completion`]).
+#[must_use = "a release boundary proves nothing until it is awaited"]
+pub struct HostReleaseCompletion<'host> {
+    host: &'host VerterHost,
+    parse: verter_semantic_source::decl_lowering::ParseReleaseCompletion,
+}
+
+impl HostReleaseCompletion<'_> {
+    /// Block until every decl-lowering worker has applied the parse
+    /// releases recorded before the boundary opened, then give back the
+    /// storage released owners left behind.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::ParseReleaseError::WorkerStopped`] when a worker stopped
+    /// before applying its releases; nothing is reclaimed then.
+    pub fn wait(self) -> Result<(), crate::ParseReleaseError> {
+        self.parse.wait()?;
+        self.host.reclaim_released_storage();
+        Ok(())
     }
 }

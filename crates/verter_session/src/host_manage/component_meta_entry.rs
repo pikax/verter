@@ -1649,6 +1649,10 @@ impl VerterHost {
 #[path = "component_meta_entry_tests.rs"]
 mod component_meta_entry_tests;
 
+#[cfg(test)]
+#[path = "component_meta_entry_depth_tests.rs"]
+mod component_meta_entry_depth_tests;
+
 /// Classification shared by the view-aware and base publish decisions.
 /// The debug line stays at each caller: the two messages differ.
 enum ComponentMetaRefusalGate {

@@ -242,8 +242,8 @@ impl VerterHost {
     /// workspace's own view (`None`) or a request overlay's effective view.
     ///
     /// `TypeImport` first; with no target, the `EsmImport` fallback; either
-    /// target normalized to its declaration companion
-    /// ([`Self::normalize_admitted_type_target`]). A refusal on any lane is
+    /// delivered target, admitted or unretained, normalized to its
+    /// declaration companion ([`Self::normalize_type_target`]). A refusal on any lane is
     /// the answer — never a "not found". Every lane resolves through the
     /// SAME snapshot, so an overlay view never mixes its own answer with a
     /// workspace one, and there is no second policy for overlays to drift
@@ -266,62 +266,48 @@ impl VerterHost {
                 verter_audit::NonAdmissionReason::ForcedTestRefusal,
             );
         }
-        match self.resolve_dependency_lane(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_session_query::resolution::ResolveRequestKind::TypeImport,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted)
-                if admitted.result().is_some() =>
-            {
-                return self.normalize_admitted_type_target(overlay, owner_canonical, admitted);
-            }
-            verter_workspace::ResolutionPublication::Admitted(_) => {}
-            verter_workspace::ResolutionPublication::Refused(refusal) => {
-                return verter_workspace::ResolutionPublication::Refused(refusal);
-            }
-        }
-        let runtime = match self.resolve_dependency_lane(
-            overlay,
-            owner_canonical,
-            import_source,
-            verter_session_query::resolution::ResolveRequestKind::EsmImport,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => admitted,
-            verter_workspace::ResolutionPublication::Refused(refusal) => {
-                return verter_workspace::ResolutionPublication::Refused(refusal);
-            }
-        };
-        self.normalize_admitted_type_target(overlay, owner_canonical, runtime)
+        // A miss falls through to the runtime lane; a refusal is the
+        // answer. A lane answered unretained leaves every answer derived
+        // from it unretained.
+        let target = self
+            .resolve_dependency_lane(
+                overlay,
+                owner_canonical,
+                import_source,
+                verter_session_query::resolution::ResolveRequestKind::TypeImport,
+            )
+            .or_else_publication(|| {
+                self.resolve_dependency_lane(
+                    overlay,
+                    owner_canonical,
+                    import_source,
+                    verter_session_query::resolution::ResolveRequestKind::EsmImport,
+                )
+            });
+        self.normalize_type_target(overlay, owner_canonical, target)
     }
 
-    fn normalize_admitted_type_target(
+    fn normalize_type_target(
         &self,
         overlay: Option<&verter_workspace::ResolutionOverlaySnapshot>,
         owner_canonical: &str,
-        admitted: verter_workspace::AdmittedResolution<String>,
+        target: verter_workspace::ResolutionPublication<String>,
     ) -> verter_workspace::ResolutionPublication<String> {
-        let Some(runtime_target) = admitted.result().cloned() else {
-            return verter_workspace::ResolutionPublication::Admitted(admitted);
+        let Some(Some(runtime_target)) = target.delivered().map(|result| result.cloned()) else {
+            return target;
         };
-        match self.resolve_dependency_lane(
+        let normalized = self.resolve_dependency_lane(
             overlay,
             owner_canonical,
             &runtime_target,
             verter_session_query::resolution::ResolveRequestKind::TypeImport,
-        ) {
-            verter_workspace::ResolutionPublication::Admitted(normalized)
-                if normalized.result().is_some() =>
-            {
-                verter_workspace::ResolutionPublication::Admitted(normalized)
-            }
-            verter_workspace::ResolutionPublication::Admitted(_) => {
-                admitted.replace_result(Some(runtime_target))
-            }
+        );
+        match normalized {
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 verter_workspace::ResolutionPublication::Refused(refusal)
             }
+            normalized if normalized.is_some() => normalized.unretained_with(&target),
+            missed => target.unretained_with(&missed),
         }
     }
 

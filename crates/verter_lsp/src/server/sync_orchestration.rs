@@ -1130,17 +1130,9 @@ impl VerterLanguageServer {
             return;
         };
 
-        self.documents.host().set_import_dependencies(
-            canonical_id,
-            resolved_dependencies
-                .iter()
-                .map(|entry| verter_session::DependencyResolution {
-                    specifier: entry.provider_specifier.clone(),
-                    resolved_canonical_id: Some(entry.source_id.clone()),
-                    possible_canonical_ids: Vec::new(),
-                })
-                .collect(),
-        );
+        self.documents
+            .host()
+            .set_import_dependencies(canonical_id, resolved_dependencies.route_snapshot());
     }
 
     /// Tell the provider what changed on disk. An engine that watches the disk
@@ -1249,15 +1241,7 @@ impl VerterLanguageServer {
         if !prepared.resolved_dependencies.is_empty() {
             self.documents.host().set_import_dependencies(
                 canonical_id,
-                prepared
-                    .resolved_dependencies
-                    .iter()
-                    .map(|entry| verter_session::DependencyResolution {
-                        specifier: entry.provider_specifier.clone(),
-                        resolved_canonical_id: Some(entry.source_id.clone()),
-                        possible_canonical_ids: Vec::new(),
-                    })
-                    .collect(),
+                prepared.resolved_dependencies.route_snapshot(),
             );
         }
 
@@ -1374,20 +1358,12 @@ impl VerterLanguageServer {
 
             let resolved_dependencies = prepared.resolved_dependencies;
             if !resolved_dependencies.is_empty() {
-                self.documents.host().set_import_dependencies(
-                    &canonical_id,
-                    resolved_dependencies
-                        .iter()
-                        .map(|entry| verter_session::DependencyResolution {
-                            specifier: entry.provider_specifier.clone(),
-                            resolved_canonical_id: Some(entry.source_id.clone()),
-                            possible_canonical_ids: Vec::new(),
-                        })
-                        .collect(),
-                );
+                self.documents
+                    .host()
+                    .set_import_dependencies(&canonical_id, resolved_dependencies.route_snapshot());
             }
 
-            for dependency in resolved_dependencies {
+            for dependency in resolved_dependencies.into_results() {
                 if dependency.provider_target
                     == verter_session_query::resolution::ProviderTarget::CarrierPublicApi
                 {

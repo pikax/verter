@@ -71,6 +71,7 @@ use verter_type_expr_oxc::{lower_property_key, lower_return_annotation, lower_ts
 #[path = "type_eval_build_shallow.rs"]
 mod shallow;
 
+use verter_type_expr::{IndexedElaboratedProperty, IndexedElaborationForm, IndexedReportSite};
 pub use verter_type_expr::{
     IndexedValueCall, IndexedValueCallArg, IndexedValueCallKind, IndexedValueExpression,
 };
@@ -96,6 +97,8 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
             IndexedValueExpression::Member { object, .. } => pending.push(object),
             IndexedValueExpression::Call(call) => {
                 call.point = call.point.saturating_add(base);
+                call.report_point = call.report_point.saturating_add(base);
+                call.report_end = call.report_end.saturating_add(base);
                 let IndexedValueCall {
                     callee,
                     receiver,
@@ -108,6 +111,7 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
                 }
                 for argument in Arc::make_mut(args) {
                     argument.point = argument.point.saturating_add(base);
+                    argument.report.offset(base);
                     pending.push(&mut argument.expression);
                 }
             }
@@ -117,8 +121,10 @@ pub fn offset_indexed_value_expression(expression: &mut IndexedValueExpression, 
 
 /// The object and name of a static member read whose object is a value the
 /// indexed domain evaluates: a direct call, construct or tagged template,
+/// an object, array or primitive literal (`[1, "a"].filter`, `"ab".concat`),
 /// or a member read off one (`f().a.b`). Its value is the object's member
-/// ([`IndexedValueExpression::Member`]).
+/// ([`IndexedValueExpression::Member`]), read through the object's
+/// apparent type as the checker reads it.
 fn member_of_evaluated_value<'a>(
     expr: &'a Expression<'a>,
 ) -> Option<(&'a Expression<'a>, &'a str)> {
@@ -134,7 +140,14 @@ fn member_of_evaluated_value<'a>(
             Expression::CallExpression(call) if !call.optional => {
                 return Some((&member.object, member.property.name.as_str()));
             }
-            Expression::NewExpression(_) | Expression::TaggedTemplateExpression(_) => {
+            Expression::NewExpression(_)
+            | Expression::TaggedTemplateExpression(_)
+            | Expression::ArrayExpression(_)
+            | Expression::ObjectExpression(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_)
+            | Expression::BooleanLiteral(_)
+            | Expression::BigIntLiteral(_) => {
                 return Some((&member.object, member.property.name.as_str()));
             }
             Expression::StaticMemberExpression(inner) if !inner.optional => root = &inner.object,
@@ -6873,12 +6886,16 @@ fn indexed_record_receiver<'a>(callee: &'a Expression<'a>) -> Option<&'a Express
 fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedValueExpression {
     enum Task<'a> {
         Value(&'a Expression<'a>, MemberLiteralPolicy),
+        /// A member read's object: an array literal there is the
+        /// checker's array literal expression, whose fresh elements widen
+        /// (`[1, "a"].filter` reads `(string | number)[]`'s `filter`).
+        Object(&'a Expression<'a>),
         Build(IndexedCallNode<'a>),
         BuildMember(&'a str),
     }
     fn push_member<'a>(object: &'a Expression<'a>, name: &'a str, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::BuildMember(name));
-        tasks.push(Task::Value(object, MemberLiteralPolicy::Widen));
+        tasks.push(Task::Object(object));
     }
     fn push_node<'a>(node: IndexedCallNode<'a>, tasks: &mut Vec<Task<'a>>) {
         tasks.push(Task::Build(node));
@@ -6921,15 +6938,29 @@ fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedVa
         IndexedNode::Member(object, name) => push_member(object, name, &mut tasks),
     }
     while let Some(task) = tasks.pop() {
-        match task {
-            Task::Value(expr, policy) => match indexed_value_step(expr, source, policy, None) {
-                IndexedValueStep::Lowered(lowered) => values.push(lowered),
-                IndexedValueStep::Call(node) => push_node(node, &mut tasks),
-                IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
-            },
+        let (expr, policy) = match task {
+            Task::Value(expr, policy) => (expr, policy),
+            Task::Object(expr) => {
+                if matches!(
+                    unwrap_expression_wrappers(expr),
+                    Expression::ArrayExpression(_)
+                ) {
+                    values.push(lowered_or_unsupported(
+                        infer_declaration_expression_type(
+                            expr,
+                            source,
+                            TopLevelLiteralPolicy::Preserve,
+                        ),
+                        expr,
+                    ));
+                    continue;
+                }
+                (expr, MemberLiteralPolicy::Widen)
+            }
             Task::Build(node) => {
                 let call = build_indexed_call(node, &mut values, source);
                 values.push(IndexedValueExpression::Call(call));
+                continue;
             }
             Task::BuildMember(name) => {
                 let object = values.pop().expect("the member's object");
@@ -6937,7 +6968,13 @@ fn lower_nested_indexed_calls(first: IndexedNode<'_>, source: &str) -> IndexedVa
                     object: Box::new(object),
                     name: Arc::from(name),
                 });
+                continue;
             }
+        };
+        match indexed_value_step(expr, source, policy, None) {
+            IndexedValueStep::Lowered(lowered) => values.push(lowered),
+            IndexedValueStep::Call(node) => push_node(node, &mut tasks),
+            IndexedValueStep::Member(object, name) => push_member(object, name, &mut tasks),
         }
     }
     values
@@ -6975,7 +7012,7 @@ fn build_indexed_call(
         IndexedCallNode::New(_) => None,
     }
     .map(|_| Box::new(values.pop().expect("the receiver's record")));
-    let argument = |expression: &Expression<'_>, lowered, spread| IndexedValueCallArg {
+    let argument = |expression: &Expression<'_>, lowered, spread, report| IndexedValueCallArg {
         expression: lowered,
         point: expression.span().start,
         spread,
@@ -6983,6 +7020,7 @@ fn build_indexed_call(
         literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
+        report,
     };
     let call_arguments = |arguments: &[oxc_ast::ast::Argument<'_>], lowered: Vec<_>| {
         let args: Vec<IndexedValueCallArg> = arguments
@@ -6993,6 +7031,7 @@ fn build_indexed_call(
                     indexed_argument_expression(authored),
                     lowered,
                     matches!(authored, oxc_ast::ast::Argument::SpreadElement(_)),
+                    indexed_argument_report_site(authored),
                 )
             })
             .collect();
@@ -7001,6 +7040,8 @@ fn build_indexed_call(
     match node {
         IndexedCallNode::Call(call) => IndexedValueCall {
             point: call.span.start,
+            report_point: indexed_call_report_span(&call.callee).0,
+            report_end: indexed_call_report_span(&call.callee).1,
             kind: IndexedValueCallKind::Call,
             callee: Box::new(callee),
             receiver,
@@ -7012,6 +7053,8 @@ fn build_indexed_call(
         },
         IndexedCallNode::New(call) => IndexedValueCall {
             point: call.span.start,
+            report_point: call.span.start,
+            report_end: call.span.end,
             kind: IndexedValueCallKind::Construct,
             callee: Box::new(callee),
             receiver: None,
@@ -7033,17 +7076,21 @@ fn build_indexed_call(
                 literal_provenance: None,
                 context_sensitive: false,
                 function_return_source: None,
+                report: IndexedReportSite {
+                    point: tagged.quasi.span.start,
+                    end: tagged.quasi.span.end,
+                    form: None,
+                },
             });
-            args.extend(
-                tagged
-                    .quasi
-                    .expressions
-                    .iter()
-                    .zip(lowered_arguments)
-                    .map(|(expression, lowered)| argument(expression, lowered, false)),
-            );
+            args.extend(tagged.quasi.expressions.iter().zip(lowered_arguments).map(
+                |(expression, lowered)| {
+                    argument(expression, lowered, false, indexed_report_site(expression))
+                },
+            ));
             IndexedValueCall {
                 point: tagged.span.start,
+                report_point: tagged.span.start,
+                report_end: tagged.span.end,
                 kind: IndexedValueCallKind::Call,
                 callee: Box::new(callee),
                 receiver,
@@ -7707,6 +7754,8 @@ fn lower_indexed_call_expression_observed(
     let (callee, receiver) = indexed_callee_and_receiver(&call.callee, source, &mut observe);
     IndexedValueCall {
         point: call.span.start,
+        report_point: indexed_call_report_span(&call.callee).0,
+        report_end: indexed_call_report_span(&call.callee).1,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7738,6 +7787,8 @@ fn lower_indexed_new_expression_observed(
 ) -> IndexedValueCall {
     IndexedValueCall {
         point: call.span.start,
+        report_point: call.span.start,
+        report_end: call.span.end,
         kind: IndexedValueCallKind::Construct,
         callee: Box::new(lower_indexed_value_expression(&call.callee, source)),
         receiver: None,
@@ -7786,10 +7837,16 @@ fn lower_indexed_tagged_template_expression_observed(
         literal_provenance: None,
         context_sensitive: false,
         function_return_source: None,
+        report: IndexedReportSite {
+            point: tagged.quasi.span.start,
+            end: tagged.quasi.span.end,
+            form: None,
+        },
     });
     for (index, expression) in tagged.quasi.expressions.iter().enumerate() {
         args.push(lower_indexed_call_argument(
             expression,
+            indexed_report_site(expression),
             false,
             index + 1,
             source,
@@ -7799,6 +7856,8 @@ fn lower_indexed_tagged_template_expression_observed(
     }
     IndexedValueCall {
         point: tagged.span.start,
+        report_point: tagged.span.start,
+        report_end: tagged.span.end,
         kind: IndexedValueCallKind::Call,
         callee: Box::new(callee),
         receiver,
@@ -7826,6 +7885,7 @@ fn lower_indexed_call_arguments(
             match argument {
                 oxc_ast::ast::Argument::SpreadElement(spread) => lower_indexed_call_argument(
                     &spread.argument,
+                    indexed_argument_report_site(argument),
                     true,
                     ordinal,
                     source,
@@ -7834,6 +7894,7 @@ fn lower_indexed_call_arguments(
                 ),
                 argument => lower_indexed_call_argument(
                     argument.to_expression(),
+                    indexed_argument_report_site(argument),
                     false,
                     ordinal,
                     source,
@@ -7849,6 +7910,7 @@ fn lower_indexed_call_arguments(
 /// One argument position, reported to `observe` at `ordinal` exactly once.
 fn lower_indexed_call_argument(
     expression: &Expression<'_>,
+    report: IndexedReportSite,
     spread: bool,
     ordinal: usize,
     source: &str,
@@ -7885,7 +7947,196 @@ fn lower_indexed_call_argument(
         literal_provenance: indexed_literal_provenance(expression, source),
         context_sensitive: indexed_context_sensitive(Some(expression)),
         function_return_source: None,
+        report,
     }
+}
+
+/// Where the checker reports a diagnostic about a whole call whose callee
+/// is `callee` (`getDiagnosticSpanForCallNode`): a property access's name,
+/// otherwise the callee expression.
+fn indexed_call_report_span(callee: &Expression<'_>) -> (u32, u32) {
+    let span = match callee {
+        Expression::StaticMemberExpression(member) => member.property.span,
+        Expression::PrivateFieldExpression(member) => member.field.span,
+        callee => callee.span(),
+    };
+    (span.start, span.end)
+}
+
+/// Where the checker reports a relation failure of one call argument: the
+/// argument node's start — a spread's `...` — and, for an argument that is
+/// not a spread, its expression's elaborated form.
+fn indexed_argument_report_site(argument: &oxc_ast::ast::Argument<'_>) -> IndexedReportSite {
+    match argument {
+        oxc_ast::ast::Argument::SpreadElement(spread) => IndexedReportSite {
+            point: spread.span.start,
+            end: spread.span.end,
+            form: None,
+        },
+        argument => indexed_report_site(argument.to_expression()),
+    }
+}
+
+/// Where the checker reports a relation failure of `expression`'s value,
+/// and the authored form it elaborates the failure into (`elaborateError`):
+/// an arrow function whose body is an expression and none of whose
+/// parameters is annotated (`elaborateArrowFunction`), an object literal
+/// (`elaborateObjectLiteral`) or an array literal (`elaborateArrayLiteral`),
+/// through parentheses. Nested forms are walked from an explicit stack, so
+/// source nesting never costs native stack.
+fn indexed_report_site(expression: &Expression<'_>) -> IndexedReportSite {
+    /// One site's elaborated shape; children are named by their index in the
+    /// node list, always allocated after their parent.
+    enum Shape {
+        Whole,
+        Unmodelled,
+        Arrow(usize),
+        Object(Vec<(Arc<str>, u32, u32, Option<usize>)>),
+        Array(Vec<usize>),
+    }
+    fn child<'a, 'b>(
+        expression: &'a Expression<'b>,
+        nodes: &mut Vec<(u32, u32, Shape)>,
+        pending: &mut Vec<(usize, &'a Expression<'b>)>,
+    ) -> usize {
+        nodes.push((expression.span().start, expression.span().end, Shape::Whole));
+        pending.push((nodes.len() - 1, expression));
+        nodes.len() - 1
+    }
+
+    let mut nodes: Vec<(u32, u32, Shape)> = Vec::new();
+    let mut pending = Vec::new();
+    child(expression, &mut nodes, &mut pending);
+    while let Some((index, mut expression)) = pending.pop() {
+        while let Expression::ParenthesizedExpression(parenthesized) = expression {
+            expression = &parenthesized.expression;
+        }
+        nodes[index].2 = match expression {
+            Expression::ArrowFunctionExpression(arrow) => {
+                let annotated = arrow
+                    .params
+                    .items
+                    .iter()
+                    .any(|param| param.type_annotation.is_some())
+                    || arrow
+                        .params
+                        .rest
+                        .as_ref()
+                        .is_some_and(|rest| rest.type_annotation.is_some());
+                match arrow.get_expression() {
+                    Some(body) if !annotated => Shape::Arrow(child(body, &mut nodes, &mut pending)),
+                    _ => Shape::Whole,
+                }
+            }
+            Expression::ObjectExpression(object) => {
+                let mut properties = Vec::with_capacity(object.properties.len());
+                let mut modelled = true;
+                for property in &object.properties {
+                    let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(property) = property
+                    else {
+                        modelled = false;
+                        break;
+                    };
+                    let name: Arc<str> = match &property.key {
+                        oxc_ast::ast::PropertyKey::StaticIdentifier(identifier) => {
+                            Arc::from(identifier.name.as_str())
+                        }
+                        oxc_ast::ast::PropertyKey::StringLiteral(literal) if !property.computed => {
+                            Arc::from(literal.value.as_str())
+                        }
+                        _ => {
+                            modelled = false;
+                            break;
+                        }
+                    };
+                    let value = (property.kind == oxc_ast::ast::PropertyKind::Init
+                        && !property.method
+                        && !property.shorthand)
+                        .then(|| child(&property.value, &mut nodes, &mut pending));
+                    properties.push((
+                        name,
+                        property.key.span().start,
+                        property.key.span().end,
+                        value,
+                    ));
+                }
+                if modelled {
+                    Shape::Object(properties)
+                } else {
+                    Shape::Unmodelled
+                }
+            }
+            Expression::ArrayExpression(array) => {
+                let mut elements = Vec::with_capacity(array.elements.len());
+                let mut modelled = true;
+                for element in &array.elements {
+                    match element {
+                        oxc_ast::ast::ArrayExpressionElement::SpreadElement(_)
+                        | oxc_ast::ast::ArrayExpressionElement::Elision(_) => {
+                            modelled = false;
+                            break;
+                        }
+                        element => {
+                            elements.push(child(element.to_expression(), &mut nodes, &mut pending))
+                        }
+                    }
+                }
+                if modelled {
+                    Shape::Array(elements)
+                } else {
+                    Shape::Unmodelled
+                }
+            }
+            Expression::TSAsExpression(assertion)
+                if matches!(
+                    &assertion.type_annotation,
+                    oxc_ast::ast::TSType::TSTypeReference(reference)
+                        if matches!(&reference.type_name, oxc_ast::ast::TSTypeName::IdentifierReference(name) if name.name == "const")
+                ) =>
+            {
+                Shape::Unmodelled
+            }
+            Expression::AssignmentExpression(_) | Expression::SequenceExpression(_) => {
+                Shape::Unmodelled
+            }
+            _ => Shape::Whole,
+        };
+    }
+
+    let mut sites: Vec<Option<IndexedReportSite>> = (0..nodes.len()).map(|_| None).collect();
+    let take = |sites: &mut Vec<Option<IndexedReportSite>>, child: usize| {
+        sites[child]
+            .take()
+            .expect("a child site is built before its parent")
+    };
+    for (index, (point, end, shape)) in nodes.into_iter().enumerate().rev() {
+        let form = match shape {
+            Shape::Whole => None,
+            Shape::Unmodelled => Some(IndexedElaborationForm::Unmodelled),
+            Shape::Arrow(body) => Some(IndexedElaborationForm::Arrow(Box::new(take(
+                &mut sites, body,
+            )))),
+            Shape::Object(properties) => Some(IndexedElaborationForm::Object(Arc::from(
+                properties
+                    .into_iter()
+                    .map(|(name, point, end, value)| IndexedElaboratedProperty {
+                        name,
+                        point,
+                        end,
+                        value: value.map(|value| take(&mut sites, value)),
+                    })
+                    .collect::<Vec<_>>(),
+            ))),
+            Shape::Array(elements) => Some(IndexedElaborationForm::Array(Arc::from(
+                elements
+                    .into_iter()
+                    .map(|element| take(&mut sites, element))
+                    .collect::<Vec<_>>(),
+            ))),
+        };
+        sites[index] = Some(IndexedReportSite { point, end, form });
+    }
+    sites[0].take().expect("the root site is built")
 }
 
 fn lower_indexed_explicit_type_arguments(

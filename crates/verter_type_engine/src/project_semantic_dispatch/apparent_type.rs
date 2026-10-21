@@ -116,7 +116,10 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 name,
                 args,
                 canonical,
-                ProjectionReductionContext::published(ProjectionMode::Expanded),
+                // The apparent surface supplies members and signature
+                // carriers. Their interiors are demanded only by a
+                // selected member or signature read.
+                ProjectionReductionContext::published(ProjectionMode::Shallow),
             )
         }
     }
@@ -518,7 +521,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             } => SemanticQueryKey::ProjectPath {
                 base: scoped(
                     base,
-                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                    ProjectionReductionContext::published(ProjectionMode::Shallow),
                 ),
                 path,
                 context,

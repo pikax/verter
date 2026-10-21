@@ -410,6 +410,12 @@ pub enum NonCacheableReadReason {
     /// never be warm-admitted as a complete result. Orthogonal to
     /// completeness: the result is NOT partial, it is non-cacheable.
     OutputMaterializationLoss,
+    /// A complete, current import resolution the retention account
+    /// declined to keep. The answer is correct and the compute that read
+    /// it is complete, but nothing derived from it may be retained in a
+    /// persistent or shared store: the process just refused to hold the
+    /// resolution itself.
+    UnretainedResolution,
 }
 
 impl NonCacheableReadReason {
@@ -426,9 +432,29 @@ impl NonCacheableReadReason {
             | Self::UnobservableSource
             | Self::InferenceBudgetExceeded
             | Self::PreparationFailure
-            | Self::OutputMaterializationLoss => {
+            | Self::OutputMaterializationLoss
+            | Self::UnretainedResolution => {
                 crate::facts::fact_read_set::NonCacheablePropagation::Transitive
             }
+        }
+    }
+
+    /// What this read says about a value computed from it. Only a declined
+    /// retention leaves the value complete and current: every other class
+    /// is a superseded, unrootable, degraded or lossy basis.
+    #[inline]
+    #[must_use]
+    pub fn basis(self) -> crate::facts::fact_read_set::NonCacheableBasis {
+        use crate::facts::fact_read_set::NonCacheableBasis;
+        match self {
+            Self::UnretainedResolution => NonCacheableBasis::RetentionDeclined,
+            Self::FencedServe
+            | Self::LeaseMiss
+            | Self::UnrootableRoute
+            | Self::UnobservableSource
+            | Self::InferenceBudgetExceeded
+            | Self::PreparationFailure
+            | Self::OutputMaterializationLoss => NonCacheableBasis::Untrusted,
         }
     }
 
@@ -465,6 +491,10 @@ impl NonCacheableReadReason {
             // degradation sidecar on every re-run, so only warm
             // PUBLICATION is refused, never intra-request reuse.
             Self::OutputMaterializationLoss => super::reuse::RequestReuse::Deterministic,
+            // An unretained resolution is the complete answer for this
+            // view; re-running it inside the request reproduces it, so only
+            // PUBLICATION is refused.
+            Self::UnretainedResolution => super::reuse::RequestReuse::Deterministic,
         }
     }
 }
