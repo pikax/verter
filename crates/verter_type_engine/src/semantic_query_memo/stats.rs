@@ -319,9 +319,12 @@ impl<'a> InFlightStatsGuard<'a> {
 #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
 const _: () = assert!(std::mem::size_of::<InFlightStatsGuard<'static>>() == 0);
 
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+const _: () = assert!(!std::mem::needs_drop::<InFlightStatsGuard<'static>>());
+
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl Drop for InFlightStatsGuard<'_> {
     fn drop(&mut self) {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         if let Some(stats) = self.stats {
             stats.record_in_flight_exit();
         }

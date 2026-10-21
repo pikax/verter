@@ -2253,6 +2253,7 @@ impl SemanticGraphStore {
         &self,
         key: &SemanticQueryKey,
     ) {
+        let _ = std::marker::PhantomData::<M>;
         #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         let _ = key;
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]

@@ -1199,6 +1199,7 @@ impl VerterHost {
     /// gates on the raw id and routes the overlay branch through
     /// [`crate::host_manage::overlay_materialize::OverlayArtifactIdentity`].
     #[must_use]
+    #[cfg(any(test, feature = "test-support", not(target_arch = "wasm32")))]
     pub(crate) fn current_content_pinned_indexed(
         &self,
         canonical: &str,

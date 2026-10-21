@@ -48,8 +48,9 @@ this row supersedes that owner's gate column.
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
+| `CaptureTargets::{observer,request,accumulator}` and retained/borrowed targets on `RequestSnapshot`, `ProjectSemanticDispatch`, `GraphIn`, `SessionDispatchHost` and `ShapeCacheOwnerScope` | Audit emissions only | OPTIONAL | One admitted execution; sibling tasks share the request's receivers | `src/request_observers.rs`, `src/resolver_core/resolver_context.rs`, `src/project_semantic_dispatch/{mod,memo}.rs`, `src/semantic_query_memo/graph_in.rs` | Receiver fields `cfg(feature = "semantic-observe")`; the carrier is zero-size otherwise; uncaptured typed access compiles away |
 | `AtomicSemanticGraphStats` counters (`hits`, `misses`, `same_path_sentinel_returns`, `waits_ms`, `joined_waits`, `inflight_aborted_retries`, `joiner_view_mismatch_forks`, `cold_aborts_swept`, `origin_edges_emitted`, builder counters, memo hit/miss counters), each a `Tally` | none; tests and measurement readers through `stats_snapshot` | OPTIONAL | One store; `Tally` is zero-size without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
-| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` drop is a no-op without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
+| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` is zero-size without drop glue when the gate is off | `src/semantic_query_memo/stats.rs` | observation gate |
 | Path-length reservoir (`path_length_samples`, `record_path_length`) | none | OPTIONAL | One store; capped at 8192 samples | `src/semantic_query_memo/{stats,mod}.rs` | observation gate |
 | `SemanticGraphStore::stats_snapshot` / `SemanticGraphStats` reader, `DerivationStore::iter_edges`, `sorted_percentile`, `intern_preserving_scope_call_count` | none; tests and measurement | OPTIONAL | Derived on read | `src/semantic_query_memo/{stats,derivation,nodes}.rs` | observation gate |
 | Blocking-wait clock read feeding `waits_ms` | none | OPTIONAL | One wait | `src/semantic_query_memo/producer.rs` | observation gate |
@@ -201,6 +202,8 @@ default builds, or work this sweep could not finish, with the reason.
    typed operations. Compile source-map timers use the selected mode, and
    per-builder graph telemetry runs only for captured execution or test work
    accounting. Process-wide instrumentation retains its documented build gate.
+   Acceptance remains open until the required instrumentation CI lanes pass
+   on the pushed candidate.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a
