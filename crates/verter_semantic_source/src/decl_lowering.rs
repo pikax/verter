@@ -36,6 +36,13 @@
 //! with a fresh lease) — a superseded snapshot can never answer a
 //! new-content demand.
 //!
+//! A lease drop never waits: it records its release for the owning worker,
+//! which applies it before its next job. A caller that must observe those
+//! releases applied opens a completion boundary
+//! ([`DeclLoweringService::release_completion`]): one marker job per worker,
+//! answered only after the worker applied every release recorded before
+//! the marker was sent.
+//!
 //! Callers BLOCK on the job result (a rendezvous channel — cooperative
 //! blocking, no spinning). Jobs must be PURE: no host calls, no service
 //! re-entry — a job that submitted a sub-job could deadlock its own
@@ -479,6 +486,15 @@ struct DeclWorker {
     /// its snapshot is retained, so this holds no more entries than the
     /// shard does.
     releases: Arc<parking_lot::Mutex<FxHashMap<SnapshotKey, usize>>>,
+    /// Disconnects when the worker thread exits, however it exits: a job
+    /// queued behind a dead worker stays buffered while the service holds
+    /// the sender, so a release boundary watches this to fail instead of
+    /// waiting for a marker that will never run.
+    alive: crossbeam_channel::Receiver<()>,
+    /// The worker thread, joined when the service drops: it owns the
+    /// shard, so its exit is when the shard's retained snapshots, and the
+    /// retention charges pinning them, are released.
+    thread: std::thread::JoinHandle<()>,
 }
 
 /// Spawn `worker_count` decl-lowering worker threads, each owning its own
@@ -500,10 +516,12 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
         let (wake, wake_rx) = crossbeam_channel::bounded::<()>(1);
         let releases = Arc::new(parking_lot::Mutex::new(FxHashMap::default()));
         let pending = Arc::clone(&releases);
-        std::thread::Builder::new()
+        let (alive_tx, alive) = crossbeam_channel::bounded::<()>(0);
+        let thread = std::thread::Builder::new()
             .name(format!("verter-decl-lower-{index}"))
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
+                let _alive = alive_tx;
                 let mut shard = SnapshotShard::new();
                 loop {
                     let job = crossbeam_channel::select! {
@@ -529,9 +547,150 @@ fn spawn_decl_workers(worker_count: usize, queue_capacity: usize) -> Vec<DeclWor
             jobs,
             wake,
             releases,
+            alive,
+            thread,
         });
     }
     workers
+}
+
+/// A completion boundary over parse releases recorded before it opened
+/// ([`DeclLoweringService::release_completion`]).
+///
+/// Holding or dropping it changes nothing: it only observes the owning
+/// workers. Every worker shard that had spawned when the boundary opened
+/// participates; the boundary is complete once each one has applied the
+/// releases recorded before its marker.
+#[must_use = "a release boundary proves nothing until it is awaited"]
+#[derive(Debug)]
+pub struct ParseReleaseCompletion {
+    #[cfg(not(target_arch = "wasm32"))]
+    pending: Vec<ShardRelease>,
+}
+
+/// One worker shard's part of a [`ParseReleaseCompletion`]: the marker's
+/// answer (`None` when the shard could not take the marker) and the
+/// worker's liveness.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct ShardRelease {
+    shard: usize,
+    receiver: Option<crossbeam_channel::Receiver<()>>,
+    alive: crossbeam_channel::Receiver<()>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ShardRelease {
+    /// `Ok(true)` once the marker answered, `Ok(false)` while the worker
+    /// has not reached it, an error once the worker stopped without it.
+    fn answered(&self) -> Result<bool, ParseReleaseError> {
+        let stopped = ParseReleaseError::WorkerStopped { shard: self.shard };
+        let receiver = self.receiver.as_ref().ok_or(stopped)?;
+        if receiver.try_recv().is_ok() {
+            return Ok(true);
+        }
+        match self.alive.try_recv() {
+            Err(crossbeam_channel::TryRecvError::Empty) => Ok(false),
+            // The worker exited: its last act may have been the marker.
+            _ => receiver.try_recv().map(|()| true).map_err(|_| stopped),
+        }
+    }
+
+    /// Block until the marker answers or the worker stops.
+    fn wait(&self) -> Result<(), ParseReleaseError> {
+        let stopped = ParseReleaseError::WorkerStopped { shard: self.shard };
+        let receiver = self.receiver.as_ref().ok_or(stopped)?;
+        crossbeam_channel::select! {
+            recv(receiver) -> answer => answer.map_err(|_| stopped),
+            recv(self.alive) -> _ => receiver.try_recv().map_err(|_| stopped),
+        }
+    }
+}
+
+/// Why a [`ParseReleaseCompletion`] cannot complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseReleaseError {
+    /// The worker owning `shard` stopped before applying the releases the
+    /// boundary covers; whether they were applied is unknown.
+    WorkerStopped { shard: usize },
+}
+
+impl std::fmt::Display for ParseReleaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerStopped { shard } => write!(
+                f,
+                "decl-lowering worker {shard} stopped before applying its parse releases"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ParseReleaseError {}
+
+impl ParseReleaseCompletion {
+    /// A boundary with nothing left to apply.
+    fn applied() -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            pending: Vec::new(),
+        }
+    }
+
+    /// Whether every participating shard has applied its releases, without
+    /// waiting. A shard found applied is not asked again.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseReleaseError::WorkerStopped`] when a shard's worker stopped
+    /// before answering.
+    pub fn try_complete(&mut self) -> Result<bool, ParseReleaseError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut outcome = Ok(());
+            self.pending.retain(|part| match part.answered() {
+                Ok(answered) => !answered,
+                Err(stopped) => {
+                    if outcome.is_ok() {
+                        outcome = Err(stopped);
+                    }
+                    true
+                }
+            });
+            outcome.map(|()| self.pending.is_empty())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(true)
+        }
+    }
+
+    /// Block until `shard`'s marker answered, then stop tracking that shard:
+    /// the observation of one worker's acknowledgment, with no job sent.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn wait_shard(&mut self, shard: usize) -> Result<(), ParseReleaseError> {
+        if let Some(at) = self.pending.iter().position(|part| part.shard == shard) {
+            self.pending[at].wait()?;
+            self.pending.remove(at);
+        }
+        Ok(())
+    }
+
+    /// Block until every participating shard has applied the releases
+    /// recorded before the boundary opened. Waits on each worker's answer
+    /// (cooperative blocking, no polling).
+    ///
+    /// # Errors
+    ///
+    /// [`ParseReleaseError::WorkerStopped`] when a shard's worker stopped
+    /// before answering.
+    pub fn wait(self) -> Result<(), ParseReleaseError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        for part in &self.pending {
+            part.wait()?;
+        }
+        Ok(())
+    }
 }
 
 /// The lazy declaration-lowering service. See module docs.
@@ -586,6 +745,28 @@ impl std::fmt::Debug for DeclLoweringService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DeclLoweringService")
             .finish_non_exhaustive()
+    }
+}
+
+/// Closing the job queues ends the workers; joining them means a dropped
+/// service has released every retained snapshot and the retention charge
+/// pinning it by the time its drop returns. Every lease holds the service,
+/// so none is left to release afterwards. A worker never joins itself: if
+/// the last handle drops on one, that worker exits once its job returns.
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DeclLoweringService {
+    fn drop(&mut self) {
+        let Some(workers) = self.workers.take() else {
+            return;
+        };
+        let current = std::thread::current().id();
+        let threads: Vec<std::thread::JoinHandle<()>> =
+            workers.into_iter().map(|worker| worker.thread).collect();
+        for thread in threads {
+            if thread.thread().id() != current {
+                let _ = thread.join();
+            }
+        }
     }
 }
 
@@ -970,6 +1151,29 @@ impl DeclLoweringService {
     }
 
     /// Caller-blocking worker rendezvous performed so far (see the field).
+    /// Bytes every retained parse snapshot pins against the account, read on
+    /// the owning workers. An observation that retains nothing and changes
+    /// no refcount.
+    #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-support")))]
+    #[must_use]
+    pub fn snapshot_pin_bytes_for_tests(&self) -> usize {
+        let Some(workers) = self.workers.get() else {
+            return 0;
+        };
+        workers
+            .iter()
+            .map(|worker| {
+                let (reply, answer) = crossbeam_channel::bounded::<usize>(1);
+                let read: WorkerJob = Box::new(move |shard| {
+                    let _ =
+                        reply.send(shard.entries.values().map(|entry| entry._pin.bytes()).sum());
+                });
+                worker.jobs.send(read).expect("the worker takes the read");
+                answer.recv().expect("the worker answers the read")
+            })
+            .sum()
+    }
+
     #[must_use]
     pub fn handoff_count(&self) -> u64 {
         self.handoffs.load(std::sync::atomic::Ordering::Relaxed)
@@ -1006,6 +1210,53 @@ impl DeclLoweringService {
         #[cfg(target_arch = "wasm32")]
         {
             WASM_DECL_LOWERING_SHARD.with(|cell| cell.borrow_mut().release(key, 1));
+        }
+    }
+
+    /// Open a completion boundary over every parse release recorded so far.
+    ///
+    /// A [`SnapshotLease`] drop records its release without waiting, and the
+    /// owning worker applies it (dropping the retained parse and its pin at
+    /// refcount zero) before the next job it runs. This sends one marker job
+    /// to every spawned worker; a worker answers the marker only after it
+    /// has applied every release recorded before the marker was sent, so the
+    /// boundary completes once every release issued before this call has
+    /// been applied on its owning worker. Releases recorded after this call
+    /// may or may not be covered: open a new boundary for them.
+    ///
+    /// Opening the boundary may wait for queue space behind other callers'
+    /// jobs, never for a worker to finish them, and takes no lock a worker
+    /// needs. A service whose workers never spawned holds no lease, so its
+    /// boundary is already complete. Never call this from inside a lowering
+    /// job: a job waiting on its own worker's marker cannot complete.
+    pub fn release_completion(&self) -> ParseReleaseCompletion {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(workers) = self.workers.get() else {
+                return ParseReleaseCompletion::applied();
+            };
+            let mut pending = Vec::with_capacity(workers.len());
+            for (shard, worker) in workers.iter().enumerate() {
+                let (applied, receiver) = crossbeam_channel::bounded::<()>(1);
+                let marker: WorkerJob = Box::new(move |_shard| {
+                    let _ = applied.send(());
+                });
+                let receiver = match worker.jobs.send(marker) {
+                    Ok(()) => Some(receiver),
+                    Err(_) => None,
+                };
+                pending.push(ShardRelease {
+                    shard,
+                    receiver,
+                    alive: worker.alive.clone(),
+                });
+            }
+            ParseReleaseCompletion { pending }
+        }
+        // wasm applies every release synchronously at the lease drop.
+        #[cfg(target_arch = "wasm32")]
+        {
+            ParseReleaseCompletion::applied()
         }
     }
 
@@ -2099,3 +2350,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "decl_lowering_release_tests.rs"]
+mod release_tests;

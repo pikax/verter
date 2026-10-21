@@ -385,6 +385,10 @@ pub(crate) enum DeferredEvaluationDemand {
     /// A mapped index consumes the instantiated value, rather than retaining
     /// a named application for a later member demand or call-return display.
     MappedIndexValue,
+    /// Select a mapped helper result while leaving its interiors addressable.
+    MappedMemberValue,
+    /// Resolve a closed mapped source without visiting its member interiors.
+    MappedSource,
 }
 
 /// Heap-owned continuation for one deferred-operator evaluation entry. A
@@ -394,6 +398,14 @@ pub(crate) enum DeferredEvaluationDemand {
 enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitKeyOfBase,
+    AwaitMappedSource {
+        source: SemanticNodeId,
+        mapper: crate::semantic_query::MapperKey,
+    },
+    AwaitMappedKeySpace {
+        source: SemanticNodeId,
+        mapper: crate::semantic_query::MapperKey,
+    },
     AwaitIndexedObject {
         index: IndexKey,
     },
@@ -845,6 +857,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// be a stable cycle/carrier stop, so it remains a `TypeNode` instead of
     /// recursively re-entering the evaluator.
     fn normalized_index_key_from_evaluated_node(&self, resolved: SemanticNodeId) -> IndexKey {
+        // An enum member's literal type indexes the property its value
+        // names (`Record<E, X>[E.A]` reads key `0`), by the rule a mapped
+        // type's enum domain keys its members with.
+        let enum_value = match self.graph().node_data(resolved).as_deref() {
+            Some(SemanticNodeData::EnumLiteral(member)) => {
+                self.enum_member_key(resolved, member).map(|_| member.base)
+            }
+            _ => None,
+        };
+        if let Some(value) = enum_value {
+            return self.normalized_index_key_from_evaluated_node(value);
+        }
         match self.graph().node_data(resolved).as_deref() {
             Some(data @ SemanticNodeData::TypeOfNominal(_)) => IndexKey::UniqueSymbol(
                 data.typeof_nominal_identity()
@@ -2495,7 +2519,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         node: SemanticNodeId,
         context: ProjectionReductionContext,
     ) -> EvaluateDeferredOutcome {
-        let evaluated = self.evaluate_selected_value_outcome(node, context);
+        let evaluated = self.evaluate_deferred_demand(
+            node,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         if evaluated.completeness.is_partial() {
             return evaluated;
         }
@@ -2533,7 +2561,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let QueryResult::Value(instantiated) = read.value else {
             return evaluated;
         };
-        let body = self.evaluate_deferred_outcome(instantiated, context);
+        let body = self.evaluate_deferred_demand(
+            instantiated,
+            context,
+            DeferredEvaluationDemand::MappedMemberValue,
+        );
         EvaluateDeferredOutcome {
             node: if matches!(
                 self.graph().node_data(body.node).as_deref(),
@@ -2648,7 +2680,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         // evaluated here, at a demand for its value: its
                         // keys where they settle, as the checker prints
                         // them.
-                        if frame.demand == DeferredEvaluationDemand::Shell {
+                        if matches!(
+                            frame.demand,
+                            DeferredEvaluationDemand::Shell
+                                | DeferredEvaluationDemand::MappedSource
+                        ) {
                             if let QueryResult::Value(keys) = read.value {
                                 if let Some(settled) =
                                     self.settled_key_of_carrier(keys, frame.context)
@@ -2657,6 +2693,55 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 }
                             }
                         }
+                        self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+                    }
+                    DeferredEvaluationStage::AwaitMappedSource { source, mut mapper } => {
+                        // The source is demanded before its domain, as in locator
+                        // projection. Keep the binder's value and remap untouched
+                        // until the existing per-key materializer binds it.
+                        let keyof_source = matches!(self.graph().node_data(mapper.key_space).as_deref(),
+                            Some(SemanticNodeData::KeyOf { base }) if *base == source);
+                        let key_space = if keyof_source {
+                            self.graph().intern_preserving_scope(
+                                mapper.key_space,
+                                SemanticNodeData::KeyOf { base: child.node },
+                            )
+                        } else if mapper.key_space == source {
+                            child.node
+                        } else {
+                            mapper.key_space
+                        };
+                        if keyof_source
+                            && matches!(
+                                self.graph().node_data(child.node).as_deref(),
+                                Some(SemanticNodeData::Infer { .. })
+                            )
+                        {
+                            mapper.key_space = key_space;
+                            let read = self.execute_read(SemanticQueryKey::MappedType {
+                                source: child.node,
+                                mapper,
+                                context: frame.context,
+                            });
+                            self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
+                        } else {
+                            frame.stage = DeferredEvaluationStage::AwaitMappedKeySpace {
+                                source: child.node,
+                                mapper,
+                            };
+                            DeferredEvaluationAction::Push {
+                                node: key_space,
+                                context: frame.context,
+                            }
+                        }
+                    }
+                    DeferredEvaluationStage::AwaitMappedKeySpace { source, mut mapper } => {
+                        mapper.key_space = child.node;
+                        let read = self.execute_read(SemanticQueryKey::MappedType {
+                            source,
+                            mapper,
+                            context: frame.context,
+                        });
                         self.deferred_read_action(frame, read, || self.opaque(QueryError::Miss))
                     }
                     DeferredEvaluationStage::AwaitIndexedObject { index } => match index {
@@ -2768,11 +2853,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         match data.as_ref() {
                             _ if demand != DeferredEvaluationDemand::Shell
                                 && self
-                                    .selected_value_children(data.as_ref(), context)
+                                    .selected_value_children(data.as_ref(), context, demand)
                                     .is_some() =>
                             {
                                 let children = self
-                                    .selected_value_children(data.as_ref(), context)
+                                    .selected_value_children(data.as_ref(), context, demand)
                                     .expect("selected child topology");
                                 if let Some(&first) = children.first() {
                                     let frame = frames.last_mut().expect("active evaluator frame");
@@ -2816,6 +2901,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             }
                             SemanticNodeData::Mapped { source, mapper } => {
                                 let frame = frames.last_mut().expect("active evaluator frame");
+                                if frame.demand != DeferredEvaluationDemand::Shell
+                                    && crate::semantic_query::may_reduce_operator(frame.context)
+                                {
+                                    frame.stage = DeferredEvaluationStage::AwaitMappedSource {
+                                        source: *source,
+                                        mapper: mapper.clone(),
+                                    };
+                                    DeferredEvaluationAction::Push {
+                                        node: *source,
+                                        context: frame.context,
+                                    }
+                                } else {
                                 let read = self.execute_read(SemanticQueryKey::MappedType {
                                     source: *source,
                                     mapper: mapper.clone(),
@@ -2824,6 +2921,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self.deferred_read_action(frame, read, || {
                                     self.opaque(QueryError::Miss)
                                 })
+                                }
                             }
                             // A NOMINAL (`unique symbol`) carrier is
                             // TERMINAL: resolving its head would project the
@@ -2903,7 +3001,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 self.deferred_read_action(frame, read, || current)
                             }
                             SemanticNodeData::InstantiationRef { base, args }
-                                if demand == DeferredEvaluationDemand::MappedIndexValue
+                                if (demand == DeferredEvaluationDemand::MappedIndexValue
+                                    || (demand == DeferredEvaluationDemand::MappedSource
+                                        && !self.type_is_generic(current))
+                                    || (matches!(demand, DeferredEvaluationDemand::SelectedValue | DeferredEvaluationDemand::MappedMemberValue)
+                                        && self.selected_value_has_closed_conditional_body(current, base)))
                                     && !matches!(
                                         self.prepared_decl_kind(base),
                                         Some(
@@ -2922,6 +3024,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         slot,
                                         Arc::clone(args.as_arc()),
                                         self.instantiate_context_for(&base.canonical_id, context),
+                                    ),
+                                ));
+                                let frame = frames.last_mut().expect("active evaluator frame");
+                                self.deferred_read_action(frame, read, || current)
+                            }
+                            SemanticNodeData::DeclRef { identity }
+                                if demand == DeferredEvaluationDemand::MappedSource
+                                    && self.prepared_decl_kind(identity) == Some(verter_session_query::declarations::TypeDeclKind::Alias) =>
+                            {
+                                let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                    crate::semantic_query::InstantiateKey::new(
+                                        self.type_slot_for(identity.canonical_id.clone(), identity.owner, identity.decl_name.clone()),
+                                        Arc::from([]),
+                                        self.instantiate_context_for(&identity.canonical_id, context),
                                     ),
                                 ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
@@ -2992,9 +3108,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let parent = frames.last().expect("a child has a parent demand");
                     // Key enumeration consumes the source's domain,
                     // without demanding all of its member values.
-                    let demand = if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase)
-                    {
+                    let demand = if matches!(
+                        parent.stage,
+                        DeferredEvaluationStage::AwaitMappedSource { .. }
+                            | DeferredEvaluationStage::AwaitMappedKeySpace { .. }
+                    ) {
+                        DeferredEvaluationDemand::MappedSource
+                    } else if matches!(parent.stage, DeferredEvaluationStage::AwaitKeyOfBase) {
                         DeferredEvaluationDemand::Shell
+                    } else if parent.demand == DeferredEvaluationDemand::MappedMemberValue
+                        && matches!(
+                            &parent.stage,
+                            DeferredEvaluationStage::AwaitValueChildren { data, .. }
+                                if matches!(data.as_ref(), SemanticNodeData::Signature { .. })
+                        )
+                    {
+                        // Declared signature type positions publish their selected
+                        // values, even when the enclosing mapped member keeps its
+                        // object surface addressable.
+                        DeferredEvaluationDemand::SelectedValue
                     } else {
                         parent.demand
                     };
@@ -3145,32 +3277,66 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
             | SemanticNodeData::BareRef(_)
             | SemanticNodeData::ImportType(_) => true,
-            // The mapped-index-value arm reads the declaration's kind.
-            SemanticNodeData::InstantiationRef { .. } => {
-                demand == DeferredEvaluationDemand::MappedIndexValue
-            }
+            // Selected values also read the declaration's body classification.
+            // Keep that read inside a frame so its dependency proof is retained.
+            SemanticNodeData::InstantiationRef { .. } => demand != DeferredEvaluationDemand::Shell,
+            SemanticNodeData::DeclRef { .. } => demand == DeferredEvaluationDemand::MappedSource,
             data => {
                 demand != DeferredEvaluationDemand::Shell
-                    && self.selected_value_children(data, context).is_some()
+                    && self
+                        .selected_value_children(data, context, demand)
+                        .is_some()
             }
         };
         !rewritten
+    }
+
+    /// A substituted conditional alias is evaluated at a selected call result.
+    /// Ordinary named surfaces and genuinely open applications stay addressable.
+    fn selected_value_has_closed_conditional_body(
+        &self,
+        node: SemanticNodeId,
+        identity: &crate::semantic_query::DeclIdentity,
+    ) -> bool {
+        let mut identity = identity.clone();
+        let mut seen = rustc_hash::FxHashSet::default();
+        while self.prepared_decl_kind(&identity)
+            == Some(verter_session_query::declarations::TypeDeclKind::Alias)
+            && seen.insert(identity.clone())
+        {
+            let Some(Some(body)) = self.declared_alias_body(&identity) else {
+                return false;
+            };
+            match self.graph().node_data(body).as_deref() {
+                Some(SemanticNodeData::Conditional { .. }) => return !self.type_is_generic(node),
+                Some(SemanticNodeData::DeclRef { identity: next })
+                | Some(SemanticNodeData::InstantiationRef { base: next, .. }) => {
+                    identity = next.clone();
+                }
+                _ => return false,
+            }
+        }
+        false
     }
 
     fn selected_value_children(
         &self,
         data: &SemanticNodeData,
         context: ProjectionReductionContext,
+        demand: DeferredEvaluationDemand,
     ) -> Option<Vec<SemanticNodeId>> {
         let whole = crate::semantic_query::may_reduce_operator(context)
-            && context.mode == ProjectionMode::Expanded;
+            && context.mode == ProjectionMode::Expanded
+            && demand != DeferredEvaluationDemand::MappedSource;
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole => Some(vec![*element]),
             SemanticNodeData::Tuple { elements, .. } if whole => {
                 Some(elements.iter().map(|e| e.value).collect())
             }
-            SemanticNodeData::Object(surface) if whole => {
+            SemanticNodeData::Object(surface)
+                if whole && demand != DeferredEvaluationDemand::MappedMemberValue =>
+            {
                 Some(surface.positive_members().iter().map(|m| m.value).collect())
             }
             SemanticNodeData::Signature {

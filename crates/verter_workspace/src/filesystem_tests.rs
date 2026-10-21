@@ -159,10 +159,29 @@ fn frozen_resolution_revalidation_bypasses_the_shared_file_snapshot() {
     );
     let frozen = recorder.freeze();
 
+    assert!(frozen.revalidate(), "the captured input starts current");
+    let before = workspace.vfs_provenance_snapshot();
+    for _ in 0..8 {
+        assert!(WorkspaceRead::resolution_event_bridge_complete(&frozen));
+    }
+    let after = workspace.vfs_provenance_snapshot();
+    assert_eq!(
+        after.resolution_evidence_live_read_count - before.resolution_evidence_live_read_count,
+        0,
+        "checking coverage of an immutable replay must not repeat live input validation"
+    );
+
     std::fs::write(&file_path, "export const value = 2").unwrap();
     assert!(
         !frozen.revalidate(),
         "independent validation must see bytes newer than the shared snapshot cache"
+    );
+
+    let unobserved = temp_canonical_id(&dir.path().join("unobserved.ts"));
+    assert!(WorkspaceRead::read_file(&frozen, &unobserved).is_none());
+    assert!(
+        !WorkspaceRead::resolution_event_bridge_complete(&frozen),
+        "a read missing from the immutable capture must make replay incomplete"
     );
 }
 

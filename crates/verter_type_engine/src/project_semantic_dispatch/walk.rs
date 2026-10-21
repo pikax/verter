@@ -1607,6 +1607,7 @@ pub(crate) fn reduce_merged_decl_display_surface(
 /// its `extends`/`implements` HERITAGE reference arms.
 ///
 /// `Object` (and `Alias`-to-`Object`) bodies are pure own-body surfaces.
+/// Nested `MergedDecl` groups contribute every body in declaration order.
 /// `Intersection` bodies (interface/class with heritage) contribute their
 /// object-surface arms as own-body and their remaining reference arms as
 /// heritage (de-duplicated). Any other shape yields nothing.
@@ -1616,30 +1617,32 @@ pub(super) fn collect_merged_contributor_arms(
     own_surfaces: &mut Vec<ShallowSurface>,
     heritage_arms: &mut Vec<SemanticNodeId>,
 ) {
-    let Some(data) = graph.node_data(node) else {
-        return;
-    };
-    match data.as_ref() {
-        SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
-        SemanticNodeData::Intersection(arms) => {
-            let arms = arms.members_arc();
-            drop(data);
-            for arm in arms.iter() {
-                if arm_is_object_surface(graph, *arm) {
-                    if let Some(view) = object_surface_view(graph, *arm) {
-                        own_surfaces.push(ShallowSurface::from_object(&view));
+    let mut pending: smallvec::SmallVec<[SemanticNodeId; 4]> = smallvec::smallvec![node];
+    while let Some(node) = pending.pop() {
+        let Some(data) = graph.node_data(node) else {
+            continue;
+        };
+        match data.as_ref() {
+            SemanticNodeData::Object(view) => own_surfaces.push(ShallowSurface::from_object(view)),
+            SemanticNodeData::Intersection(arms) => {
+                let arms = arms.members_arc();
+                drop(data);
+                for arm in arms.iter() {
+                    if arm_is_object_surface(graph, *arm) {
+                        if let Some(view) = object_surface_view(graph, *arm) {
+                            own_surfaces.push(ShallowSurface::from_object(&view));
+                        }
+                    } else if !heritage_arms.contains(arm) {
+                        heritage_arms.push(*arm);
                     }
-                } else if !heritage_arms.contains(arm) {
-                    heritage_arms.push(*arm);
                 }
             }
+            SemanticNodeData::Alias(target) => pending.push(*target),
+            SemanticNodeData::MergedDecl { contributors } => {
+                pending.extend(contributors.iter().rev().copied());
+            }
+            _ => {}
         }
-        SemanticNodeData::Alias(target) => {
-            let target = *target;
-            drop(data);
-            collect_merged_contributor_arms(graph, target, own_surfaces, heritage_arms);
-        }
-        _ => {}
     }
 }
 
@@ -8641,8 +8644,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             None,
                         );
                     }
-                    QueryResult::Error(_) => {
-                        self.note_unresolved_surface_arm(target, name, ref_owner);
+                    QueryResult::Error(error) => {
+                        // A lookup its own demand stopped early is not an
+                        // unresolvable arm: the read already folded its
+                        // causes, and the arm stays unknown, not missing.
+                        if !matches!(error, QueryError::IncompleteSemanticOperand { .. }) {
+                            self.note_unresolved_surface_arm(target, name, ref_owner);
+                        }
                         self.contribute_surface(
                             target,
                             root_contribution,
@@ -9091,7 +9099,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// (`mapper.parameter_node`) with the key literal in
     /// `mapper.value_expr`, then materialises the substituted node only
     /// enough to close the selected key via the shared
-    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value`]
+    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value_with_node`]
     /// helper. The materialisation runs under
     /// `structural_transit_with_mode(Navigate)`: nested `KeyOf` /
     /// `MappedType` operators carrier-stop via
@@ -9187,10 +9195,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.dispatch.cancellation.is_cancelled() {
                 return None;
             }
-            let literal = iteration_key.literal.as_ref()?;
-            let key_arg = self
-                .graph()
-                .intern_node(SemanticNodeData::Literal(literal.clone()));
+            let key_arg = self.dispatch.key_domain_binder(iteration_key)?;
             let value = if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
                 // The preimage PROVED this produced member exists, so its
                 // value must never surface as `Opaque(Miss)` — that node
@@ -9713,12 +9718,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     shared_value.expect("initialised immediately above")
                 } else {
-                    let literal = key.literal.as_ref()?;
-                    self.dispatch.materialize_selected_key_mapped_value(
-                        mapper,
-                        literal,
-                        materialise_context,
-                    )
+                    let key_arg = self.dispatch.key_domain_binder(&key)?;
+                    self.dispatch
+                        .materialize_selected_key_mapped_value_with_node(
+                            mapper,
+                            key_arg,
+                            materialise_context,
+                        )
                 };
                 let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
                     self.dispatch
@@ -11298,6 +11304,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::string_literal(s.as_str()),
                 literal: Some(crate::semantic_query::LiteralValue::String(s.clone())),
+                binder: None,
             });
             true
         }
@@ -11310,6 +11317,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::from_js_number(*n),
                 literal: Some(crate::semantic_query::LiteralValue::Number(*n)),
+                binder: None,
             });
             true
         }
@@ -11536,6 +11544,50 @@ mod m1_merge_visibility_tests {
 
     fn one_member_surface(m: ShallowSurfaceMember) -> ShallowSurface {
         ShallowSurface::from_entries(vec![super::ShallowSurfaceEntry::Member(m)], None)
+    }
+
+    #[test]
+    fn nested_merged_contributors_keep_every_own_member() {
+        let graph = SemanticGraphStore::new();
+        let _roots = graph.enter_node_root_scope();
+        let object = |name| {
+            let surface = one_member_surface(member(
+                &graph,
+                name,
+                MemberVisibility::Public,
+                MemberMergeRole::Authored,
+                PrimitiveKind::Number,
+            ));
+            graph.intern_node(SemanticNodeData::Object(super::surface_view_from_shallow(
+                &surface,
+            )))
+        };
+        let nested = graph.intern_node(SemanticNodeData::MergedDecl {
+            contributors: crate::semantic_query::PayloadArray::from(vec![
+                object("base"),
+                object("same_file"),
+            ]),
+        });
+        let alias = graph.intern_node(SemanticNodeData::Alias(nested));
+        let peer = object("other_file");
+        for contributors in [[alias, peer], [peer, alias]] {
+            let node = super::reduce_merged_decl_with_graph(&graph, &contributors);
+            let data = graph.node_data(node).expect("merged declaration has data");
+            let SemanticNodeData::Object(view) = data.as_ref() else {
+                panic!("merged own members form an object: {data:?}");
+            };
+            let mut names: Vec<_> = view
+                .positive_members()
+                .iter()
+                .map(|member| member.string_name().expect("named member"))
+                .collect();
+            names.sort_unstable();
+            assert_eq!(
+                names,
+                ["base", "other_file", "same_file"],
+                "a same-file merge contributing to a cross-file merge keeps every member"
+            );
+        }
     }
 
     fn merged_member_visibility(surface: &ShallowSurface, name: &str) -> MemberVisibility {

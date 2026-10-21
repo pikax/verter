@@ -36,8 +36,15 @@ use verter_type_engine::project_semantic_dispatch::walk::ShallowDiagnostic;
 /// details) is preserved through `ExpansionDiagnostic.context` —
 /// `ExpansionStopReason` itself is a payload-free `Copy` enum because
 /// it is mirrored to a proto enum and a string-encoded TS enum.
+///
+/// `checker_message` is the checker's formatted diagnostic for a walker
+/// diagnostic the checker reports itself (TS2859), which the context carries
+/// in place of the bare node identities.
 #[must_use]
-pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnostic {
+pub(crate) fn shallow_to_expansion(
+    diag: &ShallowDiagnostic,
+    checker_message: Option<&str>,
+) -> ExpansionDiagnostic {
     match diag {
         ShallowDiagnostic::ProjectionWorkLimit { root } => ExpansionDiagnostic {
             reason: ExpansionStopReason::ProjectionWorkLimit,
@@ -124,10 +131,14 @@ pub(crate) fn shallow_to_expansion(diag: &ShallowDiagnostic) -> ExpansionDiagnos
             property_name: None,
         },
         // A relation refused at its comparison allowance (TS2859): the
-        // operation budget stopped it, naming the check's two subjects.
-        ShallowDiagnostic::RelationTooComplex { source, target } => ExpansionDiagnostic {
+        // operation budget stopped it. The context is the checker's
+        // formatted diagnostic naming the check's two types, where the
+        // caller can print them.
+        ShallowDiagnostic::RelationTooComplex { .. } => ExpansionDiagnostic {
             reason: ExpansionStopReason::BudgetExceeded,
-            context: format!("relation-too-complex@{source:?}->{target:?}"),
+            context: checker_message
+                .map(str::to_owned)
+                .unwrap_or_else(|| "relation-too-complex".to_owned()),
             property_name: None,
         },
     }
@@ -151,6 +162,7 @@ pub(crate) fn shallow_diagnostics_to_macro_expansion(
     macro_index: usize,
     macro_kind: MacroExpansionKind,
     cache_suppress: bool,
+    checker_message: &dyn Fn(&ShallowDiagnostic) -> Option<String>,
 ) -> MacroExpansionDiagnostics {
     let exactness = if cache_suppress {
         ExpansionExactness::Incomplete
@@ -165,7 +177,10 @@ pub(crate) fn shallow_diagnostics_to_macro_expansion(
     MacroExpansionDiagnostics {
         macro_kind,
         macro_index,
-        diagnostics: diags.iter().map(shallow_to_expansion).collect(),
+        diagnostics: diags
+            .iter()
+            .map(|diag| shallow_to_expansion(diag, checker_message(diag).as_deref()))
+            .collect(),
         exactness,
         execution_status,
     }
@@ -188,7 +203,7 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_open_conditional_to_indeterminate_reason() {
         let diag = ShallowDiagnostic::OpenConditional { node: dummy_node() };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::IndeterminateConditional);
         assert!(
             proj.context.contains("open-conditional"),
@@ -200,15 +215,16 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_pathological_input_to_budget_exceeded() {
         let diag = ShallowDiagnostic::PathologicalInput { root: dummy_node() };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::BudgetExceeded);
     }
 
     #[test]
     fn operational_limits_map_to_distinguishable_public_expansion_contexts() {
         let root = dummy_node();
-        let work = shallow_to_expansion(&ShallowDiagnostic::ProjectionWorkLimit { root });
-        let depth = shallow_to_expansion(&ShallowDiagnostic::ConnectedQueryDepthLimit { root });
+        let work = shallow_to_expansion(&ShallowDiagnostic::ProjectionWorkLimit { root }, None);
+        let depth =
+            shallow_to_expansion(&ShallowDiagnostic::ConnectedQueryDepthLimit { root }, None);
 
         assert_eq!(work.reason, ExpansionStopReason::ProjectionWorkLimit);
         assert_eq!(depth.reason, ExpansionStopReason::ConnectedQueryDepthLimit);
@@ -222,7 +238,7 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_cyclic_instantiation_to_dedicated_variant() {
         let diag = ShallowDiagnostic::CyclicInstantiation { decl: dummy_decl() };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         // Dedicated 1:1 mapping — was previously projected as
         // `UnresolvedReference` with substring inspection on `context`
         // to recover the cycle signal. The dedicated variant lets
@@ -234,7 +250,7 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_duplicate_arm_to_idempotent_arm() {
         let diag = ShallowDiagnostic::DuplicateArmShortCircuited { node: dummy_node() };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::IdempotentArm);
         assert!(proj.context.contains("duplicate-arm-short-circuited"));
     }
@@ -242,7 +258,7 @@ mod tests {
     #[test]
     fn shallow_to_expansion_maps_cycle_short_circuit_to_cyclic_reference() {
         let diag = ShallowDiagnostic::CycleShortCircuited { node: dummy_node() };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::CyclicReference);
         assert!(proj.context.contains("cycle-short-circuited"));
     }
@@ -257,7 +273,7 @@ mod tests {
                 ),
             ),
         };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::InstantiationError);
         assert_eq!(proj.property_name.as_deref(), Some("Dummy"));
         assert!(proj.context.contains("instantiation-error"));
@@ -269,7 +285,7 @@ mod tests {
             union_node: dummy_node(),
             arm_index: 3,
         };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         // Was previously projected as `UnsupportedOperator` (wrong:
         // the arm is empty, not unsupported). Dedicated variant
         // disambiguates union-arm-empty from genuine unsupported
@@ -288,7 +304,7 @@ mod tests {
             ),
             owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
         };
-        let proj = shallow_to_expansion(&diag);
+        let proj = shallow_to_expansion(&diag, None);
         assert_eq!(proj.reason, ExpansionStopReason::UnresolvedReference);
         assert_eq!(proj.property_name.as_deref(), Some("NotFoundHeritage"));
         assert!(
@@ -314,6 +330,7 @@ mod tests {
             7,
             MacroExpansionKind::DefineProps,
             true,
+            &|_| None,
         );
         assert_eq!(env.macro_index, 7);
         assert_eq!(env.diagnostics.len(), 2);
@@ -331,8 +348,13 @@ mod tests {
 
     #[test]
     fn macro_expansion_envelope_marks_exact_when_no_suppression() {
-        let env =
-            shallow_diagnostics_to_macro_expansion(&[], 0, MacroExpansionKind::DefineEmits, false);
+        let env = shallow_diagnostics_to_macro_expansion(
+            &[],
+            0,
+            MacroExpansionKind::DefineEmits,
+            false,
+            &|_| None,
+        );
         assert_eq!(env.exactness, ExpansionExactness::ExactConcrete);
         assert_eq!(env.execution_status, ExpansionExecutionStatus::Completed);
     }

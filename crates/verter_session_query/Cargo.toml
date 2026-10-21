@@ -13,6 +13,10 @@ publish = false
 # Exposes test-only observability accessors and constructors to cross-crate test code.
 # Production binaries MUST NOT enable this feature.
 test-support = ["verter_retention/test-support"]
+# Forwards the retention account's default-off ACTIVE-occupancy window to
+# the soak/tooling runner through the `retention` re-export, without the
+# rest of `test-support`. Forwarded by `verter_session/soak-support` only.
+soak-support = ["verter_retention/soak-support"]
 # Measurement-only: enables the `currency_probe` wall-clock/call-count rail
 # (`src/currency_probe.rs`). Absent from `default`; requested ONLY by
 # measurement harnesses, never by a production edge.

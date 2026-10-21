@@ -2070,9 +2070,10 @@ pub(crate) mod checker_syntax {
     /// One live object member, unified across the two carriers the
     /// comparer reads: a closed `Object` surface member and a
     /// spread-projection positive fact. Facets that a fact carries only
-    /// as `Indeterminate` make the member unmatchable.
+    /// as `Indeterminate` make the member unmatchable. A numeric key is
+    /// named by its canonical spelling, as the checker prints it (`{ 0: … }`).
     struct LiveMember<'a> {
-        name: Option<&'a str>,
+        name: Option<std::borrow::Cow<'a, str>>,
         optional: bool,
         readonly: bool,
         method_kind: Option<verter_type_expr::ObjectMethodKind>,
@@ -2084,7 +2085,12 @@ pub(crate) mod checker_syntax {
             member: &'a verter_type_engine::semantic_query::SurfaceMember,
         ) -> LiveMember<'a> {
             LiveMember {
-                name: member.key.as_string(),
+                name: match &member.key {
+                    verter_type_expr::AuthoredPropertyKey::Number(number) => {
+                        Some(std::borrow::Cow::Owned(number.get().to_string()))
+                    }
+                    key => key.as_string().map(std::borrow::Cow::Borrowed),
+                },
                 optional: member.optional,
                 readonly: member.readonly,
                 method_kind: member.method_kind,
@@ -2110,7 +2116,12 @@ pub(crate) mod checker_syntax {
                     _ => (false, false, None, None),
                 };
             LiveMember {
-                name: fact.key().as_string(),
+                name: match fact.key() {
+                    verter_type_expr::PropertyKey::Number(number) => {
+                        Some(std::borrow::Cow::Owned(number.get().to_string()))
+                    }
+                    key => key.as_string().map(std::borrow::Cow::Borrowed),
+                },
                 optional,
                 readonly,
                 method_kind,
@@ -2565,7 +2576,7 @@ pub(crate) mod checker_syntax {
                     }
                     _ => None,
                 };
-                member.name == Some(name.as_str())
+                member.name.as_deref() == Some(name.as_str())
                     && member.optional == *optional
                     && member.readonly == *readonly
                     && member.method_kind.is_none()
@@ -2586,7 +2597,7 @@ pub(crate) mod checker_syntax {
                 // signature equals the printed function. The method print
                 // carries no predicate, so a live predicate method never
                 // satisfies it.
-                member.name == Some(name.as_str())
+                member.name.as_deref() == Some(name.as_str())
                     && member.optional == *optional
                     && member.method_kind == Some(verter_type_expr::ObjectMethodKind::Method)
                     && member.value.is_some_and(|value| {

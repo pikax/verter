@@ -489,6 +489,25 @@ impl SemanticGraphStore {
         )
     }
 
+    /// Release the storage a drained workload leaves behind without
+    /// touching anything still live: drop the sidecar entries of destroyed
+    /// nodes, the dependency-rail interner's dead entries and drained
+    /// tables, and the dedup tables of arena shards that index no node.
+    ///
+    /// Never revokes a node, a cached candidate or a reader's result: each
+    /// step only frees storage whose last referent is already gone, so it
+    /// is safe on a live store and idempotent. A host close runs it after
+    /// its caches have released their owners.
+    pub fn release_drained_storage(&self) -> DrainedStorageReport {
+        DrainedStorageReport {
+            sidecar_entries_dropped: self.reclaim_destroyed_sidecars(),
+            dedup_tables_released: {
+                self.dep_signature_interner.sweep();
+                self.arena.release_idle_dedup_tables()
+            },
+        }
+    }
+
     /// Mark `node` as described by a sidecar entry just written, draining
     /// the destroyed log first when it has grown past
     /// [`DESTROYED_DRAIN_THRESHOLD`]. `false` when `node` was already
@@ -499,6 +518,15 @@ impl SemanticGraphStore {
         }
         self.arena.track_sidecar(node)
     }
+}
+
+/// What [`SemanticGraphStore::release_drained_storage`] freed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrainedStorageReport {
+    /// Per-node sidecar entries of destroyed nodes dropped.
+    pub sidecar_entries_dropped: usize,
+    /// Arena dedup-shard tables released because they indexed no node.
+    pub dedup_tables_released: usize,
 }
 
 /// Whether a warm candidate's VALIDITY is bound to `canonical_id` — by a
