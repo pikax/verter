@@ -490,12 +490,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// The object of the namespace a function or a class named `name` in
-    /// `canonical` merges with, when that namespace exports a value: its own
-    /// file's namespace, or for a script's global every script's namespace of
-    /// that name. `None` when no such namespace exports a value, so the value
-    /// stays a single declaration. The roots are every file whose namespace
-    /// of the name was read, whether or not it merges: a read that merged
-    /// nothing still depends on those namespaces exporting no value.
+    /// `canonical` merges with, when that namespace exports a value: the
+    /// namespace its own declaration scope declares (the file's, or the
+    /// ambient block's whose member the value is), or for a script's global
+    /// every script's namespace of that name. `None` when no such namespace
+    /// exports a value, so the value stays a single declaration. The roots
+    /// are every file whose namespace of the name was read, whether or not it
+    /// merges: a read that merged nothing still depends on those namespaces
+    /// exporting no value.
     pub(super) fn namespace_merged_into_value(
         &self,
         canonical: &str,
@@ -503,25 +505,39 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         name: &str,
         context: crate::semantic_query::ProjectionReductionContext,
     ) -> (Option<SemanticNodeId>, Vec<ObservedGraphSelfRoot>) {
-        let (object, roots) = if !name.contains('.') && !self.canonical_is_module(canonical) {
-            self.global_namespace_object_observed(canonical, name, context)
-        } else {
-            match self.namespace_object(canonical, owner, None, name, context) {
-                Some((object, roots)) => (Some(object), roots),
-                None => (
-                    None,
-                    self.ctx
-                        .ensure_indexed_ready_serve(canonical)
-                        .map(|serve| {
-                            vec![(
-                                verter_type_expr::OwnedStr::from(canonical),
-                                serve.indexed.whole_hash,
-                            )]
-                        })
-                        .unwrap_or_default(),
-                ),
-            }
-        };
+        // The declaration scope the value was read from: the file's own,
+        // else the ambient block its identity falls back to.
+        let own_scope = self
+            .ctx
+            .ensure_indexed_ready_serve(canonical)
+            .and_then(|serve| {
+                let state = &serve.indexed.shallow_state;
+                if state.headers.value_header_in(owner, name).is_some() {
+                    None
+                } else {
+                    state.value_fallback_augmentation_scope(owner, name)
+                }
+            });
+        let (object, roots) =
+            if own_scope.is_none() && !name.contains('.') && !self.canonical_is_module(canonical) {
+                self.global_namespace_object_observed(canonical, name, context)
+            } else {
+                match self.namespace_object(canonical, owner, own_scope.as_ref(), name, context) {
+                    Some((object, roots)) => (Some(object), roots),
+                    None => (
+                        None,
+                        self.ctx
+                            .ensure_indexed_ready_serve(canonical)
+                            .map(|serve| {
+                                vec![(
+                                    verter_type_expr::OwnedStr::from(canonical),
+                                    serve.indexed.whole_hash,
+                                )]
+                            })
+                            .unwrap_or_default(),
+                    ),
+                }
+            };
         let object = object.filter(|object| {
             matches!(
                 self.graph().node_data(*object).as_deref(),

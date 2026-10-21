@@ -1525,7 +1525,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope: value_root.scope.clone(),
                     name: root,
                 };
-                return self.build_typeof(&aliased_root, &aliased_path, context);
+                return self.build_typeof_suspending(
+                    &aliased_root,
+                    &aliased_path,
+                    context,
+                    suspend,
+                );
             }
         }
 
@@ -2620,34 +2625,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 groups.extend(contributions.signature_groups);
             }
         }
-        let node = if !is_class && groups.len() > 1 {
+        let signatures = if !is_class && groups.len() > 1 {
             self.merged_declaration_signatures_node(groups)
         } else {
             let signature_nodes: Vec<SemanticNodeId> = groups.into_iter().flatten().collect();
-            let surface = self.value_signature_surface(signature_nodes, is_class, scope);
-            // A namespace of the function's name merges into its value: the
-            // namespace's exported values are properties of `typeof f`.
+            self.value_signature_surface(signature_nodes, is_class, scope)
+        };
+        // A namespace of the function's name merges into its value, whether
+        // the function is declared once or merged from several declarations:
+        // the namespace's exported values are properties of `typeof f`.
+        let is_function = matches!(
+            own.kind,
+            verter_session_query::declarations::ValueDeclKind::Function
+                | verter_session_query::declarations::ValueDeclKind::AsyncFunction
+        );
+        let node = if is_function {
             let identity = &own.root_identity;
-            let is_function = matches!(
-                own.kind,
-                verter_session_query::declarations::ValueDeclKind::Function
-                    | verter_session_query::declarations::ValueDeclKind::AsyncFunction
+            let (object, roots) = self.namespace_merged_into_value(
+                identity.canonical_id.as_ref(),
+                identity.owner,
+                identity.symbol_name.as_ref(),
+                context,
             );
-            if is_function {
-                let (object, roots) = self.namespace_merged_into_value(
-                    identity.canonical_id.as_ref(),
-                    identity.owner,
-                    identity.symbol_name.as_ref(),
-                    context,
-                );
-                augmentation_roots.extend(roots);
-                match object {
-                    Some(object) => self.merged_value_and_namespace(surface, object, scope.clone()),
-                    None => surface,
-                }
-            } else {
-                surface
+            augmentation_roots.extend(roots);
+            match object {
+                Some(object) => self.merged_value_and_namespace(signatures, object, scope.clone()),
+                None => signatures,
             }
+        } else {
+            signatures
         };
         (node, augmentation_roots, augmentation_unobservable)
     }
@@ -10352,11 +10358,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             whole_hash: indexed.whole_hash,
             local_scope: None,
         };
-        let scope_payload = self.ctx.prepared_decl_bundle(canonical).map(|bundle| {
-            crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
-                &bundle, owner,
-            )
-        });
+        // The members lower in the scope the whole value lowers in
+        // ([`Self::declaration_scope_payload`]).
+        let scope_payload = self
+            .ctx
+            .prepared_decl_bundle(canonical)
+            .map(|bundle| self.declaration_scope_payload(&bundle, canonical, owner, symbol));
         let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::from_scope_payload(
             scope_payload.as_ref(),
         );

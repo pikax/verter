@@ -23,32 +23,45 @@ fn named_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<String> {
     let mut failures = Vec::new();
     for setting in ALL {
         let canonical = format!("{}/probe.ts", setting.root);
-        for (name, answer) in rows {
-            let result = host
-                .resolve_named_symbol_with_audit(&canonical, name, None)
-                .into_result()
-                .expect("the named demand does not fault");
-            let Some(node) = result else {
-                failures.push(format!(
-                    "`{name}` [{}]: the checker answers `{answer}`, the demand resolved nothing",
-                    setting.label
-                ));
-                continue;
-            };
-            let store_view = host.resolver_store_view_read().into_owned_view();
-            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx =
-                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
-            let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
-            let expected = checker_syntax::parse(answer)
-                .unwrap_or_else(|err| panic!("the checker print `{answer}` must parse: {err}"));
-            if !checker_syntax::matches_node(&dispatch, node.id(), &expected, 0) {
-                failures.push(format!(
-                    "`{name}` [{}]: the checker answers `{answer}`, the demand measured `{}`",
-                    setting.label,
-                    render_node(&dispatch, node.id(), 0)
-                ));
-            }
+        failures.extend(
+            named_mismatches_in(&host, &canonical, rows)
+                .into_iter()
+                .map(|failure| format!("[{}] {failure}", setting.label)),
+        );
+    }
+    failures
+}
+
+/// Every `(alias, checker print)` pair whose named demand in `canonical` on
+/// `host` does not resolve to the checker's answer.
+fn named_mismatches_in(
+    host: &Arc<crate::VerterHost>,
+    canonical: &str,
+    rows: &[(&str, &str)],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (name, answer) in rows {
+        let result = host
+            .resolve_named_symbol_with_audit(canonical, name, None)
+            .into_result()
+            .expect("the named demand does not fault");
+        let Some(node) = result else {
+            failures.push(format!(
+                "`{name}`: the checker answers `{answer}`, the demand resolved nothing"
+            ));
+            continue;
+        };
+        let store_view = host.resolver_store_view_read().into_owned_view();
+        let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+        let host_ctx = crate::resolver_core::HostResolverContext::new(host, &store_view, overlay);
+        let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+        let expected = checker_syntax::parse(answer)
+            .unwrap_or_else(|err| panic!("the checker print `{answer}` must parse: {err}"));
+        if !checker_syntax::matches_node(&dispatch, node.id(), &expected, 0) {
+            failures.push(format!(
+                "`{name}`: the checker answers `{answer}`, the demand measured `{}`",
+                render_node(&dispatch, node.id(), 0)
+            ));
         }
     }
     failures
@@ -329,5 +342,195 @@ fn a_namespace_starting_to_export_a_value_misses_the_warm_class_read() {
             ));
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A namespace merges into a function merged from several declarations as
+/// it merges into one declared once: a global function two scripts declare,
+/// and a namespace's function two blocks of the namespace declare, take the
+/// merged namespace's values beside their overloads, and the overloads still
+/// answer a call.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the two
+/// declaration files and a probe module, each read off a TS2322 against
+/// `never`): `keyof typeof N.g` is `"tag"`, `ReturnType<typeof N.g>` `2`,
+/// `keyof typeof h` `"tag"`, `typeof h.tag` `"H"`, `ReturnType<typeof h>`
+/// `2`.
+///
+/// Mutation: merging the namespace only into a function of one declaration
+/// leaves `keyof typeof N.g` and `keyof typeof h` `never`.
+#[test]
+fn a_namespace_merges_into_a_function_of_several_declarations() {
+    use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
+    let files = [
+        (
+            "a.d.ts",
+            "declare namespace N { function g(): 1 }\n\
+             declare namespace N { function g(x: 2): 2; namespace g { const tag: 'T' } }\n\
+             declare function h(): 1;\n",
+        ),
+        (
+            "b.d.ts",
+            "declare function h(x: 2): 2;\n\
+             declare namespace h { const tag: \"H\"; }\n",
+        ),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        "export {};\n",
+        &[
+            ("keyof typeof N.g", "\"tag\""),
+            ("ReturnType<typeof N.g>", "2"),
+            ("keyof typeof h", "\"tag\""),
+            ("typeof h.tag", "\"H\""),
+            ("ReturnType<typeof h>", "2"),
+        ],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A function an ambient module declares merges with the namespace of its
+/// name the same module block declares, not with a global namespace of that
+/// name.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the two
+/// declaration files and a probe module importing `f` from `"amb"`):
+/// `keyof typeof f` is `"tag"`.
+///
+/// Mutation: reading the namespace in the declaring file's own scope merges
+/// the global `f`, answering `"wrong"`.
+#[test]
+fn an_ambient_module_function_merges_its_own_blocks_namespace() {
+    use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
+    let files = [
+        (
+            "a.d.ts",
+            "declare module \"amb\" { export function f(): 1; \
+             export namespace f { const tag: \"T\"; } }\n",
+        ),
+        ("g.d.ts", "declare namespace f { const wrong: 1; }\n"),
+    ];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        "import { f } from \"amb\";\ntype __D<T> = T extends unknown ? T : never;\n",
+        &[("__D<keyof typeof f>", "\"tag\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `import X = N.M` declared inside a namespace body names `N.M` for that
+/// body's types and values.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict`, read off a
+/// TS2322 against `never`): `Use.T` is `"yes"`, `Use.X` `5`, `Q.Z` `"yes"`.
+///
+/// Mutation: indexing only file-scope aliases leaves `Local.T['deep']`
+/// unresolved.
+#[test]
+fn a_namespace_alias_declared_in_a_namespace_body_reads_the_namespace_it_names() {
+    let source = r#"
+type __BenchInit = 0;
+namespace Outer { export namespace Inner { export type T = { deep: "yes" }; export const x = 5 as const; } }
+namespace Use { import Local = Outer.Inner; export type T = Local.T["deep"]; export type X = typeof Local.x; }
+namespace Q { import I = Outer.Inner; export type Z = I.T["deep"]; }
+type UseT = Use.T;
+type UseX = Use.X;
+type QZ = Q.Z;
+"#;
+    let failures = named_mismatches(
+        source,
+        &[("UseT", "\"yes\""), ("UseX", "5"), ("QZ", "\"yes\"")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A module's `import X = N.M` of a script's global namespace reads `N.M`'s
+/// members in type and value position.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over the
+/// script and the probe module): `GI.T` is `"g"`, `typeof GI.x` `7`.
+///
+/// Mutation: resolving the global namespace by the unexpanded name leaves
+/// `GI.T` unresolved.
+#[test]
+fn a_module_alias_of_a_global_namespace_reads_its_members() {
+    use super::checker_probe_lane_tests::{mismatches_in, ProbeProject};
+    let files = [(
+        "g.ts",
+        "namespace GN { export namespace Inner { export type T = \"g\"; \
+         export const x = 7 as const; } }\n",
+    )];
+    let failures = mismatches_in(
+        ProbeProject {
+            files: &files,
+            compiler_options: None,
+            ambient_lib: None,
+        },
+        "import GI = GN.Inner;\nexport {};\n",
+        &[("GI.T", "\"g\""), ("typeof GI.x", "7")],
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An alias a module exports with `export import X = N.M` names `N.M` for a
+/// module importing it, in type and value position; an edit retargeting the
+/// alias reaches a warm read.
+///
+/// Measured on TypeScript 7.0.2 (`tsc --ignoreConfig --strict` over `m.ts`
+/// and the probe module): `X.T` is `1`, `typeof X.v` `1`; with the alias
+/// retargeted to `N.K`, `2` and `2`.
+///
+/// Mutation: expanding an alias only in the scope that declares it leaves
+/// both reads unresolved.
+#[test]
+fn an_exported_namespace_alias_reads_the_namespace_it_names_from_an_importer() {
+    use super::checker_probe_lane_tests::{
+        mismatches_in, mismatches_on_host, probe_host, ProbeProject,
+    };
+    let module = |target: &str| {
+        format!(
+            "namespace N {{ export namespace M {{ export type T = 1; export const v = 1 as const; }} \
+             export namespace K {{ export type T = 2; export const v = 2 as const; }} }}\n\
+             export import X = N.{target};\n"
+        )
+    };
+    let before = module("M");
+    let after = module("K");
+    let files = [("m.ts", before.as_str())];
+    let edited_files = [("m.ts", after.as_str())];
+    let project = |files| ProbeProject {
+        files,
+        compiler_options: None,
+        ambient_lib: None,
+    };
+    let probe = "import { X } from './m';\n";
+    let rows = [("X.T", "1"), ("typeof X.v", "1")];
+    let mut failures = mismatches_in(project(&files), probe, &rows);
+    let warm = probe_host(project(&files));
+    failures.extend(mismatches_on_host(&warm, project(&files), probe, &rows));
+    crate::u6_flow_shape_corpus_tests::upsert(
+        &warm,
+        "/wb/m.ts",
+        &after,
+        crate::FileLanguage::script_ts(),
+    );
+    failures.extend(
+        mismatches_on_host(
+            &warm,
+            project(&edited_files),
+            probe,
+            &[("X.T", "2"), ("typeof X.v", "2")],
+        )
+        .into_iter()
+        .map(|failure| format!("after the retarget, warm: {failure}")),
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
