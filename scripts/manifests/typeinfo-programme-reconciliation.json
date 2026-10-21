@@ -1924,6 +1924,22 @@
         "title": "fix(session): run the typeinfo rows that pass against their checked-in expectations",
         "date": "2026-09-27"
       }
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_accessor_decorator_returning_same_target_publishes_public_property",
+      "removalReference": {
+        "title": "fix(core): read get/set accessors and accessor fields as properties",
+        "date": "2026-10-20"
+      }
+    },
+    {
+      "file": "decorators.rs",
+      "function": "decorators_identity_accessor_decorator_publishes_public_property",
+      "removalReference": {
+        "title": "fix(core): read get/set accessors and accessor fields as properties",
+        "date": "2026-10-20"
+      }
     }
   ]
 }

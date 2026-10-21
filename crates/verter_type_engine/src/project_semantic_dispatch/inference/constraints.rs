@@ -45,7 +45,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         &self,
         bindings: &Arc<[InferBinding]>,
         constraints: &FxHashMap<SemanticNodeId, SemanticNodeId>,
-    ) -> Option<Arc<[InferBinding]>> {
+    ) -> Option<(Arc<[InferBinding]>, bool)> {
         super::InferenceTxn::new(self).infer_bindings_within_constraints(bindings, constraints)
     }
 }
@@ -327,26 +327,31 @@ impl<D: super::InferenceDemandDriver> super::InferenceTxn<'_, D> {
 
     /// `bindings` with each `infer` that `constraints` constrains the
     /// checker's fixed type (`getInferredType`): its inference when it is
-    /// assignable to its constraint, else that constraint. `None` when a
-    /// constraint relation is undecided.
+    /// assignable to its constraint, else that constraint — and whether any
+    /// inference was replaced by its constraint. `None` when a constraint
+    /// relation is undecided.
     pub(in crate::project_semantic_dispatch) fn infer_bindings_within_constraints(
         &self,
         bindings: &Arc<[InferBinding]>,
         constraints: &FxHashMap<SemanticNodeId, SemanticNodeId>,
-    ) -> Option<Arc<[InferBinding]>> {
-        let mut fixed: Vec<InferBinding> = bindings.to_vec();
-        for binding in fixed.iter_mut() {
+    ) -> Option<(Arc<[InferBinding]>, bool)> {
+        let mut fixed: Option<Vec<InferBinding>> = None;
+        for (index, binding) in bindings.iter().enumerate() {
             let Some(&constraint) = constraints.get(&binding.param) else {
                 continue;
             };
-            let step = self.execute_relate_pair(binding.bound, constraint);
-            match step {
+            match self.execute_relate_pair(binding.bound, constraint) {
                 RelationStep::Assignable { .. } => {}
-                RelationStep::NotAssignable => binding.bound = constraint,
+                RelationStep::NotAssignable => {
+                    fixed.get_or_insert_with(|| bindings.to_vec())[index].bound = constraint;
+                }
                 _ => return None,
             }
         }
-        Some(Arc::from(fixed.into_boxed_slice()))
+        Some(match fixed {
+            Some(fixed) => (Arc::from(fixed.into_boxed_slice()), true),
+            None => (Arc::clone(bindings), false),
+        })
     }
 }
 

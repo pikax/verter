@@ -109,6 +109,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
     // Pre-edit bodies — `b: { other: string }` is the shape that
     // gets edited.
     let body_a = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "id".to_string().into(),
@@ -125,6 +126,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         ],
     }));
     let body_b_v1 = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "other".to_string().into(),
@@ -135,6 +137,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         )],
     }));
     let body_b_v2 = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         // Edit: `string` → `number`.
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
@@ -146,6 +149,7 @@ fn bullet_6_pick_literal_key_path_precise_invariant() {
         )],
     }));
     let body_c = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "extra".to_string().into(),

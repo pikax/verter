@@ -2189,8 +2189,13 @@ fn discover_class_members<'ast>(
                 ctx.enclosing_heritage = previous_heritage;
                 ctx.enclosing_this = previous_this;
             }
-            oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
-                let Some(_member_name) = static_property_key_name(&prop.key) else {
+            oxc_ast::ast::ClassElement::PropertyDefinition(_)
+            | oxc_ast::ast::ClassElement::AccessorProperty(_) => {
+                let Some(field) = crate::analysis::class_field_value::ClassField::of(element)
+                else {
+                    continue;
+                };
+                let Some(_member_name) = static_property_key_name(field.key) else {
                     continue;
                 };
                 let member_path: Arc<[u32]> = Arc::from(vec![member_ordinal].into_boxed_slice());
@@ -2200,9 +2205,9 @@ fn discover_class_members<'ast>(
                     class.heritage.as_ref().map(|heritage| EnclosingHeritage {
                         super_class: &heritage.expression,
                         super_type_arguments: heritage.type_arguments.as_deref(),
-                        static_side: prop.r#static,
+                        static_side: field.r#static,
                     });
-                ctx.enclosing_this = Some(EnclosingThis::of_member(prop.r#static));
+                ctx.enclosing_this = Some(EnclosingThis::of_member(field.r#static));
                 // A field read through a synthetic value is an indexed
                 // program expression that value reads. One classified as an
                 // initializer (it reads `this`, or holds a callback that
@@ -2213,10 +2218,10 @@ fn discover_class_members<'ast>(
                     crate::analysis::class_field_value::class_field_value(
                         ctx.class_fields,
                         class,
-                        prop,
+                        field,
                         ctx.source,
                     ),
-                    prop.value.as_ref(),
+                    field.value,
                     ctx.anchor(contributor_index),
                 ) {
                     let source = if kind
@@ -2245,7 +2250,7 @@ fn discover_class_members<'ast>(
                                 },
                                 overload_ordinal: 0,
                             }),
-                            readonly: prop.readonly,
+                            readonly: field.readonly,
                         }
                     } else {
                         program_expression_source(&ctx.walks, value)
@@ -2263,7 +2268,7 @@ fn discover_class_members<'ast>(
                         source,
                     });
                 }
-                match prop.value.as_ref() {
+                match field.value {
                     Some(Expression::ArrowFunctionExpression(arrow)) => {
                         discover_arrow_inner(
                             arrow,
@@ -4181,6 +4186,10 @@ pub fn resolve_function_node<'a>(
                         function_from_expression(property.value.as_ref()?)?,
                         property.r#static,
                     ),
+                    ClassElement::AccessorProperty(property) => (
+                        function_from_expression(property.value.as_ref()?)?,
+                        property.r#static,
+                    ),
                     _ => return None,
                 };
                 enclosing_heritage = class.heritage.as_ref().map(|heritage| EnclosingHeritage {
@@ -4454,6 +4463,9 @@ pub fn build_indexed_program_expression_ir(
                 .get(*member_ordinal as usize)?
             {
                 oxc_ast::ast::ClassElement::PropertyDefinition(prop) => prop.value.as_ref()?,
+                oxc_ast::ast::ClassElement::AccessorProperty(property) => {
+                    property.value.as_ref()?
+                }
                 _ => return None,
             }
         }

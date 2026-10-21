@@ -897,6 +897,7 @@ mod self_tests {
 
     fn obj(props: Vec<(&str, TypeExpr, bool)>) -> TypeExpr {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: props
                 .into_iter()
                 .map(|(name, ty, optional)| {

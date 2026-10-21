@@ -79,6 +79,7 @@ use verter_type_expr::OwnedStr;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::conditional_decision::{exact_reading, ConditionalReading};
+use super::declared_read_widening::literal_primitive;
 use super::dispatch_txn::{
     provisional_relate_step, redischarge_is_stable, CompletedResolveCallMember, CompletedSccMember,
     FlowReturnPendingOutcome, InferenceOccurrence, ObligationFrameDomain, ObligationIdentity,
@@ -88,7 +89,7 @@ use super::dispatch_txn::{
 };
 use super::inference::session::{
     InferenceInfoSetup, InferenceSession, InferenceSessionSetup, InferenceSessionState,
-    ReverseProjectionState, ReverseRecoveredEntry, SessionCheckpoint,
+    ReverseRecoveredEntry, SessionCheckpoint,
 };
 #[cfg(feature = "semantic-observe")]
 use super::relation_explanation::RelationExplanation;
@@ -254,6 +255,17 @@ enum ReverseSourceShape {
     Tuple { readonly: bool },
 }
 
+/// Whether `primitive` is one a literal type belongs to.
+fn holds_literals(primitive: PrimitiveKind) -> bool {
+    matches!(
+        primitive,
+        PrimitiveKind::String
+            | PrimitiveKind::Number
+            | PrimitiveKind::BigInt
+            | PrimitiveKind::Boolean
+    )
+}
+
 fn reverse_optional(observed: bool, modifier: OptionalityMod) -> Option<bool> {
     match modifier {
         OptionalityMod::Add => Some(false),
@@ -294,20 +306,13 @@ pub(super) struct InferParamSite {
 #[derive(Debug, Clone)]
 pub(crate) struct InferPatternInfo {
     setup: InferenceSessionSetup,
-    reverse_homomorphic: Option<ReverseHomomorphicSpec>,
 }
 
 impl InferPatternInfo {
     fn new(
         graph: &crate::semantic_query_memo::SemanticGraphStore,
         sites: Vec<InferParamSite>,
-        reverse_homomorphic: Option<ReverseHomomorphicSpec>,
     ) -> Self {
-        let pass_kind = if reverse_homomorphic.is_some() {
-            InferencePassKind::ReverseHomomorphicMapped
-        } else {
-            InferencePassKind::Ordinary
-        };
         let candidate_priority = sites
             .iter()
             .map(|site| site.priority)
@@ -325,13 +330,12 @@ impl InferPatternInfo {
                 graph,
                 infos,
                 VariancePhase::Covariant,
-                pass_kind,
+                InferencePassKind::Ordinary,
                 candidate_priority,
                 NoInferMask::empty(),
                 ConstParamPolicy::NonConst,
                 ContextualInferenceMode::None,
             ),
-            reverse_homomorphic,
         }
     }
 }
@@ -545,7 +549,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             target: SemanticNodeId,
         ) -> RelationStep {
             if let Some(step) = self
-                .literal_pair_relation_of(source, target)
+                .literal_pair_relation_of(source, target, RelationKind::Assignable)
                 .or_else(|| self.literal_union_membership_of(source, target))
             {
                 self.graph().record_relation_check();
@@ -564,7 +568,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             target: SemanticNodeId,
             relation: RelationKind,
         ) -> RelationStep {
-            if let Some(step) = self.literal_pair_relation_of(source, target) {
+            if let Some(step) = self.literal_pair_relation_of(source, target, relation) {
                 self.graph().record_relation_check();
                 return step;
             }
@@ -1336,7 +1340,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return Some(relation_step_from_payload(&payload));
             }
         }
-        let served = self.graph().get_relation_payload(self.ctx, key)?;
+        let served = match self.graph().get_relation_payload(self.ctx, key) {
+            Some(served) => served,
+            // A relation the request completed for itself — a root nested
+            // in another computation, or a member of its component — is
+            // kept in the request's tier, never the memo.
+            None => self.kept_value_read(&key.to_query_key(), |value| match value {
+                SemanticQueryValue::Relation(payload) => Some(payload),
+                _ => None,
+            })?,
+        };
         let payload = served.value;
         if measurement {
             if !self.admits_served_as_own_check(&served.receipt) {
@@ -2437,17 +2450,24 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     /// A pair of literal types relates, under every relation kind and
     /// policy, exactly when the two are one value (`"a"` to `"a"`, never
-    /// `"a"` to `"b"` or `1` to `"1"`), and deciding it reads nothing and
-    /// cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
-    /// answers it by identity. So it is decided before the reentry
-    /// intercept, the memo and the cold build, whose query machinery a
-    /// guard filtering a wide literal union otherwise paid twice per
-    /// remaining arm. The operands' file roots are deposited as the cold
-    /// build's read would record them. `None` for any other pair, and while
-    /// an inference session collects (its candidate bookkeeping runs the
-    /// ordinary path).
+    /// `"a"` to `"b"` or `1` to `"1"`). A literal against one of the four
+    /// primitives literals belong to (`string`, `number`, `bigint`,
+    /// `boolean`) is decided as plainly under every directional relation and
+    /// comparability: it relates to its own primitive (`"a"` to `string`)
+    /// and to no other (`"a"` to `number`). Deciding either reads nothing
+    /// and cannot re-enter itself — the checker's `isSimpleTypeRelatedTo`
+    /// answers both from the two types' flags. So they are decided before
+    /// the reentry intercept, the memo and the cold build, whose query
+    /// machinery a guard filtering a wide literal union otherwise paid twice
+    /// per remaining arm, and a template capture checked against its implied
+    /// `string` constraint once per capture. The operands' file roots are
+    /// deposited as the cold build's read would record them. `None` for any
+    /// other pair — a primitive against a literal, and a literal against a
+    /// primitive under [`RelationKind::Identity`], whose structural axis the
+    /// relation leaves undecided, included — and while an inference session
+    /// collects (its candidate bookkeeping runs the ordinary path).
     fn literal_pair_relation(&self, key: &RelateMemoKey) -> Option<RelationStep> {
-        self.literal_pair_relation_of(key.source, key.target)
+        self.literal_pair_relation_of(key.source, key.target, key.relation)
     }
 
     /// [`Self::literal_pair_relation`] over a node pair, decided before a
@@ -2459,6 +2479,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         source: SemanticNodeId,
         target: SemanticNodeId,
+        relation: RelationKind,
     ) -> Option<RelationStep> {
         if self.dispatch_txn.borrow().active_session().is_some() {
             return None;
@@ -2470,6 +2491,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             (Some(SemanticNodeData::Literal(source)), Some(SemanticNodeData::Literal(target))) => {
                 source == target
+            }
+            (
+                Some(SemanticNodeData::Literal(literal)),
+                Some(SemanticNodeData::Primitive(primitive)),
+            ) if relation != RelationKind::Identity && holds_literals(*primitive) => {
+                literal_primitive(literal) == *primitive
             }
             _ => return None,
         };
@@ -2856,10 +2883,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if wants_session {
             if let Some(pattern) = pattern {
-                let session_id = txn.push_collecting_session(
-                    pattern.setup,
-                    pattern.reverse_homomorphic.map(ReverseProjectionState::new),
-                );
+                let session_id = txn.push_collecting_session(pattern.setup);
                 // Both identities come from the same immutable setup value;
                 // candidate collection cannot make them diverge.
                 verter_debug_assert_eq!(
@@ -4277,6 +4301,107 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// Keep a relation root the request completed for itself
+    /// ([`super::completes_request_locally`]) in the request's completion
+    /// tier together with every member its component completed, under the
+    /// root's carrier, receipt and edit clocks — the members a published
+    /// root's batched publish would admit to the family memo, and none it
+    /// would not. The component is kept whole or not at all: a root that is
+    /// not kept (partial, unpriced, cancelled, or `carrier` absent because
+    /// it is not admissible), a member that is not a decided binary relation
+    /// or whose value is no longer live, or a refused reservation keeps
+    /// nothing. Either way each member's flight ends unpublished: a joiner
+    /// computes again, and a reader in this request finds the kept member.
+    pub(super) fn relation_keep_completed_component(
+        &self,
+        key: &SemanticQueryKey,
+        read: &crate::semantic_query::CacheRead<QueryResult<SemanticQueryValue>>,
+        carrier: Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
+        computed_at: super::WorkspaceEdit,
+    ) {
+        let (members, flow_members, call_members) = {
+            let mut txn = self.dispatch_txn.borrow_mut();
+            txn.flow.closed_values.clear();
+            (
+                {
+                    txn.relation.settled.clear();
+                    std::mem::take(&mut txn.relation.completed_members)
+                },
+                std::mem::take(&mut txn.flow.completed_members),
+                std::mem::take(&mut txn.call.completed_members),
+            )
+        };
+        let graph = self.graph();
+        let component = carrier
+            .filter(|_| !read.result_is_partial() && read.receipt.priced().is_some())
+            .and_then(|carrier| {
+                let member_read = |value: SemanticQueryValue| {
+                    graph
+                        .completed_member_read(value, read.receipt.clone())
+                        .ok()
+                };
+                let mut kept = vec![(key.clone(), read.clone())];
+                for member in members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if !matches!(
+                        member.payload.outcome,
+                        RelationOutcome::Assignable | RelationOutcome::NotAssignable
+                    ) {
+                        return None;
+                    }
+                    kept.push((
+                        member.key.to_query_key(),
+                        member_read(SemanticQueryValue::Relation(member.payload.clone()))?,
+                    ));
+                }
+                for member in flow_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    if member.result.key() != &member.key {
+                        return None;
+                    }
+                    kept.push((
+                        SemanticQueryKey::FlowReturn(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::FlowReturn(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.value().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                for member in call_members
+                    .iter()
+                    .filter(|member| member.inline_flight.is_some())
+                {
+                    kept.push((
+                        SemanticQueryKey::ResolveCall(Box::new(member.key.clone())),
+                        member_read(SemanticQueryValue::ResolveCall(
+                            verter_session_query::retention::owned::Owned::new(
+                                member.result.get().clone(),
+                            ),
+                        ))?,
+                    ));
+                }
+                Some((kept, carrier))
+            });
+        if let Some((kept, carrier)) = component {
+            self.completions
+                .keep_component(graph, kept, &carrier, computed_at);
+        }
+        for member in &members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &flow_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+        for member in &call_members {
+            self.abort_inline_flight(member.inline_flight.as_ref());
+        }
+    }
+
     fn relation_publication_roots(
         &self,
         root_key: &RelateMemoKey,
@@ -4619,7 +4744,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 
     fn relation_pattern_info_uncached(&self, target: SemanticNodeId) -> Option<InferPatternInfo> {
         let graph = self.graph();
-        if let Some(spec) = self.reverse_homomorphic_spec(target) {
+        let is_infer = |node: SemanticNodeId| {
+            matches!(
+                graph.node_data(node).as_deref(),
+                Some(SemanticNodeData::Infer { .. })
+            )
+        };
+        if let Some(spec) = self.reverse_homomorphic_spec(target, is_infer) {
             let name = match graph.node_data(spec.base_infer).as_deref() {
                 Some(SemanticNodeData::Infer { name, .. }) => Arc::<str>::from(name),
                 _ => return None,
@@ -4631,7 +4762,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name,
                     priority: InferenceCandidatePriority::HomomorphicMapped,
                 }],
-                Some(spec),
             ));
         }
         if let Some(SemanticNodeData::Infer { name, .. }) = graph.node_data(target).as_deref() {
@@ -4642,7 +4772,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     name: Arc::<str>::from(name),
                     priority: InferenceCandidatePriority::NakedTypeParameter,
                 }],
-                None,
             ));
         }
         let inventory = self.infer_inventory(target);
@@ -4661,13 +4790,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => None,
             })
             .collect();
-        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites, None))
+        (!sites.is_empty()).then(|| InferPatternInfo::new(graph, sites))
     }
 
-    /// Recognize only the exact `{ [P in keyof infer T]: X }` descriptor.
+    /// Recognize only the exact `{ [P in keyof T]: X }` descriptor over an
+    /// inferable `T` — an `infer` declaration, or a parameter the active
+    /// session infers. A key-remapped mapped type (`as` clause) infers
+    /// nothing (`inferToMappedType` skips a mapped type with a name type).
     fn reverse_homomorphic_spec(
         &self,
         mapped_node: SemanticNodeId,
+        inferable: impl Fn(SemanticNodeId) -> bool,
     ) -> Option<ReverseHomomorphicSpec> {
         let graph = self.graph();
         let mapped = graph.node_data(mapped_node)?;
@@ -4686,10 +4819,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return None,
         };
         if source != key_base
-            || !matches!(
-                graph.node_data(key_base).as_deref(),
-                Some(SemanticNodeData::Infer { .. })
-            )
+            || !inferable(key_base)
             || !matches!(
                 graph.node_data(mapper.parameter_node).as_deref(),
                 Some(SemanticNodeData::TypeParam { .. })
@@ -5461,57 +5591,112 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
     }
 
-    /// The two slices a fixed-length `remainder` tuple splits into against
-    /// an `inference` tuple of exactly two variadic elements the active
-    /// session infers (`[...A, ...B]`), at the arity the call's arguments
-    /// imply for the first: `(A, A's slice, B, B's slice)`. `None` for
-    /// every other shape, or when the first's arity is unknown or longer
-    /// than the remainder.
-    #[allow(clippy::type_complexity)]
-    fn implied_arity_split(
-        &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        let [first, second] = inference else {
-            return None;
-        };
-        if !first.rest || !second.rest || remainder.iter().any(|element| element.rest) {
+    /// The reverse mapping a relation into `target` makes: `target` is a
+    /// homomorphic mapped type over a parameter the active session infers,
+    /// a conditional's `infer` declaration and a call's type parameter
+    /// alike, with no reverse mapping of it already in flight.
+    fn reverse_mapping_target(&self, target: SemanticNodeId) -> Option<ReverseHomomorphicSpec> {
+        if !self.relation_session_active()
+            || !matches!(
+                self.graph().node_data(target).as_deref(),
+                Some(SemanticNodeData::Mapped { .. })
+            )
+        {
             return None;
         }
         let graph = self.graph();
-        let txn = self.dispatch_txn.borrow();
-        let session = txn.active_session()?;
-        let inferred = |node: SemanticNodeId| {
+        let spec = self.reverse_homomorphic_spec(target, |node| {
             matches!(
                 graph.node_data(node).as_deref(),
-                Some(SemanticNodeData::TypeParam { .. })
-            ) && session.infers(node)
+                Some(SemanticNodeData::Infer { .. } | SemanticNodeData::TypeParam { .. })
+            ) && self
+                .dispatch_txn
+                .borrow()
+                .active_session()
+                .is_some_and(|session| session.infers(node))
+        })?;
+        let in_flight = self
+            .dispatch_txn
+            .borrow()
+            .active_session()
+            .is_some_and(|session| session.reverse_in_flight(target));
+        (!in_flight).then_some(spec)
+    }
+
+    /// `target`, a key-remapped mapped type (`as` clause) over `keyof T`
+    /// for a parameter `T` the active session infers, with `T` replaced by
+    /// what an uninferred parameter fixes to — its constraint, else
+    /// `unknown`: the checker infers nothing through a mapped type with a
+    /// name type (`inferToMappedType` is skipped, and its generic keys name
+    /// no member), so the relation is the one to that instantiation. `None`
+    /// for any other target.
+    fn remapped_mapping_without_inference(&self, target: SemanticNodeId) -> Option<SemanticNodeId> {
+        if !self.relation_session_active() {
+            return None;
+        }
+        let graph = self.graph();
+        let mapper = match graph.node_data(target).as_deref() {
+            Some(SemanticNodeData::Mapped { mapper, .. }) if mapper.name_remap.is_some() => {
+                mapper.clone()
+            }
+            _ => return None,
         };
-        if !inferred(first.value) || !inferred(second.value) {
-            return None;
+        let key_space = self.peel_relation_alias(mapper.key_space)?;
+        let base = match graph.node_data(key_space).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => self.peel_relation_alias(*base)?,
+            _ => return None,
+        };
+        let constraint = match graph.node_data(base).as_deref() {
+            Some(
+                SemanticNodeData::Infer { constraint, .. }
+                | SemanticNodeData::TypeParam { constraint, .. },
+            ) => *constraint,
+            _ => return None,
+        };
+        let constraint = {
+            let txn = self.dispatch_txn.borrow();
+            let session = txn.active_session()?;
+            if !session.infers(base) {
+                return None;
+            }
+            constraint.or_else(|| session.declared_constraint(base))
+        };
+        let fixed = constraint.unwrap_or_else(|| {
+            graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Unknown))
+        });
+        let instantiated = self.substitute_semantic_type_param(target, base, fixed);
+        Some(
+            self.evaluate_deferred_semantic_node_with_context(
+                instantiated,
+                ProjectionReductionContext::structural_transit_with_mode(
+                    crate::semantic_query::ProjectionMode::Navigate,
+                ),
+            )
+            .into_active_query_build_node(self),
+        )
+    }
+
+    /// Run one reverse mapping inside its own session journals
+    /// ([`Self::relate_reverse_homomorphic`]).
+    fn relate_reverse_mapping(
+        &self,
+        source: SemanticNodeId,
+        spec: ReverseHomomorphicSpec,
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let opened = self
+            .dispatch_txn
+            .borrow_mut()
+            .active_session_mut()
+            .is_some_and(|session| session.open_reverse_frame(spec.clone()));
+        if !opened {
+            return RelationResult::Unknown;
         }
-        let arity = session.implied_arity(first.value)?;
-        if arity > remainder.len() {
-            return None;
+        let result = self.relate_reverse_homomorphic(source, &spec, bindings);
+        if let Some(session) = self.dispatch_txn.borrow_mut().active_session_mut() {
+            session.close_reverse_frame();
         }
-        Some((
-            first.value,
-            remainder[..arity]
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect::<Vec<_>>(),
-            second.value,
-            remainder[arity..]
-                .iter()
-                .map(crate::semantic_query::TupleElement::copy)
-                .collect::<Vec<_>>(),
-        ))
+        result
     }
 
     /// Recover the input of an exact homomorphic mapped target. The only
@@ -5977,16 +6162,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         expected_index: &IndexKey,
     ) -> Vec<SemanticNodeId> {
         let graph = self.graph();
-        let Some(SemanticNodeData::Infer {
-            name: base_name,
-            binder: base_binder,
-            ..
-        }) = graph
-            .node_data(base_infer)
-            .as_deref()
-            .map(crate::semantic_query::SemanticNodeData::clone)
-        else {
-            return Vec::new();
+        // An `infer` declaration is read through its binder as well; a type
+        // parameter only as itself.
+        let (base_name, base_binder) = match graph.node_data(base_infer).as_deref() {
+            Some(SemanticNodeData::Infer { name, binder, .. }) => {
+                (name.clone(), Some(binder.clone()))
+            }
+            Some(SemanticNodeData::TypeParam { display_name, .. }) => (display_name.clone(), None),
+            _ => return Vec::new(),
         };
         let mut targets = Vec::new();
         let mut visited: FxHashSet<(SemanticNodeId, bool)> = FxHashSet::default();
@@ -6171,7 +6354,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         object: SemanticNodeId,
         base_infer: SemanticNodeId,
-        base_binder: crate::semantic_query::InferBinderId,
+        base_binder: Option<crate::semantic_query::InferBinderId>,
     ) -> bool {
         let Some(object) = self.peel_relation_alias(object) else {
             return false;
@@ -6183,7 +6366,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return false;
         };
         match data.as_ref() {
-            SemanticNodeData::InferRef { binder, .. } => *binder == base_binder,
+            SemanticNodeData::InferRef { binder, .. } => base_binder.as_ref() == Some(binder),
             _ => false,
         }
     }
@@ -6203,10 +6386,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let txn = self.dispatch_txn.borrow();
         match txn.reentry().nearest_relate() {
             Some((top, _)) => {
-                let inference_context = top.inference_context.as_ref().and_then(|context| {
-                    (context.pass_kind == InferencePassKind::ReverseHomomorphicMapped)
-                        .then(|| context.clone())
-                });
+                let inference_context = txn
+                    .active_session()
+                    .filter(|session| session.reverse_active())
+                    .map(|session| session.context_key().clone());
                 RelateMemoKey {
                     source,
                     target,
@@ -7540,15 +7723,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return result;
         }
-        let reverse_spec = self
-            .dispatch_txn
-            .borrow()
-            .active_session()
-            .and_then(InferenceSession::reverse_spec)
-            .cloned()
-            .filter(|spec| spec.mapped_node == key.target);
-        if let Some(spec) = reverse_spec {
-            return self.relate_reverse_homomorphic(key.source, &spec, bindings);
+        if let Some(spec) = self.reverse_mapping_target(key.target) {
+            return self.relate_reverse_mapping(key.source, spec, bindings);
         }
         // An unfinished or aborted conditional reading on either side
         // leaves the relation undecided; only complete readings relate.
@@ -7694,6 +7870,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return Some(RelationResult::Unknown),
         };
+        // An effect-free program is already complete. Relate its ordinary
+        // empty surface so primitive and nullable rules use the same authority
+        // as an authored `{}` type, rather than requiring two object branches.
+        let regular_target = self.regularized_empty_object_program(target);
+        // A fresh empty literal has an inferable index signature even in the
+        // strict subtype relation. Keep its program for object comparisons:
+        // the correlated projection proves its empty domain, whereas an empty
+        // ordinary surface cannot distinguish it from a declared `{}` type.
+        let keep_literal_source = self.strict_subtype_mode()
+            && matches!(
+                self.graph().node_data(source).as_deref(),
+                Some(SemanticNodeData::ObjectSpreadProgram(program))
+                    if program.is_literal && program.effects.is_empty()
+            )
+            && matches!(
+                self.graph().node_data(regular_target).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            );
+        let regular_source = if keep_literal_source {
+            source
+        } else {
+            self.regularized_empty_object_program(source)
+        };
+        if regular_source != source || regular_target != target {
+            return Some(self.relate_member(
+                regular_source,
+                regular_target,
+                bindings,
+                InferPosition::Covariant,
+            ));
+        }
         // Top/bottom rules apply before projection: `any` / `unknown` accept
         // from either side, `never` is bottom, an error type swallows, and the
         // `object` nonprimitive accepts every program (a construction program
@@ -9055,6 +9262,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
+        // A declaration naming a homomorphic mapped type over a parameter
+        // the session infers reverse-maps where it is unwrapped.
+        if let Some(spec) = self.reverse_mapping_target(target) {
+            return self.relate_reverse_mapping(source, spec, bindings);
+        }
+        // A key-remapped one infers nothing to its parameter, which then
+        // stands for what it fixes to.
+        if let Some(instantiated) = self.remapped_mapping_without_inference(target) {
+            return self.relate_member(source, instantiated, bindings, InferPosition::Covariant);
+        }
         // Function-inference demand point (the pre-relation function-infer
         // case, now inside the authority): with an active session and a
         // Function pattern, a check still riding a deferred /
@@ -13950,16 +14167,11 @@ trait RelationDemandDriver {
     ) -> Option<PairStep>;
     fn charge_relation_work(&self, units: u64) -> bool;
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool;
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )>;
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts>;
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize>;
     fn intern_normalized_union_or_intersection(
         &self,
         members: &[SemanticNodeId],
@@ -14096,6 +14308,12 @@ trait RelationDemandDriver {
         bound: SemanticNodeId,
         occurrence: InferenceOccurrence,
     ) -> bool;
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool;
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -14171,6 +14389,8 @@ trait RelationDemandDriver {
     fn variance_marker_pair(&self, source: SemanticNodeId, target: SemanticNodeId) -> MarkerPair;
     fn weak_target_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool;
     fn relation_strict_config(&self) -> StrictFamilyConfig;
+    /// The union of `members`, through the shared ordered reducer.
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId;
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId;
 }
 impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
@@ -14205,17 +14425,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         ProjectSemanticDispatch::implicit_index_rejects(self, source, target)
     }
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        ProjectSemanticDispatch::implied_arity_split(self, inference, remainder)
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts> {
+        ProjectSemanticDispatch::inferable_variadics(self, elements)
+    }
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize> {
+        ProjectSemanticDispatch::spread_fixed_arity(self, node)
     }
     fn intern_normalized_union_or_intersection(
         &self,
@@ -14456,6 +14673,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     ) -> bool {
         ProjectSemanticDispatch::relation_deposit(self, param_node, bound, occurrence)
     }
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
+        ProjectSemanticDispatch::relation_deposit_slice(self, param_node, slice, occurrence)
+    }
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -14581,6 +14806,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     fn relation_strict_config(&self) -> StrictFamilyConfig {
         ProjectSemanticDispatch::relation_strict_config(self)
     }
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        self.intern_normalized_union_or_intersection(members, true)
+    }
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
         super::walk::reduce_merged_decl_with_graph(self.graph(), contributors)
     }
@@ -14670,17 +14898,14 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn implicit_index_rejects(&self, source: SemanticNodeId, target: SemanticNodeId) -> bool {
         self.driver.implicit_index_rejects(source, target)
     }
-    fn implied_arity_split(
+    fn inferable_variadics(
         &self,
-        inference: &[crate::semantic_query::TupleElement],
-        remainder: &[crate::semantic_query::TupleElement],
-    ) -> Option<(
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-        SemanticNodeId,
-        Vec<crate::semantic_query::TupleElement>,
-    )> {
-        self.driver.implied_arity_split(inference, remainder)
+        elements: &[crate::semantic_query::TupleElement],
+    ) -> Option<super::inference::VariadicElementFacts> {
+        self.driver.inferable_variadics(elements)
+    }
+    fn spread_fixed_arity(&self, node: SemanticNodeId) -> Option<usize> {
+        self.driver.spread_fixed_arity(node)
     }
     fn intern_normalized_union_or_intersection(
         &self,
@@ -14893,6 +15118,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> bool {
         self.driver.relation_deposit(param_node, bound, occurrence)
     }
+    fn relation_deposit_slice(
+        &self,
+        param_node: SemanticNodeId,
+        slice: SemanticNodeId,
+        occurrence: InferenceOccurrence,
+    ) -> bool {
+        self.driver
+            .relation_deposit_slice(param_node, slice, occurrence)
+    }
     fn relation_nominal_leaf(
         &self,
         source: SemanticNodeId,
@@ -15023,6 +15257,9 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     fn relation_strict_config(&self) -> StrictFamilyConfig {
         self.driver.relation_strict_config()
     }
+    fn relation_intern_union(&self, members: &[SemanticNodeId]) -> SemanticNodeId {
+        self.driver.relation_intern_union(members)
+    }
     fn reduce_merged_declaration(&self, contributors: &[SemanticNodeId]) -> SemanticNodeId {
         self.driver.reduce_merged_declaration(contributors)
     }
@@ -15062,6 +15299,234 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         };
         is_carrier(&source_data) || is_carrier(&target_data)
     }
+    /// Relate a concrete array or tuple to a generic tuple whose variadic
+    /// elements the active session infers, by the shared positional plan
+    /// ([`crate::signature_kernel::tuple_inference_plan`]): each slice the
+    /// plan assigns an inferable variadic deposits, and the concrete side
+    /// relates position by position to the generic tuple with each such
+    /// element replaced by its slice — or, when the plan infers nothing to
+    /// it, by its constraint, as the checker relates the check to the
+    /// pattern instantiated with the fixed inferences. `concrete` is `None`
+    /// for an array, whose one rest position `concrete_slots` holds.
+    #[allow(clippy::too_many_arguments)]
+    fn relate_generic_tuple(
+        &self,
+        (concrete, concrete_slots): (
+            Option<&Arc<[crate::semantic_query::TupleElement]>>,
+            Vec<TupleSlot>,
+        ),
+        generic: &[crate::semantic_query::TupleElement],
+        facts: &super::inference::VariadicElementFacts,
+        generic_is_source: bool,
+        bindings: &[InferBinding],
+        work: &mut Vec<RelateWork>,
+        results: &mut Vec<RelationResult>,
+    ) {
+        use crate::signature_kernel::{TupleElementKind, TupleInferenceStep, VariadicArityFacts};
+        let graph = self.graph();
+        let occurrence = self.relation_current_occurrence();
+        let kind_of = |slot: &TupleSlot| match slot.kind {
+            TupleSlotKind::Required => TupleElementKind::Required,
+            TupleSlotKind::Optional => TupleElementKind::Optional,
+            TupleSlotKind::Rest => TupleElementKind::Rest,
+            TupleSlotKind::Variadic => TupleElementKind::Variadic,
+        };
+        let generic_slots = self.tuple_slots(generic);
+        let concrete_kinds: Vec<TupleElementKind> = concrete_slots.iter().map(kind_of).collect();
+        let generic_kinds: Vec<TupleElementKind> = generic_slots.iter().map(kind_of).collect();
+        let plan = crate::signature_kernel::tuple_inference_plan(
+            &concrete_kinds,
+            concrete.is_some(),
+            &generic_kinds,
+            facts,
+        );
+        // Two variadics split at an implied arity tile the concrete middle
+        // only when their slices neither overlap nor leave a gap. A split the
+        // checker clamps (an implied arity overrunning the fixed ends) still
+        // infers both halves, but the tuple instantiated with them is no
+        // answer: the checker relates the arguments to the FIXED inferences,
+        // which the call's post-fixation pass does.
+        let split_is_partial = concrete.is_some_and(|concrete| {
+            let (mut halves, mut covered, mut fixed, mut rest_array) = (0, 0, 0, false);
+            for step in &plan {
+                match *step {
+                    TupleInferenceStep::Slice { start, end, .. } => {
+                        halves += 1;
+                        covered += concrete.len() - end - start;
+                    }
+                    TupleInferenceStep::RestArray { .. } => {
+                        halves += 1;
+                        rest_array = true;
+                    }
+                    TupleInferenceStep::Element { .. } => fixed += 1,
+                    _ => {}
+                }
+            }
+            halves > 1 && (rest_array || covered + fixed != concrete.len())
+        });
+        let mut inferred: Vec<Option<Vec<crate::semantic_query::TupleElement>>> =
+            generic.iter().map(|_| None).collect();
+        for step in plan {
+            let (target, slice, slice_elements, slice_arity, speculative) = match step {
+                TupleInferenceStep::Slice {
+                    start,
+                    end,
+                    target,
+                    speculative,
+                } => {
+                    let Some(concrete) = concrete else { continue };
+                    let elements: Vec<crate::semantic_query::TupleElement> = concrete
+                        [start..concrete.len() - end]
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy)
+                        .collect();
+                    let slice = graph.intern_node(SemanticNodeData::Tuple {
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements
+                                .iter()
+                                .map(crate::semantic_query::TupleElement::copy)
+                                .collect::<Vec<_>>()
+                                .into_boxed_slice(),
+                        ),
+                        readonly: false,
+                    });
+                    let arity = Some(elements.len());
+                    (target, slice, elements, arity, speculative)
+                }
+                TupleInferenceStep::RestElement { source, target }
+                    if generic_kinds[target] == TupleElementKind::Variadic =>
+                {
+                    let slice = graph.intern_node(SemanticNodeData::Array {
+                        element: concrete_slots[source].type_argument,
+                        readonly: false,
+                    });
+                    let label = concrete.and_then(|concrete| concrete[source].label.clone());
+                    let element = crate::semantic_query::TupleElement {
+                        label,
+                        value: slice,
+                        optional: false,
+                        rest: true,
+                    };
+                    (target, slice, vec![element], None, false)
+                }
+                TupleInferenceStep::RestArray { start, target } => {
+                    let mut members = Vec::with_capacity(concrete_slots.len() - start);
+                    for slot in &concrete_slots[start..] {
+                        // A variadic member's element type is an indexed
+                        // access the plan does not build.
+                        if slot.kind == TupleSlotKind::Variadic {
+                            results.push(RelationResult::Unknown);
+                            return;
+                        }
+                        members.push(slot.type_argument);
+                    }
+                    let slice = graph.intern_node(SemanticNodeData::Array {
+                        element: self.relation_intern_union(&members),
+                        readonly: false,
+                    });
+                    let element = crate::semantic_query::TupleElement {
+                        label: None,
+                        value: slice,
+                        optional: false,
+                        rest: true,
+                    };
+                    (target, slice, vec![element], None, false)
+                }
+                // Matching structures infer elementwise: a variadic infers its
+                // type argument to the variadic it faces, which keeps that
+                // element in the instantiated tuple. That one element spreads
+                // as many positions as its type fixes, not one.
+                TupleInferenceStep::Element { source, target }
+                    if generic_kinds[target] == TupleElementKind::Variadic =>
+                {
+                    let Some(concrete) = concrete else { continue };
+                    let element = concrete[source].copy();
+                    let arity = self.spread_fixed_arity(element.value);
+                    (target, element.value, vec![element], arity, false)
+                }
+                // Every other inference is a positional one the relation below
+                // makes as it relates the pair.
+                _ => continue,
+            };
+            let Some(variadic) = facts.elements[target] else {
+                continue;
+            };
+            if !self.relation_deposit_slice(
+                variadic.param,
+                slice,
+                super::inference::slice_occurrence(occurrence, speculative),
+            ) {
+                results.push(RelationResult::Unknown);
+                return;
+            }
+            // A slice of no fixed tuple constraint's arity (an array among
+            // them) fails it, and the checker fixes the element to that
+            // constraint.
+            if facts
+                .fixed_constraint_arity(target)
+                .is_none_or(|arity| slice_arity == Some(arity))
+            {
+                inferred[target] = Some(slice_elements);
+            }
+        }
+        if split_is_partial {
+            results.push(RelationResult::Unknown);
+            return;
+        }
+        let mut instantiated: Vec<crate::semantic_query::TupleElement> =
+            Vec::with_capacity(generic.len());
+        for (index, element) in generic.iter().enumerate() {
+            if let Some(elements) = inferred[index].take() {
+                instantiated.extend(elements);
+                continue;
+            }
+            let Some(variadic) = facts.elements[index] else {
+                instantiated.push(element.copy());
+                continue;
+            };
+            let fallback = variadic.fallback;
+            match graph.node_data(fallback).as_deref() {
+                Some(SemanticNodeData::Tuple { elements, .. }) => instantiated.extend(
+                    elements
+                        .iter()
+                        .map(crate::semantic_query::TupleElement::copy),
+                ),
+                Some(SemanticNodeData::Array { .. }) => {
+                    instantiated.push(crate::semantic_query::TupleElement {
+                        label: element.label.clone(),
+                        value: fallback,
+                        optional: false,
+                        rest: true,
+                    })
+                }
+                _ => {
+                    results.push(RelationResult::Unknown);
+                    return;
+                }
+            }
+        }
+        let instantiated_slots = self.tuple_slots(&instantiated);
+        let pairs = if generic_is_source {
+            tuple_position_pairs(&instantiated_slots, true, &concrete_slots)
+        } else {
+            tuple_position_pairs(&concrete_slots, concrete.is_some(), &instantiated_slots)
+        };
+        let Some(pairs) = pairs else {
+            results.push(RelationResult::NotAssignable);
+            return;
+        };
+        if pairs.is_empty() {
+            results.push(assignable(bindings));
+            return;
+        }
+        push_all_of(
+            work,
+            pairs
+                .into_iter()
+                .map(|(source, target)| RelateWork::Descend(source, target, DescendKind::Eval))
+                .collect(),
+        );
+    }
     fn expand_array_tuple_pair(
         &self,
         (source, target): (SemanticNodeId, SemanticNodeId),
@@ -15070,7 +15535,6 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
         work: &mut Vec<RelateWork>,
         results: &mut Vec<RelationResult>,
     ) -> bool {
-        let graph = self.graph();
         let occurrence = self.relation_current_occurrence();
         match (source_data, target_data) {
             (
@@ -15114,149 +15578,39 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     results.push(RelationResult::NotAssignable);
                     return true;
                 }
-                // Tuple-inference rest tail (RI-6 in-scope): a trailing
-                // `...infer Rest` element binds the remaining source
-                // elements as a tuple through the active session.
+                // A generic tuple whose variadic elements the active session
+                // infers takes the shared positional plan: the concrete
+                // tuple's slices infer to them, and the concrete tuple relates
+                // to the generic one instantiated with what they inferred.
+                // In a contravariant position (a parameter list) the generic
+                // tuple is the source.
                 let rest_on_source = matches!(occurrence.variance, VariancePhase::Contravariant);
-                // Exactly two variadic elements the session infers
-                // (`[...A, ...B]`) split a fixed-length tuple at the first's
-                // implied arity, the checker's slice by `impliedArity`.
-                if let Some(split) = self.implied_arity_split(
-                    if rest_on_source { &s_els } else { &t_els },
-                    if rest_on_source { &t_els } else { &s_els },
-                ) {
-                    let (first, first_slice, second, second_slice) = split;
-                    let first_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            first_slice.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    let second_slice = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            second_slice.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    results.push(
-                        if self.relation_deposit(first, first_slice, occurrence)
-                            && self.relation_deposit(second, second_slice, occurrence)
-                        {
-                            assignable(bindings)
-                        } else {
-                            RelationResult::Unknown
-                        },
+                let (concrete, generic) = if rest_on_source {
+                    (&t_els, &s_els)
+                } else {
+                    (&s_els, &t_els)
+                };
+                if let Some(facts) = self.inferable_variadics(generic) {
+                    let concrete_slots = self.tuple_slots(concrete);
+                    self.relate_generic_tuple(
+                        (Some(concrete), concrete_slots),
+                        generic,
+                        &facts,
+                        rest_on_source,
+                        bindings,
+                        work,
+                        results,
                     );
                     return true;
                 }
-                let session_rest = if self.relation_session_active() {
-                    let inference_elements = if rest_on_source { &s_els } else { &t_els };
-                    inference_elements.iter().position(|e| {
-                        e.rest
-                            && matches!(
-                                graph.node_data(e.value).as_deref(),
-                                Some(SemanticNodeData::Infer { .. })
-                            )
-                    })
-                } else {
-                    None
-                };
-                if session_rest.is_some() {
-                    let required_source_len =
-                        s_els.iter().filter(|e| !e.optional && !e.rest).count();
-                    let required_target_len =
-                        t_els.iter().filter(|e| !e.optional && !e.rest).count();
-                    let (required_inference_len, required_remainder_len) = if rest_on_source {
-                        (required_source_len, required_target_len)
-                    } else {
-                        (required_target_len, required_source_len)
-                    };
-                    if required_remainder_len < required_inference_len {
-                        results.push(RelationResult::NotAssignable);
-                        return true;
-                    }
-                }
                 let mut pairs: Vec<(SemanticNodeId, SemanticNodeId)> = Vec::new();
-                if let Some(rest_index) = session_rest {
-                    let (inference_elements, remainder_elements) = if rest_on_source {
-                        (&s_els, &t_els)
-                    } else {
-                        (&t_els, &s_els)
-                    };
-                    let infer_element = inference_elements[rest_index].value;
-                    let prefix = &inference_elements[..rest_index];
-                    let suffix = &inference_elements[rest_index + 1..];
-                    let required_prefix_len =
-                        prefix.iter().filter(|element| !element.optional).count();
-                    let required_suffix_len =
-                        suffix.iter().filter(|element| !element.optional).count();
-                    if remainder_elements.len() < required_prefix_len + required_suffix_len {
+                let source_slots = self.tuple_slots(&s_els);
+                let target_slots = self.tuple_slots(&t_els);
+                match tuple_position_pairs(&source_slots, true, &target_slots) {
+                    Some(positions) => pairs.extend(positions),
+                    None => {
                         results.push(RelationResult::NotAssignable);
                         return true;
-                    }
-                    // Reserve the full fixed suffix when present; when the
-                    // concrete tuple is shorter, only optional trailing suffix
-                    // slots may disappear. The same rule applies to the fixed
-                    // prefix before the variadic capture.
-                    let suffix_len = suffix
-                        .len()
-                        .min(remainder_elements.len().saturating_sub(required_prefix_len));
-                    let prefix_len = prefix
-                        .len()
-                        .min(remainder_elements.len().saturating_sub(suffix_len));
-                    if prefix[prefix_len..].iter().any(|element| !element.optional)
-                        || suffix[suffix_len..].iter().any(|element| !element.optional)
-                    {
-                        results.push(RelationResult::NotAssignable);
-                        return true;
-                    }
-                    let remainder_end = remainder_elements.len() - suffix_len;
-                    let remainder: Vec<crate::semantic_query::TupleElement> = remainder_elements
-                        .iter()
-                        .skip(prefix_len)
-                        .take(remainder_end - prefix_len)
-                        .map(crate::semantic_query::TupleElement::copy)
-                        .collect();
-                    // The capture is the slice of the concrete tuple, its
-                    // labels, optionality and rest kept and never readonly
-                    // (`sliceTupleType`).
-                    let remainder_tuple = graph.intern_node(SemanticNodeData::Tuple {
-                        elements: crate::semantic_query::PayloadArray::from(
-                            remainder.into_boxed_slice(),
-                        ),
-                        readonly: false,
-                    });
-                    if !self.relation_deposit(infer_element, remainder_tuple, occurrence) {
-                        results.push(RelationResult::Unknown);
-                        return true;
-                    }
-                    for position in 0..prefix_len {
-                        pairs.push((s_els[position].value, t_els[position].value));
-                    }
-                    for offset in 0..suffix_len {
-                        let inference_position = rest_index + 1 + offset;
-                        let remainder_position = remainder_elements.len() - suffix_len + offset;
-                        if rest_on_source {
-                            pairs.push((
-                                inference_elements[inference_position].value,
-                                remainder_elements[remainder_position].value,
-                            ));
-                        } else {
-                            pairs.push((
-                                remainder_elements[remainder_position].value,
-                                inference_elements[inference_position].value,
-                            ));
-                        }
-                    }
-                } else {
-                    let source_slots = self.tuple_slots(&s_els);
-                    let target_slots = self.tuple_slots(&t_els);
-                    match tuple_position_pairs(&source_slots, true, &target_slots) {
-                        Some(positions) => pairs.extend(positions),
-                        None => {
-                            results.push(RelationResult::NotAssignable);
-                            return true;
-                        }
                     }
                 }
                 if pairs.is_empty() {
@@ -15353,6 +15707,20 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                     missing_removed: s_el,
                     value: source,
                 }];
+                if !matches!(occurrence.variance, VariancePhase::Contravariant) {
+                    if let Some(facts) = self.inferable_variadics(&t_els) {
+                        self.relate_generic_tuple(
+                            (None, source_slots.to_vec()),
+                            &t_els,
+                            &facts,
+                            false,
+                            bindings,
+                            work,
+                            results,
+                        );
+                        return true;
+                    }
+                }
                 let target_slots = self.tuple_slots(&t_els);
                 let Some(pairs) = tuple_position_pairs(&source_slots, false, &target_slots) else {
                     results.push(RelationResult::NotAssignable);
@@ -16745,7 +17113,7 @@ pub mod reverse_ownership_tests {
             &crate::semantic_query_memo::SemanticGraphStore::default(),
             Arc::from(vec![InferenceInfoSetup::new(param, Arc::from("T"))].into_boxed_slice()),
             VariancePhase::Covariant,
-            InferencePassKind::ReverseHomomorphicMapped,
+            InferencePassKind::Ordinary,
             InferenceCandidatePriority::HomomorphicMapped,
             NoInferMask::empty(),
             ConstParamPolicy::NonConst,
@@ -16753,8 +17121,8 @@ pub mod reverse_ownership_tests {
         )
     }
 
-    fn reverse_state(param: SemanticNodeId) -> ReverseProjectionState {
-        ReverseProjectionState::new(ReverseHomomorphicSpec {
+    fn reverse_spec(param: SemanticNodeId) -> ReverseHomomorphicSpec {
+        ReverseHomomorphicSpec {
             mapped_node: SemanticNodeId(301),
             base_infer: param,
             mapper_parameter: SemanticNodeId(302),
@@ -16763,7 +17131,7 @@ pub mod reverse_ownership_tests {
                 optionality: OptionalityMod::Keep,
                 readonly: ReadonlyMod::Keep,
             },
-        })
+        }
     }
 
     /// Compile-time witness over every capability family: this private
@@ -16799,11 +17167,12 @@ pub mod reverse_ownership_tests {
         let aggregate = SemanticNodeId(305);
         let fallback = SemanticNodeId(306);
 
-        let mut inactive = InferenceSession::new(
-            SessionId(1),
-            reverse_setup(active_param),
-            Some(reverse_state(active_param)),
+        let mut inactive = InferenceSession::new(SessionId(1), reverse_setup(active_param));
+        assert!(
+            !inactive.open_reverse_frame(reverse_spec(SemanticNodeId(999))),
+            "a reverse mapping opens only over a parameter of the frozen session setup"
         );
+        assert!(inactive.open_reverse_frame(reverse_spec(active_param)));
         assert!(
             !inactive.deposit_reverse_aggregate(
                 SemanticNodeId(999),
@@ -16820,11 +17189,16 @@ pub mod reverse_ownership_tests {
             "a refused deposit must leave no independently publishable reverse result"
         );
 
-        let mut active = InferenceSession::new(
-            SessionId(2),
-            reverse_setup(active_param),
-            Some(reverse_state(active_param)),
+        let mut active = InferenceSession::new(SessionId(2), reverse_setup(active_param));
+        assert!(
+            !active.deposit_reverse_aggregate(
+                active_param,
+                aggregate,
+                InferenceCandidatePriority::HomomorphicMapped,
+            ),
+            "a reverse aggregate binds only while its reverse mapping is in flight"
         );
+        assert!(active.open_reverse_frame(reverse_spec(active_param)));
         assert!(active.deposit_reverse_aggregate(
             active_param,
             aggregate,

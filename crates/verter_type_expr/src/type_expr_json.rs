@@ -70,6 +70,10 @@ pub fn type_expr_from_json(v: &serde_json::Value) -> Option<TypeExpr> {
             let props = v.get("properties")?.as_array()?;
             let members = props.iter().filter_map(json_to_object_member).collect();
             Some(TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: v
+                    .get("emptyLiteral")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 properties: members,
             })))
         }
@@ -601,7 +605,8 @@ impl TypeExpr {
                 })).collect::<Vec<_>>(),
                 "readonly": readonly
             }),
-            Self::Object(obj) => json!({
+            Self::Object(obj) => {
+                let mut value = json!({
                 "kind": "object",
                 "properties": obj.properties.iter().map(|m| match m {
                     ObjectMember::Property(p) => {
@@ -662,7 +667,12 @@ impl TypeExpr {
                         "ty": s.ty.to_json_value()
                     }),
                 }).collect::<Vec<_>>()
-            }),
+                });
+                if obj.empty_literal {
+                    value["emptyLiteral"] = json!(true);
+                }
+                value
+            }
             Self::Function(func) => {
                 let mut value = Self::function_to_json(func);
                 value["kind"] = json!("function");
