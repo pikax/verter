@@ -77,7 +77,12 @@ one `ClassField` view (`analysis::class_field_value`): a function value is a
 served class-member position, and a call-derived or `this`-reading initializer
 reads its synthetic `C:field:x` / `C:static:x` value declaration. Accessor
 grouping keys on the property spelling, so `get 1` / `set "1"` is one mutable
-property.
+property; `Pick` and `Omit` select that pair by its `keyof` key, the key of its
+first declaration (`AccessorSelectionKeys`). Under heritage shadowing the own
+member's form wins: the heritage merge (`MergedMemberAccum`) takes the
+shadowing own-body contributors' method kind, so an own property over an
+inherited getter maps mutable and an own getter over an inherited property
+maps `readonly`.
 Selective instance-member lowering includes these fields, so `keyof`, member
 reads and indexed reads agree. `accessor_property_tests` covers these rules,
 mapped modifiers, generic reads, and ordinary-method/call-signature controls;
