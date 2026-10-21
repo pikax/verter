@@ -68,6 +68,19 @@ pub(super) fn named_answer_with_library(
     mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
     benchmark_library: bool,
 ) -> Answer {
+    named_answer_in_union_order(source, probe, mode, benchmark_library, false)
+}
+
+/// [`named_answer_with_library`], on a host whose store orders union
+/// members by the reversed stable key when `reverse_union_order`: the
+/// order-only counterfactual, in a cache namespace of its own.
+fn named_answer_in_union_order(
+    source: &str,
+    probe: &str,
+    mode: Option<verter_type_engine::semantic_query::ProjectionMode>,
+    benchmark_library: bool,
+    reverse_union_order: bool,
+) -> Answer {
     let config = if benchmark_library {
         r#"{ "compilerOptions": { "strict": true, "noLib": true }, "files": ["lib.bench.d.ts", "scenario.ts"] }"#
     } else {
@@ -77,6 +90,11 @@ pub(super) fn named_answer_with_library(
         crate::HostConfig::default(),
         &[("/expand", config)],
     );
+    if reverse_union_order {
+        host.project_type_store()
+            .semantic_graph()
+            .reverse_union_order_for_tests();
+    }
     if benchmark_library {
         let library = "/expand/lib.bench.d.ts";
         let _ = host
@@ -824,4 +842,58 @@ fn rtk_slice_method_reducer_actions_answer_completely_and_grow_linearly() {
 #[test]
 fn rtk_slice_arrow_reducer_actions_answer_completely_and_grow_linearly() {
     assert_rtk_slice_actions_grow_linearly(true);
+}
+
+/// The action union of a ten-reducer slice differs from the checker's only
+/// in its member order (semantic-difference ledger, `VerterStableV1`
+/// order-induced). The checker prints the members in reducer order, `"s/r0"`
+/// to `"s/r9"`; the live answer holds the same members in the stable-key
+/// order. On a fresh host whose store reverses ONLY the union order, the
+/// members are unchanged and their order is exactly reversed, so no member
+/// depends on the order; a fresh host under the stable order answers the
+/// stable order again.
+#[test]
+fn rtk_slice_actions_differ_from_the_checker_only_in_union_order() {
+    const COUNT: usize = 10;
+    let members = |reverse_union_order: bool| -> Vec<String> {
+        let answer = named_answer_in_union_order(
+            &rtk_slice(COUNT, false),
+            "ReturnType<Actions[keyof Actions]>",
+            None,
+            true,
+            reverse_union_order,
+        );
+        let TypeExpr::Union(members) = &answer.answer else {
+            panic!("`{}` is not a union", short(&answer.answer));
+        };
+        members.iter().map(display).collect()
+    };
+    let checker: Vec<String> = (0..COUNT)
+        .map(|i| {
+            let payload = if i % 2 == 0 {
+                format!("'l{i}'")
+            } else {
+                "number".to_string()
+            };
+            format!("{{ payload: {{ v{i}: {payload} }}; type: 's/r{i}' }}")
+        })
+        .collect();
+    let stable = members(false);
+    let sorted = |members: &[String]| {
+        members
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(sorted(&stable), sorted(&checker), "the checker's members");
+    assert_eq!(sorted(&stable), rtk_actions(COUNT), "the checker's members");
+    assert_ne!(stable, checker, "the stable order is not the checker's");
+    let reversed = members(true);
+    let mut expected_reversed = stable.clone();
+    expected_reversed.reverse();
+    assert_eq!(
+        reversed, expected_reversed,
+        "with only the union order reversed, the same members in the reversed order"
+    );
+    assert_eq!(members(false), stable, "the stable order again");
 }

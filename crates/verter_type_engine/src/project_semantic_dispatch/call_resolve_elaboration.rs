@@ -1093,10 +1093,23 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
-    /// `node`'s object surface, when it is one.
+    /// `node`'s object surface, when it is one. A mapped type over a closed
+    /// key domain is the object its keys map to, the object the relation
+    /// decides against.
     fn object_view(&self, node: SemanticNodeId) -> Option<SurfaceView> {
         match self.structural_data(node)?.as_ref() {
             SemanticNodeData::Object(view) => Some(view.clone()),
+            SemanticNodeData::Mapped { source, mapper } => {
+                let object = self.mapped_object_for_relation(
+                    *source,
+                    mapper,
+                    crate::semantic_query::ProjectionReductionContext::structural_transit(),
+                )?;
+                match self.graph().node_data(object)?.as_ref() {
+                    SemanticNodeData::Object(view) => Some(view.clone()),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

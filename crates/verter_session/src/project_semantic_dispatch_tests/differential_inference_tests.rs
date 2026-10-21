@@ -3138,3 +3138,68 @@ fn pinned_same_spelling_mapped_parameter_call() {
         Matrix::new(MAPPED_PARAMETER_MEMBERS).types(&[("typeof sameSpelling", "\"first\"")]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// The fixture of [`a_fresh_literal_against_a_closed_mapped_type_is_excess_checked`].
+const MAPPED_EXCESS: &str = r##"
+type Enumerated = { [K in "a" | "b"]: K };
+declare function enumerated(x: Enumerated): "first";
+declare function enumerated(x: unknown): "second";
+export const enumeratedExcess = enumerated({ a: "a", b: "b", c: 1 });
+export const enumeratedExact = enumerated({ a: "a", b: "b" });
+type Valued = { [K in "a"]: number };
+declare function valued(x: Valued): "first";
+declare function valued(x: unknown): "second";
+export const valuedExcess = valued({ a: 1, z: 2 });
+type Face = { a: number };
+declare function partial(x: Partial<Face>): "first";
+declare function partial(x: unknown): "second";
+export const partialExcess = partial({ a: 1, z: 2 });
+declare function plain(x: { a: "a"; b: "b" }): "first";
+declare function plain(x: unknown): "second";
+export const plainExcess = plain({ a: "a", b: "b", c: 1 });
+declare function one(x: Enumerated): void;
+export function single() { return one({ a: "a", b: "b", c: 1 }); }
+declare function onePartial(x: Partial<Face>): void;
+export function singlePartial() { return onePartial({ a: 1, z: 2 }); }
+"##;
+
+/// A mapped type over a closed key domain is an object target of the fresh
+/// excess-property check, as the object its keys map to: a fresh literal
+/// with a property the mapped type has no key for selects the next
+/// overload, as it does against the object written out, while the literal
+/// with exactly its keys selects the mapped overload. A single signature
+/// reports the excess property (TS2353) at it.
+#[test]
+fn a_fresh_literal_against_a_closed_mapped_type_is_excess_checked() {
+    let mut failures = Matrix::new(MAPPED_EXCESS).types(&[
+        ("typeof enumeratedExcess", "\"second\""),
+        ("typeof enumeratedExact", "\"first\""),
+        ("typeof valuedExcess", "\"second\""),
+        ("typeof partialExcess", "\"second\""),
+        ("typeof plainExcess", "\"second\""),
+    ]);
+    let host = super::signature_predicate_inference_tests::host_with(MAPPED_EXCESS);
+    let rows: &[(&str, &str)] = &[
+        ("single", "(19,57): error TS2353: Object literal may only specify known properties, and 'c' does not exist in type 'Enumerated'."),
+        ("singlePartial", "(21,61): error TS2353: Object literal may only specify known properties, and 'z' does not exist in type 'Partial<Face>'."),
+    ];
+    for root in [
+        super::signature_predicate_inference_tests::STRICT_ROOT,
+        super::signature_predicate_inference_tests::LOOSE_ROOT,
+    ] {
+        for (function, expected) in rows {
+            let reported = super::signature_predicate_inference_tests::checker_report(
+                &host,
+                root,
+                function,
+                MAPPED_EXCESS,
+            );
+            if reported != [*expected] {
+                failures.push(format!(
+                    "`{function}` in {root}: {reported:#?}, expected {expected:#?}"
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

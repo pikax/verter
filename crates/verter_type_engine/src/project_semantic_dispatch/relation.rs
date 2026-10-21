@@ -10987,12 +10987,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::Mapped { source, mapper } => {
                     let (source, mapper) = (*source, mapper.clone());
                     drop(data);
-                    match self
-                        .identity_mapped_object_for_relation(source, &mapper)
-                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                        .or_else(|| {
-                            self.enumerated_mapped_object_for_relation(source, &mapper, transit)
-                        }) {
+                    match self.mapped_object_for_relation(source, &mapper, transit) {
                         Some(object) if object != current => {
                             current = object;
                             continue;
@@ -11064,6 +11059,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             current = unwrapped;
         }
         IdentityCarrierUnwrap::Unresolvable
+    }
+
+    /// The object a mapped type resolves to for a relation, when its source
+    /// and key domain are closed: an identity mapping over an object
+    /// ([`Self::identity_mapped_object_for_relation`]), a key domain holding
+    /// an index key ([`Self::index_key_mapped_object_for_relation`]), or an
+    /// enumerable key domain
+    /// ([`Self::enumerated_mapped_object_for_relation`]). `None` when the
+    /// mapped type stays the carrier it is. The ordinary relation and the
+    /// fresh excess-property check both read a mapped operand through it,
+    /// so the check runs on the object the relation decides against.
+    pub(super) fn mapped_object_for_relation(
+        &self,
+        source: SemanticNodeId,
+        mapper: &crate::semantic_query::MapperKey,
+        transit: ProjectionReductionContext,
+    ) -> Option<SemanticNodeId> {
+        self.identity_mapped_object_for_relation(source, mapper)
+            .or_else(|| self.index_key_mapped_object_for_relation(mapper, transit))
+            .or_else(|| self.enumerated_mapped_object_for_relation(source, mapper, transit))
     }
 
     /// The object an identity mapped type over a closed object surface
