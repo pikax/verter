@@ -6288,7 +6288,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
     /// The compiler-provided utility a type alias named `name` whose
     /// authored body is the `intrinsic` keyword declares: the intrinsic its
     /// name selects, whether the lib declares the alias or the user does.
-    /// `None` for a name that selects no utility.
+    /// `None` for a name that selects no utility, which the caller answers
+    /// as that unsupported intrinsic.
     pub fn resolve_intrinsic_alias(&self, name: &str) -> Option<BuiltinUtility> {
         match self.resources.intrinsics.lookup(name) {
             crate::intrinsic_registry::IntrinsicLookup::Found(intrinsic) => {

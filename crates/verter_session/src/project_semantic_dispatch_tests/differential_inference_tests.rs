@@ -386,6 +386,37 @@ fn editing_an_imported_intrinsic_alias_misses_the_warm_answer() {
     assert_eq!(answer("export type NoInfer<T> = T[];\n"), "Array(\"ok\")");
 }
 
+/// An `intrinsic` alias whose name selects no implemented intrinsic is that
+/// unsupported intrinsic, a typed partial answer, never the body it spells:
+/// the `intrinsic` keyword is not a reference, so a module's own
+/// `type intrinsic` never answers it.
+#[test]
+fn a_local_intrinsic_alias_without_an_implementation_is_unsupported() {
+    use super::checker_probe_lane_tests::{
+        default_probe_host, with_probe_outcome_on_host, ProbeProject,
+    };
+    use super::StructuralFactDemandOutcome;
+    let host = default_probe_host();
+    let source = "type intrinsic = string;\n\
+                  type BuiltinIteratorReturn = intrinsic;\n\
+                  type NotAnIntrinsic<T> = intrinsic;\n\
+                  export {};\n";
+    for probe in ["BuiltinIteratorReturn", "NotAnIntrinsic<1>"] {
+        with_probe_outcome_on_host(
+            &host,
+            ProbeProject::default(),
+            source,
+            probe,
+            |_, outcome| {
+                assert!(
+                    matches!(outcome, StructuralFactDemandOutcome::Partial(_)),
+                    "{probe}: {outcome:?}"
+                );
+            },
+        );
+    }
+}
+
 /// The fixture of [`const_type_parameters`].
 const CONST_TYPE_PARAMETERS: &str = r##"
 declare function c1<const T>(x: T): T;

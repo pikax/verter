@@ -5728,30 +5728,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // 3b. A type alias whose authored body is the `intrinsic` keyword is
         // the compiler-provided type its name selects (the checker's
         // `intrinsicTypeKinds`), whether the lib declares it or the user does:
-        // a local `type NoInfer<T> = intrinsic` is `NoInfer`.
+        // a local `type NoInfer<T> = intrinsic` is `NoInfer`. A name that
+        // selects no implemented intrinsic is that unsupported intrinsic, never
+        // the body it spells: the keyword is not a reference to evaluate.
         if prepared.body_facts.classification == verter_type_expr::facts::TypeBodyClass::Intrinsic {
-            if let Some(utility) = adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
-                let mut output = builtin_utility_output(Some(utility));
-                // The answer exists because the declaring file spells the
-                // alias `intrinsic`: root it on that file's observed version,
-                // as the ordinary declaration path does, so an edit to the
-                // alias misses the warm read. A non-file base has no version.
-                if !is_non_file_base {
-                    output.dep_signature = output
-                        .dep_signature
-                        .iter()
-                        .cloned()
-                        .chain(
-                            self.dep_signature_for(decl_canonical, decl_whole_hash)
-                                .iter()
-                                .cloned(),
-                        )
-                        .collect();
-                    output = output
-                        .with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
-                }
-                return InstantiateStart::Done(Box::new(output));
+            let mut output = match adapter.resolve_intrinsic_alias(decl_name.as_ref()) {
+                Some(utility) => builtin_utility_output(Some(utility)),
+                None => (
+                    QueryResult::Value(self.opaque(QueryError::UnsupportedIntrinsic {
+                        name: verter_type_expr::OwnedStr::from(decl_name.as_ref()),
+                    })),
+                    self.project_generation_signature(),
+                )
+                    .into(),
+            };
+            // The answer exists because the declaring file spells the alias
+            // `intrinsic`: root it on that file's observed version, as the
+            // ordinary declaration path does, so an edit to the alias misses
+            // the warm read. A non-file base has no version.
+            if !is_non_file_base {
+                output.dep_signature = output
+                    .dep_signature
+                    .iter()
+                    .cloned()
+                    .chain(
+                        self.dep_signature_for(decl_canonical, decl_whole_hash)
+                            .iter()
+                            .cloned(),
+                    )
+                    .collect();
+                output =
+                    output.with_observed_self_roots([(decl_canonical.clone(), decl_whole_hash)]);
             }
+            return InstantiateStart::Done(Box::new(output));
         }
 
         // 4. Bind type parameters to args (positional). When a
