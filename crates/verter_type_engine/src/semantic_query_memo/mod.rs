@@ -51,6 +51,8 @@ use crate::semantic_query::{
 
 pub mod arena;
 mod binder_dependencies;
+#[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+pub mod charge_witness;
 pub mod construction_copy;
 pub mod delivery_lease;
 pub mod derivation;

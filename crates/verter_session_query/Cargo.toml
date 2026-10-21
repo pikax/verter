@@ -13,9 +13,11 @@ publish = false
 # Exposes test-only observability accessors and constructors to cross-crate test code.
 # Production binaries MUST NOT enable this feature.
 test-support = ["verter_retention/test-support"]
-# Forwards the retention account's default-off ACTIVE-occupancy window to
+# Forwards the retention account's default-off seams — the ACTIVE-occupancy
+# window and the allocation charge observer — to
 # the soak/tooling runner through the `retention` re-export, without the
-# rest of `test-support`. Forwarded by `verter_session/soak-support` only.
+# rest of `test-support`. Forwarded by `verter_type_engine/soak-support` and
+# `verter_session/soak-support` only.
 soak-support = ["verter_retention/soak-support"]
 # The coordinated, default-off observation opt-in (see docs/arch/semantic-observe.md):
 # compiles the `currency_probe` wall-clock/call-count rail
