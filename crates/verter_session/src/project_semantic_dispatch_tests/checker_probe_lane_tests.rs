@@ -563,6 +563,31 @@ pub(super) fn evaluated_mismatches(source: &str, rows: &[(&str, &str)]) -> Vec<S
         .collect()
 }
 
+/// What `probe` evaluates to on `host` under a publication demand, rendered:
+/// a probe after another reads what the earlier one left in the host.
+pub(super) fn evaluated_render_on_host(
+    host: &Arc<crate::VerterHost>,
+    source: &str,
+    probe: &str,
+) -> String {
+    with_probe_on_host(
+        host,
+        ProbeProject::default(),
+        source,
+        probe,
+        |dispatch, node| {
+            let value = dispatch
+                .normalize_node_for_structural_fact_demand(
+                    node,
+                    ProjectionReductionContext::published(ProjectionMode::Expanded),
+                )
+                .into_usable_node()
+                .unwrap_or_else(|| panic!("the probe `{probe}` evaluated to a partial demand"));
+            render_node(dispatch, value, 0)
+        },
+    )
+}
+
 /// The label of each element of the tuple `probe` settles on — the
 /// parameter NAMES a `Parameters<…>` answer carries.
 pub(super) fn tuple_labels(source: &str, probe: &str) -> Vec<Option<String>> {
