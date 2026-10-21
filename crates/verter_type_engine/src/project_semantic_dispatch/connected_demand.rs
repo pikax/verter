@@ -28,8 +28,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::cost_receipt::{
-    BudgetProfileSpec, CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage,
-    Nesting, ReplayRefusal, COST_MODEL_REVISION,
+    BudgetProfileSpec, CostDependency, CostIdentity, CostIdentitySet, CostScope, DemandCostReceipt,
+    LogicalUsage, Nesting, ReplayRefusal, COST_MODEL_REVISION,
 };
 
 use crate::semantic_query::PartialReasonSet;
@@ -321,7 +321,7 @@ pub struct ConnectedDemandLedger<'a> {
     scope_open: Cell<bool>,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
-    paid: RefCell<FxHashSet<CostIdentity>>,
+    paid: RefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
     request_effects: Cell<RequestEffects>,
@@ -662,7 +662,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             tripped: Cell::new(PartialReasonSet::empty()),
             scopes: RefCell::new(Vec::new()),
             scope_open: Cell::new(false),
-            paid: RefCell::new(FxHashSet::default()),
+            paid: RefCell::new(CostIdentitySet::default()),
             request_effects: Cell::new(RequestEffects::default()),
             schedule_cut: Cell::new(false),
         }
