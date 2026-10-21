@@ -1568,10 +1568,15 @@ fn the_observation_job_uploads_the_prefixed_artifact_and_never_disposes_on_a_num
     let (probe, observation) = text
         .split_once("\n  observe:")
         .expect("separate observation job");
-    assert!(probe.contains("-E 'not test(observation_lane_emits_one_artifact)'"));
+    assert!(!probe.contains("validation-probe-observe"));
     assert!(!probe.contains("Upload the observation artifact"));
     assert!(observation.contains("continue-on-error: true"));
-    assert!(observation.contains("-E 'test(observation_lane_emits_one_artifact)'"));
+    // The capture is a lane driver, not a test: it drives the complete
+    // corpus under the job's own timeout rather than a per-test deadline.
+    assert!(observation.contains(
+        "cargo run -p verter_validation_probe --features external-corpus --bin validation-probe-observe -- --lane main"
+    ));
+    assert!(!observation.contains("cargo nextest"));
     assert!(observation
         .contains("validation-probe-observations-${{ github.run_id }}-${{ github.run_attempt }}"));
     assert!(observation.contains("if: always()"));
@@ -1595,40 +1600,30 @@ fn the_observation_source_carries_no_threshold_or_rebaseline_policy() {
     );
 }
 
-#[cfg(feature = "external-corpus")]
+/// A live capture is accepted only when it measured something and the
+/// adapter claimed no comparison: a grid that validates but recorded no
+/// compile measurement anywhere observed nothing.
 #[test]
-fn observation_lane_emits_one_artifact() {
-    use verter_validation_probe::runner::PhaseDeadlines;
-    use verter_validation_probe::summary::Lane;
+fn a_live_capture_needs_a_measurement_and_claims_no_comparison() {
+    valid_artifact()
+        .check_live_capture()
+        .unwrap_or_else(|error| panic!("{error}"));
 
-    let lane = match std::env::var("VALIDATION_PROBE_LANE").as_deref() {
-        Ok("main") => Lane::Main,
-        _ => Lane::Smoke,
-    };
-    let artifact = observe::capture(lane, PhaseDeadlines::default())
-        .unwrap_or_else(|error| panic!("observation capture failed: {error}"));
-    let path = observe::write_observations(&artifact)
-        .unwrap_or_else(|error| panic!("writing observations: {error}"));
-    assert!(path.is_file(), "{}", path.display());
-    assert!(!artifact.artifact_id.is_empty());
-    assert!(!artifact.rows.is_empty());
-    assert!(
-        artifact.rows.iter().any(|row| row
-            .samples
-            .iter()
-            .any(|sample| sample.measurement.is_some())),
-        "a live observation must record at least one compile measurement"
-    );
-    for row in &artifact.rows {
-        assert!(
-            !row.comparison_eligible,
-            "{}: the adapter never sets comparison_eligible",
-            row.row_id
-        );
-        assert_eq!(
-            row.observed_outcome,
-            observe::project_observed_outcome(&row.samples).expect("projectable"),
-        );
-        assert_eq!(row.samples.len(), row.mode.sample_count() as usize);
+    let mut unmeasured = valid_artifact();
+    for row in &mut unmeasured.rows {
+        for sample in &mut row.samples {
+            sample.measurement = None;
+        }
     }
+    let error = unmeasured
+        .check_live_capture()
+        .expect_err("a capture without any measurement must be refused");
+    assert!(error.to_string().contains("compile measurement"), "{error}");
+
+    let mut claimed = valid_artifact();
+    claimed.rows[0].comparison_eligible = true;
+    let error = claimed
+        .check_live_capture()
+        .expect_err("the adapter never sets comparison_eligible");
+    assert!(error.to_string().contains("comparison_eligible"), "{error}");
 }
