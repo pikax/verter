@@ -28,3 +28,12 @@ Edges compose. `ProjectPath(OtherType<string>, ['a','foo'])` produces a node who
 **Origin edges are recorded only where something reads them.** `record_origin_edge` records under `cfg(any(test, feature = "test-support", feature = "semantic-observe"))`: the audit origin graph (`audit_enabled && footprint_capture`, a capture build) and the derivation-layer tests are its only readers. A production build interns no fence, records no bucket, tracks no sidecar and charges no retention for origin edges; `walk_origin_chain` / `export_origin_edges_in_scope` stay compiled and see an empty store. Call sites build the arguments inside `record_origin_edge!`, so a shipped build evaluates none of their payload construction. Request-context audit counters and the accumulator push compile only under `semantic-observe`; engine code emits through `verter_type_engine::observe_request!(|ctx| …)` and `verter_audit::observe!(|obs| …)`, whose bodies are type-checked but never built in a default build.
 
 **Captured receivers are request-owned handles.** `RequestSnapshot` retains `CaptureTargets` at lifecycle admission. Dispatchers and their resumptions keep those handles; `GraphIn` and session lookups borrow them. Typed emission requires an explicit receiver and never polls the observer or accumulator slot. `Uncaptured` erases receiver access and payload construction. The snapshot keeps required cancellation, clocks and budgets independently.
+
+**Optional counter storage is shared, owner gates remain local.** Engine
+`Tally` aliases `verter_audit::observe::Counter<AtomicU64>` under the observation
+gate and `Counter<()>` otherwise. Cache occupancy uses the same type with
+shared `Arc<AtomicU64>` storage under that gate. The stripped type is zero-size
+and has no measurement reader. This does not enable `semantic-observe` through
+a test-support dependency. Session capture availability re-exports the audit
+substrate authority; a session built without its own capture feature still
+normalizes capture flags off and emits only unavailable status records.

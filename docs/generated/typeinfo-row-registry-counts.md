@@ -15,8 +15,8 @@ preserved by a named equivalent-or-stronger successor row).
 | Count | Value |
 | --- | --- |
 | baseline (registry cardinality) | 365 |
-| ignored | 95 |
-| running_unratified | 203 |
+| ignored | 93 |
+| running_unratified | 205 |
 | lifted | 67 |
 | superseded | 0 |
 
@@ -35,7 +35,7 @@ preserved by a named equivalent-or-stronger successor row).
 | U2.UTILITIES | 32 | 9 | 23 | 0 | 0 |
 | U2.INDEXED_ACCESS | 25 | 4 | 5 | 16 | 0 |
 | U2.MAPPED_TEMPLATE | 18 | 6 | 7 | 5 | 0 |
-| U2.CLASS_SURFACES | 37 | 21 | 12 | 4 | 0 |
+| U2.CLASS_SURFACES | 37 | 19 | 14 | 4 | 0 |
 | U2.ENUMS | 7 | 0 | 7 | 0 | 0 |
 | U2.MODULE_AUGMENTATION | 4 | 0 | 4 | 0 | 0 |
 | U2.JSX_FOUNDATIONS | 7 | 0 | 7 | 0 | 0 |

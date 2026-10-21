@@ -2136,15 +2136,15 @@ fn a_builtin_utility_build_reads_the_scope_payload_once() {
         "/p.ts",
         "export type Foo = { a: string };\nexport type X = Partial<Foo>;\n",
     );
-    // Captured execution: only it records into the request counters read below.
+    // Bind the observer before the captured resolver snapshots its receivers.
+    let counter = Arc::new(ScopePayloadReadCounter::default());
+    let guard = verter_audit::observer::install_observer(counter.clone());
     let view = host.resolver_store_view_read().into_owned_view();
     let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
     let dispatch = ProjectSemanticDispatch::new(&captured);
     let _builder = dispatch.enter_construction_scope();
     let scope = file_scope(&dispatch, "/p.ts");
     let carrier = bare_ref_carrier(&dispatch, "Partial", scope, &[PrimitiveKind::String]);
-    let counter = Arc::new(ScopePayloadReadCounter::default());
-    let guard = verter_audit::observer::install_observer(counter.clone());
     let resolved = resolve_subject(&dispatch, carrier, ProjectionMode::Expanded);
     drop(guard);
     assert!(

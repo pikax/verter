@@ -28,8 +28,8 @@ use std::sync::Arc;
 use rustc_hash::FxHashSet;
 
 use super::cost_receipt::{
-    BudgetProfileSpec, CostDependency, CostIdentity, CostScope, DemandCostReceipt, LogicalUsage,
-    Nesting, ReplayRefusal, COST_MODEL_REVISION,
+    BudgetProfileSpec, CostDependency, CostIdentity, CostIdentitySet, CostScope, DemandCostReceipt,
+    LogicalUsage, Nesting, ReplayRefusal, COST_MODEL_REVISION,
 };
 
 use crate::semantic_query::PartialReasonSet;
@@ -42,18 +42,23 @@ use crate::semantic_query::PartialReasonSet;
 pub const RELATION_UNITS_PER_COMPARISON: usize = 2;
 
 /// The construction bytes one structured comparison reserves: what a pair
-/// the relation relates holds live at its peak — its frame, its memo entry
-/// and its proof (measured: 1.9 KB per pair relating 200 reversed object
-/// arms). Provisional: the per-pair footprint and this charge are sized
-/// together in the combined performance phase.
+/// the relation relates holds live at its peak — its queued member and the
+/// index its answer is read back through, its relation flight and prepared
+/// identity, its interned key — with the frames, bindings, receipts and
+/// connected-demand state the relation holds beside them. No proof or
+/// explanation is held per pair. The allocator canary
+/// `a_relation_holds_no_more_than_it_charges` measures that working state
+/// independently of this figure and fails when the charge understates it.
+/// The allowance it sizes is calibrated with the other operation and
+/// retention limits.
 pub const RELATION_PAIR_BYTES: usize = 2_048;
 
 /// The construction bytes one arm of a constructed union reserves while the
 /// union is canonicalized: its place in the member lists the passes build,
 /// its ordering key and its entries in the dedup and literal tables
 /// (measured: about 175 bytes an arm canonicalizing the 99,999 string
-/// literals a two-span template forms). Provisional, like
-/// [`RELATION_PAIR_BYTES`].
+/// literals a two-span template forms). Provisional: calibrated with the
+/// other operation and retention limits.
 pub const UNION_ARM_BYTES: usize = 256;
 
 /// The construction bytes interning one derived node reserves: its payload
@@ -321,7 +326,7 @@ pub struct ConnectedDemandLedger<'a> {
     scope_open: Cell<bool>,
     /// The computations whose receipt, and its whole prerequisite closure,
     /// this connected demand has paid.
-    paid: RefCell<FxHashSet<CostIdentity>>,
+    paid: RefCell<CostIdentitySet>,
     /// What this connected demand itself did to its request: the request
     /// operations it spent and the computations it was first to pay.
     request_effects: Cell<RequestEffects>,
@@ -354,7 +359,6 @@ pub(crate) struct ComponentMetaSpan {
     pub(crate) advisory_bytes: u64,
     pub(crate) trip: PartialReasonSet,
     pub(crate) schedule_cuts: u64,
-    pub(crate) certificates: u64,
 }
 
 thread_local! {
@@ -475,7 +479,6 @@ impl TaskSpanCarry {
                 open.advisory_bytes = open.advisory_bytes.saturating_add(span.advisory_bytes);
                 open.trip = open.trip.union(span.trip);
                 open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
-                open.certificates = open.certificates.saturating_add(span.certificates);
             }
         });
     }
@@ -539,17 +542,6 @@ fn remember_schedule_cut() {
     COMPONENT_META_SPANS.with(|spans| {
         for span in spans.borrow_mut().iter_mut() {
             span.schedule_cuts = span.schedule_cuts.saturating_add(1);
-        }
-    });
-}
-
-fn remember_certificate() {
-    if !span_open() {
-        return;
-    }
-    COMPONENT_META_SPANS.with(|spans| {
-        for span in spans.borrow_mut().iter_mut() {
-            span.certificates = span.certificates.saturating_add(1);
         }
     });
 }
@@ -675,7 +667,7 @@ impl<'a> ConnectedDemandLedger<'a> {
             tripped: Cell::new(PartialReasonSet::empty()),
             scopes: RefCell::new(Vec::new()),
             scope_open: Cell::new(false),
-            paid: RefCell::new(FxHashSet::default()),
+            paid: RefCell::new(CostIdentitySet::default()),
             request_effects: Cell::new(RequestEffects::default()),
             schedule_cut: Cell::new(false),
         }
@@ -1096,15 +1088,6 @@ impl<'a> ConnectedDemandLedger<'a> {
         self.tripped.set(tripped);
         remember_trip(reason);
         tripped
-    }
-
-    /// A producer proved an exact same-path recurrence. A same-path bit
-    /// without this note is not a certificate. Recorded on an open
-    /// component-meta span only: outside one, admission has no compute to
-    /// attribute it to.
-    pub(crate) fn note_divergence_certificate(&self) {
-        let _ = self;
-        remember_certificate();
     }
 }
 
@@ -1819,12 +1802,6 @@ impl ConnectedDemandLedger<'_> {
             _guard: guard,
         })
     }
-}
-
-/// Note a real divergence certificate on the open component-meta span.
-#[cfg(any(test, feature = "test-support"))]
-pub fn note_component_meta_divergence_for_test() {
-    remember_certificate();
 }
 
 /// Note a schedule cut on the open component-meta span.

@@ -598,7 +598,7 @@ use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_f
 /// Project a recorded observation onto arena-free structural text so two
 /// hosts are comparable.
 fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalProductObservation {
-    use super::flow_products::WideningMembership;
+    use super::flow_products::{FlowNarrowed, WideningMembership};
     fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
         use verter_type_expr::TypeExpr;
         match ty {
@@ -653,12 +653,17 @@ fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalPro
                         .facts()
                         .iter()
                         .map(|fact| {
-                            format!(
-                                "{:?}/{:?}/{}",
-                                fact.binding,
-                                fact.path,
-                                node(fact.narrowed_to)
-                            )
+                            // A remainder is the union of the arms it keeps.
+                            let narrowed = match &fact.narrowed_to {
+                                FlowNarrowed::Node(narrowed) => node(*narrowed),
+                                FlowNarrowed::Remainder(remainder) => {
+                                    match remainder.remaining_arms().as_slice() {
+                                        [arm] => node(*arm),
+                                        arms => format!("union:{:?}", set(arms)),
+                                    }
+                                }
+                            };
+                            format!("{:?}/{:?}/{narrowed}", fact.binding, fact.path)
                         })
                         .collect();
                     facts.sort();

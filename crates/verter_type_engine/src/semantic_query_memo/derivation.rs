@@ -352,9 +352,11 @@ impl DerivationStore {
         edge: OriginEdge,
     ) {
         let bucket_key = (result, kind);
-        let is_new_bucket = !self.edges.contains_key(&bucket_key);
         let table_before = self.table_bytes();
-        let bucket_before = self.edges.get(&bucket_key).map_or(0, bucket_bytes);
+        let (is_new_bucket, bucket_before) = match self.edges.get(&bucket_key) {
+            Some(bucket) => (false, bucket_bytes(bucket)),
+            None => (true, 0),
+        };
         // Append the edge, then apply the PER-BUCKET FIFO cap inside the
         // SAME `&mut self` step. The bucket `Vec` is insertion-ordered
         // (push at the back), so the oldest edge is at the front and a

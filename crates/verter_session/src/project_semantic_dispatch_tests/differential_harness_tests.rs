@@ -36,7 +36,7 @@ use verter_type_engine::semantic_query::{
 pub(super) struct Setting {
     pub(super) root: &'static str,
     pub(super) label: &'static str,
-    options: &'static str,
+    pub(super) options: &'static str,
 }
 
 /// `strict`.
@@ -62,6 +62,13 @@ pub(super) const LOOSE_IMPLICIT: Setting = Setting {
     root: "/loose-implicit",
     label: "both off",
     options: r#"{ "strict": true, "strictNullChecks": false, "noImplicitAny": false }"#,
+};
+
+/// `strict` with `strictFunctionTypes` off.
+pub(super) const STRICT_FUNCTION_TYPES_OFF: Setting = Setting {
+    root: "/strict-loose-function-types",
+    label: "strictFunctionTypes off",
+    options: r#"{ "strict": true, "strictFunctionTypes": false }"#,
 };
 
 /// The four settings, in the order a four-answer row lists them.
@@ -880,24 +887,29 @@ fn observe_with_deadline(
     let thread_host = Arc::clone(host);
     let canonical = canonical.to_owned();
     let symbol = symbol.to_owned();
-    let thread = std::thread::spawn(move || {
-        let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            observe(&thread_host, &canonical, &symbol, scoped)
-        }))
-        .unwrap_or_else(|payload| {
-            let message = payload
-                .downcast_ref::<String>()
-                .cloned()
-                .or_else(|| {
-                    payload
-                        .downcast_ref::<&str>()
-                        .map(|text| (*text).to_owned())
-                })
-                .unwrap_or_default();
-            (Observed::Panicked(message), Vec::new())
-        });
-        let _ = sender.send(observed);
-    });
+    // Match the host CPU workers' stack: debug signature relations must
+    // reach their logical depth guard before the platform's stack guard.
+    let thread = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let observed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                observe(&thread_host, &canonical, &symbol, scoped)
+            }))
+            .unwrap_or_else(|payload| {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|text| (*text).to_owned())
+                    })
+                    .unwrap_or_default();
+                (Observed::Panicked(message), Vec::new())
+            });
+            let _ = sender.send(observed);
+        })
+        .expect("start semantic observation worker");
     match await_row(&thread, &receiver, ROW_CPU_BUDGET, ROW_NO_PROGRESS_BACKSTOP) {
         Ok(observed) => observed,
         Err(RowOverdue::Disconnected) => (

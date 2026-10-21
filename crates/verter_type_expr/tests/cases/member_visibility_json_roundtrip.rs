@@ -21,6 +21,7 @@ use verter_type_expr::{
 
 fn object(members: Vec<ObjectMember>) -> TypeExpr {
     TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: members,
     }))
 }

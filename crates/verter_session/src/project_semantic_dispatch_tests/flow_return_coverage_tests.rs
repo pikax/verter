@@ -1778,12 +1778,14 @@ fn assignment_expression_return_is_the_assigned_type() {
 fn class_expression_return_is_its_constructor_type() {
     let host = ts_host();
     let instance = TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+        empty_literal: false,
         properties: Vec::new(),
     }));
     assert_eq!(
         eval(&host, LEAF, "leafClassExpr"),
         Outcome::Value {
             ty: TypeExpr::Object(Arc::new(verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: vec![verter_type_expr::ObjectMember::ConstructSignature(
                     verter_type_expr::FunctionExpr::synthetic(
                         Vec::new(),

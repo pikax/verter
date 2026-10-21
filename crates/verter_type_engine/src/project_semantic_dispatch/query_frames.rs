@@ -180,7 +180,7 @@ pub(super) struct FlowSeam {
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
     /// The reads the run reached that no answer holds, in the order it
     /// reached them, each with the claim it entered with.
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
     /// How many queries the run is evaluating in place now: their reads
@@ -228,7 +228,7 @@ pub(super) struct CallSeam {
     resume: Option<Box<super::call_resolve::CallSuspension>>,
     answers: FxHashMap<(SemanticQueryKey, TupleSplicePosition), QueryDelivery>,
     resumes: OperandResumes,
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
 }
@@ -272,6 +272,88 @@ pub(super) struct ConditionalBuild {
     pending: std::collections::VecDeque<(SemanticQueryKey, ClaimAttempt)>,
 }
 
+/// The reads a seam's run reached that no answer holds, in the order it
+/// reached them, each with the claim it entered with, and an index of them
+/// by demand. A run over a wide union reaches a read per member; asking
+/// whether one of them is already needed compares it with the needs that
+/// share its demand's hash, not with every need before it. Each need's key
+/// is stored once, in `reached`, and a membership question borrows the key
+/// it asks about.
+#[derive(Default)]
+pub(super) struct SeamNeeds {
+    reached: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    /// Positions in `reached`, by the hash of each need's demand.
+    demands: hashbrown::HashTable<usize>,
+}
+
+/// Whether the reached need `(need, claim)` is the demand of `key` at
+/// `site`: the one comparison a membership question makes with a stored
+/// need, counted for the growth tests.
+fn is_need(
+    (need, claim): &(SemanticQueryKey, ClaimAttempt),
+    key: &SemanticQueryKey,
+    site: TupleSplicePosition,
+) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    SEAM_NEED_PROBES.with(|probes| probes.set(probes.get() + 1));
+    claim.checking_site() == site && need == key
+}
+
+/// The hash a need's demand — its key at its checking site — is indexed by.
+fn demand_hash(key: &SemanticQueryKey, site: TupleSplicePosition) -> u64 {
+    std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, (key, site))
+}
+
+impl SeamNeeds {
+    fn push(&mut self, key: SemanticQueryKey, claim: ClaimAttempt) {
+        let hash = demand_hash(&key, claim.checking_site());
+        let position = self.reached.len();
+        self.reached.push((key, claim));
+        let reached = &self.reached;
+        self.demands.insert_unique(hash, position, |&stored| {
+            let (key, claim) = &reached[stored];
+            demand_hash(key, claim.checking_site())
+        });
+    }
+
+    /// Whether `key`, at `site`, is one of the needs.
+    fn contains(&self, key: &SemanticQueryKey, site: TupleSplicePosition) -> bool {
+        if self.reached.is_empty() {
+            return false;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        SEAM_NEED_QUESTIONS.with(|questions| questions.set(questions.get() + 1));
+        let reached = &self.reached;
+        self.demands
+            .find(demand_hash(key, site), |&stored| {
+                is_need(&reached[stored], key, site)
+            })
+            .is_some()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.reached.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.reached.len()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn iter(&self) -> std::slice::Iter<'_, (SemanticQueryKey, ClaimAttempt)> {
+        self.reached.iter()
+    }
+}
+
+impl IntoIterator for SeamNeeds {
+    type Item = (SemanticQueryKey, ClaimAttempt);
+    type IntoIter = std::vec::IntoIter<(SemanticQueryKey, ClaimAttempt)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.reached.into_iter()
+    }
+}
+
 /// What a running conditional decision's reads are answered from: its
 /// frame's answers, and the reads they do not answer.
 pub(super) struct DecisionSeam {
@@ -281,7 +363,7 @@ pub(super) struct DecisionSeam {
     /// The reads the run reached that no answer holds, in the order it
     /// reached them, each with the claim it entered with for the runtime
     /// to produce it.
-    needs: Vec<(SemanticQueryKey, ClaimAttempt)>,
+    needs: SeamNeeds,
     /// The frame depth a needed demand's own frame runs at.
     depth: u32,
     /// How many queries the decision reached are evaluating in place now.
@@ -805,7 +887,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             key: key.clone(),
             producer: Some(producer),
             tracer: None,
-            taint: BuildLocalTaint::default(),
+            taint: BuildLocalTaint {
+                produces: super::instantiation_frame_identity(key),
+                ..BuildLocalTaint::default()
+            },
             build: None,
             active: None,
             depth: self.child_depth,
@@ -840,7 +925,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 Err(delivery) => return Start::Answer(Ok(*delivery)),
             },
         };
-        // A result this dispatcher published answers before any claim: a
+        // A result the request already completed answers before any claim: a
         // claim installs a flight other tasks may join, so it is taken only
         // to produce.
         if let Some((read, carrier)) = dispatch.own_published_read(key, nesting) {
@@ -859,10 +944,13 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         // request alone, as it does nested in a synchronous build: its
         // frame produces it without the family memo's claim.
         if dispatch.request_local_is_open(key) {
-            dispatch.connected_demand.note_divergence_certificate();
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
-        if dispatch.completes_nested_request_locally(key) {
+        // A relation completes for the request only through its synchronous
+        // root, which keeps its component with it.
+        if !matches!(key, SemanticQueryKey::Relate { .. })
+            && dispatch.completes_nested_request_locally(key)
+        {
             dispatch
                 .request_local_open
                 .borrow_mut()
@@ -906,9 +994,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         match claim {
             Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier, nesting))),
             Claim::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
                 Start::Answer(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Claim::Subscribed(subscription) => Start::Subscribe(PendingClaim {
@@ -1015,12 +1100,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         };
         Ok(match claim {
             Claim::Read(read) => dispatch.answered(key, read, carrier, nesting),
-            Claim::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
-                dispatch.recursion_delivery(key, recursion)
-            }
+            Claim::Recursive(recursion) => dispatch.recursion_delivery(key, recursion),
             Claim::Subscribed(_) | Claim::Produce(_) => {
                 dispatch.recursion_delivery(key, Recursion::SamePath)
             }
@@ -1102,9 +1182,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 External::Complete(Ok(dispatch.answered(key, read, carrier, nesting)))
             }
             Joined::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
                 External::Complete(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Joined::Retry => {
@@ -1158,16 +1235,18 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
-    /// Whether a demand of `key` a frame needs completes for this request
-    /// alone, outside the family memo's claim and admission: exactly when a
-    /// read of it nested in a synchronous build does
-    /// ([`super::completes_request_locally`]) — outside every checker
-    /// obligation and every forced operand, and not already produced on this
-    /// task's path.
-    fn completes_nested_request_locally(&self, key: &SemanticQueryKey) -> bool {
+    /// Whether a read of `key` nested in another computation — a demand a
+    /// frame needs, or a read nested in a synchronous build — completes for
+    /// this request alone, outside the family memo's claim and admission
+    /// ([`super::completes_request_locally`]): outside every forced operand,
+    /// outside every checker obligation unless the family completes inside
+    /// one ([`super::completes_request_locally_in_obligations`]), and not
+    /// already produced on this task's path.
+    pub(super) fn completes_nested_request_locally(&self, key: &SemanticQueryKey) -> bool {
         super::completes_request_locally(key)
             && self.active_operand_evidence.borrow().is_empty()
-            && self.dispatch_txn.borrow().obligations.decides_root()
+            && (super::completes_request_locally_in_obligations(key)
+                || self.dispatch_txn.borrow().obligations.decides_root())
             && !self
                 .graph()
                 .is_same_path_claim_at(key, self.checking_site.get())
@@ -1294,8 +1373,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             t.borrow_mut()
                 .push(super::raise::query_key_discriminant(key))
         });
-        #[cfg(any(test, feature = "test-support"))]
-        super::raise::record_dispatch_key(key);
         let mut carrier = None;
         // The runtime holds this entry on the heap: it enters no nested
         // native query level.
@@ -1521,7 +1598,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let installed = self.decision_seam.replace(Some(DecisionSeam {
             answers: std::mem::take(&mut build.answers),
             resumes: std::mem::take(&mut build.resumes),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
         }));
@@ -1607,12 +1684,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let read = match answered {
                 Some(delivery) => Seam::Answered(delivery),
                 None if seam.nested > 0 => return None,
-                None if seam.needs.iter().any(|(needed, claim)| {
-                    needed == key && claim.checking_site() == self.checking_site.get()
-                }) =>
-                {
-                    Seam::Waiting
-                }
+                None if seam.needs.contains(key, self.checking_site.get()) => Seam::Waiting,
                 None => Seam::Enter,
             };
             (read, seam.depth)
@@ -1630,7 +1702,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.read_delivery(*delivery, nesting)
                 }
                 Ok(claim) => {
-                    self.with_decision_seam(|seam| seam.needs.push((key.clone(), claim)));
+                    self.with_decision_seam(|seam| seam.needs.push(key.clone(), claim));
                     self.suspended_decision_read()
                 }
             },
@@ -1959,7 +2031,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let lease = match producer {
             FrameProducer::Lease(lease) => lease,
             // A request-local completion settles as a producer's would and
-            // enters no family memo; the dispatcher keeps what it may serve
+            // enters no family memo; the request keeps what it may serve
             // again.
             FrameProducer::RequestLocal { attempt } => {
                 let (read, kept) = self.graph().complete_request_local(
@@ -2076,7 +2148,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             resume: build.suspension.take(),
             answers: std::mem::take(&mut build.answers),
             resumes: std::mem::take(&mut build.resumes),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
         }));
         verter_debug_assert!(installed.is_none(), "one call walk runs per step");
@@ -2154,7 +2226,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let outer = self.decision_seam.replace(Some(DecisionSeam {
             answers,
             resumes,
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
         }));
@@ -2252,7 +2324,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let frame_depth = self.dispatch_txn.borrow().reentry().depth() + 1;
         let installed = self.flow_seam.replace(Some(FlowSeam {
             answers: std::mem::take(&mut build.answers),
-            needs: Vec::new(),
+            needs: SeamNeeds::default(),
             depth,
             nested: 0,
             windows: 0,
@@ -2325,12 +2397,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .cloned()
             {
                 Some(delivery) => Seam::Answered(delivery),
-                None if seam.needs.iter().any(|(needed, claim)| {
-                    needed == key && claim.checking_site() == self.checking_site.get()
-                }) =>
-                {
-                    Seam::Waiting
-                }
+                None if seam.needs.contains(key, self.checking_site.get()) => Seam::Waiting,
                 None => Seam::Enter,
             };
             (read, seam.depth)
@@ -2348,7 +2415,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     self.read_delivery(*delivery, nesting)
                 }
                 Ok(claim) => {
-                    self.with_flow_seam(|seam| seam.needs.push((key.clone(), claim)));
+                    self.with_flow_seam(|seam| seam.needs.push(key.clone(), claim));
                     self.suspended_decision_read()
                 }
             },
@@ -2562,6 +2629,28 @@ pub struct CallSuspensionForTests {
 thread_local! {
     static CALL_SUSPENSIONS_FOR_TESTS: std::cell::RefCell<Vec<CallSuspensionForTests>> =
         const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static SEAM_NEED_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SEAM_NEED_QUESTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The membership questions seams asked on this thread since it started:
+/// whether a read is already one of the needs its run reached.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seam_need_questions_for_tests() -> u64 {
+    SEAM_NEED_QUESTIONS.with(std::cell::Cell::get)
+}
+
+/// The stored needs a seam's membership queries compared a read with on
+/// this thread since it started: a read already needed is compared with the
+/// need that shares its demand's hash, never with every need the run
+/// reached before it.
+#[cfg(any(test, feature = "test-support"))]
+pub fn seam_need_probes_for_tests() -> u64 {
+    SEAM_NEED_PROBES.with(std::cell::Cell::get)
 }
 
 /// Take the suspensions call frames' walks made on this thread.

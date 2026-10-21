@@ -56,7 +56,7 @@ impl<'a> Visit<'a> for TypeAssertionCollector {
 pub(crate) fn rewrite_ts_type_assertions(
     content: &str,
     content_start: u32,
-    out: &mut CodeTransform<'_>,
+    out: &mut CodeTransform<'_, impl verter_audit::observe::ObserveExec>,
 ) {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, content, SourceType::ts()).parse();

@@ -59,13 +59,11 @@ use crate::semantic_query::{
     SurfaceMember, SurfaceView, TypeParamDecl,
 };
 
-/// Separate identities for a public substitution and each recursive node
-/// it consumes: their receipts cannot accidentally hide a child's usage.
+/// The identity of one substitution walk, `(node, parameter, arg)`: the
+/// memo entry its receipt prices. A public substitution and the walk at its
+/// root are one computation, so they share one receipt and one entry.
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
-enum SubstitutionCost {
-    Root(SemanticNodeId, SemanticNodeId, SemanticNodeId),
-    Node(SemanticNodeId, SemanticNodeId, SemanticNodeId),
-}
+struct SubstitutionCost(SemanticNodeId, SemanticNodeId, SemanticNodeId);
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
     fn priced_substitution_read(
@@ -90,7 +88,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// seals no receipt and so publishes nothing to the memo.
     fn substitution_cost(
         &self,
-        identity: SubstitutionCost,
         node: SemanticNodeId,
         parameter: SemanticNodeId,
         arg: SemanticNodeId,
@@ -105,8 +102,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }))
             .ok()?;
         Some(
-            self.connected_demand
-                .record_cost(super::cost_receipt::CostIdentity::of_key(identity).with_roots(roots)),
+            self.connected_demand.record_cost(
+                super::cost_receipt::CostIdentity::of_key(SubstitutionCost(node, parameter, arg))
+                    .with_roots(roots),
+            ),
         )
     }
 
@@ -147,7 +146,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 observer.record_event(verter_audit::AuditEvent::SubstituteTopLevelCall);
             });
             self.enter_substitution_walk();
-            if node != parameter_node && self.binder_dependency_proves_absent(node, parameter_node) {
+            if node == parameter_node {
+                self.classify_recursive_substitution(node, parameter_node, arg);
+                return arg;
+            }
+            if self.binder_dependency_proves_absent(node, parameter_node) {
                 return node;
             }
             // Hash-cons memo. The store-owned `substitute_memo` collapses
@@ -169,35 +172,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 });
                 return cached;
             }
-            // Change-tracking through recursion. The internal helper
-            // returns (result, changed) so each branch can short-circuit
-            // the rebuild path when no descendant produced a different
-            // node id. The public signature is unchanged; callers see only
-            // the result id.
-            //
-            // Evidence-blind-replay fence: the store-owned memo is
-            // cross-request, so a walk whose canonical composite routing
-            // deposited NON-TRIVIAL evidence (file self-roots, or an
-            // incomplete comparison's warm suppression) must not be
-            // replayed to a later request that would then skip the deposit
-            // — a stale warm read served on an under-rooted entry. The
-            // epoch advancing across the walk suppresses the publish; the
-            // result itself still flows to the caller.
-            let epoch_before = self.canonical_evidence_epoch.get();
-            let recording = self.substitution_cost(
-                SubstitutionCost::Root(node, parameter_node, arg),
-                node,
-                parameter_node,
-                arg,
-            );
-            let result = self
-                .substitute_with_change_tracking(node, parameter_node, arg)
-                .0;
-            if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
-                self.graph()
-                    .substitute_memo_publish_priced(node, parameter_node, arg, result, receipt);
-            }
-            result
+            // Change-tracking through recursion. The walk at the root is
+            // this substitution itself: it records the one receipt and
+            // publishes the one memo entry the triple has, so the public
+            // entry wraps no second recording around it. The public
+            // signature is unchanged; callers see only the result id.
+            self.classify_recursive_substitution(node, parameter_node, arg);
+            self.substitute_node_recorded(node, parameter_node, arg).0
         }
     }
 
@@ -778,13 +759,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // structurally correct: visiting the binder twice in
         // `Foo<K, K>`-style fixtures IS the recursive memo's hit
         // case at the boundary.
-        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
-            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
-                node: node.0,
-                parameter_node: parameter_node.0,
-                arg: arg.0,
-            })
-        });
+        self.classify_recursive_substitution(node, parameter_node, arg);
         // Trivial-identity short-circuit runs AFTER classification:
         // the per-request audit needs to see every entry, but the
         // identity branch returns `arg` without touching graph
@@ -807,17 +782,45 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let changed = cached != node;
             return (cached, changed);
         }
-        // Same evidence-blind-replay fence as the top-level entry: a
-        // sub-walk whose canonical routing deposited non-trivial
-        // evidence is not replayable, and neither is any enclosing
-        // sub-walk (ancestors observe the same epoch advance).
+        self.substitute_node_recorded(node, parameter_node, arg)
+    }
+
+    /// Count one arrival at `(node, parameter, arg)` in the request's
+    /// audit footprint: unique or repeated within the request.
+    fn classify_recursive_substitution(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
+            ctx.classify_recursive_substitute(RecursiveSubstituteIdentity {
+                node: node.0,
+                parameter_node: parameter_node.0,
+                arg: arg.0,
+            })
+        });
+    }
+
+    /// The cold walk of `(node, parameter, arg)` after its memo missed:
+    /// recorded as one computation and published, priced, when complete.
+    ///
+    /// Evidence-blind-replay fence: the store-owned memo is cross-request,
+    /// so a walk whose canonical composite routing deposited NON-TRIVIAL
+    /// evidence (file self-roots, or an incomplete comparison's warm
+    /// suppression) must not be replayed to a later request that would
+    /// then skip the deposit — a stale warm read served on an under-rooted
+    /// entry. The epoch advancing across the walk suppresses the publish,
+    /// for this walk and every enclosing one (ancestors observe the same
+    /// advance); the result itself still flows to the caller.
+    fn substitute_node_recorded(
+        &self,
+        node: SemanticNodeId,
+        parameter_node: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> (SemanticNodeId, bool) {
         let epoch_before = self.canonical_evidence_epoch.get();
-        let recording = self.substitution_cost(
-            SubstitutionCost::Node(node, parameter_node, arg),
-            node,
-            parameter_node,
-            arg,
-        );
+        let recording = self.substitution_cost(node, parameter_node, arg);
         let (result, changed) =
             self.substitute_with_change_tracking_inner(node, parameter_node, arg);
         if let Some(receipt) = self.finish_substitution_cost(recording, epoch_before) {
@@ -2139,7 +2142,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => None,
         };
 
-        let mut visited: rustc_hash::FxHashSet<SemanticNodeId> = rustc_hash::FxHashSet::default();
+        let mut visited = crate::semantic_query::small_node_set::SmallNodeSet::default();
         let mut stack: Vec<SemanticNodeId> = Vec::new();
         stack.push(root);
         while let Some(node) = stack.pop() {

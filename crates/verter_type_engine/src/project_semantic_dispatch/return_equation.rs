@@ -249,7 +249,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 {
                     return Some(result);
                 }
-                let served = self.graph().get_resolve_call_result(self.ctx, key)?;
+                let served = self
+                    .graph()
+                    .get_resolve_call_result(self.ctx, key)
+                    .or_else(|| self.kept_call_result(key))?;
                 if !self.admits_served(&served.receipt) {
                     return None;
                 }

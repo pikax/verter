@@ -97,7 +97,7 @@ this row supersedes that owner's gate column.
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | Aggregate owner probe and compaction examination counter (`OwnerEntries.examined`) | none; the crate's own tests | OPTIONAL | Per aggregate token | `src/cancellation.rs` | `cfg(test)` — a test-only proof counter needs no capture gate |
-| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner`, `current_timing_enabled` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
+| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
 | `cancellation_token`, opaque context install/clear guards | Cancellation and request-context carriage | REQUIRED / REQUIRED-lifetime | Per dispatch | `src/request_context.rs` | always |
 
 ## verter_semantic_source
@@ -158,7 +158,7 @@ this row supersedes that owner's gate column.
 | `hotpath::measure` attributes on compile, codegen, source-map, AST, lint and analysis entries | none; profiling | OPTIONAL | Profiler window | `crates/verter_compiler/src/**`, `crates/verter_parser/src/ast/mod.rs`, `crates/verter_diagnostics/src/linter.rs`, `crates/verter_semantic/src/analysis/build.rs` | `cfg(feature = "semantic-observe")` |
 | Compile phase timers and source-map clocks reported to the audit observer | Audit records only | OPTIONAL | One compile | `crates/verter_compiler/src/compile/mod.rs` | `cfg(feature = "semantic-observe")` (`observe!`, `Stopwatch`) |
 | Compile-result wall-clock durations (`parse_start`, `total_start`, `style_start`, `script_start`, `tpl_start`, `tsx_start`, `tsc_start` clock reads feeding `VerterCompileResult::{parse_duration_ms, total_duration_ms}` and each block's `duration_ms`) | none in production: the public result fields (and the FFI `parseDurationMs`) are read only by the `ffi-bench` measurement | OPTIONAL timers on a public result shape | One compile | `crates/verter_compiler/src/compile/{mod,types}.rs` | always (open item: compiler attribution owns the result-shape change) |
-| `CodeTransform` per-op audit emission (`record_audit_op`) | Audit records only | OPTIONAL | Per op | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` (`observe!`) |
+| `CodeTransform<'_, M>` operation tally (`record_audit_op`) | Audit records only | OPTIONAL | One transform, published on drop | `crates/verter_compiler/src/code_transform/code_transform.rs` | `cfg(feature = "semantic-observe")` and `M::CAPTURED`; uncaptured updates and drop-time observation compile out |
 
 ## Bindings
 
@@ -207,8 +207,9 @@ default builds, or work this sweep could not finish, with the reason.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a
-   wire-contract retirement; removing them is owned by the audit and typeinfo
-   wire owners, not this sweep. A default build no longer emits them at all:
+   wire-contract retirement. Their backing counters, bump helper, carrier
+   fields and snapshot reads are removed; audit builders emit literal zeros.
+   A default build no longer emits them at all:
    it returns no captured record.
 5. Diagnostic tools that read audit records — `packages/benchmark/src/_audit-component.ts`,
    `scripts/benchmark/trace-component-corpus.mjs` and the native and WASM
@@ -233,3 +234,26 @@ default builds, or work this sweep could not finish, with the reason.
    (`a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it`)
    runs in both builds. The explanation state is relation-owned and recorded
    here for the relation inventory.
+
+## Optional counter storage
+
+`observe::Counter<S>` owns the common u64 counter operations. Each owner selects
+`AtomicU64`, `Arc<AtomicU64>` or zero-size `()` storage through its existing
+compile gate: audit `ObservedU64` uses `semantic-observe`, engine `Tally` and
+`OccupancyCounter` use the observation gate. Only retained storage has a reader;
+shared clones retain the same atomic. The narrower u32/u16/flag primitives
+keep their typed operations. Availability is computed only by the audit
+substrate and re-exported by the session.
+
+## VFS capture execution
+
+Plain workspace reads are uncaptured. `WorkspaceRead::read_file_captured` takes
+bound `VfsReadCapture` identity/timing; both entries share the same typed read
+implementation. `VfsReadProbe<Uncaptured>` touches no clock, request slot or
+sink registry. Read-detail strings are likewise absent from production defaults
+and skipped by instrumented uncaptured reads; the workspace unit-test seam
+retains its existing detail assertions. Source jobs bind `CapturedSourceLoader`
+at their execution boundary from the submitted context (or the DAG waiter
+group's winner context when no submission context is carried);
+the session loader forwards that data, and typed dependency-source reads borrow
+their existing capture targets. There is no per-read timing-context accessor.

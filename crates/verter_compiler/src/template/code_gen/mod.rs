@@ -218,7 +218,7 @@ pub fn generate_template<'alloc>(
     ast: &TemplateAst,
     oxc_ast: &OxcParsedAst<'alloc>,
     source: &'alloc str,
-    ct: &mut crate::code_transform::CodeTransform<'alloc>,
+    ct: &mut crate::code_transform::CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
     alloc: &'alloc Allocator,
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,

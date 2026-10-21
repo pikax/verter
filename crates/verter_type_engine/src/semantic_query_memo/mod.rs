@@ -2324,7 +2324,6 @@ impl SemanticGraphStore {
         // path's pre-loop observation. Gated to match the instrumentation
         // module (absent in release).
         #[cfg(any(test, feature = "test-support"))]
-        #[cfg(feature = "semantic-observe")]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
         // A chronological operation trace: optional observation.

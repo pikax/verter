@@ -670,7 +670,10 @@ impl<'alloc> CodeGenOutput<'alloc> {
     /// Returns the categorized runtime helper imports collected during codegen.
     /// Vue helpers go to `vue`, SSR helpers go to `ssr` (from `vue/server-renderer`).
     #[cfg_attr(feature = "semantic-observe", hotpath::measure)]
-    pub fn apply_to(mut self, ct: &mut CodeTransform<'alloc>) -> TemplateImports<'alloc> {
+    pub fn apply_to(
+        mut self,
+        ct: &mut CodeTransform<'alloc, impl verter_audit::observe::ObserveExec>,
+    ) -> TemplateImports<'alloc> {
         // Carry the recorded helper-import preamble identity into the transform. The same `&'alloc
         // str` becomes an `Inserted` chunk below, so source-map generation can locate it by pointer
         // and report the typed preamble-end boundary. No-op when no preamble was emitted.

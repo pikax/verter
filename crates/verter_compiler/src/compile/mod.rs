@@ -1214,7 +1214,7 @@ fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
     if options.target.needs_script() && !use_transferred_script_semantics {
         let script_start = Instant::now();
 
-        let mut ct = CodeTransform::new(input, allocator);
+        let mut ct = CodeTransform::<M>::new_in(input, allocator);
 
         // Parse template expressions early so we can collect the set of identifiers
         // actually used in the template (for import elision in script codegen).
@@ -1490,7 +1490,7 @@ fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
         } else {
             script_result.imports.clone()
         };
-        let emit_import_line = |ct: &mut CodeTransform<'_>, names: &[&'static str]| {
+        let emit_import_line = |ct: &mut CodeTransform<'_, M>, names: &[&'static str]| {
             if names.is_empty() {
                 return;
             }
@@ -1761,7 +1761,7 @@ fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
                 // align. Remove the prefix (before <template>) and suffix
                 // (after </template>) within the CT so build_string() produces
                 // only the template region with correct sourcemap offsets.
-                let mut tpl_ct = CodeTransform::new(input, &tpl_alloc);
+                let mut tpl_ct = CodeTransform::<M>::new_in(input, &tpl_alloc);
                 let tpl_tag_start = template_ast.root.tag_open.start as usize;
                 let tpl_tag_end = template_ast
                     .root
@@ -2051,7 +2051,7 @@ fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
         // Unified single CodeTransform for both script and template.
         // One CT → one source map → template diagnostics map correctly.
         let tsx_alloc = Allocator::new();
-        let mut tsx_ct = CodeTransform::new(input, &tsx_alloc);
+        let mut tsx_ct = CodeTransform::<M>::new_in(input, &tsx_alloc);
         // Authored JavaScript file-check directives must remain header pragmas in
         // the generated companion. Put them before the JSX authority: current
         // TSGO recognizes the file-check override only from the leading pragma
@@ -2189,7 +2189,7 @@ fn compile_inner_in<M: verter_audit::observe::ObserveExec>(
                         &tsx_script_result.template_component_bindings,
                     );
                     if options.ide_chunk_boundaries {
-                        let mut chunk_ct = CodeTransform::new(input, &tsx_alloc);
+                        let mut chunk_ct = CodeTransform::<M>::new_in(input, &tsx_alloc);
                         tsx_out.clone().apply_to(&mut chunk_ct);
                         let code = chunk_ct.build_string();
                         let source_map = chunk_ct.generate_map_json(SourceMapOptions {

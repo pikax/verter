@@ -3,6 +3,35 @@ use std::cell::Cell;
 use verter_audit::observe::{capture, CaptureAvailability, ObserveMode};
 
 #[test]
+fn optional_counter_storage_preserves_owned_shared_and_stripped_gates() {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering::Relaxed},
+        Arc,
+    };
+    use verter_audit::observe::Counter;
+
+    let owned = Counter::<AtomicU64>::new();
+    owned.fetch_add(7, Relaxed);
+    owned.fetch_max(11, Relaxed);
+    owned.fetch_sub(2, Relaxed);
+    assert_eq!(owned.load(Relaxed), 9);
+
+    let shared = Counter::<Arc<AtomicU64>>::new();
+    let sibling = shared.clone();
+    shared.fetch_add(7, Relaxed);
+    sibling.saturating_sub(3);
+    assert_eq!(shared.load(Relaxed), 4);
+    sibling.saturating_sub(10);
+    assert_eq!(shared.load(Relaxed), 0);
+
+    let stripped = Counter::<()>::new();
+    stripped.fetch_add(7, Relaxed);
+    stripped.fetch_max(11, Relaxed);
+    stripped.saturating_sub(3);
+    assert_eq!(std::mem::size_of_val(&stripped), 0);
+}
+
+#[test]
 fn unavailable_capture_does_not_collect_or_fabricate_metrics() {
     let calls = Cell::new(0);
     let metrics = capture(|| {

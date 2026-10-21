@@ -434,7 +434,7 @@ fn clause_write_replay_moves_every_runtime_domain_and_kills_old_guards() {
             verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowingFact {
                 binding: entering.identity(&subject).unwrap(),
                 path: Arc::from([]),
-                narrowed_to: string,
+                narrowed_to: verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowed::Node(string),
                 fresh_literal: None,
             },
         ]),
