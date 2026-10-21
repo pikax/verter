@@ -1105,12 +1105,7 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                let nullability = match store.node_scope_in_scope(current) {
-                    Some(NodeScopeId::File { canonical_id, .. }) => {
-                        dispatch.nullability_for(&canonical_id)
-                    }
-                    _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                };
+                let nullability = root_nullability(store, dispatch, current);
                 let key = SemanticQueryKey::reduce_written_intersection_operands(
                     store,
                     members,
@@ -1202,6 +1197,20 @@ pub(crate) fn classify_base_surfacing(
             Ok(fallback) => Ok(fallback.unwrap_or(base)),
             Err(fault) => Err(fault),
         },
+    }
+}
+
+/// The `null` / `undefined` algebra a composite written in `node`'s file
+/// is constructed under: that file's `strictNullChecks`, and the strict
+/// algebra for a node no file owns.
+fn root_nullability<M: verter_audit::observe::ObserveExec>(
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    node: SemanticNodeId,
+) -> verter_session_query::flow::policy::NullabilityPolicy {
+    match store.node_scope_in_scope(node) {
+        Some(NodeScopeId::File { canonical_id, .. }) => dispatch.nullability_for(&canonical_id),
+        _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
     }
 }
 

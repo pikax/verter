@@ -822,6 +822,7 @@ impl Subscription<'_> {
         )]
         key: &crate::semantic_query::SemanticQueryKey,
     ) -> Result<(), WaitCycle> {
+        let _ = std::marker::PhantomData::<M>;
         let producer = state.owner.unwrap_or(self.waiter);
         let edge = self
             .store

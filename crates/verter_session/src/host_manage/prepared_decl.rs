@@ -143,6 +143,7 @@ fn record_prepared_decl_materialization<M: verter_audit::observe::ObserveExec>(
     canonical_id: &str,
     started: verter_audit::observe::Stopwatch,
 ) {
+    let _ = std::marker::PhantomData::<M>;
     #[cfg(feature = "semantic-observe")]
     if M::CAPTURED {
         if let Some(accumulator) = observation.accumulator.as_deref() {
@@ -2683,13 +2684,11 @@ impl VerterHost {
             if cold_lease.refused.is_some() {
                 return None;
             }
-            if cold_lease.parsed_now {
-                if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
-                    self.provenance
-                        .decl_lowering
-                        .eval_program_parses
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
+            if cold_lease.parsed_now && (cfg!(any(test, feature = "test-support")) || M::CAPTURED) {
+                self.provenance
+                    .decl_lowering
+                    .eval_program_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             // The cold-index job ran over the snapshot its own acquisition
             // pinned, so a missing answer for an unrefused parse is an

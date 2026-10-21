@@ -1216,6 +1216,7 @@ impl VerterHost {
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
         let observation = verter_type_engine::resolver_core::resolver_context::capture_targets(ctx);
+        let _ = observation;
         {
             component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_seed_owner_cache",

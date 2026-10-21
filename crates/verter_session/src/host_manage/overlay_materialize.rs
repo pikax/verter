@@ -786,13 +786,11 @@ impl VerterHost {
         if cold_lease.refused.is_some() {
             return None;
         }
-        if cold_lease.parsed_now {
-            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
-                self.provenance
-                    .decl_lowering
-                    .eval_program_parses
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+        if cold_lease.parsed_now && (cfg!(any(test, feature = "test-support")) || M::CAPTURED) {
+            self.provenance
+                .decl_lowering
+                .eval_program_parses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         // LEASE-ONLY run: `cold_lease` (acquired above) is held on this
         // stack, so the retained snapshot is pinned for the whole flight

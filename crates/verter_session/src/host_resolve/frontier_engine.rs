@@ -438,7 +438,7 @@ impl VerterHost {
     /// (re-export edits, tombstoned dependencies). Base callers
     /// (`view = None`) fall through to the historical
     /// `routed_shallow_state` body — identical behaviour.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn routed_shallow_state_with_view(
         &self,
         canonical_id: &str,

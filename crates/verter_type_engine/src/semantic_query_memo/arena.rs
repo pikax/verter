@@ -1739,13 +1739,38 @@ impl NodeArena {
         fingerprint: u64,
     ) -> SemanticNodeId {
         let _ = observation;
-        match self.try_intern_with_fingerprint::<M>(observation, data, scope.clone(), fingerprint) {
+        match self.try_intern_with_fingerprint_in::<M>(
+            observation,
+            data,
+            scope.clone(),
+            fingerprint,
+        ) {
             Ok(id) => id,
             Err(error) => self.push_impl::<M>(observation, SemanticNodeData::Opaque(error), scope),
         }
     }
 
-    fn try_intern_with_fingerprint<M: verter_audit::observe::ObserveExec>(
+    /// Explicit bucket selection for arena collision/release fixtures.
+    #[cfg(test)]
+    #[allow(
+        dead_code,
+        reason = "Fixture seam for explicit fingerprint configurations"
+    )]
+    fn try_intern_with_fingerprint(
+        &self,
+        data: SemanticNodeData,
+        scope: NodeScopeId,
+        fingerprint: u64,
+    ) -> Result<SemanticNodeId, crate::semantic_query::QueryError> {
+        self.try_intern_with_fingerprint_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            data,
+            scope,
+            fingerprint,
+        )
+    }
+
+    fn try_intern_with_fingerprint_in<M: verter_audit::observe::ObserveExec>(
         &self,
         observation: &crate::request_observers::CaptureTargets,
         data: SemanticNodeData,
@@ -1905,6 +1930,7 @@ impl NodeArena {
     fn write_for_intern<M: verter_audit::observe::ObserveExec>(
         &self,
     ) -> parking_lot::RwLockWriteGuard<'_, ArenaInner> {
+        let _ = std::marker::PhantomData::<M>;
         #[cfg(test)]
         self.race_event(ArenaRaceEvent::BeforeInnerWrite);
         #[cfg(feature = "semantic-observe")]
@@ -1938,7 +1964,7 @@ impl NodeArena {
             }
         }
         let fingerprint = structural_fingerprint(&data, &scope);
-        let id = self.try_intern_with_fingerprint::<M>(observation, data, scope, fingerprint)?;
+        let id = self.try_intern_with_fingerprint_in::<M>(observation, data, scope, fingerprint)?;
         Ok(super::node_roots::NodeRoot::adopt(
             Arc::clone(&self.core),
             id,
