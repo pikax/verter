@@ -10,6 +10,7 @@
 //! is kept, cloned and read after the dispatcher is gone, and a builder that
 //! composes construction ordinals opens its own explicit owner.
 
+use verter_audit::observe::ObserveExec;
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::canonical_algebra;
 use verter_type_engine::project_semantic_dispatch::one_level_surface::OneLevelSurface;
@@ -23,7 +24,7 @@ use verter_type_engine::semantic_query::{
 };
 use verter_type_engine::semantic_query_memo::node_data_lease::{NodeDataLease, SurfaceLease};
 use verter_type_engine::semantic_query_memo::node_roots::{NodeRoot, NodeRootScope};
-use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::{GraphIn, SemanticGraphStore};
 use verter_type_engine::signature_kernel::SignatureSetValue;
 
 fn read_children(graph: &SemanticGraphStore, lease: &NodeDataLease) -> Result<usize, QueryError> {
@@ -101,9 +102,9 @@ fn read_origin_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> usize 
         + usize::from(graph.node_scope_in_scope(id).is_some())
 }
 
-fn render_and_build_in_lane(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {
+fn render_and_build_in_lane<M: ObserveExec>(graph: GraphIn<'_, M>, id: SemanticNodeId) -> bool {
     let shown = display::display_in_scope(
-        graph,
+        graph.store(),
         &SemanticQueryValue::TypeNode(id),
         DisplayNeeds::empty(),
     );

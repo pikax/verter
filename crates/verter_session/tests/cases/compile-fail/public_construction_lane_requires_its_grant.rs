@@ -15,6 +15,7 @@
 //! `intern_ordered_union_in_scope`) answer only inside a held lane, and a
 //! macro spread-formula merge runs only through a dispatcher.
 
+use verter_audit::observe::ObserveExec;
 use verter_session_query::flow::completion::NormalCompletion;
 use verter_session_query::flow::policy::NullabilityPolicy;
 use verter_type_engine::project_semantic_dispatch::{canonical_algebra, relation_predicates, walk};
@@ -23,12 +24,12 @@ use verter_type_engine::semantic_query::semantic_context::SemanticContext;
 use verter_type_engine::semantic_query::{
     display, keyof_operand_is_type_variable, printed_union_arms, stable_key,
     ClassExpressionIdentity, DepSignature, DisplayNeeds, FlowReturnKey, FlowReturnResult,
-    MapperKind, ObjectProjectionAlternative, OriginEdgeKind, OriginMeta, PrimitiveKind,
-    PropertyKey, RelateMemoKey, ResolveCallKey, SemanticNodeData, SemanticNodeId, SemanticQueryKey,
-    SemanticQueryValue, SurfaceView,
+    MapperKind, ObjectProjectionAlternative, OriginEdgeKind, OriginMeta, PropertyKey,
+    RelateMemoKey, ResolveCallKey, SemanticNodeId, SemanticQueryKey, SemanticQueryValue,
+    SurfaceView,
 };
 use verter_type_engine::semantic_query_memo::node_roots::NodeConstructionGrant;
-use verter_type_engine::semantic_query_memo::SemanticGraphStore;
+use verter_type_engine::semantic_query_memo::{GraphIn, SemanticGraphStore};
 
 fn open_a_lane(graph: &SemanticGraphStore) {
     let _scope = graph.enter_node_root_scope();
@@ -48,10 +49,6 @@ fn follow_an_alias_chain(graph: &SemanticGraphStore, id: SemanticNodeId) {
 
 fn read_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) {
     let _scope = graph.node_scope(id);
-}
-
-fn copy_an_origin_scope(graph: &SemanticGraphStore, id: SemanticNodeId) -> SemanticNodeId {
-    graph.intern_preserving_scope(id, SemanticNodeData::Primitive(PrimitiveKind::String))
 }
 
 fn classify_a_structure(graph: &SemanticGraphStore, id: SemanticNodeId) -> bool {
@@ -76,8 +73,8 @@ fn release_kernel_roots(graph: &SemanticGraphStore, id: SemanticNodeId) {
     let _epoch = graph.release_signature_records_naming([id]);
 }
 
-fn record_an_origin_edge(
-    graph: &SemanticGraphStore,
+fn record_an_origin_edge<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     id: SemanticNodeId,
     kind: OriginEdgeKind,
     meta: OriginMeta,
@@ -100,8 +97,8 @@ fn view_a_union(graph: &SemanticGraphStore, id: SemanticNodeId, ctx: &SemanticCo
     let _members = stable_key::semantic_union_members(graph, id, ctx);
 }
 
-fn build_over_ordinals(
-    graph: &SemanticGraphStore,
+fn build_over_ordinals<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     id: SemanticNodeId,
     nullability: NullabilityPolicy,
 ) {
@@ -142,8 +139,8 @@ fn render_and_judge(graph: &SemanticGraphStore, id: SemanticNodeId, completion: 
     let _verdict = FlowReturnResult::new(graph, id, completion, None);
 }
 
-fn merge_caller_surfaces(
-    graph: &SemanticGraphStore,
+fn merge_caller_surfaces<M: ObserveExec>(
+    graph: GraphIn<'_, M>,
     arms: &[Option<walk::ShallowSurface>],
     alternatives: &[ObjectProjectionAlternative],
     evidence: &mut canonical_algebra::CanonicalEvidence,
