@@ -124,20 +124,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
+        let has_outer_bindings = !surrounding.is_empty();
         let surrounding = self.type_params_within(&surrounding);
         let mut identities: Vec<_> = specs
             .iter()
             .enumerate()
             .map(|(index, spec)| mint_identity(&spec.name, index))
             .collect();
+        let originals = identities.clone();
         let captures = !matches!(identity, BinderIdentityMode::DeclHeader { .. })
-            && identities.iter().any(|(origin, index)| {
-                surrounding.iter().any(|node| {
-                    matches!(graph.node_data(*node).as_deref(),
+            && (has_outer_bindings
+                || identities.iter().any(|(origin, index)| {
+                    surrounding.iter().any(|node| {
+                        matches!(graph.node_data(*node).as_deref(),
                     Some(SemanticNodeData::TypeParam { decl, param_index, .. })
                         if decl == origin && param_index == index)
-                })
-            });
+                    })
+                }));
         if captures {
             for (decl, index) in &mut identities {
                 *decl = self.capture_avoiding_parameter_decl(decl, *index, &surrounding);
@@ -264,6 +267,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             finals.push(BuiltTypeParamBinder {
                 name: Arc::clone(&spec.name),
                 binder,
+                original: captures.then(|| {
+                    verter_session_query::retention::owned::Owned::new(
+                        crate::semantic_query::TypeParamOrigin {
+                            declaration: originals[index].0.clone(),
+                            index: originals[index].1,
+                        },
+                    )
+                }),
                 constraint,
                 default,
             });

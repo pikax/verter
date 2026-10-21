@@ -5688,6 +5688,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !self.relation_session_active()
             || (self.signature_is_generic(target) && !self.relation_session_reads_candidates_only())
         {
+            let target = if self.signature_is_generic(source) {
+                self.canonical_signature_for_relation(target)?
+            } else {
+                target
+            };
             return Some((
                 self.instantiate_signature_in_context_of(source, target, kind)
                     .unwrap_or(source),

@@ -17551,6 +17551,7 @@ fn reverse_projection_association_accepts_scoped_infer_refs_but_rejects_bare_ref
                 param: shadow_parameter,
                 constraint: None,
                 default: None,
+                original: None,
                 is_const: false,
             }]
             .into_boxed_slice(),
@@ -28455,6 +28456,7 @@ fn generic_fn_with_carrier_return(host: &VerterHost) -> (SemanticNodeId, Semanti
                 param: t_param,
                 constraint: None,
                 default: None,
+                original: None,
                 is_const: false,
             }]
             .into_boxed_slice(),

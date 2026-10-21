@@ -4841,6 +4841,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     param: *binder,
                     constraint,
                     default,
+                    original: None,
                     is_const: param.is_const,
                 }
             })

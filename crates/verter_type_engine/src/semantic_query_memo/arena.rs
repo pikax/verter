@@ -2324,6 +2324,7 @@ mod arena_intern_tests {
                         param: binder.id(),
                         constraint,
                         default: None,
+                        original: None,
                         is_const: false,
                     }]),
                     occurrence.clone(),

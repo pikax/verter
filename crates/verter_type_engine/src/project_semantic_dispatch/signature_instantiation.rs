@@ -18,6 +18,49 @@ use crate::semantic_query::{
 };
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// The target used by contextual signature comparison: unconstrained
+    /// cloned binders name their originals, and the instantiated signature
+    /// has no local clause. Defaults play no part in that target relation.
+    pub(super) fn canonical_signature_for_relation(
+        &self,
+        signature: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let graph = self.graph();
+        let data = graph.node_data(signature)?;
+        let SemanticNodeData::Signature {
+            type_parameters, ..
+        } = data.as_ref()
+        else {
+            return Some(signature);
+        };
+        let mut renamed = Vec::with_capacity(type_parameters.len());
+        for parameter in type_parameters.iter() {
+            if parameter.constraint.is_some() {
+                continue;
+            }
+            let original = match &parameter.original {
+                Some(original) => original.clone(),
+                None => self.type_parameter_origin(parameter.param)?,
+            };
+            let canonical = graph.intern_preserving_scope(
+                parameter.param,
+                SemanticNodeData::TypeParam {
+                    decl: original.declaration.clone(),
+                    param_index: original.index,
+                    constraint: None,
+                    default: None,
+                    display_name: parameter.name.clone(),
+                },
+            );
+            renamed.push((parameter.param, canonical));
+        }
+        let substitution = crate::semantic_query::CanonicalTypeSubstitution::new(graph, renamed);
+        Some(self.substitute_canonical(
+            self.signature_without_type_parameters(signature),
+            &substitution,
+        ))
+    }
+
     /// A target signature read for inference: its own parameters erase to
     /// `any`, leaving the enclosing session's sites intact.
     pub(super) fn erased_signature(&self, signature: SemanticNodeId) -> SemanticNodeId {

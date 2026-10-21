@@ -991,6 +991,7 @@ fn lower_function_signature(
             param: binder,
             constraint,
             default,
+            original: None,
             is_const: tp.is_const,
         });
     }

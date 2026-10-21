@@ -612,8 +612,9 @@ fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
 pub(super) const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\ninterface PP2<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PP2<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PP2<TResult2>) | undefined | null): PP2<TResult1 | TResult2>; }\n";
 
 /// Cyclic authored and library thenables complete through shared inference.
-/// The library reference infers one layer; the two authored interfaces keep
-/// the checker's negative result. Both rows assert the answer, not merely
+/// The library reference infers one layer and accepts the fixed thenable;
+/// the two authored interfaces keep the checker's negative result.
+/// Every row asserts the answer, not merely
 /// termination. The named-alias controls also run on a 1 MiB stack.
 #[test]
 fn a_mirrored_thenable_relation_terminates() {
@@ -623,6 +624,10 @@ fn a_mirrored_thenable_relation_terminates() {
             vec!["1"],
         ),
         (Read::Type("[PP2<1>] extends [PL<1>] ? 1 : 0"), vec!["0"]),
+        (
+            Read::Type("[Promise<1>] extends [PL<1>] ? 1 : 0"),
+            vec!["1"],
+        ),
     ];
     let matrix = Matrix::new(MIRRORED_THENABLE)
         .lib(GLOBALS_LIB)
@@ -632,6 +637,8 @@ fn a_mirrored_thenable_relation_terminates() {
     assert!(library.matched, "{}: {}", library.class, library.lane);
     let user = &verdicts[1][0];
     assert!(user.matched, "{}: {}", user.class, user.lane);
+    let fixed = &verdicts[2][0];
+    assert!(fixed.matched, "{}: {}", fixed.class, fixed.lane);
 }
 
 #[test]

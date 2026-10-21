@@ -5079,6 +5079,7 @@ fn infer_substitution_does_not_capture_function_shadowed_binder() {
                 param: inner_u,
                 constraint: None,
                 default: None,
+                original: None,
                 is_const: false,
             }]
             .into_boxed_slice(),

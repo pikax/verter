@@ -1011,12 +1011,14 @@ impl PayloadHeap for TypeParamDecl {
         let Self {
             name,
             param,
+            original,
             constraint,
             default,
             is_const,
         } = self;
         name.visit_payload_heap(visitor);
         param.visit_payload_heap(visitor);
+        original.visit_payload_heap(visitor);
         constraint.visit_payload_heap(visitor);
         default.visit_payload_heap(visitor);
         is_const.visit_payload_heap(visitor);

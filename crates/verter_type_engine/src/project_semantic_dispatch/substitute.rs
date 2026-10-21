@@ -66,6 +66,26 @@ use crate::semantic_query::{
 struct SubstitutionCost(SemanticNodeId, SemanticNodeId, SemanticNodeId);
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    pub(super) fn type_parameter_origin(
+        &self,
+        parameter: SemanticNodeId,
+    ) -> Option<verter_session_query::retention::owned::Owned<crate::semantic_query::TypeParamOrigin>>
+    {
+        let data = self.graph().node_data(parameter)?;
+        let SemanticNodeData::TypeParam {
+            decl, param_index, ..
+        } = data.as_ref()
+        else {
+            return None;
+        };
+        Some(verter_session_query::retention::owned::Owned::new(
+            crate::semantic_query::TypeParamOrigin {
+                declaration: decl.clone(),
+                index: *param_index,
+            },
+        ))
+    }
+
     /// A deterministic alpha identity outside the surrounding binder slots.
     pub(super) fn capture_avoiding_parameter_decl(
         &self,
@@ -88,9 +108,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         unreachable!("more fresh slots than forbidden slots")
     }
 
-    /// Freshen a clause before an owner argument would become captured by
-    /// one of its binders. The display names and two-phase bound edges stay
-    /// the authored ones; only the private binder identities change.
+    /// Instantiate a clause with distinct local parameters before inserting
+    /// an outer argument. A later substitution preserves those parameters
+    /// unless its argument would be captured by them.
     fn signature_avoiding_capture(
         &self,
         signature: SemanticNodeId,
@@ -101,9 +121,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let free = self.type_params_within(&[argument]);
-        if !parameters
+        if parameters
             .iter()
-            .any(|parameter| free.contains(&parameter.param))
+            .all(|parameter| parameter.original.is_some())
+            && !parameters
+                .iter()
+                .any(|parameter| free.contains(&parameter.param))
         {
             return None;
         }
@@ -205,6 +228,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 param,
                 constraint,
                 default,
+                original: self.type_parameter_origin(parameter.param),
                 is_const: parameter.is_const,
             });
         }
@@ -1827,6 +1851,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if !type_parameters
                     .iter()
                     .any(|decl| decl.param == parameter_node)
+                    && !self.binder_dependency_proves_absent(node, parameter_node)
                 {
                     if let Some(fresh) = self.signature_avoiding_capture(node, type_parameters, arg)
                     {
@@ -1922,6 +1947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param,
                         constraint: new_constraint,
                         default: new_default,
+                        original: tp.original.clone(),
                         is_const: tp.is_const,
                     });
                 }
@@ -2092,6 +2118,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param: tp.param,
                         constraint: new_constraint,
                         default: new_default,
+                        original: tp.original.clone(),
                         is_const: tp.is_const,
                     });
                 }

@@ -3944,6 +3944,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 param,
                 constraint,
                 default,
+                original: self.type_parameter_origin(decl.param),
                 is_const: decl.is_const,
             });
         }

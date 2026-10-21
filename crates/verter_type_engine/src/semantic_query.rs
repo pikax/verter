@@ -12198,6 +12198,22 @@ pub fn split_this_receiver(params: &[FunctionParam]) -> (Option<&FunctionParam>,
     }
 }
 
+/// The declaration slot a cloned signature parameter originated from.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeParamOrigin {
+    pub declaration: DeclIdentity,
+    pub index: u16,
+}
+
+impl verter_session_query::retention::owned::Measured for TypeParamOrigin {
+    fn heap_bytes(
+        &self,
+        aliases: &mut verter_session_query::retention::allocation::AliasSet,
+    ) -> usize {
+        self.declaration.canonical_id.offer(aliases) + self.declaration.decl_name.offer(aliases)
+    }
+}
+
 /// Type-parameter declaration on a [`SemanticNodeData::Signature`].
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct TypeParamDecl {
@@ -12206,6 +12222,10 @@ pub struct TypeParamDecl {
     /// parameter — the identity inference binds. Per-parameter policy
     /// (const-ness, binding) keys off THIS node, never the display name.
     pub param: SemanticNodeId,
+    /// The original slot of a cloned parameter. Authored parameters use
+    /// their own slot. Canonical signature comparison reads this identity;
+    /// display names and instantiated defaults are not binder identities.
+    pub original: Option<verter_session_query::retention::owned::Owned<TypeParamOrigin>>,
     pub constraint: Option<SemanticNodeId>,
     pub default: Option<SemanticNodeId>,
     /// The authored `<const T>` modifier. PER-PARAMETER (`<const T, U>`
@@ -12226,6 +12246,7 @@ impl TypeParamDecl {
         Self {
             name: self.name.clone(),
             param: self.param,
+            original: self.original.clone(),
             constraint: self.constraint,
             default: self.default,
             is_const: self.is_const,
