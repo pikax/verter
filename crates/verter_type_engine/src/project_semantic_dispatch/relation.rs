@@ -7586,8 +7586,26 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // An effect-free program is already complete. Relate its ordinary
         // empty surface so primitive and nullable rules use the same authority
         // as an authored `{}` type, rather than requiring two object branches.
-        let regular_source = self.regularized_empty_object_program(source);
         let regular_target = self.regularized_empty_object_program(target);
+        // A fresh empty literal has an inferable index signature even in the
+        // strict subtype relation. Keep its program for object comparisons:
+        // the correlated projection proves its empty domain, whereas an empty
+        // ordinary surface cannot distinguish it from a declared `{}` type.
+        let keep_literal_source = self.strict_subtype_mode()
+            && matches!(
+                self.graph().node_data(source).as_deref(),
+                Some(SemanticNodeData::ObjectSpreadProgram(program))
+                    if program.is_literal && program.effects.is_empty()
+            )
+            && matches!(
+                self.graph().node_data(regular_target).as_deref(),
+                Some(SemanticNodeData::Object(_))
+            );
+        let regular_source = if keep_literal_source {
+            source
+        } else {
+            self.regularized_empty_object_program(source)
+        };
         if regular_source != source || regular_target != target {
             return Some(self.relate_member(
                 regular_source,

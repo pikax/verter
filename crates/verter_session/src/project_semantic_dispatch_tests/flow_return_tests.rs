@@ -11800,6 +11800,37 @@ fn flow_expr_cold_warm(
     (expr, cold.degradation())
 }
 
+#[test]
+fn const_context_empty_spread_keeps_complete_readonly_members() {
+    for (expression, count, literal) in [
+        ("{ ...{} } as const", 0, false),
+        ("{ ...{}, value: 1 } as const", 1, true),
+        ("{ value: 1, ...{} } as const", 1, true),
+        ("{ ...{ value: 1 } } as const", 1, false),
+    ] {
+        let (expr, degradation) =
+            flow_expr_cold_warm(&format!("function makeProps() {{ return {expression}; }}"));
+        assert_eq!(degradation, None, "{expression}: {expr:?}");
+        let verter_type_expr::TypeExpr::Object(object) = &expr else {
+            panic!("expected an object for {expression}: {expr:?}");
+        };
+        assert_eq!(object.properties.len(), count);
+        if count == 0 {
+            continue;
+        }
+        let verter_type_expr::ObjectMember::Property(property) = &object.properties[0] else {
+            panic!("expected a property for {expression}: {object:?}");
+        };
+        assert!(property.readonly);
+        let expected = if literal {
+            verter_type_expr::TypeExpr::Literal(verter_type_expr::LiteralValue::Number(1.0))
+        } else {
+            verter_type_expr::TypeExpr::Primitive(verter_type_expr::PrimitiveName::Number)
+        };
+        assert_eq!(property.ty, expected, "{expression}");
+    }
+}
+
 /// A switch case's dispatch-edge refinement rides the reaching-TYPE
 /// layer, while an enclosing `typeof` guard's facts ride the narrowing
 /// overlay. The case's own refinement is what a read must publish: it is

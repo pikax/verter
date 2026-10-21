@@ -224,6 +224,12 @@ structural readers use that same empty surface, so a fresh `{}` still absorbs
 a primitive sibling and reports required missing properties where the checker
 does, without losing its literal provenance before object normalization.
 The empty construction and its regular surface both display as `{}`.
+Const-context spread readers also regularize effect-free operands before
+copying their readonly members, so an empty literal contributes no properties
+without degrading the result. Strict-subtype object comparisons retain a fresh
+empty program through correlated projection: its empty domain satisfies an
+inferable index signature, while a declared `{}` keeps the ordinary surface
+rules and does not acquire literal status.
 Thus separately declared object values do not normalize against later siblings.
 Member-granular and whole-value publication apply the same rule through nested
 object properties, without a depth cutoff. Class fields normalize as independent

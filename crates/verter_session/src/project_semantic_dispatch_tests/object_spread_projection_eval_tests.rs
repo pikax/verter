@@ -1292,6 +1292,46 @@ fn relate(
 }
 
 #[test]
+fn strict_subtype_empty_literal_keeps_its_inferable_index() {
+    use verter_type_engine::project_semantic_dispatch::dispatch_txn::RelationStep;
+    use verter_type_engine::semantic_query::RelationKind;
+
+    let host = host();
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    let graph = host.project_type_store().semantic_graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let fresh = program(graph, []);
+    let regular = object(graph, []);
+    let regular_program =
+        graph.intern_node(SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+            is_literal: false,
+            effects: verter_type_engine::semantic_query::PayloadArray::from(Vec::new()),
+        }));
+    let index = index_object(graph, string, number);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, index, RelationKind::StrictSubtype),
+        RelationStep::Assignable { .. }
+    ));
+    for source in [regular, regular_program] {
+        assert!(matches!(
+            dispatch.execute_relate_pair_kind(source, index, RelationKind::StrictSubtype),
+            RelationStep::NotAssignable
+        ));
+    }
+    let required = object(graph, [surface_member("value", number, false)]);
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, required, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
+    assert!(matches!(
+        dispatch.execute_relate_pair_kind(fresh, number, RelationKind::StrictSubtype),
+        RelationStep::NotAssignable
+    ));
+}
+
+#[test]
 fn correlated_union_spread_rejects_empty_and_accepts_each_arm() {
     let host = host();
     let dispatch = ProjectSemanticDispatch::new(&host);

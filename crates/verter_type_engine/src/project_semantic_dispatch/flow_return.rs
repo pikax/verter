@@ -10863,6 +10863,7 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap;
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId;
     fn value_read_widens(
         &self,
         canonical: &str,
@@ -11562,6 +11563,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::regularized_empty_object_program(self, node)
     }
     fn value_read_widens(
         &self,
@@ -12352,6 +12356,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         self.driver.unwrap_identity_carrier_for_relation(id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        self.driver.regularized_empty_object_program(node)
     }
     fn value_read_widens(
         &self,
@@ -15073,6 +15080,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
             super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
         };
+        let resolved = self.dispatch.regularized_empty_object_program(resolved);
         let surface = match self.dispatch.arena().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
