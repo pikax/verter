@@ -28,10 +28,11 @@ impl CaptureAvailability {
 
 /// Concrete execution modes carried by optional capture owners.
 ///
-/// A root entry (or a background job at submission) selects its mode once
-/// with [`ObserveMode::select`]; the request context carries the choice
-/// through every scheduler resumption, so no operation re-checks whether
-/// capture is enabled.
+/// A root entry selects its mode once with [`ObserveMode::select`] (the
+/// session's `capture::select_mode`); the request context carries the
+/// choice, and every scheduler resumption and background job reinstalls that
+/// context, so its captured observer, accumulator and counters exist only for
+/// a captured request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObserveMode {
     /// Execute without optional observations.
@@ -246,7 +247,7 @@ impl ObservedFlag {
 #[derive(Debug, Clone, Copy)]
 pub struct Stopwatch {
     #[cfg(feature = "semantic-observe")]
-    started: crate::instant::Instant,
+    started: Option<crate::instant::Instant>,
 }
 
 impl Stopwatch {
@@ -256,16 +257,32 @@ impl Stopwatch {
     pub fn start() -> Self {
         Self {
             #[cfg(feature = "semantic-observe")]
-            started: crate::instant::Instant::now(),
+            started: Some(crate::instant::Instant::now()),
         }
     }
 
-    /// Milliseconds since [`Stopwatch::start`].
+    /// Start the clock for a request that selected `mode` at its root
+    /// entry: an uncaptured request never reads the clock, and its stopwatch
+    /// is read only by a record it never publishes.
+    #[inline(always)]
+    #[must_use]
+    pub fn start_for(mode: ObserveMode) -> Self {
+        #[cfg(not(feature = "semantic-observe"))]
+        let _ = mode;
+        Self {
+            #[cfg(feature = "semantic-observe")]
+            started: mode.is_captured().then(crate::instant::Instant::now),
+        }
+    }
+
+    /// Milliseconds since [`Stopwatch::start`]; zero for an uncaptured
+    /// request's stopwatch, which no published record reads.
     #[must_use]
     pub fn elapsed_ms(&self) -> f64 {
         #[cfg(feature = "semantic-observe")]
         {
-            self.started.elapsed().as_secs_f64() * 1000.0
+            self.started
+                .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0)
         }
         #[cfg(not(feature = "semantic-observe"))]
         {
@@ -273,12 +290,15 @@ impl Stopwatch {
         }
     }
 
-    /// Nanoseconds since [`Stopwatch::start`], saturated to `u64`.
+    /// Nanoseconds since [`Stopwatch::start`], saturated to `u64`; zero for
+    /// an uncaptured request's stopwatch.
     #[must_use]
     pub fn elapsed_nanos(&self) -> u64 {
         #[cfg(feature = "semantic-observe")]
         {
-            self.started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            self.started.map_or(0, |started| {
+                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+            })
         }
         #[cfg(not(feature = "semantic-observe"))]
         {

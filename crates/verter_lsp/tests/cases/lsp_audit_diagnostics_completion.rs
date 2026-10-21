@@ -72,10 +72,10 @@ async fn diagnostics_audit_records_num_diagnostics(worker_pools: &Arc<TestHostWo
 async fn completion_audit_records_num_completion_items(worker_pools: &Arc<TestHostWorkerPools>) {
     let host = fresh_audit_host(worker_pools);
 
-    let result = audit_harness::run_with_audit::<usize, _, _>(
+    let result = audit_harness::run_with_audit::<usize, _, _, _>(
         &std::sync::Arc::clone(&host),
         LspMethodTag::Completion,
-        verter_audit::RequestTargetIdentity::RegisteredCanonical("/comp.vue".to_string()),
+        || verter_audit::RequestTargetIdentity::RegisteredCanonical("/comp.vue".to_string()),
         Some(tower_lsp_server::ls_types::Position {
             line: 0,
             character: 0,

@@ -55,15 +55,20 @@ impl VerterHost {
         } else {
             None
         };
-        let ctx = verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             std::sync::Arc::<str>::from(canonical),
-            verter_audit::RequestKind::ComponentMeta,
+            || verter_audit::RequestKind::ComponentMeta,
             footprint_capture,
             self.config.audit_timing_capture && self.config.audit_enabled,
             accumulator.clone(),
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
+        // An uncaptured request feeds no accumulator: the context dropped
+        // it, so the VFS sink must not register one either.
+        #[cfg(feature = "semantic-observe")]
+        let accumulator = accumulator.filter(|_| ctx.observe_mode.is_captured());
 
         // Construct the audit registration BEFORE installing the TLS
         // guard. The `Active` arm enters the host's active-request

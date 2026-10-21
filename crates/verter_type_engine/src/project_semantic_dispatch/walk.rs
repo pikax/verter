@@ -2327,7 +2327,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 },
             ),
         };
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             value,
             edge_kind,
             Arc::from(vec![object].into_boxed_slice()),
@@ -3212,7 +3213,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 } else {
                     read_value
                 };
-                self.graph().record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    self.graph(),
                     read_value,
                     OriginEdgeKind::ProjectIndex,
                     Arc::from([source, source_object, argument]),
@@ -3252,7 +3254,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                 _ => return self.stop_finite_mapped_with(output, object, index_node),
             };
             let value = self.mapped_index_read(mapper, value, source, source_optional);
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 value,
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object, source, mapper.key_space]),
@@ -3368,7 +3371,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             values.push(self.known_member_read(object, surface, &known, Some(&index), true)?);
         }
         for (key, value) in keys.iter().zip(&values) {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 *value,
                 OriginEdgeKind::ProjectIndex,
                 Arc::from([object]),
@@ -3895,22 +3899,22 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         results.push(self.opaque_miss());
                         return;
                     };
-                    let meta = match segment {
-                        PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                            key: key.clone(),
-                            provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                        },
-                        PathSegment::Index(index) => OriginMeta::Index(index.clone()),
-                    };
                     let edge_kind = match segment {
                         PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                         PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                     };
-                    self.graph().record_origin_edge(
+                    crate::semantic_query_memo::record_origin_edge!(
+                        self.graph(),
                         member_value,
                         edge_kind,
                         Arc::from([current]),
-                        meta,
+                        match segment {
+                            PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                key: key.clone(),
+                                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                            },
+                            PathSegment::Index(index) => OriginMeta::Index(index.clone()),
+                        },
                         self.fence.clone(),
                     );
                     current = member_value;
@@ -4046,22 +4050,22 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         }));
                     match member {
                         Some(member_value) => {
-                            let meta = match segment {
-                                PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                    key: key.clone(),
-                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                },
-                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                            };
                             let edge_kind = match segment {
                                 PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                                 PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                             };
-                            self.graph().record_origin_edge(
+                            crate::semantic_query_memo::record_origin_edge!(
+                                self.graph(),
                                 member_value,
                                 edge_kind,
                                 Arc::from(vec![current].into_boxed_slice()),
-                                meta,
+                                match segment {
+                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                        key: key.clone(),
+                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                    },
+                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                },
                                 self.fence.clone(),
                             );
                             current = member_value;
@@ -4430,7 +4434,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         distributive,
                         pending: None,
                     });
-                    self.graph().record_origin_edge(
+                    crate::semantic_query_memo::record_origin_edge!(
+                        self.graph(),
                         wrapper,
                         OriginEdgeKind::ConditionalSelect,
                         Arc::from(vec![check, extends].into_boxed_slice()),
@@ -4756,20 +4761,20 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                                 PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                             };
-                            let meta = match next_segment.expect("literal_key implies a segment") {
-                                PathSegment::Member(member_key) => OriginMeta::ProjectedMember {
-                                    key: member_key.clone(),
-                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                },
-                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                            };
-                            self.graph().record_origin_edge(
+                            crate::semantic_query_memo::record_origin_edge!(
+                                self.graph(),
                                 narrowed,
                                 edge_kind,
                                 Arc::from(
                                     vec![current, *source, mapper.key_space].into_boxed_slice(),
                                 ),
-                                meta,
+                                match next_segment.expect("literal_key implies a segment") {
+                                    PathSegment::Member(member_key) => OriginMeta::ProjectedMember {
+                                        key: member_key.clone(),
+                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                    },
+                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                },
                                 self.fence.clone(),
                             );
                             current = narrowed;
@@ -5145,18 +5150,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                             PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                             PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                         };
-                        let meta = match next_segment.expect("checked above") {
-                            PathSegment::Member(member_key) => OriginMeta::ProjectedMember {
-                                key: member_key.clone(),
-                                provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                            },
-                            PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                        };
-                        self.graph().record_origin_edge(
+                        crate::semantic_query_memo::record_origin_edge!(
+                            self.graph(),
                             value,
                             edge_kind,
                             Arc::from(vec![current, *source, mapper.key_space].into_boxed_slice()),
-                            meta,
+                            match next_segment.expect("checked above") {
+                                PathSegment::Member(member_key) => OriginMeta::ProjectedMember {
+                                    key: member_key.clone(),
+                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                },
+                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                            },
                             self.fence.clone(),
                         );
                         current = value;
@@ -5343,7 +5348,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         }
                         self.visited_aliases.push(identity);
                     }
-                    self.graph().record_origin_edge(
+                    crate::semantic_query_memo::record_origin_edge!(
+                        self.graph(),
                         target_id,
                         OriginEdgeKind::AliasResolve,
                         Arc::from(vec![current].into_boxed_slice()),
@@ -5540,22 +5546,22 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                     continue;
                                 }
                             };
-                            let meta = match &path[index] {
-                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                                PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                    key: key.clone(),
-                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                },
-                            };
                             let edge_kind = match &path[index] {
                                 PathSegment::Member(_) => OriginEdgeKind::ProjectMember,
                                 PathSegment::Index(_) => OriginEdgeKind::ProjectIndex,
                             };
-                            self.graph().record_origin_edge(
+                            crate::semantic_query_memo::record_origin_edge!(
+                                self.graph(),
                                 member_node,
                                 edge_kind,
                                 Arc::from([current]),
-                                meta,
+                                match &path[index] {
+                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                        key: key.clone(),
+                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                    },
+                                },
                                 self.fence.clone(),
                             );
                             current = member_node;
@@ -5660,7 +5666,8 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                                 },
                             ),
                         };
-                        self.graph().record_origin_edge(
+                        crate::semantic_query_memo::record_origin_edge!(
+                            self.graph(),
                             length,
                             edge_kind,
                             Arc::from(vec![current].into_boxed_slice()),
@@ -5777,18 +5784,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                         });
                     match projected {
                         Some(value) => {
-                            let meta = match segment {
-                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                                PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                    key: key.clone(),
-                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                },
-                            };
-                            self.graph().record_origin_edge(
+                            crate::semantic_query_memo::record_origin_edge!(
+                                self.graph(),
                                 value,
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
-                                meta,
+                                match segment {
+                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                        key: key.clone(),
+                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                    },
+                                },
                                 self.fence.clone(),
                             );
                             current = value;
@@ -5841,18 +5848,18 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     match self.classify_numeric_index_segment(segment) {
                         Some(_) => {
-                            let meta = match segment {
-                                PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
-                                PathSegment::Member(key) => OriginMeta::ProjectedMember {
-                                    key: key.clone(),
-                                    provenance: verter_audit::MemberEdgeProvenance::PathProjection,
-                                },
-                            };
-                            self.graph().record_origin_edge(
+                            crate::semantic_query_memo::record_origin_edge!(
+                                self.graph(),
                                 element,
                                 OriginEdgeKind::ProjectIndex,
                                 Arc::from(vec![current].into_boxed_slice()),
-                                meta,
+                                match segment {
+                                    PathSegment::Index(ix) => OriginMeta::Index(ix.clone()),
+                                    PathSegment::Member(key) => OriginMeta::ProjectedMember {
+                                        key: key.clone(),
+                                        provenance: verter_audit::MemberEdgeProvenance::PathProjection,
+                                    },
+                                },
                                 self.fence.clone(),
                             );
                             current = element;

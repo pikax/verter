@@ -69,7 +69,7 @@ use crate::typeinfo::framework_surface::results::{
 };
 use crate::typeinfo::types::{TypeInfoQueryLevel, VueMacroSurfaceRequest};
 use crate::VerterHost;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 /// The audit operation tag the framework-surface executor registers under.
@@ -105,14 +105,15 @@ impl VerterHost {
         // no selector or an empty selector canonical has no applicable
         // document target.
         let (canonical_for_audit, target_identity) = framework_selector_target(&envelope);
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_for_audit.as_str()),
-            RequestKind::TypeInfoGraph,
+            || RequestKind::TypeInfoGraph,
             footprint_capture,
             timing_capture,
             None,
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
         #[cfg(feature = "semantic-observe")]
         let registration = {
@@ -121,7 +122,7 @@ impl VerterHost {
             registration
         };
 
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let (response, payload) = {
             // The request runs under its context whether or not it captures:
             // the context carries its budget and cancellation.

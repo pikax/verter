@@ -3277,13 +3277,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // entry on `(decl_canonical, observed_hash)`.
         self.graph().record_instantiate();
         let fence = self.dep_signature_for(decl_canonical, observed_hash);
-        let base = self
-            .graph()
-            .intern_node_with_scope(SemanticNodeData::Opaque(QueryError::Miss), scope.clone());
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             result,
             OriginEdgeKind::Instantiate,
-            Arc::from(vec![base].into_boxed_slice()),
+            Arc::from([self.graph().intern_node_with_scope(
+                SemanticNodeData::Opaque(QueryError::Miss),
+                scope.clone(),
+            )]),
             OriginMeta::None,
             fence.clone(),
         );
@@ -5404,13 +5405,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // origin-walks resolve through the carrier: sources are the
             // builtin base node + each arg.
             let fence = self.project_generation_signature();
-            let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-            inst_sources.push(base);
-            inst_sources.extend(args.iter().copied());
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 carrier,
                 OriginEdgeKind::Instantiate,
-                Arc::from(inst_sources.into_boxed_slice()),
+                std::iter::once(base).chain(args.iter().copied()).collect(),
                 OriginMeta::None,
                 fence.clone(),
             );
@@ -6142,13 +6141,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let fence = self.dep_signature_for(decl_canonical, decl_whole_hash);
 
         // Instantiate edge: result <- [base, args...].
-        let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-        inst_sources.push(base);
-        inst_sources.extend(args.iter().copied());
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             result,
             OriginEdgeKind::Instantiate,
-            Arc::from(inst_sources.into_boxed_slice()),
+            std::iter::once(base).chain(args.iter().copied()).collect(),
             OriginMeta::None,
             fence.clone(),
         );
@@ -6158,7 +6155,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // position; at shell level this aggregates on the result node
         // per lazy block.
         for (param_name, arg_id) in substitutions {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 result,
                 OriginEdgeKind::SubstituteTypeParam,
                 Arc::from(vec![arg_id].into_boxed_slice()),
@@ -10500,13 +10498,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // Helper: emit the common `Instantiate` + per-arg
         // `SubstituteTypeParam` edges on a utility result node.
         let record_utility_edges = |result_id: SemanticNodeId| {
-            let mut inst_sources: Vec<SemanticNodeId> = Vec::with_capacity(args.len() + 1);
-            inst_sources.push(base);
-            inst_sources.extend(args.iter().copied());
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 result_id,
                 OriginEdgeKind::Instantiate,
-                Arc::from(inst_sources.into_boxed_slice()),
+                std::iter::once(base).chain(args.iter().copied()).collect(),
                 OriginMeta::None,
                 fence.clone(),
             );
@@ -10514,15 +10510,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // Use the utility's declared type-parameter name when
                 // known; fall back to a positional label only for
                 // unknown utilities (which return Opaque anyway).
-                let param_name: Arc<str> = param_names
-                    .get(idx)
-                    .map(|n| Arc::<str>::from(*n))
-                    .unwrap_or_else(|| Arc::<str>::from(format!("T{idx}")));
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result_id,
                     OriginEdgeKind::SubstituteTypeParam,
-                    Arc::from(vec![*arg_id].into_boxed_slice()),
-                    OriginMeta::SubstitutedParam(verter_type_expr::OwnedStr::from(param_name)),
+                    Arc::from([*arg_id]),
+                    OriginMeta::SubstitutedParam(verter_type_expr::OwnedStr::from(
+                        param_names
+                            .get(idx)
+                            .map(|n| Arc::<str>::from(*n))
+                            .unwrap_or_else(|| Arc::<str>::from(format!("T{idx}"))),
+                    )),
                     fence.clone(),
                 );
             }
@@ -10833,7 +10831,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             "NoInfer" if args.len() == 1 => {
                 let source = args[0];
                 let result = graph.intern_node(SemanticNodeData::Alias(source));
-                graph.record_origin_edge(
+                crate::semantic_query_memo::record_origin_edge!(
+                    graph,
                     result,
                     OriginEdgeKind::AliasResolve,
                     Arc::from(vec![source].into_boxed_slice()),
@@ -13274,7 +13273,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // can recover the entry path without rebuilding it from per-hop
         // edges.
         if result != base {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 result,
                 OriginEdgeKind::ProjectPath,
                 Arc::from(vec![base].into_boxed_slice()),
@@ -13967,7 +13967,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             member_literals.push((node, key));
         }
         for (lit_id, key) in &member_literals {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 *lit_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![base].into_boxed_slice()),
@@ -14882,7 +14883,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // edge so origin-graph consumers still see the structural
             // dependency; per-member edges only emit on the
             // publication path below.
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -14918,7 +14920,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -15137,7 +15140,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -15605,7 +15609,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 source,
                 mapper: mapper.clone(),
             });
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -15642,7 +15647,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         //    - Normalize: result ← [source, key_space, value_expr,
         //      name_remap?] (the full contribution set).
         //    - ProjectMember per produced member.
-        graph.record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            graph,
             node,
             OriginEdgeKind::Normalize,
             Arc::from(contribution_nodes.clone().into_boxed_slice()),
@@ -15650,7 +15656,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             fence.clone(),
         );
         for (value_id, key) in project_member_edges {
-            graph.record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                graph,
                 value_id,
                 OriginEdgeKind::ProjectMember,
                 Arc::from(vec![source, mapper.key_space].into_boxed_slice()),
@@ -16668,7 +16675,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let node = composite.node;
         let fence = self.project_generation_signature();
         if members.len() > 1 {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 node,
                 OriginEdgeKind::Normalize,
                 Arc::clone(members),

@@ -44,7 +44,7 @@ use verter_audit::{ProjectionModeTag, WaitAudit};
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::VerterHost;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 #[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::ProjectionMode;
 use verter_type_engine::semantic_query::{SemanticNodeId, SemanticQueryApi, SemanticQueryKey};
@@ -259,13 +259,15 @@ impl VerterHost {
         let accumulator = footprint_scope.accumulator();
         #[cfg(not(feature = "semantic-observe"))]
         let accumulator = None;
-        let ctx = RequestContext::with_kind_and_timing(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_hint),
-            RequestKind::TypeResolution,
+            || RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
             accumulator,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         // BEFORE installing the TLS guard: construct the registration.
@@ -295,7 +297,7 @@ impl VerterHost {
         // query against already-superseded state and returning it as a
         // normal answer. `UnstableState` decodes to `resolved = None` below,
         // and the audit record still emits with the unstable signal.
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let result = match crate::typeinfo::current_store_view_for_query(self) {
             Some(current_view) => {
                 // Bind the dispatch ctor to a request-scoped

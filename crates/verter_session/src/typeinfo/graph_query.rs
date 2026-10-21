@@ -70,7 +70,7 @@ use verter_protocol::verter::v1::{
 use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::VerterHost;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::ProjectionMode;
 
 impl VerterHost {
@@ -100,14 +100,15 @@ impl VerterHost {
         } else {
             verter_audit::RequestTargetIdentity::registered(canonical_for_audit.clone())
         };
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_for_audit.as_str()),
-            RequestKind::TypeInfoGraph,
+            || RequestKind::TypeInfoGraph,
             footprint_capture,
             timing_capture,
             None,
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
         #[cfg(feature = "semantic-observe")]
         let registration = {
@@ -118,7 +119,7 @@ impl VerterHost {
 
         // The request runs under its context whether or not it captures:
         // the context carries its budget and cancellation.
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let (response, payload) = {
             let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
             self.execute_resolve_symbol_graph(envelope)

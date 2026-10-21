@@ -77,7 +77,7 @@ use crate::host_audit_runtime::AuditRequestRegistration;
 use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::VerterHost;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::{
     NodeScopeId, ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeData,
     SemanticNodeId, SemanticQueryApi, SemanticQueryKey, SemanticQueryOutput,
@@ -230,14 +230,15 @@ impl VerterHost {
         let accumulator = footprint_scope.accumulator();
         #[cfg(not(feature = "semantic-observe"))]
         let accumulator = None;
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::<str>::from(canonical_id),
-            RequestKind::TypeResolution,
+            || RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
             accumulator,
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         #[cfg(feature = "semantic-observe")]
@@ -248,7 +249,7 @@ impl VerterHost {
             registration
         };
 
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let (outcome, effective_mode) = {
             // The request runs under its context whether or not it captures:
             // the context carries its budget and cancellation.

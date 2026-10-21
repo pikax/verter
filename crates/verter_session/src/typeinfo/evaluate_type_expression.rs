@@ -57,7 +57,7 @@ use crate::host_resolve_type_audit::TypeResolutionRequestError;
 use crate::types::UpsertRequest;
 use crate::VerterHost;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 use verter_type_engine::semantic_query::{
     ProjectionMode, QueryResult, ResolveDeclKey, ScopeId, SemanticNodeId, SemanticQueryApi,
     SemanticQueryKey, SemanticQueryOutput,
@@ -154,14 +154,15 @@ impl VerterHost {
         let accumulator = footprint_scope.accumulator();
         #[cfg(not(feature = "semantic-observe"))]
         let accumulator = None;
-        let ctx = RequestContext::with_kind_timing_and_projection_budget(
+        let ctx = crate::capture::root_entry_context(
+            self,
             request_id,
             Arc::clone(&canonical_scope),
-            RequestKind::TypeResolution,
+            || RequestKind::TypeResolution,
             footprint_capture,
             timing_capture,
             accumulator,
-            self.config.projection_op_budget,
+            verter_execution::cancellation::CancellationToken::new(),
         );
 
         #[cfg(feature = "semantic-observe")]
@@ -172,7 +173,7 @@ impl VerterHost {
             registration
         };
 
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let scratch_uri = compute_scratch_uri(&req.scope, &req.expression, &req.extra_imports);
 
         let (outcome, from_cache) = {

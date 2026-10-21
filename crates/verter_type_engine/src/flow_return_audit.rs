@@ -56,7 +56,7 @@ pub fn record_flow_return_started(canonical_id: &str, function_symbol: &str) {
 
 #[cfg(feature = "semantic-observe")]
 fn record_flow_return_started_captured(canonical_id: &str, function_symbol: &str) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.flow_return_cold_computes
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -83,7 +83,7 @@ pub fn record_flow_slice_budget_exceeded(exceeded: &FlowSliceBudgetExceeded) {
 
 #[cfg(feature = "semantic-observe")]
 fn record_flow_slice_budget_exceeded_captured(exceeded: &FlowSliceBudgetExceeded) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.flow_return_budget_exceeded
             .fetch_add(1, Ordering::Relaxed);
     }
@@ -123,7 +123,7 @@ pub fn record_flow_cycle_reentry(cycle_id: u32, function_symbol: &str) {
 
 #[cfg(feature = "semantic-observe")]
 fn record_flow_cycle_reentry_captured(cycle_id: u32, function_symbol: &str) {
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.flow_return_cycle_reentries
             .fetch_add(1, Ordering::Relaxed);
     }

@@ -7,6 +7,30 @@
 
 use super::*;
 
+/// Record a derivation/origin edge through
+/// `SemanticGraphStore::record_origin_edge`, building its arguments only where
+/// the derivation layer records them: `record_origin_edge!(graph, result,
+/// kind, sources, meta, fence)`.
+///
+/// Origin edges are optional provenance. In a shipped build (no `test`,
+/// `test-support` or `semantic-observe`) the arguments are type-checked inside
+/// a closure that is never built or called, so a derivation site allocates no
+/// source slice, interns no placeholder and clones no fence for an edge that
+/// would be discarded. Build every edge-only value inside the macro's
+/// arguments, never before it.
+macro_rules! record_origin_edge {
+    ($graph:expr, $result:expr, $kind:expr, $sources:expr, $meta:expr, $fence:expr $(,)?) => {{
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        $graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
+        if false {
+            let _ = || $graph.record_origin_edge($result, $kind, $sources, $meta, $fence);
+        }
+    }};
+}
+pub(crate) use record_origin_edge;
+
 impl SemanticGraphStore {
     construction_ordinal_seam! {
         /// Record a derivation/origin edge for `result`. Builders call this

@@ -1520,6 +1520,8 @@ impl SettledProducer<'_> {
                 }
             }
         } else {
+            // A chronological operation trace: optional observation.
+            #[cfg(feature = "semantic-observe")]
             tracing::debug!(
                 target: "verter::memo::suppress",
                 key = ?self.prepared.key(),

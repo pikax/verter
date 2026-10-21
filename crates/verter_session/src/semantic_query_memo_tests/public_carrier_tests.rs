@@ -742,10 +742,8 @@ fn a_construction_handed_to_a_builder_lives_until_the_builder_closes() {
     );
 }
 
-#[cfg(not(feature = "semantic-observe"))]
 const DELIVERY_FILE: &str = "/public/deliveries.ts";
 
-#[cfg(not(feature = "semantic-observe"))]
 fn delivery_decl_key(name: &str) -> ResolveDeclKey {
     ResolveDeclKey {
         scope: ScopeId {
@@ -760,7 +758,6 @@ fn delivery_decl_key(name: &str) -> ResolveDeclKey {
     }
 }
 
-#[cfg(not(feature = "semantic-observe"))]
 /// The expanded body of the fixture's declaration `name`.
 fn delivery_body_key<C: verter_type_engine::resolver_core::ResolverCapabilities>(
     d: &verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch<'_, C>,
@@ -812,11 +809,10 @@ fn delivered_shape(
 /// query delivery, and every clone of it, outlives the dispatcher and drains
 /// when its final holder drops.
 ///
-/// A build with `semantic-observe` also records relation explanations, whose
-/// leases root their operands for the dispatcher's lifetime by design; the
-/// "keeps nothing while the dispatcher lives" premise holds only without
-/// them, so this runs in the default build.
-#[cfg(not(feature = "semantic-observe"))]
+/// The dispatcher runs under no captured request, so even a build with
+/// `semantic-observe` records no relation explanation (whose leases would
+/// root their operands for the dispatcher's lifetime): an uncaptured
+/// request's lifetime is the shipped one in both builds.
 #[test]
 fn a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it() {
     use verter_type_engine::semantic_query::{SemanticQueryApi, SemanticQueryValue};

@@ -96,7 +96,7 @@ pub fn record_node_arena_lock_acquisition(wait: std::time::Duration) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = wait;
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         // Single mutation point: the observer-trait method on
         // `RequestContext` bumps the per-cache counter (matched on
         // the lock name) AND the cross-cache `WaitAudit` aggregates.
@@ -119,7 +119,7 @@ pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
     #[cfg(not(feature = "semantic-observe"))]
     let _ = wait;
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         // Single mutation point: the observer-trait method on
         // `RequestContext` bumps the per-cache counter (matched on
         // the lock name) AND the cross-cache `WaitAudit` aggregates.
@@ -137,7 +137,7 @@ pub fn record_family_map_lock_acquisition(wait: std::time::Duration) {
 #[inline(always)]
 pub fn record_dep_signature_merge() {
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.dep_signature_merges
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -148,7 +148,7 @@ pub fn record_dep_signature_merge() {
 #[inline(always)]
 pub fn record_dep_signature_intern_hit() {
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = crate::request_context::current_request_context() {
+    if let Some(ctx) = crate::request_context::current_captured_request_context() {
         ctx.dep_signature_intern_hits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }

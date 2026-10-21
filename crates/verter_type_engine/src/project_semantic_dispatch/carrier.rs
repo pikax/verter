@@ -414,7 +414,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             },
         );
         if result != node {
-            self.graph().record_origin_edge(
+            crate::semantic_query_memo::record_origin_edge!(
+                self.graph(),
                 result,
                 crate::semantic_query::OriginEdgeKind::Normalize,
                 Arc::from([node]),

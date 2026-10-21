@@ -347,6 +347,9 @@ pub(super) struct ActiveInstantiations {
 }
 
 impl ActiveInstantiations {
+    /// The active depth: read only by the optional dispatch-intent counters
+    /// and the test request-state probe.
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     pub(super) fn len(&self) -> usize {
         self.order.len()
     }
@@ -595,10 +598,13 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
         std::cell::RefCell<rustc_hash::FxHashMap<Arc<str>, dispatch_txn::RelationEnvironment>>,
     /// The relation explanations this request captured, in decision order
     /// ([`relation_explanation`]). Optional observation state: it exists
-    /// only under `semantic-observe` and is dropped with the request.
+    /// only under `semantic-observe`, is `Some` only when the request
+    /// context installed at construction selected captured execution (the
+    /// root entry's one selection, carried to every task dispatcher), and is
+    /// dropped with the request.
     #[cfg(feature = "semantic-observe")]
     pub(super) relation_explanations:
-        std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>,
+        Option<std::cell::RefCell<Vec<relation_explanation::RelationExplanation>>>,
     /// Monotonic count of NON-TRIVIAL canonical-evidence deposits (a
     /// deposit carrying file self-roots or an `incomplete` verdict).
     /// Snapshot-and-compare fences an evidence-blind memo publish: the
@@ -1114,7 +1120,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             relation_env_scope: std::cell::RefCell::new(smallvec::SmallVec::new()),
             relation_env_by_file: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "semantic-observe")]
-            relation_explanations: std::cell::RefCell::new(Vec::new()),
+            relation_explanations: crate::request_context::with_current_request_context(|ctx| {
+                ctx.observe_mode.is_captured()
+            })
+            .unwrap_or(false)
+            .then(|| std::cell::RefCell::new(Vec::new())),
             canonical_evidence_epoch: std::cell::Cell::new(0),
             checking_site: std::cell::Cell::new(Default::default()),
             operation_budget_epoch: std::cell::Cell::new(0),
@@ -1222,7 +1232,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         relation_env_scope.swap(&other.relation_env_scope);
         relation_env_by_file.swap(&other.relation_env_by_file);
         #[cfg(feature = "semantic-observe")]
-        relation_explanations.swap(&other.relation_explanations);
+        if let (Some(mine), Some(theirs)) = (relation_explanations, &other.relation_explanations) {
+            mine.swap(theirs);
+        }
         canonical_evidence_epoch.swap(&other.canonical_evidence_epoch);
         checking_site.swap(&other.checking_site);
         operation_budget_epoch.swap(&other.operation_budget_epoch);
@@ -2373,6 +2385,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(ctx) = crate::request_context::current_request_context() else {
             return;
         };
+        if !ctx.observe_mode.is_captured() {
+            return;
+        }
         let depth = self.instantiate_active.borrow().len();
         ctx.observe_type_resolution_depth(u16::try_from(depth).unwrap_or(u16::MAX));
         match key {
@@ -3063,7 +3078,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         name: &Arc<str>,
     ) {
         let fence = self.dep_signature_for(&owner.canonical_id, owner.whole_hash);
-        self.graph().record_origin_edge(
+        crate::semantic_query_memo::record_origin_edge!(
+            self.graph(),
             member_value,
             OriginEdgeKind::ProjectMember,
             Arc::from(vec![parent_surface].into_boxed_slice()),

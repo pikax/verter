@@ -2455,14 +2455,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let payload = match step {
             RelationStep::Assignable { bindings } => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::Assignable {
+                self.record_relation_explanation(|| RelationExplanation::Assignable {
                     pair: self.lease_relate_pair(&key),
                 });
                 self.relation_payload(RelationOutcome::Assignable, bindings)
             }
             RelationStep::NotAssignable => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::NotAssignable {
+                self.record_relation_explanation(|| RelationExplanation::NotAssignable {
                     pair: self.lease_relate_pair(&key),
                 });
                 self.relation_payload(
@@ -2472,7 +2472,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }
             RelationStep::BudgetExceeded(cap) => {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                self.record_relation_explanation(|| RelationExplanation::BudgetExceeded { cap });
                 self.relation_payload(
                     RelationOutcome::BudgetExceeded(cap.kind),
                     Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3043,7 +3043,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return FramePop::RootClose(match failure {
                     crate::semantic_query::ResolveCallFailure::Budget => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(RelationExplanation::BudgetExceeded {
+                        self.record_relation_explanation(|| RelationExplanation::BudgetExceeded {
                             cap: RecursionOrBudgetCap {
                                 kind:
                                     crate::semantic_query::BudgetExceededKind::CallResolutionBudget,
@@ -3107,7 +3107,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // edge drove the poison.
             if let Some(cap) = budget_cap {
                 #[cfg(feature = "semantic-observe")]
-                self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                self.record_relation_explanation(|| RelationExplanation::BudgetExceeded { cap });
                 let payload = self.relation_payload(
                     RelationOutcome::BudgetExceeded(cap.kind),
                     Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3180,7 +3180,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // `BudgetExceeded` payload when a budget edge drove it.
                 if let Some(cap) = cap {
                     #[cfg(feature = "semantic-observe")]
-                    self.record_relation_explanation(RelationExplanation::BudgetExceeded { cap });
+                    self.record_relation_explanation(|| RelationExplanation::BudgetExceeded {
+                        cap,
+                    });
                     let payload = self.relation_payload(
                         RelationOutcome::BudgetExceeded(cap.kind),
                         Arc::from(Vec::<InferBinding>::new().into_boxed_slice()),
@@ -3451,8 +3453,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let footprints =
                 Self::relation_publication_footprints(&recursion_uses, cyclic, has_relation_root);
             #[cfg(feature = "semantic-observe")]
-            let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> = cyclic
-                .then(|| {
+            let cycle_members: Option<Arc<[super::relation_explanation::LeasedRelatePair]>> =
+                (cyclic && self.relation_explanations_captured()).then(|| {
                     discharged
                         .iter()
                         .map(|(key, _, _, _, _, _, _)| self.lease_relate_pair(key))
@@ -3470,7 +3472,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 let mut payload = match &verdict {
                     PendingVerdict::Assignable { bindings } => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(match &cycle_members {
+                        self.record_relation_explanation(|| match &cycle_members {
                             Some(members) => RelationExplanation::CoinductiveCycle {
                                 pair: self.lease_relate_pair(&key),
                                 members: Arc::clone(members),
@@ -3483,7 +3485,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     PendingVerdict::NotAssignable => {
                         #[cfg(feature = "semantic-observe")]
-                        self.record_relation_explanation(RelationExplanation::NotAssignable {
+                        self.record_relation_explanation(|| RelationExplanation::NotAssignable {
                             pair: self.lease_relate_pair(&key),
                         });
                         self.relation_payload(

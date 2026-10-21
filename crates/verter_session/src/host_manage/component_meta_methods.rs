@@ -123,17 +123,25 @@ impl VerterHost {
         if verter_type_engine::request_context::current_request_context().is_some() {
             return None;
         }
-        Some(verter_type_engine::request_context::RequestContextGuard::install(
-            verter_type_engine::request_context::RequestContext::with_kind_timing_and_projection_budget(
-                request_id,
-                std::sync::Arc::<str>::from(canonical_id),
-                verter_audit::RequestKind::ComponentMeta,
-                false,
-                timing_capture,
-                None,
-                self.config.projection_op_budget,
+        // A surface without an audit registration publishes no record, so
+        // its context is uncaptured: it carries only the required budget,
+        // canonical and cancellation.
+        let _ = timing_capture;
+        Some(
+            verter_type_engine::request_context::RequestContextGuard::install(
+                verter_type_engine::request_context::RequestContext::for_root_entry(
+                    request_id,
+                    std::sync::Arc::<str>::from(canonical_id),
+                    || verter_audit::RequestKind::ComponentMeta,
+                    verter_audit::observe::ObserveMode::Uncaptured,
+                    false,
+                    false,
+                    None,
+                    self.config.projection_op_budget,
+                    verter_execution::cancellation::CancellationToken::new(),
+                ),
             ),
-        ))
+        )
     }
 
     /// [`Self::resolve_component_meta_with_view`] with an optional

@@ -63,8 +63,7 @@ use crate::project_type_store::{AnalysisArtifactKey, AnalysisReady};
 use crate::VerterHost;
 #[cfg(feature = "semantic-observe")]
 use verter_session_query::analysis::file_analysis::FileAnalysisSnapshot;
-#[cfg(feature = "semantic-observe")]
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 
 impl VerterHost {
     /// Run a semantic-analysis request through the host's shared
@@ -108,25 +107,50 @@ impl VerterHost {
         // the request actually did.
         let pre_call_cache_hit = self.current_content_pinned_indexed(canonical_id).is_some();
 
+        // One request context for BOTH modes (same canonical, host
+        // projection budget and cancellation); the root entry selects its
+        // capture mode once, here. Semantic-analysis requests install no
+        // footprint accumulator: the analysis path does not emit footprint
+        // events the way the cold component-meta resolver does.
+        let request_id = self.next_request_id();
+        let parent_request_id = verter_execution::request_context::current_request_id();
+        let ctx = crate::capture::root_entry_context(
+            self,
+            request_id,
+            Arc::<str>::from(canonical_id),
+            || RequestKind::SemanticAnalysis,
+            self.config.footprint_capture,
+            self.config.audit_timing_capture,
+            None,
+            verter_execution::cancellation::CancellationToken::new(),
+        );
+
         // Captured path: the request publishes a record.
         #[cfg(feature = "semantic-observe")]
-        if self.config.audit_enabled {
-            return self.analyze_with_audit_captured(canonical_id, pre_call_cache_hit);
+        if ctx.observe_mode.is_captured() {
+            return self.analyze_with_audit_captured(
+                canonical_id,
+                pre_call_cache_hit,
+                request_id,
+                ctx,
+            );
         }
 
-        // Uncaptured path (audit disabled by the host, or capture compiled
-        // out): drive the analysis and return the cheap default-filled
-        // record. Nothing is measured or published.
-        let request_id = self.next_request_id();
-        let analysis = self.materialize_analysis_ready(canonical_id);
-        let parent_request_id =
-            verter_execution::request_context::current_request_id().map(|id| id.to_string());
+        // Uncaptured path (audit disabled by the host, the kind filtered,
+        // or capture compiled out): drive the analysis under the request's
+        // context and return the cheap default-filled record. Nothing is
+        // measured or published.
+        let analysis = {
+            let _ctx_guard = RequestContextGuard::install(ctx);
+            self.materialize_analysis_ready(canonical_id)
+        };
+        let parent_request_id = parent_request_id.map(|id| id.to_string());
         let record = noop_semantic_analysis_record(
             request_id,
             canonical_id,
             parent_request_id,
             pre_call_cache_hit,
-            crate::capture::uncaptured_state(false),
+            crate::capture::uncaptured_state(self.config.audit_enabled),
         );
         AuditedResult::ok(analysis, record)
     }
@@ -138,30 +162,13 @@ impl VerterHost {
         self: &Arc<Self>,
         canonical_id: &str,
         pre_call_cache_hit: bool,
+        request_id: u64,
+        ctx: Arc<verter_type_engine::request_context::RequestContext>,
     ) -> AuditedResult<Option<AnalysisReady>, Infallible> {
-        // Stamp request id and increment the created-counter so the
-        // `AuditedRequest` harness's multi-request guard surfaces
-        // correctly when a closure issues both a component-meta and
-        // analyze call inside the same `run` window.
-        let request_id = self.next_request_id();
-        #[cfg(feature = "semantic-observe")]
+        // Increment the created-counter so the `AuditedRequest` harness's
+        // multi-request guard surfaces correctly when a closure issues both
+        // a component-meta and analyze call inside the same `run` window.
         verter_type_engine::request_context::increment_requests_created();
-
-        // Build the per-request context. Footprint capture follows
-        // the host config; semantic-analysis requests do NOT install
-        // a footprint accumulator because the analysis path does not
-        // emit footprint events the way the cold component-meta
-        // resolver does.
-        let footprint_capture = self.config.footprint_capture && self.config.audit_enabled;
-        let timing_capture = self.config.audit_timing_capture && self.config.audit_enabled;
-        let ctx = RequestContext::with_kind_and_timing(
-            request_id,
-            Arc::<str>::from(canonical_id),
-            RequestKind::SemanticAnalysis,
-            footprint_capture,
-            timing_capture,
-            None,
-        );
 
         // BEFORE installing the TLS guard: construct the registration.
         // The `Noop` arm short-circuits when the consumer filter

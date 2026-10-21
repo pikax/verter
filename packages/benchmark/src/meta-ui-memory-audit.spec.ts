@@ -57,9 +57,9 @@ describe("parseMetaUiBenchArgs --profile-audit", () => {
 
 describe("ensureMemoryAuditCapable (loud-failure setup gate + runtime enable)", () => {
   // A binding whose exports are missing entirely — an older prebuilt
-  // binary that predates the runtime memory-audit surface. This is the
-  // ONLY loud-failure class now: the single binary always carries the
-  // surface and enables at runtime.
+  // binary that predates the runtime memory-audit surface. A current
+  // binding always exports the surface; only the instrumented one can
+  // enable it.
   it("throws loudly when the binding lacks the memoryAuditSnapshot export", () => {
     expect(() => ensureMemoryAuditCapable({})).toThrow(/@verter\/native/);
   });
@@ -90,6 +90,22 @@ describe("ensureMemoryAuditCapable (loud-failure setup gate + runtime enable)", 
     const capable = ensureMemoryAuditCapable(binding);
     expect(calls[0]).toBe("enable");
     expect(capable.snapshot().allocCount).toBe(7);
+  });
+
+  it("throws loudly, naming the instrumented build, when the binding reports the audit unavailable", () => {
+    // A default binding compiles no counting allocator: enable reports
+    // `false` and the gate must not probe on as if counters existed.
+    let probed = false;
+    const binding = {
+      memoryAuditEnable: () => false,
+      memoryAuditSnapshot: () => {
+        probed = true;
+        return null;
+      },
+      memoryAuditResetHighWater: () => false,
+    };
+    expect(() => ensureMemoryAuditCapable(binding)).toThrow(/unavailable.*build:observe/s);
+    expect(probed).toBe(false);
   });
 
   it("throws loudly when the snapshot stays null even after enabling", () => {

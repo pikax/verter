@@ -77,6 +77,7 @@ pub use nodes::AliasChainEnd;
 mod observability;
 pub use observability::NodeOwnershipCounts;
 mod origin_edges;
+pub(crate) use origin_edges::record_origin_edge;
 pub mod prepared;
 pub mod refusal_summary;
 pub(crate) mod relation_memo;
@@ -2211,12 +2212,16 @@ impl SemanticGraphStore {
 
     /// The observations a family-memo lookup that missed `key` makes.
     pub(crate) fn note_lookup_miss(&self, key: &SemanticQueryKey) {
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        let _ = key;
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
         #[cfg(any(test, feature = "test-support"))]
         crate::project_semantic_dispatch::raise::record_dispatch_cold(key);
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ false));
+        // A chronological operation trace: optional observation.
+        #[cfg(feature = "semantic-observe")]
         tracing::debug!(
             target: "verter::memo::miss",
             ?key,
@@ -2226,6 +2231,8 @@ impl SemanticGraphStore {
 
     /// The observations a family-memo lookup answered warm for `key` makes.
     fn note_warm_hit(&self, key: &SemanticQueryKey) {
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        let _ = key;
         // Instrumentation — fast-path attribution.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
@@ -2267,8 +2274,11 @@ impl SemanticGraphStore {
         // path's pre-loop observation. Gated to match the instrumentation
         // module (absent in release).
         #[cfg(any(test, feature = "test-support"))]
+        #[cfg(feature = "semantic-observe")]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ true));
 
+        // A chronological operation trace: optional observation.
+        #[cfg(feature = "semantic-observe")]
         tracing::debug!(
             target: "verter::memo::hit",
             ?key,

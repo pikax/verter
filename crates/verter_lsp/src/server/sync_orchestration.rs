@@ -604,9 +604,10 @@ impl VerterLanguageServer {
             self.publish_full_diagnostics(uri).await;
             return;
         }
-        let target_identity = crate::audit_harness::target_identity_for_uri(&self.documents, uri);
+        let target_identity =
+            || crate::audit_harness::target_identity_for_uri(&self.documents, uri);
         let uri_for_body = uri.clone();
-        let _ = crate::audit_harness::run_with_audit::<usize, _, _>(
+        let _ = crate::audit_harness::run_with_audit::<usize, _, _, _>(
             &host,
             verter_audit::payloads::tags::LspMethodTag::Diagnostics,
             target_identity,

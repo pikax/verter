@@ -52,7 +52,7 @@ use crate::VerterHost;
 #[cfg(feature = "semantic-observe")]
 use verter_session_query::flow::policy::FlowGap;
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
-use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+use verter_type_engine::request_context::RequestContextGuard;
 #[cfg(feature = "semantic-observe")]
 use verter_type_engine::semantic_query::{
     FlowReturnDegradation, FlowReturnUnsupported, ResolveCallFailure,
@@ -219,25 +219,16 @@ impl VerterHost {
         let accumulator = footprint_scope.accumulator();
         #[cfg(not(feature = "semantic-observe"))]
         let accumulator = None;
-        let ctx = match cancellation {
-            None => RequestContext::with_kind_and_timing(
-                request_id,
-                Arc::<str>::from(canonical_id),
-                RequestKind::FlowReturnInference,
-                footprint_capture,
-                timing_capture,
-                accumulator,
-            ),
-            Some(cancellation) => RequestContext::with_kind_timing_and_cancellation(
-                request_id,
-                Arc::<str>::from(canonical_id),
-                RequestKind::FlowReturnInference,
-                footprint_capture,
-                timing_capture,
-                accumulator,
-                cancellation,
-            ),
-        };
+        let ctx = crate::capture::root_entry_context(
+            self,
+            request_id,
+            Arc::<str>::from(canonical_id),
+            || RequestKind::FlowReturnInference,
+            footprint_capture,
+            timing_capture,
+            accumulator,
+            cancellation.unwrap_or_default(),
+        );
 
         // BEFORE installing the TLS guard: construct the registration.
         #[cfg(feature = "semantic-observe")]
@@ -255,7 +246,7 @@ impl VerterHost {
         // returns the value with no outer publish fence). On sustained
         // churn surface the typed `UnstableState` error rather than
         // answering from superseded state.
-        let request_clock = verter_audit::observe::Stopwatch::start();
+        let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let outcome: Result<Arc<FlowReturnResult>, FlowReturnError> = if ctx.is_cancelled() {
             // A request cancelled before it starts runs none of its work —
             // a warm read included, which checks no cancellation — and

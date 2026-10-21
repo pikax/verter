@@ -108,8 +108,18 @@ There are no other measurement features.
 request optional capture; no production dependency edge, default feature or
 dev-dependency edge may enable it, even through a root's dev-dependency
 feature unification. The session crate's own test build is checked the same
-way, so the canonical gate and the core CI shards always build and test the
-uncaptured configuration. Suites that read a captured record, a footprint or
+way, so the canonical gate and the core CI shards never switch
+`semantic-observe` on. They do build with the members' `test-support`
+features, and the observation gate
+`cfg(any(test, feature = "test-support", feature = "semantic-observe"))` also
+compiles the bookkeeping tests read under `test-support`: origin edges, the
+graph store's tallies, occupancy counters, VFS provenance and the
+declaration-lowering counters. The shipped configuration of that state — no
+`test`, no `test-support`, no `semantic-observe` — is exercised by the
+shipped-cfg lane (`verter_shipped_cfg_contract` under the
+`no-debug-assertions` profile), and the feature-closure guard keeps every
+member's `test-support`, like `soak-support`, out of every shipped closure.
+Suites that read a captured record, a footprint or
 a measurement carry `#[cfg(feature = "semantic-observe")]` and run in the
 instrumentation lane: `node scripts/observe-lane.mjs run` tests every
 workspace member that declares `semantic-observe` with it switched on, under
@@ -146,14 +156,28 @@ An instrumented binary captures per request. The audited entries (component
 meta, type resolution, named-symbol and expression evaluation, graph queries,
 framework surfaces, flow return, analyze, compile, workspace operations, LSP
 handlers and MCP tools) select captured or uncaptured execution once at root
-entry from the host's `audit_enabled` setting and request filter; background
-work selects at job submission. Both modes install the same request context,
-so budget, cancellation and partiality behave identically and only the
-optional capture record differs. Specialization is bounded to these two modes,
-not every host/counter combination. Emission sites use the `observe!` and
-`observe_request!` macros and the zero-size observed types below; there are no
-per-operation enabled checks, no `NoOpObserver` virtual calls and no observer
-TLS polling in default builds.
+entry (`verter_session::capture::select_mode`, over
+`ObserveMode::select`) from the host's `audit_enabled` setting and request
+filter, and build their request context with
+`verter_session::capture::root_entry_context`. Both modes install the same
+REQUIRED context — canonical, the host's `projection_op_budget` and
+cancellation — so budget, cancellation and partiality behave identically and
+only the optional capture differs. The context carries the selected mode
+(`RequestContext::observe_mode`), and every scheduler resumption and task
+dispatcher reinstalls that same context, so background work runs in the mode
+its submitting request selected. A captured context plants the audit observer
+and the footprint accumulator; an uncaptured one clears the observer slot,
+records nothing through `observe_request!` or the request's counters, starts
+no stopwatch and captures no relation explanation (a dispatcher selects its
+explanation buffer once, at construction, from the installed context). An LSP
+handler is an async window that may resume on any runtime worker, so neither
+mode installs a governing request context there: the requests the handler
+issues install their own exactly as they do uncaptured, and a captured LSP
+session plants only the observer slot. Specialization is bounded to these two
+modes, not every host/counter combination. Emission sites use the `observe!`
+and `observe_request!` macros and the zero-size observed types below; there
+are no per-operation enabled checks, no `NoOpObserver` virtual calls and no
+observer TLS polling in default builds.
 
 A default build has no audit envelope at all. The observer slot, the
 per-request accumulator, the record store, the scheduler and VFS audit sinks
@@ -170,7 +194,8 @@ without `semantic-observe` and `Available` with it. Availability is a binary
 capability, independent of the profile and of whether a request asks for
 capture. `ObserveMode::{Uncaptured, Captured}` is the execution vocabulary;
 `ObserveMode::select(requested)` picks the mode for a root entry and is always
-`Uncaptured` in a default build. `verter_session::capture::availability()`
+`Uncaptured` in a default build; its production caller is
+`verter_session::capture::select_mode`. `verter_session::capture::availability()`
 re-exports the build's answer for the host layer.
 
 `observe::capture(|| payload)` returns `None` when the feature is off without

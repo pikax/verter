@@ -3884,6 +3884,58 @@ fn captured_cycle_explanation_leases_operands_past_eviction_and_close() {
     );
     let a = resolve_relation_fixture_symbol(&host, canonical, "RecA");
     let b = resolve_relation_fixture_symbol(&host, canonical, "RecB");
+
+    // An uncaptured request selects no explanation buffer: the same cold
+    // judgement, on a second host, records nothing and leases no operand.
+    {
+        let host = host_for_relation_tests();
+        upsert_relation_fixture(
+            &host,
+            canonical,
+            "export interface RecA { next: RecA }
+export interface RecB { next: RecB }
+",
+        );
+        let a = resolve_relation_fixture_symbol(&host, canonical, "RecA");
+        let b = resolve_relation_fixture_symbol(&host, canonical, "RecB");
+        let _uncaptured = verter_type_engine::request_context::RequestContextGuard::install(
+            verter_type_engine::request_context::RequestContext::for_root_entry(
+                1,
+                Arc::from(canonical),
+                || verter_audit::RequestKind::TypeResolution,
+                verter_audit::observe::ObserveMode::Uncaptured,
+                true,
+                true,
+                None,
+                0,
+                verter_execution::cancellation::CancellationToken::new(),
+            ),
+        );
+        let uncaptured = ProjectSemanticDispatch::new(&host);
+        let answer = uncaptured.execute_relate_pair_as_result_for_tests(a, b);
+        assert!(
+            matches!(&answer, RelationResult::Assignable { bindings } if bindings.is_empty()),
+            "the uncaptured answer is the recursive answer, got {answer:?}"
+        );
+        assert!(
+            uncaptured.take_relation_explanations().is_empty(),
+            "an uncaptured request records no explanation"
+        );
+    }
+
+    let _captured = verter_type_engine::request_context::RequestContextGuard::install(
+        verter_type_engine::request_context::RequestContext::for_root_entry(
+            2,
+            Arc::from(canonical),
+            || verter_audit::RequestKind::TypeResolution,
+            verter_audit::observe::ObserveMode::Captured,
+            false,
+            false,
+            None,
+            0,
+            verter_execution::cancellation::CancellationToken::new(),
+        ),
+    );
     let dispatch = ProjectSemanticDispatch::new(&host);
     let graph = host.project_type_store().semantic_graph();
 

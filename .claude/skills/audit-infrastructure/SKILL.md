@@ -24,7 +24,13 @@ occupancy/ownership charges remain independent of capture.
 when `semantic-observe` is off and `Available` when on. `observe::capture`
 returns `None` without calling its collector when off; it returns the collected
 payload when on, never fabricated zero metrics. `ObserveMode` supplies the
-uncaptured/captured vocabulary and `ObserveMode::select` picks it at root entry.
+uncaptured/captured vocabulary and `ObserveMode::select` picks it at root entry,
+through `verter_session::capture::select_mode`; `capture::root_entry_context`
+builds the REQUIRED request context (canonical, host `projection_op_budget`,
+cancellation) identically for both modes and `RequestContext::observe_mode`
+carries the choice through every resumption. An uncaptured context clears the
+observer slot and records nothing (`observe_request!`, cache-event and
+dispatch-intent counters, relation explanations, `Stopwatch::start_for`).
 The whole audit envelope compiles only under `semantic-observe`: the observer
 TLS, `HostAuditRuntime`, the record store, the per-request accumulator, the
 scheduler and VFS audit sinks and the request context's audit counters are
@@ -217,9 +223,9 @@ Every public audited entry-point follows the same lifecycle: stamp a request id,
 
 ### LSP
 
-`verter_lsp::audit_harness::run_with_audit(host, method, target_identity, position, body, populate)` wraps each LSP handler future in:
+`verter_lsp::audit_harness::run_with_audit(host, method, target_identity, position, body, populate)` wraps each LSP handler future in (`target_identity` is a closure, called only for an audited request):
 
-1. An `LspAuditSession` keyed by `LspMethodTag` and `RequestTargetIdentity` (constructed via `VerterHost::lsp_audit_begin`). Registered URIs use the registry's exact stored identity; request-before-registration uses the raw URI; `NotApplicable` is reserved for operations with no single document target.
+1. An `LspAuditSession` keyed by `LspMethodTag` and `RequestTargetIdentity` (constructed via `VerterHost::lsp_audit_begin`). A captured session plants only the audit observer slot — never a governing request context, because the handler is an async window that may resume on any runtime worker; the requests it issues install their own contexts exactly as they do uncaptured. Registered URIs use the registry's exact stored identity; request-before-registration uses the raw URI; `NotApplicable` is reserved for operations with no single document target.
 2. The same explicit `request_deadlines` policy used when audit is disabled. Production defaults every request deadline to zero (unbounded); audit never adds a feature/provider timeout.
 3. `finalize_ok(payload)` on success or RPC error. `audit_supersede` is an observational latency SLO only: exceeding it emits telemetry but does not cancel or alter the response. Explicit client cancellation may still finalize a session with `finalize_cancelled()` through the cancellation lifecycle.
 4. Optional drain to `VERTER_LSP_AUDIT_TRACE_OUT` (JSON-lines append, configurable via env var).
