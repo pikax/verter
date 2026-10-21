@@ -156,10 +156,6 @@ pub struct FlowReturnResult {
 /// display ignore it.
 #[derive(Clone, Default)]
 pub(super) struct FlowReturnOwner(
-    #[allow(
-        dead_code,
-        reason = "held for its drop: the lease owns the result's nodes"
-    )]
     crate::semantic_query_memo::delivery_lease::SemanticDeliveryLease,
 );
 
