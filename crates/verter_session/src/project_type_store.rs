@@ -1272,6 +1272,12 @@ impl ProjectTypeStore {
                 task_registry,
                 memo_family_bound,
             );
+        // The production semantic context is a process-permanent record.
+        // Mint it with the store, so it is part of what constructing a store
+        // costs instead of residue charged to the first workload that needs
+        // it: a closed host returns to the footprint it had before its
+        // workload.
+        let _ = verter_type_engine::semantic_query::SemanticContextId::production();
         let verter_type_engine::project_semantic_dispatch::engine_resources::EngineStores {
             graph: semantic_graph,
             construction,

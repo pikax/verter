@@ -753,6 +753,13 @@ fn inspect_literal_provenance_with_budget(
 }
 
 impl CanonicalEvidence {
+    /// Whether this canonicalization proved its result outright: no
+    /// incomplete comparison, refusal or unpaid construction. Only such a
+    /// proof may be reused in place of running it again.
+    pub(super) fn is_complete_proof(&self) -> bool {
+        !self.incomplete && self.refusal.is_none() && self.exhausted.is_empty()
+    }
+
     /// Fold another canonicalization's evidence into this one — the
     /// threading primitive for helpers that run several canonical
     /// constructions before their caller reaches the single disposition

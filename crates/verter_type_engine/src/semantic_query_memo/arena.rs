@@ -1607,6 +1607,27 @@ impl NodeArenaCore {
         self.destroyed.lock().ids.len()
     }
 
+    /// Give back the table of every dedup shard that indexes no node, and
+    /// its charge. Returns the tables released.
+    ///
+    /// A shard's table keeps the capacity its busiest moment needed after
+    /// its candidates are removed, so a released workload would otherwise
+    /// leave one charged granule per shard it ever touched. A shard that
+    /// still indexes a live node keeps its table: dropping it would free
+    /// nothing a reader could not reach again.
+    pub(super) fn release_idle_dedup_tables(&self) -> usize {
+        let mut released = 0;
+        for shard in &self.shards {
+            let mut shard = shard.lock();
+            if shard.index.is_empty() && shard.index.capacity() > 0 {
+                shard.index = HashMap::with_hasher(FingerprintKeys);
+                shard.settle(self.retention_account(), 0);
+                released += 1;
+            }
+        }
+        released
+    }
+
     pub(super) fn retain(
         &self,
         ids: &[SemanticNodeId],
@@ -2471,7 +2492,10 @@ mod arena_intern_tests {
         let arena = NodeArena::default();
         let payload =
             SemanticNodeData::Literal(crate::semantic_query::LiteralValue::String("forced".into()));
-        let forced_fp = 0x00C0_FFEE_u64;
+        // The fingerprint hasher is keyed per process, so a fixed forced
+        // fingerprint shares the payload's shard in some runs. Flipping the
+        // lowest shard bit of the payload's own fingerprint never does.
+        let forced_fp = structural_fingerprint(&payload, &NodeScopeId::Global) ^ 1;
         assert_ne!(
             forced_fp & SHARD_MASK,
             structural_fingerprint(&payload, &NodeScopeId::Global) & SHARD_MASK,

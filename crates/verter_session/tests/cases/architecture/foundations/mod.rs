@@ -855,6 +855,11 @@ pub static VERTER_SESSION_PUB_SURFACE_SNAPSHOT: &[&str] = &[
         // DependencyResolution, DiagnosticsSnapshot, HostDiagnostic,
         // HostSeverity, FileAnalysisSnapshot, ...) — universally used.
         "pub use types::*",
+        // The reusable-host release boundary returned by
+        // `VerterHost::release_completion` and its failure: the soak runner
+        // and retention measurements await it after a close.
+        "pub use host_lifecycle::HostReleaseCompletion",
+        "pub use verter_semantic_source::decl_lowering::ParseReleaseError",
         // verter_lsp::background_init,
         // verter_type_runtime::tsserver::ipc, verter_type_runtime::tsgo::ipc
         // + verter_lsp::server::nav_features_navigation (the GlobalComponents

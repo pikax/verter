@@ -55,6 +55,15 @@ pub struct SemanticReadView {
 }
 
 impl SemanticReadView {
+    /// Bytes the pinned epoch's own storage is charged for: one
+    /// allocation, charged once however many readers pin it. An observation
+    /// that retains nothing.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn epoch_storage_charge_for_tests(&self) -> usize {
+        self.inner.storage.charged()
+    }
+
     pub(crate) fn lease(&self) -> super::lifetime::SignatureEpochLease {
         super::lifetime::SignatureEpochLease::from_epoch(Arc::clone(&self.inner))
     }
