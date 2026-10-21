@@ -6961,9 +6961,10 @@ fn production_missing_obligation_returns_only_and_recomputes() {
     use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
 
     let host = make_host();
+    // Bind the request before the captured resolver snapshots its receivers.
+    let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
     with_captured_dispatch(&host, |dispatch| {
-        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
-        let _guard = RequestContextGuard::install(ctx);
         let _drop_claim = inject::Guard::arm(&host.flow_fault_injection.drop_last_discharge_claim);
         let key = flow_key(
             dispatch,
@@ -7013,9 +7014,10 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
 
     // Root leg.
     let host = make_host();
+    // Bind the request before the captured resolver snapshots its receivers.
+    let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
+    let _guard = RequestContextGuard::install(ctx);
     with_captured_dispatch(&host, |dispatch| {
-        let ctx = RequestContext::new(1, Arc::from(CANONICAL), false, None);
-        let _guard = RequestContextGuard::install(ctx);
         let key = flow_key(
             dispatch,
             "subNonCallableCall",
@@ -7072,6 +7074,7 @@ fn degraded_flow_finalizer_never_warms_root_or_scc() {
         );
     });
 
+    drop(_guard);
     // SCC leg: a degraded component publishes NEITHER member.
     let scc_host = make_scc_host();
     with_captured_dispatch(&scc_host, |dispatch| {
