@@ -399,6 +399,22 @@ impl FlowReturnResult {
         self.return_type
     }
 
+    /// An owning root of the delivered return node, taken through this
+    /// result's own delivery lease: the capability outlives the result and
+    /// its request, and the shared bounded projection reads it. Exact and
+    /// degraded results both answer; [`Self::degradation`] tells them apart.
+    ///
+    /// # Errors
+    ///
+    /// [`super::QueryError::ForeignSemanticOperand`] for a result never
+    /// delivered out of the engine (its lease roots nothing), and
+    /// [`super::QueryError::StaleSemanticOperand`] when the node is gone.
+    pub fn return_root(
+        &self,
+    ) -> Result<crate::semantic_query_memo::node_roots::NodeRoot, super::QueryError> {
+        self.owner.0.node_ref(self.return_type)?.to_root()
+    }
+
     /// The typed degradation reason, or `None` for the warm-admissible arm.
     #[must_use]
     pub fn degradation(&self) -> Option<FlowReturnDegradation> {

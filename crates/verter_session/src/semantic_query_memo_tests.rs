@@ -28,6 +28,7 @@ use verter_type_engine::semantic_query_memo::*;
 
 mod allocation_ownership_tests;
 mod cancellation_tests;
+mod flow_return_root_tests;
 mod object_spread_projection_tests;
 mod producer_tests;
 mod public_carrier_tests;
