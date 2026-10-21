@@ -11701,7 +11701,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let value_reads_modifiers_member = modifier_index.is_some()
             && mapper.modifiers_type.is_some_and(|modifiers| {
                 crate::semantic_query::MapperKind::classify_value_expr(
-                    graph,
+                    &graph,
                     mapper.value_expr,
                     modifiers,
                     mapper.parameter_node,

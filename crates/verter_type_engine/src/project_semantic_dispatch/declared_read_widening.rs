@@ -206,7 +206,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     members.iter().any(|&member| {
                         member == node
                             || crate::semantic_query::stable_key::provably_equal(
-                                graph, member, node,
+                                &graph, member, node,
                             )
                     })
                 };
