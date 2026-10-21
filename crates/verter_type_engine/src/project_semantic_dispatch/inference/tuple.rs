@@ -160,8 +160,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<usize> {
         let graph = self.graph();
         let mut node = node;
-        // A constraint chain (`U extends V`, `V extends [A, B]`) is short;
-        // the bound only guards a cyclic one.
+        // A constraint chain (`U extends V`, `V extends [A, B]`) is short.
+        // bounded-loop: the bound only guards a cyclic constraint chain.
         for _ in 0..8 {
             if let Some(arity) = self.fixed_tuple_arity(node) {
                 return Some(arity);
