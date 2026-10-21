@@ -14,4 +14,7 @@ fn main() {
     // fixture names and arms the rendezvous with `soak-support` as the only
     // enabling feature.
     tests.pass(fixture_root.join("flight_rendezvous_opt_in_through_soak_support.rs"));
+    // The retention account's ACTIVE-occupancy window, opened on a host and
+    // read through the same forwarding alone.
+    tests.pass(fixture_root.join("active_occupancy_window_opt_in_through_soak_support.rs"));
 }
