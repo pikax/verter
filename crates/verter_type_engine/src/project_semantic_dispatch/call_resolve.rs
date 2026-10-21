@@ -333,7 +333,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // beneath a `FlowReturn` root leaves no trace of the family that decided
         // its overload, and the audit record under-reports the query families the
         // resolution actually touched.
-        crate::observe_request!(C::Observe => |ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.record_dispatched_query_tag(
                 crate::semantic_query::SemanticQueryKeyTag::ResolveCall,
             );

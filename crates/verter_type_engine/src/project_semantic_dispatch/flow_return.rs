@@ -3310,7 +3310,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // frame) never funnels through `execute_via_cold_build_helper`, so
         // the family's participation is recorded here — idempotent per
         // tag, no-op without an installed `RequestContext`.
-        crate::observe_request!(C::Observe => |ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.record_dispatched_query_tag(crate::semantic_query::SemanticQueryKeyTag::FlowReturn);
         });
         // The callee schedule learns what each frame's call resolution
@@ -3327,6 +3327,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // while the component is being cold-evaluated (a warm
                 // hit never opens a frame to re-enter).
                 crate::flow_return_audit::record_flow_cycle_reentry::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
                     u32::try_from(idx).unwrap_or(u32::MAX),
                     &key.function.declaration_slot.merged_symbol_name,
                 );
@@ -6728,6 +6729,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // family hit in `execute_flow_return` returns before any frame
         // opens, so a warm hit can never reach this emission.
         crate::flow_return_audit::record_flow_return_started::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
             &key.function.declaration_slot.defining_canonical,
             &key.function.declaration_slot.merged_symbol_name,
         );
@@ -6803,6 +6805,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     "flow-slice budget exceeded: typed Budget failure, ReturnOnly"
                 );
                 crate::flow_return_audit::record_flow_slice_budget_exceeded::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
                     &exceeded,
                 );
                 return degraded(
@@ -16656,6 +16659,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         incoming: &[&FlowLayerState],
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let first = incoming.first().expect("a continuation has a predecessor");
         let frame_algebra = super::flow_products::DispatchFlowAlgebra {
             dispatch: self.dispatch,
@@ -18366,6 +18370,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) {
+        let _ = observation;
         let mut incoming: Vec<FlowLayerState> = Vec::with_capacity(2);
         if consequent_falls {
             incoming.push(FlowLayerState {
@@ -18410,6 +18415,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         entry: &FlowProductStore,
         observation: &FlowWriteObservation,
     ) -> FlowLayerState {
+        let _ = observation;
         let states: smallvec::SmallVec<[&FlowLayerState; 2]> = incoming.iter().collect();
         let mut joined = self.join_states(&states, observation);
         // The branch join over the function-scoped `var` layer — the ONE
@@ -18686,6 +18692,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
         observation: &FlowWriteObservation,
         after: &FlowLayerState,
     ) -> FlowExecutedClauseWrites {
+        let _ = observation;
         FlowExecutedClauseWrites(after.products.writes_since(observation))
     }
 

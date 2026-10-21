@@ -708,7 +708,7 @@ impl VerterHost {
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.finalize_analysis_snapshot_in::<M>(canonical, snapshot, needs_template_analysis, template_inputs, analysis_started)
+            self.finalize_analysis_snapshot_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, snapshot, needs_template_analysis, template_inputs, analysis_started)
         })
     }
 
@@ -719,14 +719,16 @@ impl VerterHost {
         M: verter_audit::observe::ObserveExec,
     >(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
         mut snapshot: FileAnalysisSnapshot,
         needs_template_analysis: bool,
         template_inputs: Option<crate::types::VueTemplateInputs>,
         analysis_started: Option<Instant>,
     ) -> FileAnalysisSnapshot {
+        let _ = observation;
         verter_session_query::probe_scope!(FINALIZE_SNAPSHOT);
-        self.resolve_snapshot_imports::<M>(canonical, &mut snapshot);
+        self.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
         self.enrich_destructured_bindings(&mut snapshot);
         if needs_template_analysis {
             // No coherent inputs (torn generation join, non-SFC) →
@@ -776,7 +778,7 @@ impl VerterHost {
         Hash16,
     )> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.current_eval_state_uncached_in::<M>(canonical_id)
+            self.current_eval_state_uncached_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
         })
     }
 
@@ -785,13 +787,15 @@ impl VerterHost {
     /// request's mode.
     fn current_eval_state_uncached_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<(
         Arc<str>,
         Option<Arc<verter_compiler::framework_common::FrameworkParseArtifact>>,
         Hash16,
     )> {
-        component_meta_trace_custom!(M => "current_eval_state", format!("owner={}", canonical_id),);
+        let _ = observation;
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"current_eval_state", format!("owner={}", canonical_id),);
 
         // FileArtifactStore fast path — **current-content-pinned** (no
         // `get_any`). `current_eval_state` returns the canonical's source
@@ -806,8 +810,8 @@ impl VerterHost {
         // canonical. A stale candidate for a live scope misses both — the
         // scheduler source path below is the authoritative current content.
         let cached_facts = self
-            .current_content_pinned_indexed(canonical_id)
-            .or_else(|| self.artifact_current_indexed::<M>(canonical_id));
+            .current_content_pinned_indexed_in::<M>(observation, canonical_id)
+            .or_else(|| self.artifact_current_indexed::<M>(observation, canonical_id));
         if let Some(facts) = cached_facts {
             return Some((
                 Arc::clone(&facts.raw_source),
@@ -1211,8 +1215,10 @@ impl VerterHost {
         eval_source: &str,
         purpose: crate::resolver_core::ComponentMetaResolutionPurpose,
     ) -> Option<ComputedEvaluatedTypes> {
+        let observation = verter_type_engine::resolver_core::resolver_context::capture_targets(ctx);
+        let _ = observation;
         {
-            component_meta_trace_custom!(M =>
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_seed_owner_cache",
                 format!("owner={} store_view={}", canonical, false),
             );
@@ -1243,7 +1249,7 @@ impl VerterHost {
                 std::collections::BTreeSet::new()
             };
         let mut binding_entries = {
-            component_meta_trace_custom!(M =>
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_binding_entries",
                 format!(
                     "owner={} requested_bindings={} store_view={}",
@@ -1290,7 +1296,7 @@ impl VerterHost {
             Vec<Option<verter_type_engine::semantic_query::SemanticNodeId>>,
         > = std::cell::RefCell::new(Vec::new());
         let mut result = {
-            component_meta_trace_custom!(M =>
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>
                 "compute_evaluated_types_expand_macros",
                 format!(
                     "owner={} macros={} bindings={} store_view={}",
@@ -1620,8 +1626,7 @@ impl VerterHost {
                             } else {
                                 match (ctx.output_path.is_empty(), macro_type_arg.as_ref()) {
                                     (true, _) | (_, None) => {
-                                        component_meta_trace_custom!(
-                                    M => "macro_projection_failover",
+                                        component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                     format!(
                                         "macro_index={} field_kind={:?} reason=no_parsed_type_argument",
                                         ctx.macro_index, ctx.kind,
@@ -1745,8 +1750,7 @@ impl VerterHost {
                                                             produced_node_id: id,
                                                         } => {
                                                             produced_node_id = Some(id);
-                                                            component_meta_trace_custom!(
-                                                                M => "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_raise_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1755,8 +1759,7 @@ impl VerterHost {
                                                             preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::ProjectionMiss => {
-                                                            component_meta_trace_custom!(
-                                                                M => "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=slot_binding_projection_miss",
                                                                     ctx.macro_index, ctx.kind,
@@ -1765,8 +1768,7 @@ impl VerterHost {
                                                             preserve_authored_symbolically()
                                                         }
                                                         MacroPathOutputExpansion::CarrierMiss => {
-                                                            component_meta_trace_custom!(
-                                                                M => "macro_projection_failover",
+                                                            component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                                 format!(
                                                                     "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                                     ctx.macro_index, ctx.kind,
@@ -1790,8 +1792,7 @@ impl VerterHost {
                                                     // path) only on input the emitter
                                                     // cannot produce, so the trace
                                                     // ordering is unobservable.
-                                                    component_meta_trace_custom!(
-                                                        M => "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=slot_binding_unexpected_path",
                                                             ctx.macro_index, ctx.kind,
@@ -1850,8 +1851,7 @@ impl VerterHost {
                                                     produced_node_id: id,
                                                 } => {
                                                     produced_node_id = Some(id);
-                                                    component_meta_trace_custom!(
-                                                        M => "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=raise_failed",
                                                             ctx.macro_index, ctx.kind,
@@ -1860,8 +1860,7 @@ impl VerterHost {
                                                     preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::ProjectionMiss => {
-                                                    component_meta_trace_custom!(
-                                                        M => "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=projection_unknown",
                                                             ctx.macro_index, ctx.kind,
@@ -1870,8 +1869,7 @@ impl VerterHost {
                                                     preserve_authored_symbolically()
                                                 }
                                                 MacroPathOutputExpansion::CarrierMiss => {
-                                                    component_meta_trace_custom!(
-                                                        M => "macro_projection_failover",
+                                                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() => "macro_projection_failover",
                                                         format!(
                                                             "macro_index={} field_kind={:?} reason=opaque_scope_or_uninterpretable",
                                                             ctx.macro_index, ctx.kind,

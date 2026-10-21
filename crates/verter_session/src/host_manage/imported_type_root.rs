@@ -236,7 +236,7 @@ impl VerterHost {
                 // Trace inside the closure: the closure runs only on
                 // cache miss, so the trace event records actual
                 // resolution work — not redundant lookups.
-                component_meta_trace_custom!(M => "resolve_imported_type_root", {
+                component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() => "resolve_imported_type_root", {
                     use std::fmt::Write as _;
                     let mut detail =
                         String::with_capacity(24 + dep_canonical.len() + imported_name.len());
@@ -304,7 +304,7 @@ impl VerterHost {
             ),
         };
 
-        component_meta_trace_custom!(M => "resolve_imported_type_root_result", {
+        component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() => "resolve_imported_type_root_result", {
             // Audit-gated (the macro skips this block without an active
             // accumulator). Pre-size the detail so the per-call build is
             // ONE exact allocation instead of the `format!` grow chain —

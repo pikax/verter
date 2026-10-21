@@ -47,7 +47,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<SessionRequestLifecycle<'a, M>> {
         Self(SessionRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view,
             request_view: RequestStoreView::new(base, overlay),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -64,7 +64,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<SessionRequestLifecycle<'a, M>> {
         Self(SessionRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view,
             request_view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
             fallback_overlay: std::sync::OnceLock::new(),
@@ -74,6 +74,10 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<SessionRequestLifecycle<'a, M>> {
 
 impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
     type Observe = M;
+
+    fn capture_targets(&self) -> &verter_type_engine::request_observers::CaptureTargets {
+        self.snapshot.capture_targets()
+    }
 
     fn host(&self) -> &crate::VerterHost {
         self.inner
@@ -184,8 +188,9 @@ impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
         &self,
         canonical_id: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
-        crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view(
+        crate::host_manage::overlay_priority::ensure_indexed_ready_serve_with_view_in::<M>(
             self.inner,
+            self.capture_targets(),
             self.view,
             canonical_id,
         )
@@ -229,13 +234,18 @@ impl<M: ObserveExec> RequestBoundLifecycle for SessionRequestLifecycle<'_, M> {
         if self.view.overlay_content_hash_for(canonical).is_some() {
             return self
                 .inner
-                .materialize_overlay_indexed_ready_serve_with_view(canonical, self.view)
+                .materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                    self.capture_targets(),
+                    canonical,
+                    self.view,
+                )
                 .map(|serve| serve.indexed);
         }
         if self.view.is_tombstoned(canonical) {
             return None;
         }
-        self.inner.current_content_pinned_indexed(canonical)
+        self.inner
+            .current_content_pinned_indexed_in::<M>(self.capture_targets(), canonical)
     }
 
     fn artifact_key_for_current_content(

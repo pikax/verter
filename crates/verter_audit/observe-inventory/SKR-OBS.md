@@ -48,8 +48,9 @@ this row supersedes that owner's gate column.
 
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
+| `CaptureTargets::{observer,request,accumulator}` and retained/borrowed targets on `RequestSnapshot`, `ProjectSemanticDispatch`, `GraphIn`, `SessionDispatchHost` and `ShapeCacheOwnerScope` | Audit emissions only | OPTIONAL | One admitted execution; sibling tasks share the request's receivers | `src/request_observers.rs`, `src/resolver_core/resolver_context.rs`, `src/project_semantic_dispatch/{mod,memo}.rs`, `src/semantic_query_memo/graph_in.rs` | Receiver fields `cfg(feature = "semantic-observe")`; the carrier is zero-size otherwise; uncaptured typed access compiles away |
 | `AtomicSemanticGraphStats` counters (`hits`, `misses`, `same_path_sentinel_returns`, `waits_ms`, `joined_waits`, `inflight_aborted_retries`, `joiner_view_mismatch_forks`, `cold_aborts_swept`, `origin_edges_emitted`, builder counters, memo hit/miss counters), each a `Tally` | none; tests and measurement readers through `stats_snapshot` | OPTIONAL | One store; `Tally` is zero-size without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
-| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` drop is a no-op without the gate | `src/semantic_query_memo/stats.rs` | observation gate |
+| `in_flight_current` / `in_flight_peak` and the in-flight CAS loop | none | OPTIONAL | One store; `InFlightStatsGuard` is zero-size without drop glue when the gate is off | `src/semantic_query_memo/stats.rs` | observation gate |
 | Path-length reservoir (`path_length_samples`, `record_path_length`) | none | OPTIONAL | One store; capped at 8192 samples | `src/semantic_query_memo/{stats,mod}.rs` | observation gate |
 | `SemanticGraphStore::stats_snapshot` / `SemanticGraphStats` reader, `DerivationStore::iter_edges`, `sorted_percentile`, `intern_preserving_scope_call_count` | none; tests and measurement | OPTIONAL | Derived on read | `src/semantic_query_memo/{stats,derivation,nodes}.rs` | observation gate |
 | Blocking-wait clock read feeding `waits_ms` | none | OPTIONAL | One wait | `src/semantic_query_memo/producer.rs` | observation gate |
@@ -170,30 +171,15 @@ this row supersedes that owner's gate column.
 | LSP audit target identity (`target_identity_for_uri`, the URI string of an unregistered document) | The LSP audit record | OPTIONAL | Per request | `crates/verter_lsp/src/audit_harness.rs`, `crates/verter_lsp/src/server/{aux_features,nav_features_audit,sync_orchestration}.rs` | resolved by a closure `run_with_audit` calls only for an audited request |
 | FFI offset visit counter | none | OPTIONAL | Per conversion | `crates/verter_ffi/src/offset.rs` | `cfg(any(test, feature = "semantic-observe"))` |
 
-## Paired build evidence
+## Verification
 
-One machine (macOS, aarch64, 8 logical CPUs), release profile, the
-signature-kernel harness's quick corpus
-(`cargo run --release -p verter_session --example signature_kernel_bench -- --modules 4 --depth 4 --samples 6 --cold-samples 3 --soak 20`),
-built once without and once with `--features semantic-observe`. Every host in
-the harness runs with audit capture off, so the comparison is capture-off in
-an instrumented binary against the stripped default binary.
-
-- Answers: the 24 witnesses' outcomes in every state are identical across the
-  two builds (24 complete, 0 degraded, 0 refused in each).
-- Allocations (counting global allocator, deterministic per workload), default
-  then instrumented: warm query 1660 → 1903 allocations (+14.6%), 246 184 →
-  319 704 bytes; declaration edit 3652 → 3902 (+6.8%); augmentation edit
-  2966 → 3015 (+1.7%); local edit 10 543 → 10 624 (+0.8%); cold load 101 188 →
-  101 573 (+0.4%); restart 101 177 → 101 565 (+0.4%). The soak's final live
-  heap is 3 634 059 bytes stripped and 3 946 370 bytes instrumented.
-- Latency medians move the same way (warm query 4.2 µs → 5.6 µs), but six
-  samples per workload make them indicative only; the allocation figures are
-  the deterministic evidence.
-- Generated code: the stripped harness binary is 30 252 560 bytes against
-  33 114 848 instrumented; it carries no `current_observer` /
-  `CURRENT_OBSERVER` or request-accumulator symbol (3 and 2 in the
-  instrumented binary).
+Capture-equivalence fixtures exercise the same public requests with capture
+on and off. Allocation canaries measure cold flow emission without an
+accumulator. Compare answer classes and deterministic work/growth on the
+quick corpus; retain run commands, platform and measurements in the workflow
+report rather than a committed transcript. Inspect instrumented generated
+code for both concrete modes, including the absence of optional slot access
+in uncaptured execution.
 
 ## Open sweep items
 
@@ -204,28 +190,20 @@ default builds, or work this sweep could not finish, with the reason.
 2. The compile result's wall-clock durations are public result fields read
    only by the `ffi-bench` measurement; removing the clock reads changes the
    compile result and FFI shapes, which compiler attribution owns.
-3. Resolved: emission is specialised over the execution mode
-   (`ObserveExec`, `Captured` / `Uncaptured`; see the observation policy's
-   "Concrete execution modes"). Evidence is the generated code of an
-   instrumented release build,
-   `cargo rustc --profile release -p verter_session --lib --features semantic-observe -- --emit=asm -C symbol-mangling-version=v0`.
-   Of its functions monomorphised for uncaptured execution (named with
-   `Uncaptured`, or with a mode-carrying capability type at its uncaptured
-   default), none calls the observer slot (`current_observer`), the
-   accumulator (`current_accumulator`), the captured-context accessor, the
-   timing flag or the structured-event push; their captured twins do. For
-   example `NodeArena::try_intern_with_fingerprint::<Captured>` reads the
-   timing flag and the captured context, and `::<Uncaptured>` reads neither.
-   The only request-context read left in uncaptured code is the scheduler's
-   job-context carriage (`verter_execution::request_context::current_context`),
-   which binds the request's required budget and cancellation across a
-   resumption. Outside the specialised execution, two kinds of optional read
-   remain, each once per call and never per emission. A plain-form adapter
-   adopts the installed mode with one request-context read, and reads the
-   observer slot only when no request is installed. Request entries, cache
-   publication and eviction, and per-file production keep an untyped
-   emission that reads the accumulator or observer slot and builds no
-   payload when it is empty.
+3. Concrete emission uses explicit borrowed receivers. `RequestSnapshot`
+   retains the `CaptureTargets` at admission; dispatchers clone those handles
+   once and carry them through resumptions. `GraphIn` and session cache
+   lookups borrow the targets. Typed `observe!`, `observe_request!` and
+   structured trace forms require their receiver and perform no observer,
+   request or accumulator TLS lookup in either execution mode. Uncaptured
+   receiver access and payload construction compile away. Required scheduler
+   request-context carriage, budgets and cancellation stay unchanged. Plain
+   entry adapters may snapshot targets once; they forward the borrow through
+   typed operations. Compile source-map timers use the selected mode, and
+   per-builder graph telemetry runs only for captured execution or test work
+   accounting. Process-wide instrumentation retains its documented build gate.
+   Acceptance remains open until the required instrumentation CI lanes pass
+   on the pushed candidate.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a

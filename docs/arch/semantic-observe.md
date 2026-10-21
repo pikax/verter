@@ -179,12 +179,24 @@ sealed trait with exactly two implementors, `Captured` and `Uncaptured`, and
 `verter_audit::specialise!(mode => M, { ... })` expands its body once per mode
 with `M` naming that mode's type (only the `Uncaptured` expansion in a default
 build). Code compiled for `M` emits through the typed forms
-`observe!(M => |obs| ...)`, `observe_request!(M => |ctx| ...)`,
-`component_meta_trace_structured!(M => ...)` and
-`component_meta_trace_custom!(M => ...)`, each a branch on the constant
+`observe!(M => on observer => |obs| ...)`,
+`observe_request!(M => on request => |ctx| ...)`,
+`component_meta_trace_structured!(M => on accumulator => ...)` and
+`component_meta_trace_custom!(M => on accumulator => ...)`, each a branch on the constant
 `M::CAPTURED`: the uncaptured expansion reads no observer, request-context,
 accumulator or timing slot and builds no payload. Specialization is bounded
-to these two modes, not every host/counter combination.
+to these two modes, not every host/counter combination. The typed forms
+require an explicit borrowed receiver; neither captured nor uncaptured
+emission recovers a receiver from TLS.
+
+`RequestSnapshot` retains `CaptureTargets` at lifecycle admission. The
+dispatcher clones those handles once and carries them into its sibling task
+dispatchers; `GraphIn` borrows them for interning and cache operations. Session
+helpers pass the same borrow through typed lookups. The mode-aware
+`resolver_context::capture_targets` accessor returns a static empty carrier
+for uncaptured execution without calling a request port. With the feature
+disabled the carrier is zero-size. Required request-context, budget,
+cancellation and fact-tracing access remains independent.
 
 The mode rides the structures an execution unit already carries:
 
@@ -229,9 +241,10 @@ In a debug instrumented build a dispatcher bound to a request context asserts
 its compiled mode equals the mode the installed root entry selected, so a
 misrouted unit fails in the instrumentation lane rather than dropping a
 request's observations. The process-wide work-attribution table
-(`verter_audit::attribute!`, `count_resolver_context_call!`) and the hosts'
-provenance counters are selected by the instrumented build as a whole, not per
-request, and are outside this specialisation.
+(`verter_audit::attribute!`, `count_resolver_context_call!`) is selected by
+the instrumented build as a whole. Per-execution provenance in typed store
+and host paths follows the selected mode; test-support retains deterministic
+work accounting in both modes.
 
 A default build has no audit envelope at all. The observer slot, the
 per-request accumulator, the record store, the scheduler and VFS audit sinks

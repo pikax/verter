@@ -294,6 +294,17 @@ impl ExternalTypeFrontier {
 
     /// Process one level of the frontier.
     fn process_level<H: FrontierHost>(&mut self, host: &H) -> Result<(), BudgetExceededFailure> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.process_level_in::<H, M>(host, &verter_type_engine::request_observers::CaptureTargets::installed::<M>())
+        })
+    }
+
+    fn process_level_in<H: FrontierHost, M: verter_audit::observe::ObserveExec>(
+        &mut self,
+        host: &H,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+    ) -> Result<(), BudgetExceededFailure> {
+        let _ = observation;
         // Take ownership of current level to avoid borrow issues
         let level: Vec<_> = self.current_level.drain(..).collect();
 
@@ -322,7 +333,7 @@ impl ExternalTypeFrontier {
                 // as one barrel step, including refs whose target is
                 // later deduplicated by the `seen` set — the counter
                 // measures raw walk work, not unique-target count.
-                verter_audit::observe!(|obs| {
+                verter_audit::observe!(M => on observation.observer.as_deref() => |obs| {
                     obs.record_event(verter_audit::AuditEvent::RouteDbBarrelStep);
                 });
                 let target_canonical = host
@@ -1185,7 +1196,7 @@ mod tests {
 
     #[test]
     fn missing_file_produces_route_not_found() {
-        let host = MockHost::new(); // empty â€” no files
+        let host = MockHost::new(); // empty — no files
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1739,7 +1750,7 @@ mod tests {
             "/src/barrel.ts",
             make_state(r#"export { Props } from "./missing""#),
         );
-        // No resolution for ./missing â€” host returns None
+        // No resolution for ./missing — host returns None
 
         let mut frontier = ExternalTypeFrontier::new();
         frontier.seed(vec![PendingExternalSymbol {
@@ -1809,7 +1820,7 @@ mod tests {
     #[test]
     fn local_export_without_eval_env_produces_invalid_declaration() {
         let mut host = MockHost::new();
-        // Without eval_env, symbols map is empty â€” local closure fails
+        // Without eval_env, symbols map is empty — local closure fails
         host.add_file(
             "/src/types.ts",
             make_state("export interface Props { label: string }"),

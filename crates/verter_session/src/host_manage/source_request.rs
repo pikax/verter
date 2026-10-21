@@ -41,6 +41,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::from_ctx(ctx),
             |probe| {
                 self.get_or_resolve_returning_facts_in_scope::<_, _, _, M>(
+                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
                     provider_canonical,
                     imported_name,
                     view,
@@ -59,6 +60,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         M: verter_audit::observe::ObserveExec,
     >(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         provider_canonical: &str,
         imported_name: &str,
         view: &V,
@@ -72,19 +74,25 @@ impl<'a> ImportedRootRequestDriver<'a> {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
+        let _ = observation;
         let key = (provider_canonical.to_owned(), imported_name.to_owned());
 
         if let Some(hit) = self.db.roots.get_if_valid_with_facts(&key, view) {
             // Per-request audit attribution: warm-cache hit. The
             // closure body did not run — this is a true reuse.
-            verter_audit::observe!(M =>|obs| {
+            verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRootWarm);
             });
             return Some(hit);
         }
 
-        let run_result =
-            self.resolve_root_singleflight_inner::<_, _, _, M>(key, view, probe, resolve)?;
+        let run_result = self.resolve_root_singleflight_inner::<_, _, _, M>(
+            observation,
+            key,
+            view,
+            probe,
+            resolve,
+        )?;
         Some((
             run_result.value.root.clone(),
             run_result.value.facts.clone(),
@@ -125,6 +133,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         M: verter_audit::observe::ObserveExec,
     >(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         key: (String, String),
         view: &V,
         probe: &verter_type_engine::fact_signature_helpers::CacheabilityProbe<'_, W>,
@@ -134,6 +143,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
         V: StoreView + ?Sized,
         F: Fn() -> Option<(ImportedRootResult, Vec<FactVersionRef>)>,
     {
+        let _ = observation;
         let flight_body = || {
             if let Some(hit) = self.db.roots.get_if_valid_with_facts(&key, view) {
                 return Ok(ImportedRootFlightOutcome {
@@ -146,7 +156,7 @@ impl<'a> ImportedRootRequestDriver<'a> {
             // expensive `resolve()` closure. Joiners that block on
             // this singleflight do NOT re-enter — the counter
             // reflects unique cold work, not per-waiter overhead.
-            verter_audit::observe!(M =>|obs| {
+            verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRootCold);
             });
             match resolve() {

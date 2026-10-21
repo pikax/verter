@@ -271,13 +271,9 @@ impl AtomicSemanticGraphStats {
         }
     }
 
-    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-    #[inline(always)]
-    pub(super) fn record_in_flight_enter(&self) {}
-
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
     #[inline(always)]
     pub(super) fn record_in_flight_exit(&self) {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
         self.in_flight_current.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -288,12 +284,50 @@ impl AtomicSemanticGraphStats {
 /// in-flight counter, biasing `in_flight_peak` upward across the
 /// remaining lifetime of the store.
 pub(super) struct InFlightStatsGuard<'a> {
-    pub(super) stats: &'a AtomicSemanticGraphStats,
+    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+    stats: Option<&'a AtomicSemanticGraphStats>,
+    #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+    lifetime: std::marker::PhantomData<&'a AtomicSemanticGraphStats>,
 }
 
+impl<'a> InFlightStatsGuard<'a> {
+    #[inline(always)]
+    pub(super) fn new<M: verter_audit::observe::ObserveExec>(
+        stats: &'a AtomicSemanticGraphStats,
+    ) -> Self {
+        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+        {
+            let stats = if super::records_telemetry::<M>() {
+                stats.record_in_flight_enter();
+                Some(stats)
+            } else {
+                None
+            };
+            Self { stats }
+        }
+        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+        {
+            let _ = (stats, std::marker::PhantomData::<M>);
+            Self {
+                lifetime: std::marker::PhantomData,
+            }
+        }
+    }
+}
+
+// The shipped guard carries no optional state, including its lifetime marker.
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+const _: () = assert!(std::mem::size_of::<InFlightStatsGuard<'static>>() == 0);
+
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+const _: () = assert!(!std::mem::needs_drop::<InFlightStatsGuard<'static>>());
+
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 impl Drop for InFlightStatsGuard<'_> {
     fn drop(&mut self) {
-        self.stats.record_in_flight_exit();
+        if let Some(stats) = self.stats {
+            stats.record_in_flight_exit();
+        }
     }
 }
 

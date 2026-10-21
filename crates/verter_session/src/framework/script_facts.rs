@@ -783,7 +783,7 @@ pub(crate) fn resolve_script_facts<T: FrameworkScriptFactPayload>(
     canonical: &str,
 ) -> ScriptFactEvidence<T> {
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
-        resolve_script_facts_inner::<T, M>(host, registration, canonical, None)
+        resolve_script_facts_inner::<T, M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), host, registration, canonical, None)
     })
 }
 
@@ -803,18 +803,26 @@ pub(crate) fn resolve_script_facts_with_ctx<
     canonical: &str,
     ctx: &dyn crate::resolver_core::HostRequestContext<M>,
 ) -> ScriptFactEvidence<T> {
-    resolve_script_facts_inner::<T, M>(host, registration, canonical, Some(ctx))
+    resolve_script_facts_inner::<T, M>(
+        verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+        host,
+        registration,
+        canonical,
+        Some(ctx),
+    )
 }
 
 fn resolve_script_facts_inner<
     T: FrameworkScriptFactPayload,
     M: verter_audit::observe::ObserveExec,
 >(
+    observation: &verter_type_engine::request_observers::CaptureTargets,
     host: &VerterHost,
     registration: &FrameworkRegistration,
     canonical: &str,
     request_ctx: Option<&dyn crate::resolver_core::HostRequestContext<M>>,
 ) -> ScriptFactEvidence<T> {
+    let _ = observation;
     let engine_ctx = request_ctx
         .map(|ctx| -> &dyn ResolverContext<crate::resolver_core::HostCapabilities<M>> { ctx });
     // Zero-cost fast path: this registration registers NO provider ⇒ no
@@ -842,7 +850,7 @@ fn resolve_script_facts_inner<
             (serve.indexed, framework_parse)
         }),
         None => host
-            .ensure_indexed_ready_serve_in::<M>(canonical)
+            .ensure_indexed_ready_serve_in::<M>(observation, canonical)
             .map(|serve| {
                 (
                     serve.indexed.input_record(),
@@ -906,7 +914,7 @@ fn resolve_script_facts_inner<
         TracerScope::ScriptFactsImportRoute,
         || {
             let mut snapshot = host.get_analysis(canonical)?;
-            host.resolve_snapshot_imports::<M>(canonical, &mut snapshot);
+            host.resolve_snapshot_imports::<M>(observation, canonical, &mut snapshot);
             Some(
                 snapshot
                     .imports
@@ -1061,7 +1069,7 @@ fn resolve_script_facts_inner<
                     .iter()
                     .map(|specifier| {
                         let resolved =
-                            host.authoritative_import_route::<M>(canonical, specifier)
+                            host.authoritative_import_route::<M>(observation, canonical, specifier)
                                 .and_then(|resolution| {
                                     resolution.resolved_canonical_id.clone().or_else(|| {
                                         resolution.effective_target().map(str::to_string)
@@ -1155,7 +1163,7 @@ fn resolve_script_facts_inner<
             }
         } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
+            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
                 host,
                 &current_view,
                 overlay,
@@ -1216,7 +1224,7 @@ fn resolve_script_facts_inner<
             }
             for target in &resolved_import_targets {
                 if let Some(import_canonical) = &target.resolved_canonical {
-                    if let Some(h) = host.get_whole_hash_in::<M>(import_canonical) {
+                    if let Some(h) = host.get_whole_hash_in::<M>(observation, import_canonical) {
                         verter_type_engine::resolver_core::resolver_context::observe_fan_out(
                             verter_session_query::facts::fact_cache::FactVersionRef::FileWholeHash {
                                 canonical_id: import_canonical.clone(),

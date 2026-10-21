@@ -150,7 +150,7 @@ fn extract_component_meta_from_inputs<M: verter_audit::observe::ObserveExec>(
     let started = component_meta_debug_enabled().then(Instant::now);
     let canonical = host.resolve_alias_or_canonical(canonical_or_alias);
     let resolved_binding_reactivity = resolved_binding_reactivity(ctx, dispatch, snapshot);
-    component_meta_trace_custom!(M =>
+    component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
         "extract_component_meta",
         format!(
             "owner={} macros={} resolved_macros={} resolved_type_registry={} has_evaluated_types={}",
@@ -180,7 +180,7 @@ fn extract_component_meta_from_inputs<M: verter_audit::observe::ObserveExec>(
         file_path: &canonical,
     };
     let mut meta = verter_semantic::analysis::component_meta::extract_component_meta(input);
-    component_meta_trace_custom!(M =>
+    component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
         "extract_component_meta_declared_surface",
         format!(
             "owner={} props={} events={} slots={}",

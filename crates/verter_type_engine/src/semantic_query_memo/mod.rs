@@ -778,6 +778,19 @@ impl Default for SemanticGraphStore {
     }
 }
 
+/// Optional telemetry follows the selected execution mode. Test harnesses
+/// keep work accounting independently of request capture.
+#[inline(always)]
+pub(super) const fn records_telemetry<M: verter_audit::observe::ObserveExec>() -> bool {
+    cfg!(any(test, feature = "test-support")) || M::CAPTURED
+}
+
+impl AsRef<SemanticGraphStore> for SemanticGraphStore {
+    fn as_ref(&self) -> &SemanticGraphStore {
+        self
+    }
+}
+
 impl SemanticGraphStore {
     /// The one store constructor: the store and its graph storage charge
     /// the same account, bound before the first node is interned. Binds
@@ -1331,6 +1344,7 @@ impl SemanticGraphStore {
         canonical_id: &str,
     ) -> usize {
         use rustc_hash::FxHashSet;
+        let observation = crate::request_observers::CaptureTargets::installed::<M>();
 
         // The family memo is a three-member consistency cluster —
         // `entries` (the memo map), `memo_budget` (its FIFO ledger), and
@@ -1354,6 +1368,7 @@ impl SemanticGraphStore {
             // The index's lock acquisition, as request audit contention.
             #[cfg(feature = "semantic-observe")]
             crate::request_observers::record_family_map_lock_acquisition::<M>(
+                &observation,
                 std::time::Duration::ZERO,
             );
             let reached = self.canonical_to_entries.reached_by(canonical_id);
@@ -1482,7 +1497,8 @@ impl SemanticGraphStore {
         // arena Vec is append-only — this only clears the "next
         // intern returns existing id" path; valid SemanticNodeIds for
         // nodes already published into the arena are unaffected.
-        self.arena.invalidate_for_canonical::<M>(canonical_id);
+        self.arena
+            .invalidate_for_canonical::<M>(&observation, canonical_id);
 
         // Hash-cons memos (substitute, evaluate-deferred) — drop in
         // full on any per-canonical edit. The memo VALUE may be a
@@ -2065,7 +2081,7 @@ impl SemanticGraphStore {
                 receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
             }
         });
-        crate::observe_request!(C::Observe => |rctx| {
+        crate::observe_request!(C::Observe => on crate::resolver_core::resolver_context::capture_targets(ctx).request.as_deref() => |rctx| {
             if result.is_some() {
                 rctx.cache_counters
                     .semantic_graph
@@ -2217,59 +2233,75 @@ impl SemanticGraphStore {
             fact_status: crate::semantic_query::FactStatus::Complete,
             receipt: crate::semantic_query::ReadReceipt::Priced(entry.cost_receipt),
         };
-        self.note_warm_hit::<C::Observe>(key);
+        self.note_warm_hit::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(ctx),
+            key,
+        );
         Some(hit)
     }
 
     /// The observations of one family-memo lookup entry, warm or cold.
-    pub(crate) fn note_lookup_entry(&self) {
+    pub(crate) fn note_lookup_entry<M: verter_audit::observe::ObserveExec>(&self) {
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        if records_telemetry::<M>() {
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The observations a family-memo lookup that missed `key` makes.
-    pub(crate) fn note_lookup_miss(&self, key: &SemanticQueryKey) {
+    pub(crate) fn note_lookup_miss<M: verter_audit::observe::ObserveExec>(
+        &self,
+        key: &SemanticQueryKey,
+    ) {
+        let _ = std::marker::PhantomData::<M>;
         #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         let _ = key;
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+        if records_telemetry::<M>() {
+            crate::loop5_instrumentation::FAMILY_MEMO_MISSES.fetch_add(1, Ordering::Relaxed);
+        }
         #[cfg(any(test, feature = "test-support"))]
         crate::project_semantic_dispatch::raise::record_dispatch_cold(key);
         #[cfg(any(test, feature = "test-support"))]
         crate::capture_token::with_active_capture(|t| t.record_dispatch(key, /* hit */ false));
         // A chronological operation trace: optional observation.
         #[cfg(feature = "semantic-observe")]
-        tracing::debug!(
-            target: "verter::memo::miss",
-            ?key,
-            "memo_miss"
-        );
+        if M::CAPTURED {
+            tracing::debug!(target: "verter::memo::miss", ?key, "memo_miss");
+        }
     }
 
     /// The observations a family-memo lookup answered warm for `key` makes.
-    fn note_warm_hit<M: verter_audit::observe::ObserveExec>(&self, key: &SemanticQueryKey) {
+    fn note_warm_hit<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &crate::request_observers::CaptureTargets,
+        key: &SemanticQueryKey,
+    ) {
+        let _ = observation;
         #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
         let _ = key;
         // Instrumentation — fast-path attribution.
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::FAMILY_MEMO_HITS
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if records_telemetry::<M>() {
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            crate::loop5_instrumentation::WARM_HIT_FAST_PATH_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            crate::loop5_instrumentation::EXECUTE_COOPERATIVE_WARM_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+            crate::loop5_instrumentation::FAMILY_MEMO_HITS
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Production stats (lock-free atomic — same as slow path's
-        // warm-hit branch at step 1).
-        self.stats.hits.fetch_add(1, Ordering::Relaxed);
+            // Production stats (lock-free atomic — same as slow path's
+            // warm-hit branch at step 1).
+            self.stats.hits.fetch_add(1, Ordering::Relaxed);
+        }
 
         // Per-request audit hit attribution. Bumped exactly once per
         // warm call (the slow path's old `let initial_hit = self.get_unvalidated(&key)`
         // observation plus the loop's step-1 `self.get_unvalidated(&key)` call
         // bumped this counter twice; the fast path bumps it once).
-        crate::observe_request!(M => |rctx| {
+        crate::observe_request!(M => on observation.request.as_deref() => |rctx| {
             rctx.cache_counters
                 .semantic_graph
                 .hits
@@ -2279,6 +2311,7 @@ impl SemanticGraphStore {
         // Per-context cache-event attribution (Hit). Same as the slow
         // path's step-1 warm branch, single TLS lookup.
         crate::request_observers::record_cache_event::<M>(
+            observation,
             verter_execution::request_context::CacheEventKind::Hit,
         );
 
@@ -2296,11 +2329,9 @@ impl SemanticGraphStore {
 
         // A chronological operation trace: optional observation.
         #[cfg(feature = "semantic-observe")]
-        tracing::debug!(
-            target: "verter::memo::hit",
-            ?key,
-            "memo_hit"
-        );
+        if M::CAPTURED {
+            tracing::debug!(target: "verter::memo::hit", ?key, "memo_hit");
+        }
     }
 
     /// Abort and retire one canceled cold owner without publishing a result.
@@ -2441,9 +2472,10 @@ impl SemanticGraphStore {
         // the traced cross-file fact set. `warm_publish_one` records it
         // verbatim; it never reconstructs facts from the legacy fence.
         let read_set_signature = read_set_signature.clone();
-        let dispatch_dep_signature = self
-            .dep_signature_interner
-            .intern_in::<C::Observe>(dispatch_dep_signature);
+        let dispatch_dep_signature = self.dep_signature_interner.intern_in::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(ctx),
+            dispatch_dep_signature,
+        );
         let direct_edges =
             reverse_index::direct_edge_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
@@ -2515,7 +2547,10 @@ impl SemanticGraphStore {
             // record the sweep. Returning `false` makes the caller skip
             // the prefix-backfill loop too — the build's ids were
             // interned against a now-stale epoch.
-            record_cold_abort_swept::<C::Observe>(&self.stats);
+            record_cold_abort_swept::<C::Observe>(
+                &self.stats,
+                crate::resolver_core::resolver_context::capture_targets(ctx),
+            );
             return WarmPublishOutcome::Aborted;
         }
         // Record whether this family is newly entering the memo so the
@@ -2534,6 +2569,7 @@ impl SemanticGraphStore {
         // stays indexed across the replacement.
         reverse_index::register_published(
             C::Observe::default(),
+            crate::resolver_core::resolver_context::capture_targets(ctx),
             &self.canonical_to_entries,
             family,
             &populated_slots,
@@ -2550,7 +2586,7 @@ impl SemanticGraphStore {
         // without false positives from peer dispatches in
         // workspace-parallel runs.
         if !populated_slots.is_empty() {
-            crate::observe_request!(C::Observe => |ctx| {
+            crate::observe_request!(C::Observe => on crate::resolver_core::resolver_context::capture_targets(ctx).request.as_deref() => |ctx| {
                 ctx.memo_insertions
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             });
@@ -2693,9 +2729,10 @@ impl SemanticGraphStore {
         // Past both early-outs: this backfill genuinely clones the broader
         // result into an empty narrower sibling slot.
         verter_audit::attribute!(CacheCandidateCopy);
-        let dispatch_dep_signature = self
-            .dep_signature_interner
-            .intern_in::<C::Observe>(&dispatch_dep_signature);
+        let dispatch_dep_signature = self.dep_signature_interner.intern_in::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(ctx),
+            &dispatch_dep_signature,
+        );
         let direct_edges =
             reverse_index::direct_edge_count(&read_set_signature, &dispatch_dep_signature);
         let validated_at_generation = flags.current_project_generation();
@@ -2766,7 +2803,10 @@ impl SemanticGraphStore {
         }
         if parent_inflight.state.lock().aborted {
             drop(entries);
-            record_cold_abort_swept::<C::Observe>(&self.stats);
+            record_cold_abort_swept::<C::Observe>(
+                &self.stats,
+                crate::resolver_core::resolver_context::capture_targets(ctx),
+            );
             return false;
         }
         let Some((slots, family_was_new)) = self.family_slots_locked(&mut entries, family) else {
@@ -2782,6 +2822,7 @@ impl SemanticGraphStore {
         // stays indexed across the replacement.
         reverse_index::register_published(
             C::Observe::default(),
+            crate::resolver_core::resolver_context::capture_targets(ctx),
             &self.canonical_to_entries,
             family,
             &populated_slots,
@@ -2794,7 +2835,7 @@ impl SemanticGraphStore {
         // path bumps the same per-request counter so attribution
         // tests cover both publish sites.
         if !populated_slots.is_empty() {
-            crate::observe_request!(C::Observe => |ctx| {
+            crate::observe_request!(C::Observe => on crate::resolver_core::resolver_context::capture_targets(ctx).request.as_deref() => |ctx| {
                 ctx.memo_insertions
                     .fetch_add(populated_slots.len() as u64, Ordering::Relaxed);
             });
@@ -3059,11 +3100,15 @@ pub fn empty_diagnostics() -> crate::project_semantic_dispatch::walk::WalkerDiag
 #[inline]
 fn record_inflight_aborted_retry<M: verter_audit::observe::ObserveExec>(
     stats: &AtomicSemanticGraphStats,
+    observation: &crate::request_observers::CaptureTargets,
 ) {
-    stats
-        .inflight_aborted_retries
-        .fetch_add(1, Ordering::Relaxed);
-    crate::observe_request!(M => |ctx| {
+    let _ = observation;
+    if records_telemetry::<M>() {
+        stats
+            .inflight_aborted_retries
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    crate::observe_request!(M => on observation.request.as_deref() => |ctx| {
         ctx.inflight_aborted_retries.fetch_add(1, Ordering::Relaxed);
     });
 }
@@ -3077,9 +3122,13 @@ fn record_inflight_aborted_retry<M: verter_audit::observe::ObserveExec>(
 #[inline]
 fn record_cold_abort_swept<M: verter_audit::observe::ObserveExec>(
     stats: &AtomicSemanticGraphStats,
+    observation: &crate::request_observers::CaptureTargets,
 ) {
-    stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
-    crate::observe_request!(M => |ctx| {
+    let _ = observation;
+    if records_telemetry::<M>() {
+        stats.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
+    }
+    crate::observe_request!(M => on observation.request.as_deref() => |ctx| {
         ctx.cold_aborts_swept.fetch_add(1, Ordering::Relaxed);
     });
 }

@@ -726,8 +726,11 @@ fn augmentation_probe_rejects_stale_artifact_the_authority_gate_rejects() {
     // Precondition: every serving accessor rejects the phantom artifact
     // (its file does not exist).
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(phantom)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            phantom
+        )
+        .is_none(),
         "precondition: the authority gate must reject the phantom artifact",
     );
 
@@ -779,8 +782,11 @@ fn artifact_only_canonical_is_evicted_on_own_overlay_change() {
 
     // Control: existing file → the artifact-only authority answers.
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "PRE: a fresh artifact-only artifact must serve",
     );
 
@@ -789,8 +795,11 @@ fn artifact_only_canonical_is_evicted_on_own_overlay_change() {
     // serving across unrelated transitions.
     host.notify_upsert(unrelated, Arc::from("export const u = 1;"));
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "an unrelated overlay change must not evict the artifact-only \
          artifact (untracked surfaces reuse across unrelated transitions)",
     );
@@ -800,8 +809,11 @@ fn artifact_only_canonical_is_evicted_on_own_overlay_change() {
     // so the retained artifact must stop serving.
     host.notify_upsert(canonical, Arc::from("export type T2 = 2;"));
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "POST: the canonical's own overlay change must evict its \
          artifact-only artifact",
     );
@@ -816,8 +828,11 @@ fn artifact_only_canonical_requires_file_presence() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = seed_artifact_only(&host, canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "tier-2 must require file_exists: a nonexistent file rejects even \
          when the generation stamp matches",
     );
@@ -834,8 +849,11 @@ fn artifact_only_canonical_is_rejected_after_notify_close() {
     let _ = seed_artifact_only(&host, canonical);
     let _ = seed_artifact_only(&host, unrelated);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "PRE: the seeded artifact must serve before the close",
     );
 
@@ -846,16 +864,22 @@ fn artifact_only_canonical_is_rejected_after_notify_close() {
     // serving gate consults).
     host.notify_close(canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "POST: notify_close must invalidate the artifact-only artifact",
     );
     // Negative half: a per-canonical close must NOT take down an
     // UNRELATED canonical's artifact (per-canonical rail, not an epoch
     // equality clause).
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(unrelated)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            unrelated
+        )
+        .is_some(),
         "an unrelated canonical's artifact must survive a per-canonical \
          close",
     );
@@ -885,8 +909,11 @@ fn artifact_only_canonical_rejected_after_direct_workspace_mutation() {
     for seeded in [canonical, written, copied, unrelated] {
         let _ = seed_artifact_only(&host, seeded);
         assert!(
-            host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(seeded)
-                .is_some(),
+            host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                seeded
+            )
+            .is_some(),
             "PRE: the seeded artifact for {seeded} must serve",
         );
     }
@@ -895,8 +922,11 @@ fn artifact_only_canonical_rejected_after_direct_workspace_mutation() {
     // eviction) never runs.
     ws.notify_upsert(canonical, Arc::from("export type T2 = 2;"));
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "a DIRECT workspace notify_upsert must stop the artifact-only \
          serve (the read-side transition rail, not host-wrapper eviction)",
     );
@@ -906,8 +936,11 @@ fn artifact_only_canonical_rejected_after_direct_workspace_mutation() {
     ws.write_file(written, "export type W = 2;")
         .expect("write_file must succeed");
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(written)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            written
+        )
+        .is_none(),
         "write_file must stop the artifact-only serve",
     );
 
@@ -915,16 +948,22 @@ fn artifact_only_canonical_rejected_after_direct_workspace_mutation() {
     ws.copy_file(canonical, copied)
         .expect("copy_file must succeed");
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(copied)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            copied
+        )
+        .is_none(),
         "copy_file must stop the destination's artifact-only serve",
     );
 
     // Package-reuse negative: the rail is PER-CANONICAL — the unrelated
     // canonical's artifact keeps serving across all of the above.
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(unrelated)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            unrelated
+        )
+        .is_some(),
         "unrelated transitions must not invalidate an untouched \
          artifact-only canonical (per-canonical rail, not an epoch \
          equality clause)",
@@ -939,8 +978,11 @@ fn close_clears_retained_artifact_store() {
     let host = VerterHost::new(HostConfig::default(), ws);
     let _ = seed_artifact_only(&host, canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "PRE: the seeded artifact must serve before close()",
     );
 
@@ -960,8 +1002,11 @@ fn close_clears_retained_artifact_store() {
          whole_env)",
     );
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "POST: an artifact-only canonical must not keep serving after \
          close()",
     );
@@ -975,8 +1020,11 @@ fn artifact_only_canonical_is_rejected_across_set_workspace() {
     let host = VerterHost::new(HostConfig::default(), ws);
     let _ = seed_artifact_only(&host, canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "PRE: the seeded artifact must serve before the swap",
     );
 
@@ -986,8 +1034,11 @@ fn artifact_only_canonical_is_rejected_across_set_workspace() {
     // artifact keeps serving against a workspace it never came from.
     host.set_workspace(StdArc::new(MemoryWorkspace::new(MemoryOptions::default())));
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "POST: a workspace swap must invalidate artifact-only artifacts \
          that have no presence in the new workspace",
     );
@@ -1010,8 +1061,11 @@ fn set_workspace_same_path_different_content_does_not_serve_stale_artifact() {
     let host = VerterHost::new(HostConfig::default(), ws);
     let _ = seed_artifact_only(&host, canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_some(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_some(),
         "PRE: the seeded artifact must serve before the swap",
     );
 
@@ -1019,8 +1073,11 @@ fn set_workspace_same_path_different_content_does_not_serve_stale_artifact() {
     replacement.inject_file(canonical.to_string(), Arc::from("export type New = 2;"));
     host.set_workspace(replacement);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "POST: a workspace swap must invalidate the stale artifact even \
          when the new workspace carries the same path (different \
          content) — only the artifact-store clear catches this case",
@@ -1040,8 +1097,11 @@ fn store_view_rejects_artifact_only_state_the_accessor_rejects() {
     let host = VerterHost::new_standalone(HostConfig::default());
     let _ = seed_artifact_only(&host, canonical);
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "precondition: the accessor must reject the never-present canonical",
     );
     let view = host
@@ -1063,7 +1123,10 @@ fn store_view_rejects_artifact_only_state_the_accessor_rejects() {
     let seeded = seed_artifact_only(&fresh_host, fresh_canonical);
     assert!(
         fresh_host
-            .artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(fresh_canonical)
+            .artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                fresh_canonical
+            )
             .is_some(),
         "precondition: the accessor must serve the fresh canonical",
     );
@@ -1108,8 +1171,11 @@ fn artifact_only_superseded_artifact_rebuilds_instead_of_serving() {
     // re-materialises from the live workspace content (`ensure_loaded`
     // ingests the overlay).
     assert!(
-        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(canonical)
-            .is_none(),
+        host.artifact_current_indexed_raw::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            canonical
+        )
+        .is_none(),
         "the superseded stub must not serve after the signal eviction",
     );
     let rebuilt = host

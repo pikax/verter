@@ -93,7 +93,7 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let default_owner = host_ctx
                 .shallow_file_state(request.canonical_id.as_ref())?

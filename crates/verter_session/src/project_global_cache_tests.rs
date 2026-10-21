@@ -859,6 +859,7 @@ fn bundler_known_miss_is_never_served_warm_from_the_derived_route_cache() {
     // the caller re-resolves through the one owner-edge authority.
     assert_eq!(
         host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             "/w/owner.ts",
             "./theme"
         ),
@@ -872,6 +873,7 @@ fn bundler_known_miss_is_never_served_warm_from_the_derived_route_cache() {
     upsert_ts(&host, "/w/theme.ts", "export default { item: 'item' }");
 
     let post = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
         "/w/owner.ts",
         "./theme",
     );

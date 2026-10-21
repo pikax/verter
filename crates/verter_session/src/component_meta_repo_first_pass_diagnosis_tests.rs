@@ -375,6 +375,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
         let _guard = CaptureToken::start_for_query("phase_11d_unit_record_dedup");
         // First emission: cold ledger insert.
         graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -385,6 +386,7 @@ fn prefix_backfill_skips_record_origin_edge_when_target_already_warm() {
         // duplicate ledger entry; post-fix the dedup skips the ledger
         // write.
         graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -536,12 +538,16 @@ fn audit_mining_traces_dropped_prefix_edges() {
             Some(Arc::clone(&acc)),
         );
         let _guard = RequestContextGuard::install(ctx);
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<
+            verter_audit::observe::Captured,
+        >();
 
         // Two emissions of the SAME edge identity. Pre-fix both
         // populate the ledger AND both push to the accumulator.
         // Post-fix the ledger dedups (one entry) but the accumulator
         // sees BOTH (audit-mining contract preservation).
         graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &observation,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),
@@ -552,6 +558,7 @@ fn audit_mining_traces_dropped_prefix_edges() {
             fence.clone(),
         );
         graph.record_origin_edge_in::<verter_audit::observe::Captured>(
+            &observation,
             target,
             OriginEdgeKind::ProjectMember,
             Arc::clone(&sources),

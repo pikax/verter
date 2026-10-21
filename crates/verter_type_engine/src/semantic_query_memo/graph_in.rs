@@ -21,6 +21,8 @@ use crate::semantic_query::QueryError;
 pub struct GraphIn<'a, M: ObserveExec> {
     store: &'a SemanticGraphStore,
     mode: PhantomData<M>,
+    #[cfg(feature = "semantic-observe")]
+    observation: &'a crate::request_observers::CaptureTargets,
 }
 
 impl<M: ObserveExec> Clone for GraphIn<'_, M> {
@@ -31,14 +33,38 @@ impl<M: ObserveExec> Clone for GraphIn<'_, M> {
 
 impl<M: ObserveExec> Copy for GraphIn<'_, M> {}
 
+impl<M: ObserveExec> AsRef<SemanticGraphStore> for GraphIn<'_, M> {
+    fn as_ref(&self) -> &SemanticGraphStore {
+        self.store
+    }
+}
+
 impl<'a, M: ObserveExec> GraphIn<'a, M> {
     /// The store `store`, reached by execution compiled for `M`.
     #[inline(always)]
     #[must_use]
-    pub fn of(store: &'a SemanticGraphStore) -> Self {
+    pub fn observed(
+        store: &'a SemanticGraphStore,
+        observation: &'a crate::request_observers::CaptureTargets,
+    ) -> Self {
+        let _ = observation;
         Self {
             store,
             mode: PhantomData,
+            #[cfg(feature = "semantic-observe")]
+            observation,
+        }
+    }
+
+    #[inline(always)]
+    fn capture_targets(self) -> &'a crate::request_observers::CaptureTargets {
+        #[cfg(feature = "semantic-observe")]
+        {
+            self.observation
+        }
+        #[cfg(not(feature = "semantic-observe"))]
+        {
+            &crate::request_observers::CaptureTargets::EMPTY
         }
     }
 
@@ -53,7 +79,7 @@ impl<'a, M: ObserveExec> GraphIn<'a, M> {
     #[inline(always)]
     #[must_use = "the returned SemanticNodeId is the only way to reach the interned node"]
     pub fn intern_node(self, data: SemanticNodeData) -> SemanticNodeId {
-        self.store.intern_node_in::<M>(data)
+        self.store.intern_node_in::<M>(self.capture_targets(), data)
     }
 
     /// [`SemanticGraphStore::intern_node_with_scope_in`] under this unit's
@@ -65,7 +91,8 @@ impl<'a, M: ObserveExec> GraphIn<'a, M> {
         data: SemanticNodeData,
         scope: NodeScopeId,
     ) -> SemanticNodeId {
-        self.store.intern_node_with_scope_in::<M>(data, scope)
+        self.store
+            .intern_node_with_scope_in::<M>(self.capture_targets(), data, scope)
     }
 
     /// [`SemanticGraphStore::intern_preserving_scope_in`] under this unit's
@@ -77,7 +104,8 @@ impl<'a, M: ObserveExec> GraphIn<'a, M> {
         origin: SemanticNodeId,
         data: SemanticNodeData,
     ) -> SemanticNodeId {
-        self.store.intern_preserving_scope_in::<M>(origin, data)
+        self.store
+            .intern_preserving_scope_in::<M>(self.capture_targets(), origin, data)
     }
 
     /// [`SemanticGraphStore::intern_rooted_node_in`] under this unit's mode.
@@ -88,7 +116,8 @@ impl<'a, M: ObserveExec> GraphIn<'a, M> {
         scope: NodeScopeId,
         operands: &node_roots::NodeRootSet,
     ) -> Result<node_roots::NodeRoot, QueryError> {
-        self.store.intern_rooted_node_in::<M>(data, scope, operands)
+        self.store
+            .intern_rooted_node_in::<M>(self.capture_targets(), data, scope, operands)
     }
 }
 
@@ -109,8 +138,14 @@ impl<M: ObserveExec> GraphIn<'_, M> {
         super::producer::ValueRead,
         Option<verter_session_query::facts::fact_cache::ReadSetSignature>,
     ) {
-        self.store
-            .complete_request_local_in::<M>(attempt, flags, output, cost_receipt, capture)
+        self.store.complete_request_local_in::<M>(
+            self.capture_targets(),
+            attempt,
+            flags,
+            output,
+            cost_receipt,
+            capture,
+        )
     }
 }
 
@@ -136,8 +171,14 @@ impl<M: ObserveExec> GraphIn<'_, M> {
         meta: crate::semantic_query::OriginMeta,
         builder_fence: crate::semantic_query::DepSignature,
     ) {
-        self.store
-            .record_origin_edge_in::<M>(result, kind, sources, meta, builder_fence);
+        self.store.record_origin_edge_in::<M>(
+            self.capture_targets(),
+            result,
+            kind,
+            sources,
+            meta,
+            builder_fence,
+        );
     }
 }
 
@@ -153,5 +194,120 @@ impl<M: ObserveExec> std::ops::Deref for GraphIn<'_, M> {
 impl<M: ObserveExec> crate::semantic_query::NodeRead for GraphIn<'_, M> {
     fn node_data(&self, node: SemanticNodeId) -> Option<super::NodeData> {
         self.store.node_data(node)
+    }
+}
+
+impl<M: ObserveExec> GraphIn<'_, M> {
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_instantiate(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_instantiate();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_awaited_normalize(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_awaited_normalize();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_async_return_payload(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_async_return_payload();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_conditional_decided(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_conditional_decided();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_conditional_deferred(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_conditional_deferred();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_branch_selection_true(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_branch_selection_true();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_branch_selection_false(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_branch_selection_false();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_decl_subexpression_lowering(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_decl_subexpression_lowering();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_relation_check(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_relation_check();
+        }
+    }
+    /// Record optional telemetry for this execution.
+    #[inline(always)]
+    pub fn record_mapped_per_k_materialization(self) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_mapped_per_k_materialization();
+        }
+    }
+    /// Record a path sample only for captured execution or test work accounting.
+    #[inline(always)]
+    pub fn record_path_length(self, length: u32) {
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.store.record_path_length(length);
+        }
+    }
+}
+
+impl<'a> GraphIn<'a, verter_audit::observe::Uncaptured> {
+    /// An uncaptured fixture's graph, with no observation receivers.
+    pub fn of(store: &'a SemanticGraphStore) -> Self {
+        Self::observed(store, &crate::request_observers::CaptureTargets::EMPTY)
+    }
+}
+
+impl<M: ObserveExec> GraphIn<'_, M> {
+    /// A substitution memo read under this execution's telemetry mode.
+    pub(crate) fn substitute_memo_get_priced(
+        self,
+        node: SemanticNodeId,
+        parameter: SemanticNodeId,
+        arg: SemanticNodeId,
+    ) -> Option<(
+        SemanticNodeId,
+        std::sync::Arc<crate::project_semantic_dispatch::cost_receipt::DemandCostReceipt>,
+    )> {
+        self.store
+            .substitute_memo_get_priced::<M>(node, parameter, arg)
+    }
+
+    /// A validated deferred-evaluation read under this execution's telemetry mode.
+    pub(crate) fn evaluate_deferred_memo_get(
+        self,
+        node: SemanticNodeId,
+        context: crate::semantic_query::ProjectionReductionContext,
+        demand: crate::project_semantic_dispatch::evaluate::DeferredEvaluationDemand,
+        ctx: &dyn crate::resolver_core::fact_validation_port::FactValidation,
+    ) -> Option<crate::semantic_query::CacheRead<SemanticNodeId>> {
+        self.store
+            .evaluate_deferred_memo_get::<M>(node, context, demand, ctx)
     }
 }

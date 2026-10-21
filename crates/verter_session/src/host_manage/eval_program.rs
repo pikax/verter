@@ -220,7 +220,7 @@ impl VerterHost {
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn read_analysis_source(&self, canonical_id: &str) -> Option<Arc<str>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.read_analysis_source_in::<M>(canonical_id)
+            self.read_analysis_source_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
         })
     }
 
@@ -229,19 +229,19 @@ impl VerterHost {
     /// request's mode.
     pub(crate) fn read_analysis_source_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<Arc<str>> {
-        component_meta_trace_custom!(M => "read_analysis_source", format!("owner={canonical_id}"));
+        let _ = observation;
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source", format!("owner={canonical_id}"));
         if canonical_id.is_empty() {
-            component_meta_trace_custom!(M =>
-                "read_analysis_source_result",
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                 read_analysis_source_result_detail("", "empty-canonical", 0, true),
             );
             return None;
         }
         if let Some(source) = self.get_source(canonical_id) {
-            component_meta_trace_custom!(M =>
-                "read_analysis_source_result",
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                 read_analysis_source_result_detail(canonical_id, "host-cache", source.len(), false,),
             );
             return Some(source);
@@ -260,9 +260,8 @@ impl VerterHost {
         // source is the scheduler, read above via `get_source`) gets `None`
         // here, so a live-but-stale scope falls through to `ensure_loaded`
         // rather than reading the stale artifact.
-        if let Some(facts) = self.artifact_current_indexed::<M>(canonical_id) {
-            component_meta_trace_custom!(M =>
-                "read_analysis_source_result",
+        if let Some(facts) = self.artifact_current_indexed::<M>(observation, canonical_id) {
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                 read_analysis_source_result_detail(
                     canonical_id,
                     "module-facts-db",
@@ -274,8 +273,7 @@ impl VerterHost {
         }
 
         if is_raw_import_specifier_id(canonical_id) {
-            component_meta_trace_custom!(M =>
-                "read_analysis_source_result",
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                 read_analysis_source_result_detail(canonical_id, "raw-import-specifier", 0, true,),
             );
             return None;
@@ -291,8 +289,7 @@ impl VerterHost {
         {
             if self.ensure_loaded(canonical_id) {
                 if let Some(source) = self.get_source(canonical_id) {
-                    component_meta_trace_custom!(M =>
-                        "read_analysis_source_result",
+                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                         read_analysis_source_result_detail(
                             canonical_id,
                             "ensure-loaded",
@@ -313,9 +310,8 @@ impl VerterHost {
                 // pre-`ensure_loaded` read above: a stale lingering
                 // artifact must not seed the cold analysis / route-fact
                 // producers with pre-edit source.
-                if let Some(facts) = self.artifact_current_indexed::<M>(canonical_id) {
-                    component_meta_trace_custom!(M =>
-                        "read_analysis_source_result",
+                if let Some(facts) = self.artifact_current_indexed::<M>(observation, canonical_id) {
+                    component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                         read_analysis_source_result_detail(
                             canonical_id,
                             "ensure-loaded-module-facts",
@@ -328,8 +324,7 @@ impl VerterHost {
                     return Some(Arc::clone(&facts.raw_source));
                 }
             }
-            component_meta_trace_custom!(M =>
-                "read_analysis_source_result",
+            component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"read_analysis_source_result",
                 read_analysis_source_result_detail(canonical_id, "not-loaded", 0, true,),
             );
             None

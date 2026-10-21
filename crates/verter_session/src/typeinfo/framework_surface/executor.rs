@@ -375,7 +375,7 @@ impl VerterHost {
                         let overlay =
                             Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
                         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-                            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
+                            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
                                 self,
                                 &current_view,
                                 overlay,

@@ -39,6 +39,46 @@ macro_rules! record_origin_edge {
 }
 pub(crate) use record_origin_edge;
 
+#[cfg(all(test, feature = "semantic-observe"))]
+#[test]
+fn captured_origin_edges_keep_the_bound_accumulator_after_ambient_changes() {
+    use crate::request_context::{RequestContext, RequestContextGuard};
+    use crate::request_footprint::RequestFootprintAccumulator;
+    use crate::request_observers::CaptureTargets;
+    use verter_audit::observe::Captured;
+
+    let bound = Arc::new(RequestFootprintAccumulator::new());
+    let nested = Arc::new(RequestFootprintAccumulator::new());
+    let observation = CaptureTargets {
+        accumulator: Some(Arc::clone(&bound)),
+        ..CaptureTargets::default()
+    };
+    let store = SemanticGraphStore::new();
+    let _scope = store.enter_node_root_scope();
+    let graph = GraphIn::<Captured>::observed(&store, &observation);
+    let source = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::String,
+    ));
+    let result = graph.intern_node(SemanticNodeData::Primitive(
+        crate::semantic_query::PrimitiveKind::Number,
+    ));
+    let _nested = RequestContextGuard::install(RequestContext::new(
+        2,
+        Arc::from("/nested.ts"),
+        true,
+        Some(Arc::clone(&nested)),
+    ));
+    graph.record_origin_edge(
+        result,
+        OriginEdgeKind::Normalize,
+        Arc::from([source]),
+        crate::semantic_query::OriginMeta::None,
+        DepSignature::new(Vec::new()),
+    );
+    assert_eq!(bound.drain().derivation_edges_raw.len(), 1);
+    assert!(nested.drain().derivation_edges_raw.is_empty());
+}
+
 impl SemanticGraphStore {
     construction_ordinal_seam! {
         /// Record a derivation/origin edge for `result`. Builders call this
@@ -68,17 +108,19 @@ impl SemanticGraphStore {
         /// present is skipped, so repeated walks through the same
         /// intermediate hop do not inflate the bucket or the per-request
         /// audit cost. The audit-mining contract is preserved: the
-        /// [`request_context::current_accumulator`] push remains
+        /// request-bound accumulator push remains
         /// unconditional so the footprint miner observes every derivation hop
         /// the production hot path would have emitted.
         fn record_origin_edge_in<M: verter_audit::observe::ObserveExec>(
             &self,
+            observation: &crate::request_observers::CaptureTargets,
             result: SemanticNodeId,
             kind: OriginEdgeKind,
             sources: Arc<[SemanticNodeId]>,
             meta: crate::semantic_query::OriginMeta,
             builder_fence: DepSignature,
         ) {
+            let _ = observation;
             verter_audit::attribute_n!(OriginEdgeRecord, sources.len());
             // Origin edges feed only the audit origin graph, which exists in
             // a capture build, and the derivation-layer tests. A production
@@ -182,7 +224,7 @@ impl SemanticGraphStore {
                 // so dropped ledger writes still surface in the audit trace.
                 #[cfg(feature = "semantic-observe")]
                 if M::CAPTURED {
-                    if let Some(acc) = crate::request_context::current_accumulator() {
+                    if let Some(acc) = observation.accumulator.as_ref() {
                         acc.push_derivation_edge(result, kind, edge.clone());
                     }
                 }
@@ -238,6 +280,7 @@ impl SemanticGraphStore {
         builder_fence: DepSignature,
     ) {
         self.record_origin_edge_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
             result,
             kind,
             sources,
