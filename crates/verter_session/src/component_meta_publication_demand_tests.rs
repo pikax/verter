@@ -1806,3 +1806,73 @@ fn slot_binding_synthesis_admission_refusal_is_not_partial() {
          result_is_partial — the false-partial class"
     );
 }
+
+const RELATION_REFUSAL_SFC: &str = r#"<script setup lang="ts">
+type Keep<T, U> = T extends U ? T : never;
+type Wide = { a: string } | { b: number };
+defineProps<Keep<Wide, { a: string }>>();
+</script>
+<template><div /></template>
+"#;
+
+/// A relation the checker refuses at its comparison allowance (TS2859)
+/// reaches the component-meta consumer as the checker's formatted message
+/// naming the two compared types, through the macro payload's diagnostics.
+#[test]
+fn a_macro_payload_relation_refusal_reports_the_checkers_message() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let host = build_host(&[("/workspace/src/Refused.vue", RELATION_REFUSAL_SFC)]);
+    let resolved = with_relation_comparisons_for_tests(0, || {
+        host.get_component_meta_with_resolution("/workspace/src/Refused.vue")
+    });
+    let (meta, _) = resolved.expect("the component resolves");
+    let contexts: Vec<&str> = meta
+        .macro_expansion_diagnostics
+        .iter()
+        .flat_map(|d| d.diagnostics.iter().map(|diag| diag.context.as_str()))
+        .collect();
+    assert_eq!(
+        contexts,
+        [
+            "TS2859: Excessive complexity comparing types '{ a: string; }' and '{ a: string; }'.",
+            "TS2859: Excessive complexity comparing types '{ b: number; }' and '{ a: string; }'.",
+        ]
+    );
+}
+
+/// A refused relation whose operands print past the string length the
+/// checker clips at still publishes a formatted checker message, never a
+/// placeholder built from arena ids.
+#[test]
+fn a_macro_payload_relation_refusal_over_wide_operands_publishes_no_placeholder() {
+    use verter_type_engine::semantic_query::checker_policy::with_relation_comparisons_for_tests;
+    let members: String = (0..40).map(|i| format!("property{i}: string; ")).collect();
+    let sfc = format!(
+        r#"<script setup lang="ts">
+type Keep<T, U> = T extends U ? T : never;
+defineProps<Keep<{{ {members}}}, {{ a: string }}>>();
+</script>
+<template><div /></template>
+"#
+    );
+    let host = build_host(&[("/workspace/src/Refused.vue", sfc.as_str())]);
+    let resolved = with_relation_comparisons_for_tests(0, || {
+        host.get_component_meta_with_resolution("/workspace/src/Refused.vue")
+    });
+    let (meta, _) = resolved.expect("the component resolves");
+    let contexts: Vec<&str> = meta
+        .macro_expansion_diagnostics
+        .iter()
+        .flat_map(|d| d.diagnostics.iter().map(|diag| diag.context.as_str()))
+        .collect();
+    assert!(!contexts.is_empty(), "the refusal is reported");
+    for context in contexts {
+        assert!(!context.contains('@'), "no arena-id placeholder: {context}");
+        assert!(
+            context
+                .starts_with("TS2859: Excessive complexity comparing types '{ property0: string;"),
+            "{context}"
+        );
+        assert!(context.contains("..."), "the operand is clipped: {context}");
+    }
+}

@@ -157,7 +157,7 @@ pub(super) fn checker_diagnostics(
     host: &VerterHost,
     root: &str,
     symbol: &str,
-) -> Vec<verter_type_engine::semantic_query::CheckerDiagnostic> {
+) -> Vec<verter_type_engine::semantic_query::CheckerDiagnosticOccurrence> {
     let carrier = host.get_flow_return_type_with_audit(
         &identity(&format!("{root}/main.ts"), symbol),
         ReturnProjectionDemand::whole_return(),
@@ -167,6 +167,31 @@ pub(super) fn checker_diagnostics(
         .unwrap_or_else(|error| panic!("`{symbol}` in {root} produced no value: {error:?}"))
         .checker_diagnostics()
         .to_vec()
+}
+
+/// The checker diagnostics riding `symbol`'s whole-return answer in
+/// `root`'s copy of `source`, each printed as `tsc --pretty false` prints
+/// it after the file name: `(line,col): error TS<code>: <message>`, with a
+/// one-based line and column, then its message chain, one line each.
+pub(super) fn checker_report(
+    host: &VerterHost,
+    root: &str,
+    symbol: &str,
+    source: &str,
+) -> Vec<String> {
+    checker_diagnostics(host, root, symbol)
+        .iter()
+        .map(|occurrence| {
+            let before = &source[..occurrence.start() as usize];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').map_or(0, |newline| newline + 1) + 1;
+            format!(
+                "({line},{column}): error TS{}: {}",
+                occurrence.code().code(),
+                occurrence.full_message()
+            )
+        })
+        .collect()
 }
 
 /// The whole-return answer of `symbol` in `root`'s copy through the public

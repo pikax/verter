@@ -9094,7 +9094,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
     /// (`mapper.parameter_node`) with the key literal in
     /// `mapper.value_expr`, then materialises the substituted node only
     /// enough to close the selected key via the shared
-    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value`]
+    /// [`ProjectSemanticDispatch::materialize_selected_key_mapped_value_with_node`]
     /// helper. The materialisation runs under
     /// `structural_transit_with_mode(Navigate)`: nested `KeyOf` /
     /// `MappedType` operators carrier-stop via
@@ -9190,10 +9190,7 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
             if self.dispatch.cancellation.is_cancelled() {
                 return None;
             }
-            let literal = iteration_key.literal.as_ref()?;
-            let key_arg = self
-                .graph()
-                .intern_node(SemanticNodeData::Literal(literal.clone()));
+            let key_arg = self.dispatch.key_domain_binder(iteration_key)?;
             let value = if matches!(mapper.kind, crate::semantic_query::MapperKind::Identity) {
                 // The preimage PROVED this produced member exists, so its
                 // value must never surface as `Opaque(Miss)` — that node
@@ -9716,12 +9713,13 @@ impl<'a, 'b, C: crate::resolver_core::ResolverCapabilities> PathWalker<'a, 'b, C
                     }
                     shared_value.expect("initialised immediately above")
                 } else {
-                    let literal = key.literal.as_ref()?;
-                    self.dispatch.materialize_selected_key_mapped_value(
-                        mapper,
-                        literal,
-                        materialise_context,
-                    )
+                    let key_arg = self.dispatch.key_domain_binder(&key)?;
+                    self.dispatch
+                        .materialize_selected_key_mapped_value_with_node(
+                            mapper,
+                            key_arg,
+                            materialise_context,
+                        )
                 };
                 let value = if mapper.optionality == crate::semantic_query::OptionalityMod::Remove {
                     self.dispatch
@@ -11301,6 +11299,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::string_literal(s.as_str()),
                 literal: Some(crate::semantic_query::LiteralValue::String(s.clone())),
+                binder: None,
             });
             true
         }
@@ -11313,6 +11312,7 @@ fn collect_literal_keys(
             out.push(crate::project_semantic_dispatch::enumerate::KeyDomainKey {
                 key: crate::semantic_query::PropertyKey::from_js_number(*n),
                 literal: Some(crate::semantic_query::LiteralValue::Number(*n)),
+                binder: None,
             });
             true
         }
