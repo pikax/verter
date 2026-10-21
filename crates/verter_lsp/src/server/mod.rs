@@ -607,12 +607,12 @@ pub struct ServerCore {
     request_barriers: Arc<test_support::RequestBarriers>,
     /// Handle for the background workspace scanner. Receives priority signals
     /// from `did_open` to reorder the scan queue. `None` until a request demands
-    /// the complete carrier frontier (`activate_workspace_scan`).
+    /// the complete workspace inventory (`activate_workspace_scan`).
     /// Arc-wrapped so background init can install the scanner without &self.
     workspace_scanner:
         Arc<tokio::sync::Mutex<Option<crate::workspace_scanner::WorkspaceScannerHandle>>>,
-    /// Set by the first request that needs the owning project's complete
-    /// carrier frontier (closed-file references/rename). The workspace
+    /// Set by the first request that needs the complete workspace inventory
+    /// (references/rename frontier, workspace-wide enumeration). The workspace
     /// scanner exists only from that demand on; it survives re-init
     /// generations once demanded.
     workspace_scan_demanded: std::sync::atomic::AtomicBool,

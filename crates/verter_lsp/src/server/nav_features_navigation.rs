@@ -457,6 +457,9 @@ async fn handle_goto_definition_attempt(
     // B4: a GLOBAL css class token (declared non-scoped / :global) extends its
     // definition targets with every global declaration workspace-wide.
     if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        if !server.workspace_inventory_ready().await {
+            return Err(VerterLanguageServer::workspace_inventory_pending_error());
+        }
         return Ok(super::nav_features_css::merge_global_class_definitions(
             server,
             uri,
@@ -1078,6 +1081,9 @@ pub(super) async fn handle_references(
     // this leg completes natively and returns. Scoped classes never enter
     // (fail closed: same-file only via the native path above).
     if let Some(class_name) = super::nav_features_css::global_class_target(server, uri, position) {
+        if !server.workspace_inventory_ready().await {
+            return Err(VerterLanguageServer::workspace_inventory_pending_error());
+        }
         let locations = super::nav_features_css::merge_global_class_references(
             server,
             uri,

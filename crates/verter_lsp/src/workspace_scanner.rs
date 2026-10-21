@@ -47,6 +47,9 @@ use crate::type_provider::project_sync::ProjectSync;
 pub struct WorkspaceScannerHandle {
     tx: mpsc::UnboundedSender<ScannerSignal>,
     task: tokio::task::JoinHandle<()>,
+    /// The init generation and published snapshot the scan was started over.
+    generation: u64,
+    basis: Option<std::sync::Arc<verter_workspace::WorkspaceSnapshot>>,
 }
 
 impl WorkspaceScannerHandle {
@@ -54,6 +57,21 @@ impl WorkspaceScannerHandle {
     /// directory siblings to the front of the scan queue.
     pub fn signal_priority(&self, canonical_id: String) {
         let _ = self.tx.send(ScannerSignal::PriorityFile(canonical_id));
+    }
+
+    /// Whether this scan was started over exactly this init generation and
+    /// published snapshot — i.e. it is not superseded by a newer publication.
+    pub fn is_current_for(
+        &self,
+        generation: u64,
+        basis: Option<&std::sync::Arc<verter_workspace::WorkspaceSnapshot>>,
+    ) -> bool {
+        self.generation == generation
+            && match (&self.basis, basis) {
+                (Some(a), Some(b)) => std::sync::Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
     }
 
     /// Cancel the scanner task. Safe to call multiple times; cancels at the
@@ -121,6 +139,9 @@ pub struct WorkspaceScannerConfig {
     /// When `Some`, `classify_from_snapshot()` is used instead of
     /// `classify_tiers()`. Generation-pinned at spawn time.
     pub workspace_snapshot: Option<std::sync::Arc<verter_workspace::WorkspaceSnapshot>>,
+    /// The server init generation the scan is started for; a later
+    /// generation or publication retires it (`WorkspaceScannerHandle::is_current_for`).
+    pub generation: u64,
     /// Optional oneshot channel fired after the full scanner loop completes
     /// (both `.vue` files and non-carrier source files).
     /// Used by the server to send `$/verter/typeProviderSyncComplete`.
@@ -376,8 +397,15 @@ const DISCOVERY_IDLE_GRACE: std::time::Duration = std::time::Duration::from_mill
 /// 5. Accepts [`ScannerSignal::PriorityFile`] to dynamically reorder the queue
 pub fn spawn_workspace_scanner(config: WorkspaceScannerConfig) -> WorkspaceScannerHandle {
     let (tx, rx) = mpsc::unbounded_channel();
+    let generation = config.generation;
+    let basis = config.workspace_snapshot.clone();
     let task = tokio::spawn(scanner_loop(config, rx));
-    WorkspaceScannerHandle { tx, task }
+    WorkspaceScannerHandle {
+        tx,
+        task,
+        generation,
+        basis,
+    }
 }
 
 async fn scanner_loop(

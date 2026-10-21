@@ -11,21 +11,33 @@
     "Unconditional $/verter/heartbeat broadcast every 5s from initialized() to every client (real Lapce captures in WSP1L/WSP1B log each one as an unhandled host notification); it now runs only for a subscribed client",
     "Unconditional $/verter/carrierStoreChanged after every carrier publication (sync coordinator and editor-membership publication); it now reaches only a subscribed client",
     "Scattered inline parsing of client capabilities and feature options in handle_initialize, replaced by LspDemandPlan::from_initialize",
-    "Per-request URI String allocation for statistics timers while statistics are disabled (Statistics::timer now borrows the URI)"
+    "Per-request URI String allocation for statistics timers while statistics are disabled (Statistics::timer now borrows the URI)",
+    "The workspace scanner spawned by every background init generation (and the level-2 readiness hold behind it); the scan now starts only on demand (activate_workspace_scan) and level 2 no longer waits for it"
   ],
   "migration": "The VS Code extension (packages/vue-vscode/src/extension.ts) subscribes to heartbeat and carrierStoreChanged, so its restart watchdog and its own TypeScript service keep their signals. Any other client that relied on receiving them unasked must declare initializationOptions.subscriptions (docs/api-stability.md).",
   "preservedOwners": [
     "semantic algorithms",
-    "project resolution and the workspace scanner (closed-file cross-file rename/references stay fed)",
+    "project resolution and the workspace scanner, started on demand by the first request that needs the complete inventory (closed-file cross-file rename/references stay fed)",
     "TypeScript projection and provider sync",
     "diagnostics publication (DocumentRegistry::publish_diagnostics through the outbound replaceable lane)",
     "readiness ladder ($/verter/ready, $/verter/typeProviderSyncComplete)",
-    "request-only workspace-scale handlers ($/verter/getProjectOverview, getComponentParents, getRouteTree, getStatistics, audit), reachable only through their main.rs custom_method registrations"
+    "request-only workspace-scale handlers ($/verter/getProjectOverview, getComponentParents, getRouteTree, getStatistics, audit), reachable only through their main.rs custom_method registrations; the three that enumerate the host demand the workspace inventory"
   ],
+  "inventoryDemand": {
+    "scan": "activate_workspace_scan: idempotent, sticky across init generations, started only by a request that needs the complete inventory; no initialize, didOpen or didChange work. A scan started by the current init generation over its own published snapshot is kept by that generation's retire step; one over a superseded generation or snapshot is retired and re-armed",
+    "consumers": [
+      "references/rename: prepare_workspace_symbol_frontier (fails closed while the frontier is incomplete)",
+      "workspace/symbol, $/verter/getProjectOverview, $/verter/getRouteTree, $/verter/getComponentParents, global CSS class definition/references: workspace_inventory_ready, answered pending (LSP RequestFailed -32803) until the scan settles — never complete-empty",
+      "auto-import completion (semantic analysis enabled): local items kept, list marked isIncomplete while the inventory is pending"
+    ],
+    "documentLocal": "hover, document diagnostics, document-local completion and every request that does not enumerate the host never wait on or start the scan",
+    "lifetime": "the inventory is complete once the scan settles for the published snapshot and is dropped when a newer init generation or publication supersedes it; a workspace with no folders is always complete",
+    "outOfScope": "standalone MCP owns its own host and scanner and a tracked-files-only inventory"
+  },
   "cases": [
     {
       "id": "WSP2-AC1",
-      "binding": "crates/verter_lsp/src/server/tests/completion.rs an_unsubscribed_client_receives_no_carrier_store_pings (opening and publishing documents puts nothing on the wire except those open documents' diagnostics) + the request-only workspace-scale handlers listed in preservedOwners. The 50k-source equal-work corpus run is unavailable on the landing worker and is not reported as a number"
+      "binding": "crates/verter_lsp/src/server/tests/completion.rs an_unsubscribed_client_receives_no_carrier_store_pings (opening and publishing documents puts nothing on the wire except those open documents' diagnostics) + crates/verter_lsp/src/server/tests/diagnostics.rs the_workspace_scan_starts_only_on_frontier_demand (no scan after initialize and open; a references/rename frontier demand starts it and level 2 is not re-announced) and workspace_wide_requests_demand_the_scan_and_answer_pending_until_it_settles (cold workspace/symbol and project overview answer pending, then include the unopened carrier) + the request-only workspace-scale handlers listed in preservedOwners. The 50k-source equal-work corpus run is unavailable on the landing worker and is not reported as a number"
     },
     {
       "id": "WSP2-AC2",

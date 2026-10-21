@@ -3322,14 +3322,6 @@ impl ScanPublicationFixture {
     }
 }
 
-/// A real workspace for the production init path: a `Target` carrier that
-/// imports a `Child` carrier, and an `Unrelated` carrier in another directory
-/// that only the workspace scan ever touches.
-///
-/// `eager_import_warmup: false` turns off the `didOpen` handler's own inline
-/// warmup of imported carriers, which would otherwise deliver `Child` inside
-/// the open itself. The import-dependency publication — the route that mints
-/// the DependencyReady receipt — is unaffected.
 /// Record that a request demanded the complete carrier frontier, so the next
 /// initialization generation starts the workspace scan.
 fn demand_workspace_scan(server: &VerterLanguageServer) {
@@ -3338,6 +3330,33 @@ fn demand_workspace_scan(server: &VerterLanguageServer) {
         .store(true, std::sync::atomic::Ordering::Release);
 }
 
+/// Wait for the workspace scan to end, on the server's own settle wake — the
+/// event the production level-2 waiter awaits — never on elapsed time. The
+/// timeout only converts a lost wake into a failure instead of a hang.
+async fn await_workspace_scan_settled(server: &VerterLanguageServer) {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let settled = server.workspace_scan_settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if !server.sync_coordinator.workspace_scan_in_progress() {
+                return;
+            }
+            settled.await;
+        }
+    })
+    .await
+    .expect("the workspace scan settles");
+}
+
+/// A real workspace for the production init path: a `Target` carrier that
+/// imports a `Child` carrier, and an `Unrelated` carrier in another directory
+/// that only the workspace scan ever touches.
+///
+/// `eager_import_warmup: false` turns off the `didOpen` handler's own inline
+/// warmup of imported carriers, which would otherwise deliver `Child` inside
+/// the open itself. The import-dependency publication — the route that mints
+/// the DependencyReady receipt — is unaffected.
 async fn scan_publication_fixture(eager_import_warmup: bool) -> ScanPublicationFixture {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::test_utils::canonical_test_path(temp.path());

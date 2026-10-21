@@ -79,9 +79,24 @@ unasked must now declare the subscription at `initialize`: the VS Code
 extension declares both in `packages/vue-vscode/src/extension.ts`, and every
 other client (Lapce, Neovim, JetBrains, custom) that consumes either
 notification must opt in the same way. The workspace scan is likewise not
-started at `initialized`; it starts on the first closed-file references/rename
-request that needs the complete carrier frontier, which fails closed until the
-frontier is built.
+started at `initialized`, `didOpen` or `didChange`; it starts on the first
+request that needs the complete workspace inventory:
+
+- references/rename that need the complete carrier frontier fail closed until
+  the frontier is built;
+- `workspace/symbol`, `$/verter/getProjectOverview`, `$/verter/getRouteTree`,
+  `$/verter/getComponentParents` and global-CSS-class definition/references
+  answer LSP `RequestFailed` (`-32803`, retryable) until the scan has settled —
+  never a successful complete-empty answer built from the files the session
+  happened to open;
+- auto-import completion (enabled with semantic analysis) keeps its local items
+  and marks the list `isIncomplete` until the inventory is built.
+
+Document-local requests (hover, diagnostics, document-local completion) never
+wait on or start the scan. `$/verter/typeProviderSyncComplete` no longer implies
+a scanned workspace; a client that needs the complete inventory demands it with
+one of the requests above and retries on `-32803`. The standalone MCP server
+owns its own host and tracked-files-only inventory.
 
 The pre-release `$/verter/applyStyleOverrides` method was removed by the sealed
 block-content cutover. The LSP does not accept processor-produced bytes;
