@@ -285,15 +285,15 @@ fn a_namespace_starting_to_export_a_value_misses_the_warm_class_read() {
         )
     };
     let after = "\"make\" | \"prototype\"";
-    let project = |files| ProbeProject {
-        files,
-        compiler_options: None,
-        ambient_lib: None,
-    };
     let mut failures = Vec::new();
     for (namespace, edited) in edits {
         let files = [("a.ts", class_script), ("b.ts", namespace)];
         let edited_files = [("a.ts", class_script), ("b.ts", edited)];
+        let project = |files| ProbeProject {
+            files,
+            compiler_options: None,
+            ambient_lib: None,
+        };
         let warm = probe_host(project(&files));
         let (before, matched) = read(&warm, "\"prototype\"");
         assert!(matched, "before editing `{namespace}`: {before}");
