@@ -197,6 +197,89 @@ pub struct IndexedValueCallArg {
     pub context_sensitive: bool,
     /// Exact return carrier for an inline callback argument.
     pub function_return_source: Option<FunctionReturnSource>,
+    /// Where the checker reports a relation failure of this argument, and
+    /// the authored form it elaborates that failure through: the argument
+    /// node's start (a spread's `...`, where the checker reports every
+    /// argument the spread expands to) and its expression's form.
+    pub report: IndexedReportSite,
+}
+
+/// Where the checker reports a relation failure an expression's value
+/// causes, and how it elaborates the failure into the expression's parts
+/// (`elaborateError`).
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+pub struct IndexedReportSite {
+    /// The start of the node the checker reports at.
+    pub point: u32,
+    /// The end of the node the checker reports at; with `point` it is the
+    /// span the checker orders same-start diagnostics by.
+    pub end: u32,
+    /// The expression's elaborated form; `None` for an expression the
+    /// checker reports whole.
+    pub form: Option<IndexedElaborationForm>,
+}
+
+/// An authored expression form the checker elaborates a relation failure
+/// into (`elaborateError`), through parentheses.
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+pub enum IndexedElaborationForm {
+    /// An arrow function whose body is one expression and none of whose
+    /// parameters is annotated (`elaborateArrowFunction`): its returned
+    /// expression.
+    Arrow(Box<IndexedReportSite>),
+    /// An object literal of plain named members (`elaborateObjectLiteral`),
+    /// in authored order.
+    Object(Arc<[IndexedElaboratedProperty]>),
+    /// An array literal of plain elements (`elaborateArrayLiteral`), in
+    /// authored order.
+    Array(Arc<[IndexedReportSite]>),
+    /// A form the checker elaborates through parts this record does not
+    /// carry — an object literal with a spread or a computed name, an array
+    /// literal with a spread or a hole, a `const` assertion, an assignment or
+    /// comma operand. A failure through it has no site this record can name.
+    Unmodelled,
+}
+
+/// One member of an [`IndexedElaborationForm::Object`].
+#[derive(Debug, Clone, PartialEq, Eq, verter_retention::heap_size::HeapSize)]
+pub struct IndexedElaboratedProperty {
+    /// The member's name.
+    pub name: Arc<str>,
+    /// The start of the member's name, where the checker reports a failure
+    /// of its value.
+    pub point: u32,
+    /// The end of the member's name.
+    pub end: u32,
+    /// The member's initializer; `None` for a shorthand, method or accessor,
+    /// whose failure the checker reports at the name.
+    pub value: Option<IndexedReportSite>,
+}
+
+impl IndexedReportSite {
+    /// Move every position this site records by `base`.
+    pub fn offset(&mut self, base: u32) {
+        let mut pending = vec![self];
+        while let Some(site) = pending.pop() {
+            site.point = site.point.saturating_add(base);
+            site.end = site.end.saturating_add(base);
+            match &mut site.form {
+                Some(IndexedElaborationForm::Arrow(returned)) => pending.push(returned),
+                Some(IndexedElaborationForm::Object(properties)) => {
+                    for property in Arc::make_mut(properties) {
+                        property.point = property.point.saturating_add(base);
+                        property.end = property.end.saturating_add(base);
+                        if let Some(value) = property.value.as_mut() {
+                            pending.push(value);
+                        }
+                    }
+                }
+                Some(IndexedElaborationForm::Array(elements)) => {
+                    pending.extend(Arc::make_mut(elements).iter_mut());
+                }
+                Some(IndexedElaborationForm::Unmodelled) | None => {}
+            }
+        }
+    }
 }
 
 /// One direct call/construct record. Children are parsed typed IR; no raw
@@ -204,6 +287,13 @@ pub struct IndexedValueCallArg {
 #[derive(Debug, Clone, PartialEq, verter_retention::heap_size::HeapSize)]
 pub struct IndexedValueCall {
     pub point: u32,
+    /// The start of the node the checker reports a diagnostic about the
+    /// whole call at (`getDiagnosticSpanForCallNode`): a property-access
+    /// callee's name, any other callee of a call, and the expression itself
+    /// for `new` and a tagged template.
+    pub report_point: u32,
+    /// The end of the node `report_point` starts.
+    pub report_end: u32,
     pub kind: IndexedValueCallKind,
     pub callee: Box<IndexedValueExpression>,
     pub receiver: Option<Box<IndexedValueExpression>>,

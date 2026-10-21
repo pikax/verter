@@ -117,13 +117,36 @@ impl Measured for String {
 #[derive(Clone, Copy)]
 pub struct ChargeCtx<'a> {
     account: &'a Arc<SemanticRetentionAccount>,
+    /// Whom the charges taken here are attributed to for ACTIVE-occupancy
+    /// windows; zero-sized without the measurement window.
+    provenance: crate::Provenance,
 }
 
 impl<'a> ChargeCtx<'a> {
-    /// Charges to `account`.
+    /// Charges to `account`, with unknown provenance.
     #[must_use]
     pub fn new(account: &'a Arc<SemanticRetentionAccount>) -> Self {
-        Self { account }
+        Self {
+            account,
+            provenance: crate::Provenance::UNKNOWN,
+        }
+    }
+
+    /// Charges to `account`, attributed to `owner`.
+    ///
+    /// # Panics
+    ///
+    /// When `owner` was minted by a different account.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    #[must_use]
+    pub fn owned_by(
+        account: &'a Arc<SemanticRetentionAccount>,
+        owner: &crate::active_window::ActiveOwner,
+    ) -> Self {
+        Self {
+            account,
+            provenance: crate::Provenance::of(owner, account),
+        }
     }
 }
 
@@ -319,9 +342,10 @@ pub(crate) fn hold_nodes(
     if children.is_empty() {
         return Ok(HeldHandles::default());
     }
-    let backing = match ctx.account.reserve(
+    let backing = match ctx.account.reserve_with(
         ChargeClass::Retained,
         HeldHandles::backing_bytes_for(children.len()),
+        ctx.provenance,
     ) {
         RetentionAdmission::Admitted(charge) => charge,
         RetentionAdmission::Refused(refusal) => return Err(refusal),
@@ -361,10 +385,14 @@ pub(crate) fn hold_node(
                 }
             } else {
                 let (bytes, children) = measure(&*node, slot.block_share.is_some());
-                let charge = match ctx.account.reserve(ChargeClass::Retained, bytes) {
-                    RetentionAdmission::Admitted(charge) => charge,
-                    RetentionAdmission::Refused(refusal) => return Err(refusal),
-                };
+                let charge =
+                    match ctx
+                        .account
+                        .reserve_with(ChargeClass::Retained, bytes, ctx.provenance)
+                    {
+                        RetentionAdmission::Admitted(charge) => charge,
+                        RetentionAdmission::Refused(refusal) => return Err(refusal),
+                    };
                 // A refusal below drops what was taken so far: the charge
                 // and the child holds each release only what this hold
                 // just granted.

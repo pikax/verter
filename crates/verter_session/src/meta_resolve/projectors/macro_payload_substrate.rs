@@ -393,6 +393,7 @@ pub(crate) fn resolve_payload_surface_with_scope(
                     macro_index,
                     expansion_kind.clone(),
                     branch_read.cache_suppress(),
+                    &|diagnostic| dispatch.checker_message(diagnostic),
                 ));
             }
             // A branch is OPEN when its read is partial or its terminal stays
