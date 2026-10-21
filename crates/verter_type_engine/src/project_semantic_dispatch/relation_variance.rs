@@ -153,11 +153,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     /// Two references to one generic declaration under an inference session
-    /// first check their fixed annotated arguments. Arguments holding an
-    /// `infer` site then infer pairwise (`inferFromTypeArguments`: a
-    /// contravariant parameter's argument contravariantly, any other's
+    /// first check their fixed annotated arguments. When the target's type
+    /// arguments hold an inference site — an `infer` declaration or a type
+    /// parameter the session infers — they then infer from their type
+    /// arguments pairwise (`inferFromTypeArguments`: a contravariant parameter's argument contravariantly, any other's
     /// covariantly) and relate by them (`Box<"a">` against `Box<infer P>`
-    /// infers `"a"`, whatever `Box` expands to) — an alias's parameters
+    /// infers `"a"`, whatever `Box` expands to; `inject(key)` over
+    /// `inject<T>(key: InjectionKey<T>)` infers `T` from `key:
+    /// InjectionKey<{ a: number }>` though the empty interface never
+    /// mentions it) — an alias's parameters
     /// measured as the checker's `getAliasVariances` measures them. `None`
     /// relates the pair as before: not two such references, a variance that
     /// is unmeasurable, unreliable or being measured, or type arguments that
@@ -196,7 +200,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
         if !target_args
             .iter()
-            .any(|arg| self.subtree_contains_infer(*arg))
+            .any(|arg| self.holds_inference_site(*arg))
         {
             return None;
         }
@@ -303,7 +307,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 continue;
             };
             if [source, target].into_iter().any(|argument| {
-                self.mentions_free_type_variable(argument) || self.subtree_contains_infer(argument)
+                self.mentions_generic_operand_variable(argument, false)
+                    || self.holds_inference_site(argument)
             }) {
                 continue;
             }
@@ -337,6 +342,41 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         } else {
             None
         }
+    }
+
+    /// Whether `node` holds an inference site of the active session: an
+    /// `infer` declaration, or a type parameter a call's session infers.
+    /// Only a call's session infers type parameters, and only a node that
+    /// may mention a binder is walked for one.
+    fn holds_inference_site(&self, node: SemanticNodeId) -> bool {
+        if self.subtree_contains_infer(node) {
+            return true;
+        }
+        if !self.mentions_binder(node) {
+            return false;
+        }
+        let txn = self.dispatch_txn.borrow();
+        let Some(session) = txn.active_session().filter(|session| {
+            session.context_key().pass_kind
+                == crate::semantic_query::InferencePassKind::CallApplicability
+        }) else {
+            return false;
+        };
+        let graph = self.graph();
+        let mut visited = rustc_hash::FxHashSet::default();
+        let mut stack = vec![node];
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current) {
+                continue;
+            }
+            if session.infers(current) {
+                return true;
+            }
+            if let Some(data) = graph.node_data(current) {
+                let _ = data.for_each_child(|child| stack.push(child));
+            }
+        }
+        false
     }
 
     /// The checker's `relateVariances` over `typeArgumentsRelatedTo`: each

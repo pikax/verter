@@ -167,6 +167,44 @@ component's co-resident members). A charge stored beside a cache entry
 outlives an eviction for as long as a reader snapshot holds the entry —
 which is correct, because the bytes are still resident.
 
+**ACTIVE-occupancy windows** (`verter_retention/src/active_window.rs`,
+optional test/tooling state compiled only under `test`, `test-support` or
+the default-off `soak-support` — forwarded by
+`verter_session_query/soak-support` and `verter_session/soak-support`;
+`ACTIVE_OCCUPANCY_WINDOW_AVAILABLE` reports the build). The snapshot's
+`peak_total_bytes` mixes every class over the account's lifetime, so it
+cannot say how much ACTIVE a given workload held. A window measures ONE
+explicit `ActiveOwner` (`mint_active_owner()`, account-bound); the workload
+reserves through `reserve_as(&owner, ..)` (`ChargeCtx::owned_by` for holds
+backing) and `open_active_window(&owner)` (host route:
+`VerterHost::mint_active_occupancy_owner` + `open_active_occupancy_window`)
+registers the window under the admission lock. The owner travels with the
+charge through sharing, `split_off`, `absorb`, holding adoption, release and
+class transfers; a charge merging two different owners, and every
+`reserve(..)` charge, is UNKNOWN. A holding adoption settles its provenance
+change and class change in ONE account-locked transaction (`adopt_backing`):
+the held bytes move between ACTIVE balances with the total unchanged, and no
+window observes the adoption half-applied. `absorb` merges settled
+(non-ACTIVE) charges only. The account keeps each identified owner's ACTIVE
+bytes AND the UNKNOWN balance exactly (they sum to the account's ACTIVE bytes). Every ACTIVE transition — ACTIVE reserve and
+release, `commit_retained`, an ACTIVE `transfer_to_pinned`, a holds slice
+joining an ACTIVE charge through `holding` — is noted under that same lock:
+the account keeps each owner's ACTIVE bytes exactly, so opening or finishing
+races lose nothing and overlapping windows never reset each other.
+`finish()` / `observe()` return an `ActiveWindowReport`: the interval on the
+account's ACTIVE transition sequence, the owner's ACTIVE at open and close, its
+peak (starting at the ACTIVE held at open, never a lifetime maximum), rise and
+fall bytes (`open + rise − fall == close`), and the `foreign_transitions`
+(identified other owners, excluded) and `unknown_transitions` counts.
+`attributed()` yields a peak a crossing check may read unless unknown
+transitions occurred in the interval, UNKNOWN ACTIVE bytes were already charged
+when the window opened (occupancy spanning the window makes no transition, yet
+could be the owner's work), or the owner's own ACTIVE bytes were held at open or
+still held at close. A window
+changes no admission decision. Production builds carry no registry, sequence
+or provenance (`Provenance` is zero-sized there); current occupancy stays in the
+snapshot.
+
 **What a charge measures.** A charge covers the allocations its owner
 keeps reachable, by CAPACITY, under the declared conventions of
 `verter_retention/src/allocation.rs` (heap block = payload rounded to 16 B plus a
@@ -1454,8 +1492,21 @@ Workspace resolution carries the same distinction through
 `ResolutionOutcome`. A result-only compatibility query must consume
 `into_transient_result()` and must not retain the target. Any provider, route,
 exact-edge, parsed-edge, or artifact sink must instead consume
-`into_publication()`, whose `ResolutionPublication::{Admitted, Refused}` shape
-keeps an admitted miss distinct from a typed refusal. `AdmittedResolution`
+`into_publication()`, whose `ResolutionPublication::{Admitted, Unretained,
+Refused}` shape keeps an admitted miss distinct from a typed refusal.
+`Unretained` is a complete, current answer the retention account declined to
+keep (`RetentionPressure` at the Engine's workspace-lane reservation): it is
+DELIVERED to its consumer, never withheld like an untrustworthy non-admission
+(torn, partial, superseded, cancelled, budget-exceeded), and never admitted —
+there is no conversion to `AdmittedResolution`, so no persistent or shared
+sink can root on it. A consumer answers from it (`delivered()` /
+`into_delivered()`), import-graph bookkeeping (dependency edges, stage
+blockers, provider sync) follows it, and every session entry that converts an
+outcome into a publication marks the reading compute non-cacheable through
+`NonCacheableReadReason::UnretainedResolution` (transitive), so nothing derived
+from it is retained either; request-scoped normalization memos replay that
+mark. A composed answer that depends on an unretained lane is itself
+unretained (`or_else_publication`, `unretained_with`). `AdmittedResolution`
 has no external constructor: only the Engine transaction finalizer can mint
 one, and projections (`map_result`, `map_admitted`, `replace_result`) require an
 existing admitted carrier. The former `from_admitted_state` escape hatch is

@@ -158,6 +158,7 @@ fn main() {
                     // feature-less runner never enables. It runs in the
                     // dedicated session-soak compile-contract lane.
                     | Some("flight_rendezvous_opt_in_through_soak_support.rs")
+                    | Some("active_occupancy_window_opt_in_through_soak_support.rs")
             )
         });
     }

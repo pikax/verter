@@ -1350,6 +1350,9 @@ pub(crate) fn carrier_dependency_ids(
         let resolved = match resolve_import_specifier_standalone(host, canonical_id, &import.source)
         {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return Err(refusal);
             }

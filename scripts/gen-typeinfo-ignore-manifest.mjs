@@ -1353,7 +1353,7 @@ const ROW_MECHANISM_OVERRIDE = new Map([
   ],
   [
     tkey("call_resolution.rs", "call_resolution_this_receiver_method_call_returns_declared_return"),
-    "ReturnPathPeekerTwoFrontier",
+    "ResolveCallDispatch",
   ],
   [
     tkey("modern_ts_features.rs", "satisfies_array_literal_widens_to_primitive_array"),
@@ -2540,18 +2540,25 @@ const LIFTED_ROW_OVERRIDES = new Map([
   [
     tkey("call_resolution.rs", "call_resolution_this_receiver_method_call_returns_declared_return"),
     {
-      mech: "ReturnPathPeekerTwoFrontier",
+      mech: "ResolveCallDispatch",
       proof: "ProofRequirement::Ts7Oracle(OracleId::CallResolution)",
       semantic_queries: [
         "ResolveDecl",
         "Instantiate",
         "TypeOf",
         "ProjectPath",
+        "ResolveOverloadSet",
         "LowerLocator",
         "FlowReturn",
+        "ResolveCall",
         "SignaturesOfType",
       ],
-      consumed_mechanisms: ["QueryValueDomainFoundation", "IndexedAccessUnionDistribution"],
+      consumed_mechanisms: [
+        "QueryValueDomainFoundation",
+        "IndexedAccessUnionDistribution",
+        "ClassSurfaceProjection",
+        "ReturnPathPeekerTwoFrontier",
+      ],
       unblocker:
         'lifted by U6.CALL_RESOLVE: the `this: { data: string }` parameter binds implicitly at the `receiverObj.greet("!")` method-access call site and the call publishes its declared `string` return, so `ThisReceiverResult` projects `string`, proven against the checked-in tsgo oracle snapshot via oracle::run_row',
     },

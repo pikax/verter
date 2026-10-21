@@ -324,6 +324,7 @@ impl VerterHost {
             .resolve_import_outcome_in(overlay, parent_canonical_id, import_source, ctx)
             .into_publication();
         crate::host_manage::import_route_witness::record_resolution_witness(&publication);
+        crate::host_manage::import_route_witness::note_unretained_resolution(&publication);
         publication
     }
 
@@ -856,6 +857,43 @@ impl VerterHost {
         // canonical so the next resolver pass sees the new content.
         self.register_facts_for_new_content(canonical);
         self.bump_store_view_epoch();
+    }
+
+    /// Mint a workload identity bound to the aggregate account this host's
+    /// semantic stores charge — the same account [`Self::retention_snapshot`]
+    /// reads. ACTIVE reservations made through it
+    /// (`SemanticRetentionAccount::reserve_as`, reached with
+    /// `self.project_type_store().retention_account()`) are the workload an
+    /// ACTIVE-occupancy window measures.
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    #[must_use]
+    pub fn mint_active_occupancy_owner(
+        &self,
+    ) -> verter_session_query::retention::active_window::ActiveOwner {
+        self.project_type_store
+            .retention_account()
+            .mint_active_owner()
+    }
+
+    /// Open an ACTIVE-occupancy measurement window for `owner` on the
+    /// aggregate account this host's semantic stores charge.
+    ///
+    /// The window reports the most ACTIVE bytes `owner` held at once between
+    /// its opening and its finish; other identified owners are excluded and
+    /// unknown or mixed provenance rejects the witness (see
+    /// [`verter_session_query::retention::active_window`]). Optional
+    /// test/tooling state: present only under `test`, `test-support` or the
+    /// default-off `soak-support` feature
+    /// ([`verter_session_query::retention::ACTIVE_OCCUPANCY_WINDOW_AVAILABLE`]).
+    #[cfg(any(test, feature = "test-support", feature = "soak-support"))]
+    #[must_use = "a window measures only until it is finished or dropped"]
+    pub fn open_active_occupancy_window(
+        &self,
+        owner: &verter_session_query::retention::active_window::ActiveOwner,
+    ) -> verter_session_query::retention::active_window::ActiveOccupancyWindow {
+        self.project_type_store
+            .retention_account()
+            .open_active_window(owner)
     }
 
     /// What the host retains right now, as object counts and aggregate

@@ -119,6 +119,9 @@ fn owner_resolves_verter_types(
         verter_workspace::ResolutionPublication::Admitted(admitted) => {
             Ok(admitted.result().is_some())
         }
+        verter_workspace::ResolutionPublication::Unretained(unretained) => {
+            Ok(unretained.result().is_some())
+        }
         verter_workspace::ResolutionPublication::Refused(refusal) => Err(refusal),
     }
 }
@@ -382,6 +385,9 @@ fn prepare_carrier_provider_imports_with_verter_types(
                 match outcome.into_publication() {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         admitted.into_result()
+                    }
+                    verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                        unretained.into_result()
                     }
                     verter_workspace::ResolutionPublication::Refused(refusal) => {
                         return Err(refusal);
