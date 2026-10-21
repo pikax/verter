@@ -651,6 +651,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     self_evaluation_receipts: SelfEvaluationReceipts,
     /// Literal target membership shared by the queries of one operation.
     literal_union_indexes: relation::LiteralUnionIndexes,
+    /// Unions an operation proved its composite reduction leaves as
+    /// written, with the file roots that proof inspected.
+    composite_fixed_points: evaluate::CompositeFixedPoints,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -700,6 +703,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
     }
 }
 
+/// The connected-demand entry of a query decided in place
+/// ([`ProjectSemanticDispatch::enter_in_place_query`]): its nested level
+/// is released before its demand, as a query's are.
+pub(super) struct InPlaceQuery<'g> {
+    _depth: Option<connected_demand::ConnectedDemandGuard<'g>>,
+    _demand: connected_demand::ConnectedDemandGuard<'g>,
+}
+
 /// One operation of a dispatcher: a query execution or a root connected
 /// demand. The outermost operation entered with no construction owner of the
 /// graph open on its thread opens its own, which owns everything the
@@ -717,6 +728,7 @@ pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     literal_union_indexes: &'g relation::LiteralUnionIndexes,
+    composite_fixed_points: &'g evaluate::CompositeFixedPoints,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
@@ -729,6 +741,8 @@ impl Drop for DispatchOperation<'_> {
         if depth == 0 {
             let indexes = std::mem::take(&mut *self.literal_union_indexes.borrow_mut());
             drop(indexes);
+            let fixed_points = std::mem::take(&mut *self.composite_fixed_points.borrow_mut());
+            drop(fixed_points);
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -1146,6 +1160,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             literal_union_indexes: Default::default(),
+            composite_fixed_points: Default::default(),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
@@ -1212,6 +1227,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open,
             self_evaluation_receipts,
             literal_union_indexes,
+            composite_fixed_points,
             driven_root_traced,
             decision_seam,
             call_seam,
@@ -1256,6 +1272,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         request_local_open.swap(&other.request_local_open);
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
         literal_union_indexes.swap(&other.literal_union_indexes);
+        composite_fixed_points.swap(&other.composite_fixed_points);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
@@ -1280,6 +1297,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
             literal_union_indexes: &self.literal_union_indexes,
+            composite_fixed_points: &self.composite_fixed_points,
             demand: &self.connected_demand,
             owner,
         }
@@ -2215,6 +2233,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
             extend_unique_self_roots(&mut top.observed_self_roots, evidence.inspected_file_roots);
         }
+    }
+
+    /// Deposit the file roots a reused complete canonical proof inspected,
+    /// as [`Self::deposit_canonical_evidence`] deposits that proof's own
+    /// evidence.
+    pub(super) fn deposit_reused_canonical_roots(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        self.canonical_evidence_epoch
+            .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        self.deposit_operand_self_roots(roots);
     }
 
     /// Merge a sealed runtime operand's producer roots into the candidate
@@ -4117,6 +4150,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             );
         }
         cache_read
+    }
+
+    /// Enter a query that is decided in place rather than executed, charged
+    /// and refused exactly as its cold execution would be: the nested
+    /// connected demand, the query entry's work unit and nested level (a
+    /// tripped or cancelled demand, or a spent projection budget, refuses
+    /// it), and the cold build's budget gate, which spends one request
+    /// operation for a kind the request budget counts. `Err` is the output
+    /// that query would answer with. The returned guards hold the entry's
+    /// demand and level open while the caller decides it.
+    pub(super) fn enter_in_place_query(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Result<InPlaceQuery<'_>, Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>>
+    {
+        let (demand, preexisting_trip) = self.enter_connected_demand(false);
+        let depth = match self.charge_query_entry(key, preexisting_trip, true) {
+            Ok(depth) => depth,
+            Err(read) => {
+                return Err(Box::new(
+                    self.conditional_read_output(narrow_value_cache_read(read)),
+                ))
+            }
+        };
+        if let Some(refusal) = self.cold_build_budget_refusal(key) {
+            return Err(Box::new(refusal));
+        }
+        Ok(InPlaceQuery {
+            _depth: depth,
+            _demand: demand,
+        })
     }
 
     /// The operational refusal of a cold build before it starts: the
