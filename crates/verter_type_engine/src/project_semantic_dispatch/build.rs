@@ -11465,10 +11465,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// Registry classification: `name` is the global lib `Promise` type
-    /// (`IntrinsicRegistry` → [`IntrinsicImpl::PromiseGlobal`](crate::intrinsic_registry::IntrinsicImpl::PromiseGlobal)).
-    /// The registry lookup is the lib-decl-identity rail — resolver code
-    /// never matches the name string directly.
+    /// Whether `name`, within the `__builtin__` sentinel namespace the
+    /// shadowing gates mint for an unshadowed global, is the runtime
+    /// nominal `Promise` ([`RuntimeNominal`](crate::intrinsic_registry::RuntimeNominal)).
     pub(super) fn is_promise_global_name(&self, name: &str) -> bool {
         matches!(
             self.runtime_nominal_global_name(name),
