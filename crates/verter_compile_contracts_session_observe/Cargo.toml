@@ -1,11 +1,23 @@
+# This crate is deliberately NOT a member of the root workspace (see the
+# `exclude` list there): its whole purpose is to put
+# `verter_session/semantic-observe` on a normal dependency edge — the one
+# channel trybuild copies into its fixture projects — and member features
+# unify across every `--workspace` build, which would compile capture into
+# the core gate and stop it testing the capture-off configuration. The
+# compile-contract lane therefore runs this crate by manifest path
+# (scripts/compile-contracts.mjs, session-observe stage), out of workspace
+# unification, with its own committed Cargo.lock seeding trybuild's offline
+# fixture build. Field values mirror `[workspace.package]` because a crate
+# outside the workspace cannot inherit them.
 [package]
 name = "verter_compile_contracts_session_observe"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-authors.workspace = true
+version = "0.0.1-beta.7"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+repository = "https://github.com/pikax/verter"
+homepage = "https://verterjs.dev/"
+authors = ["pikax"]
 description = "Semantic-observe feature-profile compile contracts for verter_session"
 publish = false
 

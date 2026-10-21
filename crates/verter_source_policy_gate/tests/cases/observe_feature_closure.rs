@@ -795,6 +795,10 @@ fn narrow_work_feature_closure_keeps_capture_and_general_support_off() {
 #[test]
 fn narrow_work_feature_closure_detects_a_planted_capture_edge() {
     let root = verter_test_support::unique_temp_dir("observe-feature-closure");
+    // `unique_temp_dir` only mints the path: this scope owns removal, on
+    // success and on every assertion failure below, like the `Fixture`
+    // guard's own drop.
+    let _workspace = RemoveOnDrop(&root);
     write_member(
         &root,
         "verter_audit",
@@ -880,6 +884,17 @@ verter_session = {{ path = "../verter_session", features = [{features}] }}
     );
     assert!(!control.contains(&(session.id.clone(), "semantic-observe".into())));
     assert!(control.contains(&(session.id.clone(), "soak-support".into())));
+}
+
+/// Scope-owned removal for a minted `unique_temp_dir` path a test writes
+/// directly (the `Fixture` guard owns its own root the same way): dropping
+/// the guard removes the tree even after an assertion failure.
+struct RemoveOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveOnDrop<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(self.0);
+    }
 }
 
 fn write_member(root: &Path, name: &str, manifest: &str) {

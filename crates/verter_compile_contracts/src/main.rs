@@ -166,6 +166,13 @@ fn main() {
                     | Some("held_charge_witness_through_soak_support.rs")
                     | Some("narrow_work_observations.rs")
                     | Some("full_work_readers_absent_with_narrow_support.rs")
+                    // The capture-available agreement twin: it needs
+                    // `semantic-observe`, which no member of the workspace
+                    // may enable on a normal dependency edge (that would
+                    // unify capture into every `--workspace` build). Its
+                    // runner lives outside the workspace and runs in the
+                    // dedicated session-observe compile-contract lane.
+                    | Some("narrow_work_agreement_under_semantic_observe.rs")
             )
         });
     }

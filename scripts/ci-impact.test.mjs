@@ -661,6 +661,29 @@ test("the compile-contract lane's roots cover every owner the runner lists", () 
   }
 });
 
+test("the excluded session-observe runner still impacts the compile-contract lane", () => {
+  // The workspace `exclude` list keeps this crate out of `cargo metadata`
+  // (its `semantic-observe` edge must not unify into `--workspace` builds),
+  // so the crate half of the lane cannot see it and a path filter is the
+  // only selector that keeps its changes on the lane that runs it. It must
+  // NOT become a lane root: `classifyCiImpact` refuses roots that are not
+  // workspace members.
+  const observeGlob = "crates/verter_compile_contracts_session_observe/**";
+  assert.ok(
+    PATH_FILTERS.compiler_contracts.includes(observeGlob),
+    "the compiler_contracts filter must own the excluded runner",
+  );
+  assert.ok(
+    !LANE_ROOTS.compiler_contracts.includes("verter_compile_contracts_session_observe"),
+    "the excluded runner is not a workspace member, so it cannot be a lane root",
+  );
+  assert.doesNotMatch(
+    readFileSync(join(REPO_ROOT, "Cargo.toml"), "utf8"),
+    /members = \[[^\]]*compile_contracts_session_observe/s,
+    "if the runner re-enters the workspace, its semantic-observe edge unifies into --workspace builds",
+  );
+});
+
 test("every declared lane root is a crate in this workspace", () => {
   const names = new Set();
   const cratesDir = join(REPO_ROOT, "crates");
@@ -782,7 +805,10 @@ test("a framework vertical's listed contract data runs no lane, and listing it i
   }
   // The inert list is data: editing it runs the classifier's own tests (the
   // js lane), not every lane as an edit to the classifier does.
-  for (const file of ["scripts/ci-inert-paths.json", "scripts/ci-inert-paths.d/framework-mdx.json"]) {
+  for (const file of [
+    "scripts/ci-inert-paths.json",
+    "scripts/ci-inert-paths.d/framework-mdx.json",
+  ]) {
     const inertEdit = select([file]);
     assert.equal(inertEdit.impact.full, false, JSON.stringify(inertEdit.impact.fullReasons));
     assert.deepEqual(gatesOn(inertEdit.gates), ["js"], file);
@@ -828,7 +854,11 @@ test("unreadable selection data breaks no importer: every lane runs and the audi
       JSON.stringify([{ glob: "tests/framework-astro/AST0/cases.md", reason: "Prose." }]),
       /framework-mdx\.json.*belongs in scripts\/ci-inert-paths\.d\/framework-astro\.json/,
     ],
-    [join("scripts", "ci-inert-paths.d", "framework-mdx.json"), "{ not json", /framework-mdx\.json/],
+    [
+      join("scripts", "ci-inert-paths.d", "framework-mdx.json"),
+      "{ not json",
+      /framework-mdx\.json/,
+    ],
   ]) {
     const root = mkdtempSync(join(tmpdir(), "ci-impact-data-"));
     try {
