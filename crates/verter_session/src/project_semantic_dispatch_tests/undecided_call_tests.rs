@@ -24,11 +24,11 @@ export function w5() { return aw(p1); }
 /// four settings: `w1` is `number`, `w2` `{ v: number; }`, `w3` `number`,
 /// `w4` `Promise<number>` and `w5` `number`.
 ///
-/// The lane cannot relate the library's `Promise<number>` to
-/// `PromiseLike<T>`, so `w1` and `w2` are the typed `UnrepresentableCallee`
-/// gap, never the fallback's `unknown` / `{ v: unknown; }` they published
-/// before; `w3`'s return reads no clause parameter, so the fallback is the
-/// checker's answer. A binder takes the argument's carrier as written, so
+/// The lane relates the library's `Promise<number>` to `PromiseLike<T>`
+/// through the two interfaces' generic `then` methods, but infers nothing
+/// through `then`'s callback into the call's `T`, so `w1`, `w2` and `w3` are
+/// the typed `UnrepresentableCallee` gap, never the fallback's `unknown` /
+/// `{ v: unknown; }`. A binder takes the argument's carrier as written, so
 /// `w4` and `w5` infer `T := Promise<number>` (they published `unknown`).
 #[test]
 fn an_undecided_generic_call_is_a_typed_gap_never_its_fallback() {
@@ -49,7 +49,7 @@ fn an_undecided_generic_call_is_a_typed_gap_never_its_fallback() {
             unreachable!("return rows only")
         };
         let verdict = &row[0];
-        let expected_gap = matches!(*name, "w1" | "w2");
+        let expected_gap = matches!(*name, "w1" | "w2" | "w3");
         let as_expected = if expected_gap {
             verdict.class == "GAP" && verdict.lane.contains("UnrepresentableCallee")
         } else {

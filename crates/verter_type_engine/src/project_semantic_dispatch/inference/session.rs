@@ -657,6 +657,12 @@ impl InferenceSession {
         self.info_positions.contains_key(&param_node)
     }
 
+    /// How many candidates the session's parameters hold: a relation that
+    /// raised it made an inference.
+    pub(crate) fn candidate_total(&self) -> usize {
+        self.infos.iter().map(|info| info.candidates.len()).sum()
+    }
+
     /// A contextual mapper fixes only the binders its argument reads, rather
     /// than solving the entire clause again for each callback in a chain.
     pub(crate) fn fixation_inputs_for(
