@@ -1343,11 +1343,6 @@ fn cancellation_before_entry_performs_zero_semantic_work() {
 fn force_boundary_and_nested_dispatches_are_budget_charged() {
     let host = make_host();
     upsert(&host, SOURCE_V1);
-    // Captured execution: only it records into the request counters read below.
-    let view = host.resolver_store_view_read().into_owned_view();
-    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
-    let dispatch = ProjectSemanticDispatch::new(&captured);
-    let operand = mint(&dispatch, whole("Owned"));
     let ctx = RequestContext::with_kind_timing_and_projection_budget(
         8,
         Arc::from(OWNER),
@@ -1358,6 +1353,11 @@ fn force_boundary_and_nested_dispatches_are_budget_charged() {
         100,
     );
     let _guard = RequestContextGuard::install(Arc::clone(&ctx));
+    // Bind the request before the captured resolver snapshots its receivers.
+    let view = host.resolver_store_view_read().into_owned_view();
+    let captured = crate::resolver_core::HostResolverContext::<verter_audit::observe::Captured>::captured_for_tests(&host, &view);
+    let dispatch = ProjectSemanticDispatch::new(&captured);
+    let operand = mint(&dispatch, whole("Owned"));
     let before = ctx.projection_budget.projection_ops_executed_count();
     let _ = force(&dispatch, &operand, ProjectionMode::Expanded);
     // Two charges minimum: the force's own entry charge plus the nested
