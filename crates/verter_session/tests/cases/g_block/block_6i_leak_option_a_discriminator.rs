@@ -94,6 +94,7 @@ export type LiteralKeyedSlots<TPlan extends PricingPlan = PricingPlan> = {
 /// so the test can lower it through the public dispatch API.
 fn literal_keyed_slots_with_concrete_plan() -> TypeExpr {
     let plan_object = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "id".to_string().into(),

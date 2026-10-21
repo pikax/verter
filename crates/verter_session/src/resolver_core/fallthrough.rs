@@ -2709,6 +2709,7 @@ mod tests {
     fn known_spread_keys_from_type_expr_intersects_union_keys() {
         let summary = known_spread_keys_from_type_expr(&TypeExpr::union(vec![
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![ObjectMember::Property(
                     ObjectProperty::synthetic_public_key(
                         "id".to_string().into(),
@@ -2719,6 +2720,7 @@ mod tests {
                 )],
             })),
             TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: false,
                 properties: vec![
                     ObjectMember::Property(ObjectProperty::synthetic_public_key(
                         "id".to_string().into(),

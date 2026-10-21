@@ -65,6 +65,7 @@ fn shallow_object_does_not_trip_budget() {
     // observation in the previous test is discriminating, not
     // baseline behavior.
     let body = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "a".to_string().into(),

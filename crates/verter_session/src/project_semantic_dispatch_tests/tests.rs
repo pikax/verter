@@ -28547,6 +28547,7 @@ fn subtree_references_node_descends_object_spread_program_effects() {
     });
     let program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28599,7 +28600,7 @@ fn extends_pattern_declares_infer_descends_object_spread_program() {
     let (infer, _parameter) = reverse_test_binders(&graph, "U", 0);
     let program_with = |value: SemanticNodeId| {
         graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
-            verter_type_engine::semantic_query::ObjectSpreadProgram {
+            verter_type_engine::semantic_query::ObjectSpreadProgram { is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from(
                     vec![
                         verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28669,6 +28670,7 @@ fn mapped_type_does_not_hoist_k_dependent_program_value_expr() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28758,6 +28760,7 @@ fn record_shape_classification_sees_binder_inside_program_value() {
     });
     let value_expr = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -28871,6 +28874,7 @@ fn source_members_for_program_source_is_positive_evidence_with_partial_flag() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -28961,6 +28965,7 @@ fn mapped_type_over_open_program_source_defers() {
     });
     let open_source = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29103,6 +29108,7 @@ fn keyof_intersection_with_open_program_arm_stays_open() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -29203,6 +29209,7 @@ fn keyof_intersection_poisons_through_union_nesting() {
     });
     let open_program = graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
         verter_type_engine::semantic_query::ObjectSpreadProgram {
+            is_literal: true,
             effects: verter_type_engine::semantic_query::PayloadArray::from(
                 vec![
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
@@ -29279,6 +29286,7 @@ fn excess_arm_knows_property_reads_program_targets() {
         |effects: Vec<verter_type_engine::semantic_query::ObjectConstructionEffect>| {
             graph.intern_node(SemanticNodeData::ObjectSpreadProgram(
                 verter_type_engine::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: verter_type_engine::semantic_query::PayloadArray::from(
                         effects.into_boxed_slice(),
                     ),
@@ -30947,8 +30955,8 @@ fn a_directly_circular_generic_alias_is_the_checkers_ts2456_under_any_budget() {
 #[test]
 fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission() {
     // GROWING-GENERIC discriminator. A conditional generic whose every
-    // tail step applies itself to a FRESH node id (`type Grow<T> = T extends
-    // never ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
+    // tail step applies itself to a FRESH node id (`type Grow<T> = [T]
+    // extends [never] ? never : Grow<[T]>` — each step wraps the arg in a new tuple,
     // so `Grow<string>` → `Grow<[string]>` → `Grow<[[string]]>` → …, distinct
     // `InstantiationRef` ids the `visited` set can NEVER match) DEFEATS
     // visited-ID cycle detection. Under a ledger too small for its tail run
@@ -30960,11 +30968,34 @@ fn growing_generic_demand_fresh_node_growth_types_partial_and_refuses_admission(
     // operational truncation ALSO refuses warm admission (`result_is_partial`
     // + `cache_suppress`). Under a ledger with room, the run reaches its tail
     // budget and `Grow<string>` is the checker's TS2589 recovery; a lower
-    // tail budget than production's stands in on the same path.
+    // tail budget than production's stands in on the same path. Its check
+    // wraps the parameter (`[T]`), so no uniform-growth certificate covers
+    // it; the bare-parameter form (`T extends never ? never : Grow<[T]>`) is
+    // a certified divergence instead — the same complete TS2589 under the
+    // starved ledger, kept.
     //
     // Measured on TypeScript 7.0.2 (all four settings agree): `Grow<string>`
-    // is `any` under TS2589.
-    const GROW: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    // is `any` under TS2589, in both forms.
+    const CERTIFIED: &str = "export type Grow<T> = T extends never ? never : Grow<[T]>;\n";
+    let (outcome, partial, suppressed, instantiated, _) = grow_string_demand(CERTIFIED, Some(256));
+    assert!(
+        matches!(outcome, StructuralFactDemandOutcome::Complete(_)) && !partial && !suppressed,
+        "a certified divergence is complete under a starved ledger, got {outcome:?}"
+    );
+    assert!(
+        matches!(
+            &instantiated,
+            Some(SemanticNodeData::Opaque(verter_type_engine::semantic_query::QueryError::CheckerRecovery {
+                diagnostic,
+                basis: verter_type_engine::semantic_query::RecoveryBasis::Certified,
+                ..
+            })) if diagnostic.code
+                == verter_type_engine::semantic_query::CheckerDiagnosticCode::ExcessivelyDeepInstantiation
+        ),
+        "the bare-parameter growth is the certified TS2589 recovery, got {instantiated:?}"
+    );
+
+    const GROW: &str = "export type Grow<T> = [T] extends [never] ? never : Grow<[T]>;\n";
     let (outcome, partial, suppressed, _, _) = grow_string_demand(GROW, Some(256));
     let reasons = match outcome {
         StructuralFactDemandOutcome::Recovered { reasons, .. }

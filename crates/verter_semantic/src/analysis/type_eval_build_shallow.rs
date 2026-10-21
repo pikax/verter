@@ -1488,6 +1488,7 @@ impl<'a> Frame<'a> for ObjectFrame<'a> {
             }
         }
         let object = TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: self.object.properties.is_empty(),
             properties: std::mem::take(&mut self.members),
         }));
         let typed = Typed {
@@ -2027,7 +2028,10 @@ fn rebuild_widened(ty: &TypeExpr, widened: Vec<TypeExpr>) -> TypeExpr {
                     }
                 })
                 .collect();
-            TypeExpr::Object(Arc::new(ObjectExpr { properties }))
+            TypeExpr::Object(Arc::new(ObjectExpr {
+                empty_literal: object.empty_literal,
+                properties,
+            }))
         }
         TypeExpr::Function(function) => TypeExpr::Function(Arc::new(
             FunctionExpr::with_spans(
