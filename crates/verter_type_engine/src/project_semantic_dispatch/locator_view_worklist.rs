@@ -1417,13 +1417,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                         *argument,
                                         state.argument_context,
                                     );
-                                    self.canonical_argument_carrier(self.answer_member(
+                                    self.canonical_argument_carrier(self.answer_argument(
                                         projected(memo, *argument, operand_context),
-                                        Self::argument_read_context(
-                                            context,
-                                            state.argument_context,
-                                            operand_context,
-                                        ),
+                                        context,
+                                        state.argument_context,
+                                        operand_context,
                                         inputs,
                                     ))
                                 })

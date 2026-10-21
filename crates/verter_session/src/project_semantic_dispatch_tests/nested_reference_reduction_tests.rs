@@ -601,6 +601,79 @@ fn a_closed_access_in_a_type_argument_reads_the_member() {
     );
 }
 
+/// The type arguments of the application `answer`.
+fn type_arguments(answer: &TypeExpr) -> &[TypeExpr] {
+    match answer {
+        TypeExpr::Ref { type_arguments, .. } => type_arguments,
+        other => panic!("`{}` is not an application", display(other)),
+    }
+}
+
+/// Measured on TypeScript 7.0.2, under every `strictNullChecks` /
+/// `noImplicitAny` combination: over `type V = { a: 1 }`, a closed access
+/// anywhere inside a type argument of a deferring application reads its
+/// member, as it does written in place: `Promise<{ x: V["a"] }>` is
+/// `Promise<{ x: 1; }>`, `Promise<[V["a"]]>` is `Promise<[1]>`,
+/// `Promise<V["a"][]>` is `Promise<1[]>` (the `Array<1>` it denotes),
+/// `Promise<() => V["a"]>` is `Promise<() => 1>`,
+/// `Promise<Promise<V["a"]>>` is `Promise<Promise<1>>` and `Promise<V["a"] | 2>` is `Promise<1 | 2>`. A declaration the
+/// argument names keeps its name, and a Navigate resolution keeps the
+/// argument its carrier.
+#[test]
+fn a_closed_access_inside_a_type_argument_reads_the_member() {
+    let source = "type V = { a: 1 };\ninterface Y { b: 2 }\n";
+    let cases = [
+        ("Promise<{ x: V[\"a\"] }>", "Promise<{ x: 1 }>"),
+        ("Promise<[V[\"a\"]]>", "Promise<[1]>"),
+        // A written array is the `Array` application it denotes.
+        ("Promise<V[\"a\"][]>", "Promise<Array<1>>"),
+        ("Promise<() => V[\"a\"]>", "Promise<() => 1>"),
+        ("Promise<Promise<V[\"a\"]>>", "Promise<Promise<1>>"),
+        (
+            "{ p: Promise<{ x: V[\"a\"] }> }",
+            "{ p: Promise<{ x: 1 }> }",
+        ),
+        ("Promise<{ x: Y; y: V[\"a\"] }>", "Promise<{ x: Y; y: 1 }>"),
+    ];
+    for (strict_null_checks, no_implicit_any) in STRICTNESS {
+        let settings =
+            format!("strictNullChecks={strict_null_checks}, noImplicitAny={no_implicit_any}");
+        for (probe, expected) in cases {
+            assert_eq!(
+                display(&answer_with_options(
+                    source,
+                    probe,
+                    None,
+                    strict_null_checks,
+                    no_implicit_any,
+                )),
+                expected,
+                "{probe}, {settings}"
+            );
+        }
+        let union = answer_with_options(
+            source,
+            "Promise<V[\"a\"] | 2>",
+            None,
+            strict_null_checks,
+            no_implicit_any,
+        );
+        assert_eq!(
+            members(&type_arguments(&union)[0]),
+            set(["1", "2"]),
+            "{settings}"
+        );
+    }
+    assert_eq!(
+        display(&answer_at(
+            source,
+            "Promise<{ x: V[\"a\"] }>",
+            Some(ProjectionMode::Navigate)
+        )),
+        "Promise<{ x: V['a'] }>"
+    );
+}
+
 /// `type T0 = { a: 1 }` and `type Tk = { a: { x: T(k-1)["a"]; y:
 /// T(k-1)["a"] } }`, up to `depth`.
 fn doubling_reads(depth: usize) -> String {

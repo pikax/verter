@@ -306,9 +306,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .map(|argument| {
                     let operand_context =
                         self.argument_operand_context(*argument, argument_context);
-                    self.canonical_argument_carrier(self.answer_member(
+                    self.canonical_argument_carrier(self.answer_argument(
                         projected(memo, *argument, operand_context),
-                        Self::argument_read_context(context, argument_context, operand_context),
+                        context,
+                        argument_context,
+                        operand_context,
                         inputs,
                     ))
                 })
@@ -645,27 +647,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The altitude an application reads a closed argument at, once the
-    /// argument is projected at `operand_context`. An application that
-    /// defers its arguments (an interface's, a class's, a builtin
-    /// carrier's), projecting them at navigation altitude, keeps them as
-    /// the type arguments of the reference it is, which the checker builds
-    /// over what they read: it reads them at its own altitude
-    /// (`Promise<V["a"]>` answers `Promise<1>`). An alias's application
-    /// substitutes them into its body, which reads them where it holds
-    /// them, so its arguments keep their authored identity.
-    pub(super) fn argument_read_context(
-        holder: ProjectionReductionContext,
-        argument_context: ProjectionReductionContext,
-        operand_context: ProjectionReductionContext,
-    ) -> ProjectionReductionContext {
-        if may_reduce_operator(argument_context) {
-            operand_context
-        } else {
-            holder
-        }
-    }
-
     /// A projected child as the composite holding it keeps it: a closed
     /// indexed access reads its member, and reads on while that member is a
     /// closed access; anything else, a `keyof` included (an object, tuple,
@@ -686,6 +667,249 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 })
                 .unwrap_or(child),
             _ => child,
+        }
+    }
+
+    /// A projected type argument as the application holding it keeps it,
+    /// read at `read_context`. An application that defers its arguments
+    /// projects them at navigation altitude, so the closed accesses they
+    /// hold anywhere inside — an object's member, a tuple or array element,
+    /// a signature's parameter or return, a union or intersection arm, the
+    /// argument of a nested deferring application — are still carriers; the
+    /// checker builds the reference over what they read
+    /// (`Promise<{ x: V["a"] }>` answers `Promise<{ x: 1 }>`). A name the
+    /// argument holds stays that name, and an alias's application keeps the
+    /// identity its body substitutes.
+    pub(super) fn answer_argument(
+        &self,
+        projected: SemanticNodeId,
+        holder: ProjectionReductionContext,
+        argument_context: ProjectionReductionContext,
+        operand_context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        if may_reduce_operator(argument_context) {
+            return self.answer_member(projected, operand_context, inputs);
+        }
+        if holder.mode != ProjectionMode::Expanded || !may_reduce_operator(holder) {
+            return projected;
+        }
+        // Post-order over the argument's composite parts, each part read
+        // once however many places of the argument share it. A part met
+        // again while its own parts are pending keeps itself there.
+        let graph = self.graph();
+        let mut answered = rustc_hash::FxHashMap::<SemanticNodeId, SemanticNodeId>::default();
+        let mut entered = rustc_hash::FxHashSet::<SemanticNodeId>::default();
+        let mut stack = vec![(projected, false)];
+        while let Some((node, parts_answered)) = stack.pop() {
+            if answered.contains_key(&node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                answered.insert(node, node);
+                continue;
+            };
+            if !parts_answered {
+                if !entered.insert(node) {
+                    continue;
+                }
+                let mut pending = Vec::new();
+                self.for_each_argument_part(&data, |part| {
+                    if !answered.contains_key(&part) && !entered.contains(&part) {
+                        pending.push(part);
+                    }
+                });
+                if !pending.is_empty() {
+                    stack.push((node, true));
+                    stack.extend(pending.into_iter().map(|part| (part, false)));
+                    continue;
+                }
+            }
+            let answer = self.rebuild_argument_part(node, &data, &answered, holder, inputs);
+            answered.insert(node, answer);
+        }
+        answered.get(&projected).copied().unwrap_or(projected)
+    }
+
+    /// The parts of a type argument whose closed accesses the holder reads:
+    /// the children an answer composite reads at its own altitude
+    /// ([`Self::finish_projection_structure`]), and the arguments of a
+    /// nested application that defers them.
+    fn for_each_argument_part(
+        &self,
+        data: &SemanticNodeData,
+        mut visit: impl FnMut(SemanticNodeId),
+    ) {
+        match data {
+            SemanticNodeData::Union(arms) => arms.iter().copied().for_each(visit),
+            SemanticNodeData::Intersection(arms) => arms.iter().copied().for_each(visit),
+            SemanticNodeData::Array { element, .. } => visit(*element),
+            SemanticNodeData::Tuple { elements, .. } => {
+                elements.iter().for_each(|element| visit(element.value));
+            }
+            SemanticNodeData::Object(view) => {
+                for entry in view.entries.iter() {
+                    match entry {
+                        crate::semantic_query::SurfaceEntry::Member(member) => visit(member.value),
+                        crate::semantic_query::SurfaceEntry::CallSignature(signature)
+                        | crate::semantic_query::SurfaceEntry::ConstructSignature(signature) => {
+                            visit(*signature);
+                        }
+                        crate::semantic_query::SurfaceEntry::IndexSignature(signature) => {
+                            visit(signature.key_type);
+                            visit(signature.value_type);
+                        }
+                    }
+                }
+            }
+            SemanticNodeData::Signature {
+                params,
+                return_type,
+                ..
+            } => {
+                params.iter().for_each(|parameter| visit(parameter.ty));
+                visit(*return_type);
+            }
+            SemanticNodeData::InstantiationRef { base, args }
+                if self.defers_type_arguments(base) =>
+            {
+                args.iter().copied().for_each(visit);
+            }
+            _ => {}
+        }
+    }
+
+    /// `node` rebuilt over its parts as [`Self::answer_argument`] answered
+    /// them, or, for a closed access, the member it reads.
+    fn rebuild_argument_part(
+        &self,
+        node: SemanticNodeId,
+        data: &SemanticNodeData,
+        answered: &rustc_hash::FxHashMap<SemanticNodeId, SemanticNodeId>,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let answer = |part: SemanticNodeId| answered.get(&part).copied().unwrap_or(part);
+        let mut changed = false;
+        self.for_each_argument_part(data, |part| changed |= answer(part) != part);
+        if !changed {
+            return match data {
+                SemanticNodeData::IndexedAccess { .. } => self.answer_member(node, context, inputs),
+                _ => node,
+            };
+        }
+        match data {
+            SemanticNodeData::Union(arms) => {
+                let ids = arms.iter().map(|arm| answer(*arm)).collect();
+                let nullability = self.answer_nullability(context, inputs);
+                self.rebuild_projected_union(node, arms.origin_category(), ids, nullability)
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let ids = arms.iter().map(|arm| answer(*arm)).collect();
+                self.rebuild_projected_intersection(node, arms.origin_category(), ids)
+            }
+            SemanticNodeData::Array { element, readonly } => graph.intern_preserving_scope(
+                node,
+                SemanticNodeData::Array {
+                    element: answer(*element),
+                    readonly: *readonly,
+                },
+            ),
+            SemanticNodeData::Tuple { elements, readonly } => {
+                let elements: Vec<_> = elements
+                    .iter()
+                    .map(|element| TupleElement {
+                        value: answer(element.value),
+                        ..element.copy()
+                    })
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Tuple {
+                        elements: crate::semantic_query::PayloadArray::from(
+                            elements.into_boxed_slice(),
+                        ),
+                        readonly: *readonly,
+                    },
+                )
+            }
+            SemanticNodeData::Object(view) => {
+                use crate::semantic_query::SurfaceEntry;
+                let entries = view
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SurfaceEntry::Member(member) => SurfaceEntry::Member(SurfaceMember {
+                            value: answer(member.value),
+                            ..member.clone()
+                        }),
+                        SurfaceEntry::CallSignature(signature) => {
+                            SurfaceEntry::CallSignature(answer(*signature))
+                        }
+                        SurfaceEntry::ConstructSignature(signature) => {
+                            SurfaceEntry::ConstructSignature(answer(*signature))
+                        }
+                        SurfaceEntry::IndexSignature(signature) => {
+                            SurfaceEntry::IndexSignature(IndexSignature {
+                                key_type: answer(signature.key_type),
+                                value_type: answer(signature.value_type),
+                                ..signature.clone()
+                            })
+                        }
+                    })
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::Object(SurfaceView::from_entries(
+                        entries,
+                        view.keyspace,
+                        view.has_known_index_signature(),
+                    )),
+                )
+            }
+            SemanticNodeData::Signature { .. } => {
+                let mut rebuilt = data.clone();
+                if let SemanticNodeData::Signature {
+                    params,
+                    return_type,
+                    return_carrier,
+                    ..
+                } = &mut rebuilt
+                {
+                    let answered_params: Vec<_> = params
+                        .iter()
+                        .map(|parameter| FunctionParam {
+                            ty: answer(parameter.ty),
+                            ..parameter.copy()
+                        })
+                        .collect();
+                    *params = crate::semantic_query::PayloadArray::from(
+                        answered_params.into_boxed_slice(),
+                    );
+                    *return_type = answer(*return_type);
+                    if let crate::semantic_query::SignatureReturnCarrier::Declared(declared) =
+                        return_carrier
+                    {
+                        *declared = *return_type;
+                    }
+                }
+                graph.intern_preserving_scope(node, rebuilt)
+            }
+            SemanticNodeData::InstantiationRef { base, args } => {
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|argument| self.canonical_argument_carrier(answer(*argument)))
+                    .collect();
+                graph.intern_preserving_scope(
+                    node,
+                    SemanticNodeData::InstantiationRef {
+                        base: base.clone(),
+                        args: crate::semantic_query::PayloadArray::from(args.into_boxed_slice()),
+                    },
+                )
+            }
+            _ => node,
         }
     }
 
