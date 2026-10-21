@@ -14377,10 +14377,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let result = walker.walk(start_base, walker_path.as_ref());
         let prefix_receipts = walker.take_prefix_receipts();
         let intermediate_nodes = std::mem::take(&mut walker.intermediate_nodes);
-        // A member read through a class reference binds the member's
-        // polymorphic `this` to that reference.
+        // A member read through a reference binds the member's polymorphic
+        // `this` to that reference: a class member's `this` binder, and an
+        // interface member's declared `this` (`x: this["y"]` read through
+        // `A` is `A["y"]`), as the checker instantiates a member's `this`
+        // type with the reference it is accessed through.
         let result = if path.len() == 1 && self.is_this_receiver(base) {
-            self.bind_this_receiver(result, base)
+            self.bind_callee_receiver(result, base)
         } else {
             result
         };
@@ -20843,8 +20846,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// operations and projections that construct through this funnel are
     /// shared across projects and do not model `strictNullChecks`. A
     /// producer that answers under one project's policy — the flow-return
-    /// evaluator — constructs through [`Self::intern_normalized_union`]
-    /// with that policy instead.
+    /// evaluator or a published Expanded locator projection — constructs
+    /// through [`Self::intern_normalized_union`] with that policy instead.
     /// The union an intersection of `arms` denotes when an arm is a union —
     /// the checker's distribution (`getIntersectionType`), even where the
     /// canonical construction keeps the written intersection as its printed

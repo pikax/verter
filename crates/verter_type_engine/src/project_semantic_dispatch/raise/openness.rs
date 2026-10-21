@@ -2633,7 +2633,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> Openness<'a, C> {
 
     /// Resolve an unresolved carrier's head and judge what it names.
     fn carrier_head(&mut self, node: SemanticNodeId, position: OperandPosition) -> Flow {
-        if self.dispatch.carrier_normalizing.borrow().contains(&node) {
+        if self.dispatch.carrier_normalizing_holds(node) {
             // The carrier is being normalized below this evaluation: its
             // head resolution answers the carrier itself, for this context
             // only.

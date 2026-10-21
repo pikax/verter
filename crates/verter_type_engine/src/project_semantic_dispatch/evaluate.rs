@@ -1161,7 +1161,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// the read kept only when it is a declaration or class reference.
     /// `None` for any other access (a computed index, a partial read, a
     /// terminal that is not a named reference).
-    fn named_indexed_access(
+    pub(super) fn named_indexed_access(
         &self,
         node: SemanticNodeId,
         context: ProjectionReductionContext,
@@ -3566,9 +3566,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         let started = if settled.exit_reasons.is_none() {
                             let started =
                                 self.begin_composite(settled.n, !settled.resolve_declaration_refs);
-                            if started.is_none()
-                                && self.carrier_normalizing.borrow().contains(&settled.n)
-                            {
+                            if started.is_none() && self.carrier_normalizing_holds(settled.n) {
                                 *reentered = true;
                             }
                             started
@@ -3755,7 +3753,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !(is_union && re_decidable) && !arms.iter().any(|arm| self.is_composite_name(*arm)) {
             return None;
         }
-        if self.carrier_normalizing.borrow().contains(&node) {
+        if self.carrier_normalizing_holds(node) {
             return None;
         }
         // A union this operation already proved stays as written: the
