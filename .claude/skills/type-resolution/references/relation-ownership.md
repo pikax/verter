@@ -20,6 +20,41 @@ this index. Native `Omit` already enumerates canonical `PropertyKey` values into
 an `FxHashSet` and filters by membership; it retains that typed property-key
 owner, including its numeric/string key normalization, without relation scans.
 
+A pair question (`execute_relate_pair`) of a literal against a literal-only
+union takes no relation frame and publishes no memo entry, as a literal pair
+does: a distributive conditional asks one per member. It replays a memoized
+answer for the pair first (paying its receipt, which is never below the index
+price), then answers from the index, the lookup's roots and the index receipt
+going to the asking build. The path depends on the operands' shapes alone,
+never on what an earlier read prepared. A pair asked while a relation frame is
+on top joins that frame's chain, and a pair already open lower on the
+obligation stack is the relation's coinductive assumption: both take the
+ordinary path, which applies the chain's overflow, depth and comparison limits
+and the assumption. A preparation ahead of any relation
+frame starts only when the demand can pay for every arm and records no budget
+edge (a frame on top never asked for it); a refused one falls back to the
+relation authority, whose own frame records the refusal. Inside a relation, a
+literal-only union source against a union target reads its members through the
+index in member order and stops at the first one the target lacks
+(`eachTypeRelatedToSomeType` over `containsType`), depositing the same roots in
+the same first-inspection order as one arm per member, without a work item per
+member; a refused preparation falls back to one arm per member, and each arm
+reports it. One membership test (`literal_members_in_union`) serves all three
+paths.
+
+The structural-fact demand's composite reduction reduces a resolved union
+once per operation when every arm is a literal, a primitive or an enum member:
+such a union, proven left as written (the canonical union over the arms keeps
+every one), is recorded with the file roots that canonicalization inspected,
+and a later demand replays those roots instead of reducing it again. That
+canonicalization runs no metered construction (the meter pays only for
+distributions), so a replay prices a demand exactly as reducing again does
+(`a_reused_composite_proof_prices_a_demand_as_reducing_again`); a union with
+any other arm is reduced by every demand. A distributive conditional's members
+each read their named `extends` operand through that demand. The outermost
+dispatch operation releases the record with the membership indexes.
+Member-set comparisons in the reduction use a hashed index for wide unions.
+
 Closed single-property scalar object unions use a request-local property index
 inside the relation authority. Matching properties still enter the ordinary
 member relation in authored order, including the positional first attempt.
