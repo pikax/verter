@@ -160,12 +160,17 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     ) -> Option<usize> {
         let graph = self.graph();
         let mut node = node;
-        // A constraint chain (`U extends V`, `V extends [A, B]`) is short.
-        // bounded-loop: the bound only guards a cyclic constraint chain.
-        for _ in 0..8 {
+        // A constraint chain that returns to a parameter it passed (`T
+        // extends U, U extends T`) is circular: no fixed tuple bounds it.
+        let mut visited: Vec<SemanticNodeId> = Vec::new();
+        loop {
             if let Some(arity) = self.fixed_tuple_arity(node) {
                 return Some(arity);
             }
+            if visited.contains(&node) {
+                return None;
+            }
+            visited.push(node);
             let declared = match graph.node_data(node).as_deref() {
                 Some(
                     SemanticNodeData::Infer { constraint, .. }
@@ -180,7 +185,6 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     .and_then(|session| session.declared_constraint(node))
             })?;
         }
-        None
     }
 
     /// Deposit the slice (a mutable tuple, or the array a single rest
