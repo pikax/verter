@@ -22,6 +22,28 @@ use crate::semantic_query::{
     SemanticNodeData, SemanticNodeId, SemanticQueryKey,
 };
 
+/// Whether `data` stores a child id: a payload with none is a leaf of every
+/// structural walk (a summary, an `infer` scan) and is read on its own.
+pub(super) fn has_children(data: &SemanticNodeData) -> bool {
+    let mut found = false;
+    let _ = data.for_each_child(|_| found = true);
+    found
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static OPERAND_WALK_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MEMBER_QUERIES_FORCED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count one node a conditional's operand classification read
+/// ([`ProjectSemanticDispatch::type_is_generic`], the `infer` inventory, the
+/// lattice-extreme probe).
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn note_operand_walk_visit() {
+    OPERAND_WALK_VISITS.with(|count| count.set(count.get() + 1));
+}
+
 /// The free type variables below one semantic node, binder-aware: the type
 /// parameters written below it that no generic signature within declares
 /// over the position they are written in, and whether an `infer` reference
@@ -299,6 +321,10 @@ struct MaterializedBranches {
     true_branch: SemanticNodeId,
     false_branch: SemanticNodeId,
     pending: Option<verter_session_query::retention::owned::Owned<ConditionalPendingSubstitution>>,
+    /// Whether the distributed `extends` operand is a union of literals
+    /// alone, read once per distribution
+    /// ([`ProjectSemanticDispatch::decides_member_in_place`]).
+    literal_extends: Option<bool>,
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
@@ -339,19 +365,45 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C>
         member: SemanticNodeId,
         extends: SemanticNodeId,
     ) -> super::walk::QueryBuildOutput {
-        dispatch.conditional_query_output(SemanticQueryKey::Conditional {
+        let pending = self.pending.as_ref().map(|pending| {
+            pending.distributed_over(member).map_or_else(
+                || pending.clone(),
+                verter_session_query::retention::owned::Owned::new,
+            )
+        });
+        let literal_extends = *self
+            .literal_extends
+            .get_or_insert_with(|| dispatch.is_literal_only_union(extends));
+        let key = SemanticQueryKey::Conditional {
             check: member,
             extends,
             true_branch: self.true_branch,
             false_branch: self.false_branch,
             distributive: false,
-            pending: self.pending.as_ref().map(|pending| {
-                pending.distributed_over(member).map_or_else(
-                    || pending.clone(),
-                    verter_session_query::retention::owned::Owned::new,
-                )
-            }),
-        })
+            pending: pending.clone(),
+        };
+        if literal_extends && dispatch.decides_member_in_place(member) {
+            // Charged and refused exactly as the member's own cold query
+            // would be, then evaluated in place, as a query the running
+            // decision reaches.
+            let _entry = match dispatch.enter_in_place_query(&key) {
+                Ok(entry) => entry,
+                Err(refusal) => return *refusal,
+            };
+            let _nested = dispatch.nested_decision_query();
+            return dispatch.decide_conditional(
+                member,
+                extends,
+                false,
+                &mut MaterializedBranches {
+                    true_branch: self.true_branch,
+                    false_branch: self.false_branch,
+                    pending,
+                    literal_extends: None,
+                },
+            );
+        }
+        dispatch.conditional_query_output(key)
     }
 
     fn committed(
@@ -427,6 +479,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ConditionalBranches<C> for L
 }
 
 impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, C> {
+    /// Nodes this thread's conditional decisions read to classify their
+    /// operands (generic, `infer` sites); test-only. A distributed member
+    /// that re-reads its wide `extends` operand shows here.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn conditional_operand_walk_visits_for_tests() -> usize {
+        OPERAND_WALK_VISITS.with(std::cell::Cell::get)
+    }
+
     construction_ordinal_seam! {
         /// Conditional type (lazy-block evaluation +
         /// distributive-conditional authority), read from the materialized
@@ -494,6 +554,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     true_branch,
                     false_branch,
                     pending,
+                    literal_extends: None,
                 },
             )
         }
@@ -1149,8 +1210,16 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 return Some(recovery);
             }
         }
+        // A union this operation already indexed as literals only holds no
+        // lattice extreme: every member of a distributed conditional asks
+        // this of the one `extends` operand, so it is not scanned again.
+        if is_union && self.literal_union_index_proves_literal_only(operand) {
+            return None;
+        }
         let mut found: [Option<SemanticNodeId>; 5] = [None; 5];
         for arm in arms.iter() {
+            #[cfg(any(test, feature = "test-support"))]
+            note_operand_walk_visit();
             let arm_type = match graph.node_data(*arm).as_deref() {
                 Some(
                     SemanticNodeData::Intersection(_)
@@ -1243,6 +1312,61 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         }
     }
 
+    /// Whether a distributed member is decided in place rather than as a
+    /// conditional query of its own, given an `extends` operand that is a
+    /// union of literals alone ([`Self::is_literal_only_union`]): a literal
+    /// member, as syntax-lowered members always are. The choice reads the
+    /// operands' shapes only, never what an earlier read prepared, so a
+    /// distribution decides its members the same way in every run. Such a
+    /// decision reads the two operands alone — the relation is a membership
+    /// lookup — and binds the selected branch by structural substitution,
+    /// which evaluates nothing (its only query builds a template whose holes
+    /// are closed literals), so it reaches no query that could re-enter it.
+    /// It runs the same decision with the same reads as the member's query,
+    /// charged and refused as that query's cold entry would be
+    /// ([`ProjectSemanticDispatch::enter_in_place_query`]); a memo entry for
+    /// each member of a wide union
+    /// would be read only by another distribution over the same member, which
+    /// decides it in place as cheaply.
+    fn decides_member_in_place(&self, member: SemanticNodeId) -> bool {
+        #[cfg(any(test, feature = "test-support"))]
+        if MEMBER_QUERIES_FORCED.get() {
+            return false;
+        }
+        matches!(
+            self.graph().node_data(member).as_deref(),
+            Some(SemanticNodeData::Literal(_))
+        )
+    }
+
+    /// Test-only: every distributed member is decided as its own
+    /// conditional query on this thread while the guard lives, so a test
+    /// can compare the in-place decision with the query it stands for.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn force_member_queries_for_tests() -> impl Drop {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                MEMBER_QUERIES_FORCED.set(self.0);
+            }
+        }
+        Restore(MEMBER_QUERIES_FORCED.replace(true))
+    }
+
+    /// Whether `node` is a union whose every arm is a literal.
+    fn is_literal_only_union(&self, node: SemanticNodeId) -> bool {
+        let graph = self.graph();
+        match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Union(arms)) => arms.iter().all(|arm| {
+                matches!(
+                    graph.node_data(*arm).as_deref(),
+                    Some(SemanticNodeData::Literal(_))
+                )
+            }),
+            _ => false,
+        }
+    }
+
     fn is_conditional_checker_recovery(&self, node: SemanticNodeId) -> bool {
         matches!(
             self.graph().node_data(node).as_deref(),
@@ -1251,7 +1375,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     }
 
     fn conditional_query_output(&self, key: SemanticQueryKey) -> super::walk::QueryBuildOutput {
-        let read = self.execute_read(key);
+        self.conditional_read_output(self.execute_read(key))
+    }
+
+    /// A conditional query's read as the output a decision folds in.
+    pub(super) fn conditional_read_output(
+        &self,
+        read: crate::semantic_query::CacheRead<QueryResult<SemanticNodeId>>,
+    ) -> super::walk::QueryBuildOutput {
         // Conditional branches and their union normalization already carry
         // a bounded positional representation. Forward the adopted value,
         // including its gaps, rather than discarding its producer guarantee.
@@ -1910,7 +2041,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let same_members = match self.graph().node_data(constructed).as_deref() {
             Some(SemanticNodeData::Union(kept)) => {
                 let kept = kept.members_arc();
-                kept.len() == members.len() && kept.iter().all(|member| members.contains(member))
+                kept.len() == members.len() && super::evaluate::holds_every(&members, &kept)
             }
             _ => false,
         };
@@ -2107,9 +2238,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         // A node with no children is summarised from its own payload, without
         // the traversal's containers.
         if let Some(data) = graph.node_data(root) {
-            let mut has_child = false;
-            let _ = data.for_each_child(|_| has_child = true);
-            if !has_child {
+            if !has_children(&data) {
                 let summary = FreeTypeVariables {
                     params: matches!(data.as_ref(), SemanticNodeData::TypeParam { .. })
                         .then(|| Arc::from([root])),
@@ -2259,6 +2388,21 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
     /// an unbound type variable. At its declaration site in `extends` it is
     /// instead a pattern to infer, so genericness must retain that position.
     fn type_is_generic_operand(&self, node: SemanticNodeId, infer_operand: bool) -> bool {
+        // The walk below answers generic only at a type parameter, an `infer`
+        // reference, or an `infer` declaration read in check position (a
+        // nested conditional's check is, whatever `infer_operand` is here),
+        // and it reaches each of them only as a structural descendant: it
+        // never descends into a signature, and it leaves the structure for an
+        // instantiated alias body only when an argument mentions one of
+        // them. A node whose kept free-variable summary holds none of the
+        // three is therefore not generic in either position. A summary is
+        // kept only when complete: the walk composing one keeps nothing
+        // across a cycle.
+        if !self.mentions_generic_operand_variable(node, true)
+            && self.free_type_variables.borrow().contains_key(&node)
+        {
+            return false;
+        }
         let graph = self.graph();
         let mut pending = vec![(node, infer_operand)];
         // One visited set per operand position: a node met as an infer
@@ -2271,6 +2415,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             if !seen[usize::from(infer_operand)].insert(node) {
                 continue;
             }
+            #[cfg(any(test, feature = "test-support"))]
+            note_operand_walk_visit();
             let Some(data) = graph.node_data(node) else {
                 continue;
             };
@@ -2476,7 +2622,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         if self.relation_pattern_info(extends).is_some() {
             return ConditionalInferRoute::InScopePattern;
         }
-        match self.infer_inventory(extends) {
+        match self.infer_inventory(extends).as_ref() {
             super::relation::InferInventory::Sites(_) => ConditionalInferRoute::None,
             super::relation::InferInventory::Unsupported => ConditionalInferRoute::OutOfScope,
         }

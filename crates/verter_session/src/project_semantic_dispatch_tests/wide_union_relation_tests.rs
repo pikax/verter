@@ -69,6 +69,278 @@ fn literal_union_membership_work_grows_with_input() {
     }
 }
 
+/// The module declares its own `Exclude` (a distributive conditional, not
+/// the native utility) and derives `Most` with it. Every distributed
+/// member relates to the one `Most`, so reading what `Most` names, reducing
+/// that union and classifying it as an `extends` operand (generic, `infer`
+/// sites) happen once for the distribution, not once per member, whether
+/// the probe is a value's declared type or a named alias the host
+/// resolves. Omit over the declared utilities distributes the same way.
+///
+/// Oracle: TypeScript 7.0.2 answers `"m3" | "m5"` for both probes at every
+/// width (`--strict`).
+#[test]
+fn a_declared_exclude_reads_a_derived_union_once_per_distribution() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{LiteralValue, SemanticNodeData};
+    type Dispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+    const DECLARED: &str = "type Exclude<T, U> = T extends U ? never : T;\n\
+        type Pick<T, K extends keyof T> = { [P in K]: T[P] };\n\
+        type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;\n";
+    let reads = || {
+        Dispatch::composite_arm_reads_for_tests()
+            + Dispatch::relation_union_arm_visits_for_tests()
+            + Dispatch::conditional_operand_walk_visits_for_tests()
+    };
+    // The string literals of the alias `__Probe` the host resolves, in order.
+    let named_answer = |source: &str| {
+        let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some("/scenario.ts".to_owned()),
+                input_id: "/scenario.ts".to_owned(),
+                source: Arc::from(source),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert the scenario");
+        let node = host
+            .resolve_named_symbol("/scenario.ts", "__Probe", None)
+            .expect("the probe answers");
+        let graph = host.project_type_store().semantic_graph();
+        let mut pending = vec![node.id()];
+        let mut values = Vec::new();
+        while let Some(node) = pending.pop() {
+            match graph.node_data(node).as_deref().expect("live answer") {
+                SemanticNodeData::Union(members) => pending.extend(members.iter().rev().copied()),
+                SemanticNodeData::Alias(inner) => pending.push(*inner),
+                SemanticNodeData::Literal(LiteralValue::String(value)) => {
+                    values.push(value.to_string());
+                }
+                other => panic!("unexpected answer {other:?}"),
+            }
+        }
+        values
+    };
+    for named in [false, true] {
+        for probe in ["Exclude<W, Most>", "keyof Omit<{ [K in W]: K }, Most>"] {
+            let visits = [32, 64, 128].map(|width| {
+                let source = format!(
+                    "{DECLARED}{}type Most = Exclude<W, \"m3\" | \"m5\">;\n",
+                    wide_union(width)
+                );
+                let before = reads();
+                if named {
+                    let source = format!("{source}type __Probe = {probe};\nexport {{}};\n");
+                    assert_eq!(named_answer(&source), ["m3", "m5"], "{probe} over {width}");
+                } else {
+                    with_probe(&source, probe, |dispatch, node| {
+                        let expected =
+                            checker_syntax::parse("\"m3\" | \"m5\"").expect("valid expected type");
+                        assert!(
+                            checker_syntax::matches_node(dispatch, node, &expected, 0),
+                            "{probe} over {width} members"
+                        );
+                    });
+                }
+                reads() - before
+            });
+            println!("declared {probe} (named: {named}): union reads {visits:?}");
+            // Preparing the membership index alone reads every arm once: a
+            // count below the width means the work went uncounted.
+            for (width, visits) in [32, 64, 128].into_iter().zip(visits) {
+                assert!(
+                    visits >= width,
+                    "the reads must be observed on this thread: {probe} (named: {named}): \
+                     {visits} at width {width}"
+                );
+            }
+            for step in 0..2 {
+                assert!(
+                    visits[step + 1] * 10 <= visits[step] * 22,
+                    "doubling the input at most doubles union reads: {probe} (named: \
+                     {named}): {visits:?}"
+                );
+            }
+        }
+    }
+}
+
+/// A union the composite reduction proved it leaves as written is reused
+/// only when every arm is a literal, a primitive or an enum member: that
+/// canonicalization charges the connected demand nothing, so replaying the
+/// proof prices a demand exactly as reducing the union again does. A union
+/// holding any other arm is reduced again by every demand.
+#[test]
+fn a_reused_composite_proof_prices_a_demand_as_reducing_again() {
+    use super::ProjectSemanticDispatch;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::composite::CompositeList;
+    use verter_type_engine::semantic_query::{
+        AuthoredPropertyKey, LiteralValue, MacroOwnBodyStamp, MergeRoleStamp, PrimitiveKind,
+        ProjectionReductionContext, SemanticNodeData, SurfaceMember,
+    };
+    type Dispatch<'a> = ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+
+    let host = crate::VerterHost::new_standalone(crate::HostConfig::default());
+    let dispatch = ProjectSemanticDispatch::new(&host);
+    let _builder = dispatch.enter_construction_scope();
+    dispatch
+        .set_connected_limits_for_tests(super::connected_demand::MAX_CONNECTED_PROJECTION_WORK, 24);
+    let graph = dispatch.graph();
+    let literals: Vec<_> = (0..16)
+        .map(|index| {
+            graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(format!(
+                "s{index}"
+            ))))
+        })
+        .collect();
+    let union = |arms: Vec<_>| {
+        graph.intern_node(SemanticNodeData::Union(
+            CompositeList::authored_shell_for_tests(Arc::from(arms)),
+        ))
+    };
+    let literal_union = union(literals.clone());
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let object = graph.intern_node(SemanticNodeData::Object(
+        verter_type_engine::test_surface_view! {
+            members: Arc::from(vec![SurfaceMember {
+                excess_origin: verter_type_expr::ExcessPropertyOrigin::NonLiteral,
+                visibility: verter_type_expr::MemberVisibility::Public,
+                key: AuthoredPropertyKey::string("x"),
+                value: string,
+                optional: false,
+                readonly: false,
+                method_kind: None,
+                has_implementation_body: false,
+                declared_in_macro_type_arg: MacroOwnBodyStamp::NEUTRAL,
+                merge_role: MergeRoleStamp::NEUTRAL,
+                spans: Default::default(),
+                declaration_origin: None,
+            }].into_boxed_slice()),
+            call_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            construct_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            index_signatures: Arc::from(Vec::new().into_boxed_slice()),
+            keyspace: None,
+            has_index_signature: false,
+        },
+    ));
+    let mixed_union = union(literals.iter().copied().chain([object]).collect());
+    // Both reads of each union run in one demand, as the members of one
+    // distribution do: each returns its own connected work, bytes and arm
+    // reads.
+    let (_guard, _) = dispatch.enter_connected_demand(false);
+    let demand = |node| {
+        let ledger = dispatch.connected_demand();
+        let before = (
+            ledger.work_used_for_tests(),
+            ledger.bytes_used_for_tests(),
+            Dispatch::composite_arm_reads_for_tests(),
+        );
+        let _ = dispatch.normalize_node_for_structural_fact_demand(
+            node,
+            ProjectionReductionContext::structural_transit(),
+        );
+        (
+            ledger.work_used_for_tests() - before.0,
+            ledger.bytes_used_for_tests() - before.1,
+            Dispatch::composite_arm_reads_for_tests() - before.2,
+        )
+    };
+    let cold = demand(literal_union);
+    let replay = demand(literal_union);
+    let first = demand(mixed_union);
+    let again = demand(mixed_union);
+    assert!(
+        cold.2 >= literals.len(),
+        "the cold reduction reads every arm: {cold:?}"
+    );
+    assert_eq!(
+        replay.2, 0,
+        "the proven union is not reduced again: {replay:?}"
+    );
+    assert!(
+        first.2 > literals.len() && again.2 == first.2,
+        "a union with an object arm is reduced by every demand: {first:?} {again:?}"
+    );
+    // A first read of either union also pays for settling the node, which
+    // later reads are served; past it, reducing a union again and replaying
+    // a proof charge the same.
+    assert_eq!(
+        (replay.0, replay.1),
+        (again.0, again.1),
+        "a replay charges what reducing again charges: {replay:?} {again:?}"
+    );
+}
+
+/// A distributed member decided in place is charged and refused as its own
+/// conditional query would be. Under every request budget from one that
+/// refuses before the distribution finishes to one that answers whole, the
+/// in-place decisions and the member queries give the same answer, the same
+/// checker recovery and the same walker diagnostics.
+#[test]
+fn in_place_members_answer_and_refuse_as_member_queries_under_a_request_budget() {
+    use std::sync::Arc;
+    type Dispatch<'a> = super::ProjectSemanticDispatch<'a, crate::resolver_core::HostCapabilities>;
+    let source = format!(
+        "type Exclude<T, U> = T extends U ? never : T;\n{}type Most = Exclude<W, \"m3\" | \"m5\">;\n\
+         type __Probe = Exclude<W, Most>;\nexport {{}};\n",
+        wide_union(32)
+    );
+    // The answer's wire form, its checker recovery and the request's walker
+    // diagnostics under `budget`, with every member its own query or not.
+    let observe = |budget: usize, member_queries: bool| {
+        let _forced = member_queries.then(Dispatch::force_member_queries_for_tests);
+        let host = crate::VerterHost::new_standalone(crate::HostConfig {
+            audit_enabled: true,
+            projection_op_budget: budget,
+            ..crate::HostConfig::default()
+        });
+        let _ = host
+            .upsert(crate::UpsertRequest {
+                canonical_id: Some("/scenario.ts".to_owned()),
+                input_id: "/scenario.ts".to_owned(),
+                source: Arc::from(source.as_str()),
+                file_language: crate::FileLanguage::script_ts(),
+                aliases: Vec::new(),
+            })
+            .expect("upsert the scenario");
+        let (outcome, audit) = host
+            .resolve_named_symbol_with_audit("/scenario.ts", "__Probe", None)
+            .into_parts();
+        let answer = match outcome {
+            Ok(Some(node)) => Some((
+                host.project_node_to_type_expr_json_bytes(&node)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()),
+                node.checker_recovery_code(),
+            )),
+            Ok(None) => None,
+            Err(error) => panic!("budget {budget}: the request fails: {error:?}"),
+        };
+        let diagnostics = match &audit.kind_payload {
+            verter_audit::RequestKindPayload::TypeResolution(payload) => {
+                format!("{:?}", payload.walker_diagnostics)
+            }
+            other => panic!("not a type resolution audit: {other:?}"),
+        };
+        (answer, diagnostics)
+    };
+    let whole = observe(1_000_000, false);
+    assert_eq!(whole, observe(1_000_000, true), "an unbounded request");
+    let mut refused = 0;
+    for budget in [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128] {
+        let in_place = observe(budget, false);
+        assert_eq!(
+            in_place,
+            observe(budget, true),
+            "budget {budget}: in-place members must answer as member queries do"
+        );
+        refused += usize::from(in_place != whole);
+    }
+    assert!(refused > 0, "some budget must refuse the distribution");
+}
+
 #[test]
 fn a_partly_warm_literal_membership_demand_pays_preparation_once() {
     use super::ProjectSemanticDispatch;
@@ -175,6 +447,54 @@ fn literal_union_membership_preserves_values_order_and_general_members() {
         ("[boolean] extends [true | false] ? 1 : 2", "1"),
         ("['1'] extends [1 | 2] ? 1 : 2", "2"),
         ("[1n] extends [1 | 2] ? 1 : 2", "2"),
+    ];
+    for options in [
+        r#"{"strictNullChecks":true,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":true,"noImplicitAny":false}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":true}"#,
+        r#"{"strictNullChecks":false,"noImplicitAny":false}"#,
+    ] {
+        let failures = super::checker_probe_lane_tests::mismatches_in(
+            super::checker_probe_lane_tests::ProbeProject {
+                compiler_options: Some(options),
+                ..Default::default()
+            },
+            source,
+            &probes,
+        );
+        assert!(failures.is_empty(), "{options}: {}", failures.join("\n"));
+    }
+}
+
+/// A literal union source related member by member to a literal union
+/// target, and distributions through a declared `Exclude` / `Extract`
+/// over literal unions, a derived one among them, answer as the checker
+/// does. Measured on TypeScript 7.0.2 under each of `strictNullChecks` and
+/// `noImplicitAny` on and off (the four settings agree on every probe).
+#[test]
+fn literal_union_sources_and_declared_distributions_answer_as_the_checker() {
+    let source = r#"
+        type W = "a" | "b" | "c" | 1 | 2 | true | false | 1n | 2n;
+        enum E { A = "a", B = 1 }
+        type MyExclude<T, U> = T extends U ? never : T;
+        type MyExtract<T, U> = T extends U ? T : never;
+        type Most = MyExclude<W, "c" | 2>;
+    "#;
+    let probes = [
+        ("['a' | 1 | true | 2n] extends [W] ? 1 : 2", "1"),
+        ("['a' | 'zz'] extends [W] ? 1 : 2", "2"),
+        ("['1' | 2] extends [1 | 2] ? 1 : 2", "2"),
+        ("[1 | 2] extends [1 | 2 | 3] ? 1 : 2", "1"),
+        ("[1n | 3n] extends [W] ? 1 : 2", "2"),
+        ("['a' | 'b'] extends [E.A | E.B] ? 1 : 2", "2"),
+        ("MyExclude<'a' | 'b' | 1, 'a' | 1>", "\"b\""),
+        ("MyExtract<'a' | 'b' | 1, 'a' | 1 | 3>", "\"a\" | 1"),
+        ("MyExclude<W, Most>", "\"c\" | 2"),
+        ("[Most] extends [W] ? 1 : 2", "1"),
+        ("[W] extends [Most] ? 1 : 2", "2"),
+        ("[true | 'a'] extends [boolean | 'a'] ? 1 : 2", "1"),
+        ("[1 | 'b'] extends [MyExclude<W, 'a'>] ? 1 : 2", "1"),
+        ("MyExclude<1 | 2 | 'b', MyExclude<W, 'a'>>", "never"),
     ];
     for options in [
         r#"{"strictNullChecks":true,"noImplicitAny":true}"#,
