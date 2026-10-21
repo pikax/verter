@@ -1465,17 +1465,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // — a member the namespace exports: read from outside its body, a
         // private one is no member of it. A function-local root is never a
         // namespace (a namespace declares only at file or namespace scope).
-        if ambient_scope.is_none() && value_root.scope.local_scope.is_none() {
+        if value_root.scope.local_scope.is_none() {
             let mut joined = value_root.name.to_string();
             for (split, segment) in path.iter().enumerate() {
                 joined.push('.');
                 joined.push_str(segment);
-                if matches!(
-                    shallow.visible_value_binding(value_root.scope.owner, &joined),
-                    Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
-                ) && shallow
-                    .headers
-                    .namespace_member_is_exported(value_root.scope.owner, &joined)
+                let declared = match ambient_scope {
+                    Some(augmentation) => shallow
+                        .headers
+                        .augmentation_value_header_in(augmentation, value_root.scope.owner, &joined)
+                        .is_some(),
+                    None => matches!(
+                        shallow.visible_value_binding(value_root.scope.owner, &joined),
+                        Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
+                    ),
+                };
+                if declared
+                    && shallow
+                        .headers
+                        .namespace_member_is_exported(value_root.scope.owner, &joined)
                 {
                     let member_root = ValueRootKey {
                         scope: value_root.scope.clone(),
@@ -8221,9 +8229,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 GlobalSpace::Type => headers
                     .augmentation_type_header_in(augmentation, *owner, &qualified)
                     .is_some(),
-                GlobalSpace::Value => headers
-                    .augmentation_value_header_in(augmentation, *owner, &qualified)
-                    .is_some(),
+                GlobalSpace::Value => {
+                    headers
+                        .augmentation_value_header_in(augmentation, *owner, &qualified)
+                        .is_some()
+                        || headers
+                            .augmentation_namespace_blocks
+                            .iter()
+                            .any(|(kind, namespace)| {
+                                kind == augmentation
+                                    && namespace.owner == *owner
+                                    && namespace.qualified_name == qualified
+                            })
+                }
             };
             if declared {
                 return Some((specifier.clone(), qualified));

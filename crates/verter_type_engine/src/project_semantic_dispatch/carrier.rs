@@ -887,6 +887,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         }
 
+        // An enum member has no type header. Bind its owning value in the
+        // lexical namespace before a file/global declaration can replace it.
+        if name.rsplit_once('.').is_some_and(|(prefix, _)| {
+            self.ambient_namespace_target(scope, prefix, super::build::GlobalSpace::Value)
+                .is_some()
+        }) {
+            if let Some(member_type) =
+                self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
+            {
+                return CarrierResolutionPlan::complete(member_type);
+            }
+        }
+
         // Global lib-type fast path: an unshadowed runtime nominal interns a
         // `DeclRef` / `InstantiationRef` carrier in EVERY mode, preserving its
         // declaration identity for semantic classifiers and reducers.
@@ -1084,21 +1097,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // `Enum.Member` whose prefix is a proven enum value declaration
             // projects the member's projected type. Gated on the typed
             // `ValueDeclKind::Enum` fact, not a dotted-name heuristic.
-            if let NodeScopeId::File {
-                canonical_id,
-                owner,
-                ..
-            } = scope
+            if let Some(member_type) =
+                self.resolve_enum_member_type(scope, name_resolution, scope_payload, name.as_ref())
             {
-                if let Some(member_type) = self.resolve_enum_member_type(
-                    canonical_id.as_ref(),
-                    *owner,
-                    name_resolution,
-                    scope_payload,
-                    name.as_ref(),
-                ) {
-                    return CarrierResolutionPlan::complete(member_type);
-                }
+                return CarrierResolutionPlan::complete(member_type);
             }
             // Currently-unresolved authored reference. Under the carrier
             // modes the head STAYS a scoped `BareRef` carrier — the authored

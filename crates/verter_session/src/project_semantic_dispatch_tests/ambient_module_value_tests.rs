@@ -230,57 +230,107 @@ declare module "pkg" {
 
 #[test]
 fn an_ambient_assigned_namespace_typeof_reads_its_lexical_value() {
-    for global in ["", "declare const value: 0;"] {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
+    let mut failures = Vec::new();
+    for global in [
+        "",
+        "declare const value: 0; declare namespace Inner { const value: 0; const obj: { k: 0 }; }",
+    ] {
         let ambient = format!(
             r#"
 declare module "pkg" {{
-  namespace NS {{ const value: 99; type Opt = {{ k: typeof value }}; }}
+  namespace NS {{
+    const value: 99;
+    namespace Inner {{ const value: 99; const obj: {{ k: 99 }}; }}
+    type Opt = {{ k: typeof value; nested: typeof Inner.value }};
+    type NestedTypeof = typeof Inner.value;
+    type MemberTypeof = typeof Inner.obj.k;
+  }}
   export = NS;
 }}
 declare module "other-pkg" {{
-  namespace NS {{ const value: 7; type Opt = {{ k: typeof value }}; }}
+  namespace NS {{
+    const value: 7;
+    namespace Inner {{ const value: 7; }}
+    type Opt = {{ k: typeof value; nested: typeof Inner.value }};
+  }}
   export = NS;
 }}
 {global}
 "#
         );
         let files = [("assigned.d.ts", ambient.as_str())];
-        let failures = mismatches_in(
-            ProbeProject {
-                files: &files,
-                ..ProbeProject::default()
-            },
-            r#"import type { Opt } from "pkg"; import * as Pkg from "pkg";
+        let project = ProbeProject {
+            files: &files,
+            ..ProbeProject::default()
+        };
+        let host = probe_host(project);
+        for _ in 0..2 {
+            failures.extend(mismatches_on_host(
+                &host,
+                project,
+                r#"import type { Opt, NestedTypeof, MemberTypeof } from "pkg"; import * as Pkg from "pkg";
 import type { Opt as OtherOpt } from "other-pkg";"#,
-            &[
-                ("Opt[\"k\"]", "99"),
-                ("Pkg.Opt[\"k\"]", "99"),
-                ("OtherOpt[\"k\"]", "7"),
-            ],
-        );
-        assert!(failures.is_empty(), "{}", failures.join("\n"));
+                &[
+                    ("Opt[\"k\"]", "99"),
+                    ("Pkg.Opt[\"k\"]", "99"),
+                    ("Opt[\"nested\"]", "99"),
+                    ("Pkg.Opt[\"nested\"]", "99"),
+                    ("NestedTypeof", "99"),
+                    ("Pkg.NestedTypeof", "99"),
+                    ("MemberTypeof", "99"),
+                    ("Pkg.MemberTypeof", "99"),
+                    ("OtherOpt[\"k\"]", "7"),
+                    ("OtherOpt[\"nested\"]", "7"),
+                ],
+            ));
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
 fn an_ambient_assigned_namespace_exports_enum_member_types() {
-    let files = [(
-        "assigned.d.ts",
-        r#"
-declare module "pkg" { namespace NS { enum E { X = 99 } } export = NS; }
-"#,
-    )];
-    let failures = mismatches_in(
-        ProbeProject {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
+    let mut failures = Vec::new();
+    for global in ["", "declare enum E { X = 0 }"] {
+        let ambient = format!(
+            r#"
+declare module "pkg" {{
+  namespace NS {{
+    enum E {{ X = 99 }}
+    type EnumAlias = E.X;
+    interface Holder {{ k: E.X }}
+  }}
+  export = NS;
+}}
+{global}
+"#
+        );
+        let files = [("assigned.d.ts", ambient.as_str())];
+        let project = ProbeProject {
             files: &files,
             ..ProbeProject::default()
-        },
-        r#"import type { E } from "pkg"; import * as Pkg from "pkg";"#,
-        &[
-            ("E.X extends 99 ? true : false", "true"),
-            ("Pkg.E.X extends 99 ? true : false", "true"),
-        ],
-    );
+        };
+        let host = probe_host(project);
+        for _ in 0..2 {
+            failures.extend(mismatches_on_host(
+                &host,
+                project,
+                r#"import type { E, EnumAlias, Holder } from "pkg"; import * as Pkg from "pkg";"#,
+                &[
+                    ("E.X extends 99 ? true : false", "true"),
+                    ("Pkg.E.X extends 99 ? true : false", "true"),
+                    ("EnumAlias extends 99 ? true : false", "true"),
+                    ("Pkg.EnumAlias extends 99 ? true : false", "true"),
+                    ("Holder[\"k\"] extends 99 ? true : false", "true"),
+                    ("Pkg.Holder[\"k\"] extends 99 ? true : false", "true"),
+                ],
+            ));
+        }
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 

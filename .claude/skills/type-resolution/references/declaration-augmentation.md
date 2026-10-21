@@ -84,10 +84,15 @@ A single contribution retains its actual type (including an alias reference or
 scalar); only multiple contributors require peer surface merging.
 
 Namespace `typeof` roots bind values in that same inventory before file/global
-lookup. Their qualified name and augmentation binder identity reach the shared
-value builder, which prepares the exact module-scoped declaration and reads its
-authored value position through an `AugmentationBody` locator even when another
+lookup, including nested namespace roots whose members have qualified value
+headers. The shared value builder consumes those headers before projecting any
+remaining property path. Their qualified name and augmentation binder identity
+reach the shared value builder, which prepares the exact module-scoped declaration
+and reads its authored value position through an `AugmentationBody` locator even when another
 module declares the same namespace and value names. Enum member types
-follow the shared ambient import value route before enum projection. Namespace
-classes retain both their instance type and constructor value through the ordinary
-class header and body lowerers, including explicit exports and generic defaults.
+follow the shared ambient import value route before enum projection. An enum
+member referenced by a sibling alias first binds its owning enum in the lexical
+namespace inventory, before file/global lookup, then uses the same enum projector.
+Namespace classes retain both their instance type and constructor value through
+the ordinary class header and body lowerers, including explicit exports and
+generic defaults.

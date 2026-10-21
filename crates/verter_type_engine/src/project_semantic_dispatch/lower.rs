@@ -733,13 +733,28 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// namespace's own file.
     pub(super) fn resolve_enum_member_type(
         &self,
-        scope_canonical: &str,
-        scope_owner: verter_type_expr::TopLevelOwnerId,
+        scope: &NodeScopeId,
         name_resolution: &FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
         scope_payload: Option<&DeclarationScopePayload>,
         dotted_name: &str,
     ) -> Option<SemanticNodeId> {
+        let NodeScopeId::File {
+            canonical_id,
+            owner,
+            ..
+        } = scope
+        else {
+            return None;
+        };
+        let scope_canonical = canonical_id.as_ref();
+        let scope_owner = *owner;
         let (prefix, member) = dotted_name.rsplit_once('.')?;
+        if let Some((_, qualified)) =
+            self.ambient_namespace_target(scope, prefix, super::build::GlobalSpace::Value)
+        {
+            let enumeration = self.enum_declaration(scope_canonical, scope_owner, &qualified)?;
+            return self.enum_member_type(&enumeration, member);
+        }
         let (head, rest) = prefix.split_once('.').unwrap_or((prefix, ""));
         let indexed = self
             .ctx
