@@ -15,9 +15,9 @@ use verter_session_query::retention::{
 };
 
 /// Every host charges the one process account, so tests that read its ACTIVE
-/// transitions run one at a time (other tests in this binary reserve no
-/// ACTIVE bytes).
-static PROCESS_ACCOUNT: Mutex<()> = Mutex::new(());
+/// transitions run one at a time; every other test in this binary that
+/// compares exact account figures takes the same lock.
+pub(super) static PROCESS_ACCOUNT: Mutex<()> = Mutex::new(());
 
 const ICON: &str = "/src/types/icon.ts";
 
