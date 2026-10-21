@@ -6417,6 +6417,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &build.decl_canonical,
                 build.decl_owner,
                 &build.decl_name,
+                || true,
             )
         };
         let (recurs_when_true, arguments) = match (applies(true_branch), applies(false_branch)) {
@@ -6546,12 +6547,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let next = build
                 .generic
                 .then(|| {
-                    self.conditional_tail_arguments(
-                        result,
-                        &build.decl_canonical,
-                        build.decl_owner,
-                        &build.decl_name,
-                    )
+                    let canonical = build.decl_canonical.clone();
+                    let owner = build.decl_owner;
+                    let name = build.decl_name.clone();
+                    self.conditional_tail_arguments(result, &canonical, owner, &name, || {
+                        self.declares_conditional_body(build) == Some(true)
+                    })
                 })
                 .flatten();
             use crate::semantic_query::{checker_policy, CheckerDiagnosticOperation};
@@ -18865,12 +18866,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// through aliases that only forward their own bare parameters.
     /// Applications nested inside constructors and conditional alias bodies
     /// stay on the ordinary evaluation path, never a guessed tail edge.
+    /// Eligibility is read only after a non-self application is found;
+    /// ordinary aliases never scan the rest of their forwarding chain.
     fn conditional_tail_arguments(
         &self,
         result: SemanticNodeId,
         canonical: &verter_type_expr::OwnedStr,
         owner: verter_type_expr::TopLevelOwnerId,
         name: &verter_type_expr::OwnedStr,
+        forwarding_allowed: impl FnOnce() -> bool,
     ) -> Option<Arc<[SemanticNodeId]>> {
         let graph = self.graph();
         let reference = |node| match graph.node_data(node).as_deref() {
@@ -18882,12 +18886,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         };
         let (mut declaration, mut arguments) = reference(result)?;
         let mut seen = rustc_hash::FxHashSet::default();
+        let mut forwarding_allowed = Some(forwarding_allowed);
         loop {
             if declaration.canonical_id == *canonical
                 && declaration.owner == owner
                 && declaration.decl_name == *name
             {
                 return Some(arguments);
+            }
+            if let Some(allowed) = forwarding_allowed.take() {
+                if !allowed() {
+                    return None;
+                }
             }
             if self.cancellation.is_cancelled() || !seen.insert(declaration.clone()) {
                 return None;

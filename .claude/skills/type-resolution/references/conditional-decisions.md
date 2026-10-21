@@ -142,4 +142,6 @@ Known open rows, measured against TypeScript 7.0.2 and left unavailable rather t
 
 ## Tail calls through forwarding aliases
 
+Only a declaration whose own body is a conditional may follow a forwarding chain. Ordinary alias instantiation keeps its existing cycle carriers and one-hop work; eligibility is checked lazily when a result names a different declaration.
+
 A conditional tail call can return through aliases whose bodies only apply another declaration to their own bare type parameters. The tail recognizer follows those declared forwarding applications, substituting parameters by ordinal, and uses the existing exact-step and uniform-growth proofs for the original conditional. It never evaluates another conditional or descends through a constructor while recognizing the forwarding chain. Repeated declarations and cancellation stop recognition; unsupported bodies retain ordinary evaluation and its instantiation budget. This lets a growing conditional recover through an alias without spending the full budget on freshly minted applications.
