@@ -379,7 +379,7 @@ fn conditional_inference() {
             read: Read::Type(r#"U<{ x: 1 }>"#),
             tsc: [r#"unknown"#, r#"unknown"#, r#"unknown"#, r#"unknown"#],
             diagnostics: [&[], &[], &[], &[]],
-            baseline: [Class::Gap, Class::Gap, Class::Gap, Class::Gap],
+            baseline: [Class::Exact, Class::Exact, Class::Exact, Class::Exact],
         },
         Row {
             read: Read::Type(r#"U<R<{ x: 1 }>>"#),

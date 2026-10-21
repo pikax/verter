@@ -1788,6 +1788,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
+        if object.empty_literal && object.properties.is_empty() {
+            return LowerStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                lowering.scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             match member {
                 ObjectMember::Property(prop) => {
@@ -2681,23 +2692,38 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         extends,
                         &extends_path,
                     );
+                // A declared constraint is read where the conditional is
+                // written, and the false branch outside the pattern: no
+                // `infer` of the pattern is in scope there (`[infer A, infer
+                // B extends A]` reports TS2304 for `A`).
+                let out_of_scope_env = (!infer_sites.is_empty()).then(|| {
+                    let recovery = crate::semantic_query::checker_policy::checker_recovery(
+                        graph,
+                        crate::semantic_query::checker_policy::unresolved_type_name(),
+                    );
+                    let mut out_of_scope = env.clone();
+                    for site in &infer_sites {
+                        out_of_scope.insert(
+                            super::carrier::out_of_scope_infer_env_key(site.name.as_ref()),
+                            recovery,
+                        );
+                    }
+                    out_of_scope
+                });
                 let mut extends_env_owned;
                 let mut declarations = Vec::with_capacity(infer_sites.len());
                 let extends_env = if infer_sites.is_empty() {
                     env
                 } else {
                     extends_env_owned = env.clone();
+                    let constraint_env = out_of_scope_env.as_ref().unwrap_or(env);
                     for site in infer_sites {
                         let binder = infer_binders.binder_at(&site.path);
-                        // A declared constraint is read where the
-                        // conditional is written: no `infer` of the
-                        // pattern is in scope there (`[infer A, infer B
-                        // extends A]` reports TS2304 for `A`).
                         let constraint = site.constraint.map(|constraint| {
                             self.lower_type_expr_with_infer_factory(
                                 infer_binders,
                                 constraint,
-                                env,
+                                constraint_env,
                                 scope,
                                 name_resolution,
                                 scope_payload,
@@ -2769,8 +2795,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 true_env.insert(name.to_string(), reference);
                             }
                             &true_env
-                        } else {
+                        } else if take_true {
                             env
+                        } else {
+                            out_of_scope_env.as_ref().unwrap_or(env)
                         };
                         let node = self.lower_type_expr_with_infer_factory(
                             infer_binders,
@@ -2808,9 +2836,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 else {
                     return self.opaque(QueryError::Miss);
                 };
-                let Some(key) =
-                    self.typeof_reference_key(canonical_id, *owner, value_ref, reduction_context)
-                else {
+                let Some(key) = self.typeof_reference_key_in_scope(
+                    canonical_id,
+                    *owner,
+                    Some(name_resolution),
+                    scope_payload,
+                    value_ref,
+                    reduction_context,
+                ) else {
                     return self.opaque(QueryError::Miss);
                 };
                 let mut result = match self.execute_type_node(key) {

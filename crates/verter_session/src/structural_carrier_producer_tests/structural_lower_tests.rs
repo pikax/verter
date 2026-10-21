@@ -550,6 +550,7 @@ fn lowers_type_literal_construct_signature_as_object_not_constructor_type() {
         vec![],
     );
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::ConstructSignature(func)],
     }));
     let (graph, root) = lower_root(&host, &expr);
@@ -1049,6 +1050,7 @@ fn conditional_binds_object_member_infer_in_true_branch() {
             type_arguments: verter_type_expr::empty_type_args(),
         }),
         extends: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     "a".to_string().into(),
@@ -1272,6 +1274,7 @@ fn lowers_interface_heritage_preserving_ref_args_and_member_provenance() {
         ),
     };
     let own_body = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![ObjectMember::Property(
             ObjectProperty::synthetic_public_key(
                 "own".to_string().into(),
@@ -1775,6 +1778,7 @@ fn structural_equivalence_for_intersection_of_objects() {
         .enter_node_root_scope();
     let obj = |name: &str, prim: PrimitiveName| {
         TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     name.to_string().into(),
@@ -1893,6 +1897,7 @@ fn structural_equivalence_for_object_with_members() {
         .semantic_graph()
         .enter_node_root_scope();
     let expr = TypeExpr::Object(Arc::new(ObjectExpr {
+        empty_literal: false,
         properties: vec![
             ObjectMember::Property(ObjectProperty::synthetic_public_key(
                 "a".to_string().into(),
@@ -1972,6 +1977,7 @@ fn structural_equivalence_for_nested_composite() {
         .enter_node_root_scope();
     let object_array = TypeExpr::Array {
         element: Arc::new(TypeExpr::Object(Arc::new(ObjectExpr {
+            empty_literal: false,
             properties: vec![ObjectMember::Property(
                 ObjectProperty::synthetic_public_key(
                     "a".to_string().into(),

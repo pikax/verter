@@ -1454,7 +1454,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         self.resolve_authored_key(key).is_some()
     }
 
-    fn resolve_authored_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
+    pub(super) fn resolve_authored_key(&self, key: &AuthoredPropertyKey) -> Option<PropertyKey> {
         if let Some(known) = key.cloned_known() {
             return Some(known);
         }

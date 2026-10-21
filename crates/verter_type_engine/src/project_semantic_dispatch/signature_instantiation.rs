@@ -200,7 +200,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                     decl.param,
                     Arc::<str>::from(&decl.name),
                     ConstParamPolicy::NonConst,
-                    decl.constraint.is_some(),
+                    decl.constraint,
                 )
             })
             .collect();
@@ -217,7 +217,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         let session_id = self
             .dispatch_txn
             .borrow_mut()
-            .push_collecting_session(setup, None);
+            .push_collecting_session(setup);
         // Inference between conditional types visits corresponding operands
         // independently (`inferFromTypes`). A failed extends comparison must
         // not roll back the check position's candidate. The conditional

@@ -69,9 +69,7 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::InlineMemberFlight;
 
-use super::inference::session::{
-    InferenceSession, InferenceSessionSetup, InferenceSessionState, ReverseProjectionState,
-};
+use super::inference::session::{InferenceSession, InferenceSessionSetup, InferenceSessionState};
 
 /// Transient per-transaction session token. Content-free; NEVER enters a
 /// published key, a `ReadSetSignature.facts` observation, or any fact
@@ -3001,13 +2999,9 @@ impl CheckerDispatchTransaction {
     /// Push a fresh collecting session unconditionally. Call-owned candidate
     /// execution uses this path even when an outer collector exists; relation
     /// roots retain their separate admission predicate.
-    pub fn push_collecting_session(
-        &mut self,
-        setup: InferenceSessionSetup,
-        reverse_projection: Option<ReverseProjectionState>,
-    ) -> SessionId {
+    pub fn push_collecting_session(&mut self, setup: InferenceSessionSetup) -> SessionId {
         let id = self.alloc_session_id();
-        let mut session = InferenceSession::new(id, setup, reverse_projection);
+        let mut session = InferenceSession::new(id, setup);
         session.opened_at_depth = self.reentry().depth();
         verter_debug_assert!(
             self.relation
