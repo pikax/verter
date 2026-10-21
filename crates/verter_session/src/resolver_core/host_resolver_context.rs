@@ -28,6 +28,19 @@ pub struct HostRequestLifecycle<'a, M: ObserveExec = Uncaptured> {
 /// lifecycle-specific construction and observation hooks.
 pub type HostResolverContext<'a, M = Uncaptured> = RequestBoundAdapter<HostRequestLifecycle<'a, M>>;
 
+#[cfg(test)]
+impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a, Uncaptured>> {
+    /// An uncaptured fixture over the current host view.
+    #[must_use]
+    pub(crate) fn from_current(
+        inner: &'a crate::VerterHost,
+        base: &'a crate::resolver_store::CurrentHostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+    ) -> Self {
+        Self::from_current_in(inner, base, overlay)
+    }
+}
+
 // The tests that read optional capture compile only with it.
 #[cfg(all(test, feature = "semantic-observe"))]
 impl<'a> RequestBoundAdapter<HostRequestLifecycle<'a, verter_audit::observe::Captured>> {
@@ -59,7 +72,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
     }
 
     #[must_use]
-    pub(crate) fn from_current(
+    pub(crate) fn from_current_in(
         inner: &'a crate::VerterHost,
         base: &'a crate::resolver_store::CurrentHostStoreView,
         overlay: Arc<CanonicalCompletionOverlay>,

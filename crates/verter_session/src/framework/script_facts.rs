@@ -1163,7 +1163,7 @@ fn resolve_script_facts_inner<
             }
         } else if let Some(current_view) = crate::typeinfo::current_store_view_for_query(host) {
             let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
+            let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
                 host,
                 &current_view,
                 overlay,

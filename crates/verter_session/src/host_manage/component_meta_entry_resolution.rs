@@ -801,7 +801,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, current_view, overlay);
             let dispatch =
                 verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
             let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(

@@ -551,7 +551,7 @@ fn resolve_named_symbol_request(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let host_ctx =
-            crate::resolver_core::HostResolverContext::<'_, M>::from_current(host, &current_view, overlay);
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         // The request composes construction ordinals across several dispatcher
         // operations (lowered wire arguments, the bare declaration, the

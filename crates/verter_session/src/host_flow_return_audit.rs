@@ -265,11 +265,12 @@ impl VerterHost {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
-                    let host_ctx = crate::resolver_core::HostResolverContext::<'_, M>::from_current(
-                        self,
-                        &current_view,
-                        overlay,
-                    );
+                    let host_ctx =
+                        crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
+                            self,
+                            &current_view,
+                            overlay,
+                        );
                     let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
                         crate::resolver_core::HostCapabilities<M>,
                     > = &host_ctx;
