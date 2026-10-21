@@ -2062,6 +2062,7 @@ fn encode_query_error(enc: &mut Recipe, err: &QueryError) {
                 crate::semantic_query::CheckerDiagnosticOperation::Relation => 10,
                 crate::semantic_query::CheckerDiagnosticOperation::InstantiationBudget => 11,
                 crate::semantic_query::CheckerDiagnosticOperation::TypeAliasDeclaration => 12,
+                crate::semantic_query::CheckerDiagnosticOperation::TypeReference => 13,
             });
             // Frozen: a proven recovery and a budget recovery are distinct nodes.
             enc.u8(match basis {

@@ -229,6 +229,10 @@ pub(crate) enum BinderSlot {
 pub struct LocatorBinderFrame {
     names: FxHashMap<Arc<str>, BinderSlot>,
     infer_declarations: FxHashMap<Arc<str>, SemanticNodeId>,
+    /// `infer` declarations of an enclosing conditional this position is
+    /// outside the scope of: a reference to one that nothing else binds is
+    /// the checker's TS2304.
+    out_of_scope_infers: Vec<Arc<str>>,
 }
 
 impl Clone for LocatorBinderFrame {
@@ -238,6 +242,7 @@ impl Clone for LocatorBinderFrame {
         Self {
             names: self.names.clone(),
             infer_declarations: self.infer_declarations.clone(),
+            out_of_scope_infers: self.out_of_scope_infers.clone(),
         }
     }
 }
@@ -276,6 +281,27 @@ impl LocatorBinderFrame {
 
     fn lookup_infer_declaration(&self, name: &str) -> Option<SemanticNodeId> {
         self.infer_declarations.get(name).copied()
+    }
+
+    /// A frame over a position outside the scope of the `infer`
+    /// declarations `names`.
+    fn out_of_scope_of(names: Vec<Arc<str>>) -> Self {
+        Self {
+            out_of_scope_infers: names,
+            ..Self::default()
+        }
+    }
+
+    /// Whether this frame binds `name` (`Some(false)`) or puts it out of
+    /// an `infer` declaration's scope (`Some(true)`).
+    fn reads_out_of_scope_infer(&self, name: &str) -> Option<bool> {
+        if self.names.contains_key(name) {
+            return Some(false);
+        }
+        self.out_of_scope_infers
+            .iter()
+            .any(|out| out.as_ref() == name)
+            .then_some(true)
     }
 }
 
@@ -515,6 +541,15 @@ impl<'a> ShapeLowerCtx<'a> {
             .innermost_first()
             .find_map(|frame| frame.lookup_infer_declaration(name))
     }
+
+    /// Whether `name`, bound by no frame, names an `infer` declaration of an
+    /// enclosing conditional this position is outside the scope of.
+    fn reads_out_of_scope_infer(&self, name: &str) -> bool {
+        self.binders
+            .innermost_first()
+            .find_map(|frame| frame.reads_out_of_scope_infer(name))
+            == Some(true)
+    }
 }
 
 #[path = "locator_shape_binder.rs"]
@@ -711,6 +746,8 @@ enum LocatorConditionalStage {
     True {
         check_id: SemanticNodeId,
         extends_id: SemanticNodeId,
+        /// The pattern's `infer` names, out of scope in the false branch.
+        declared: Vec<Arc<str>>,
     },
     False {
         check_id: SemanticNodeId,
@@ -1481,15 +1518,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     );
                 let mut declaration_frame = LocatorBinderFrame::default();
                 let mut declarations = Vec::with_capacity(infer_sites.len());
+                // A declared constraint is read where the conditional is
+                // written: no `infer` of the pattern is in scope there
+                // (`[infer A, infer B extends A]` reports TS2304 for `A`).
+                let constraint_binders = binders.extended(LocatorBinderFrame::out_of_scope_of(
+                    infer_sites
+                        .iter()
+                        .map(|site| Arc::clone(&site.name))
+                        .collect(),
+                ));
                 for site in infer_sites {
                     let binder = entry.infer_binders.binder_at(&site.path);
-                    // A declared constraint is read where the conditional is
-                    // written: no `infer` of the pattern is in scope there
-                    // (`[infer A, infer B extends A]` reports TS2304 for `A`).
                     let constraint = site.constraint.map(|constraint| {
                         self.lower_locator_shape_node(
                             constraint,
-                            &entry.with_binders(binders.frames()),
+                            &entry.with_binders(constraint_binders.frames()),
                         )
                     });
                     let declaration = graph.intern_node_with_scope(
@@ -1519,6 +1562,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 declarations,
             } => {
                 let extends_id = value;
+                let declared: Vec<Arc<str>> = declarations
+                    .iter()
+                    .map(|(name, _)| Arc::clone(name))
+                    .collect();
                 let true_binders = if declarations.is_empty() {
                     binders.clone()
                 } else {
@@ -1541,6 +1588,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     stage: LocatorConditionalStage::True {
                         check_id,
                         extends_id,
+                        declared,
                     },
                 });
                 LocatorStep::Descend(true_type, true_binders)
@@ -1548,17 +1596,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             LocatorConditionalStage::True {
                 check_id,
                 extends_id,
+                declared,
             } => {
+                let false_binders = if declared.is_empty() {
+                    binders.clone()
+                } else {
+                    binders.extended(LocatorBinderFrame::out_of_scope_of(declared))
+                };
                 frames.push(LocatorFrame::Conditional {
                     conditional,
-                    binders: binders.clone(),
+                    binders,
                     stage: LocatorConditionalStage::False {
                         check_id,
                         extends_id,
                         true_id: value,
                     },
                 });
-                LocatorStep::Descend(false_type, binders)
+                LocatorStep::Descend(false_type, false_binders)
             }
             LocatorConditionalStage::False {
                 check_id,
@@ -2709,6 +2763,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }));
         }
 
+        // An `infer` declaration read outside its scope, applied or bare,
+        // is the checker's TS2304, the error type.
+        if ctx.reads_out_of_scope_infer(name) {
+            return LocatorRefPlan::Ready(crate::semantic_query::checker_policy::checker_recovery(
+                self.graph(),
+                crate::semantic_query::checker_policy::unresolved_type_name(),
+            ));
+        }
         // Unresolved: keep the deferred BareRef carrier — demand-time
         // carrier-subject normalization owns its resolution.
         LocatorRefPlan::Carrier(RefHeadResolution::Unresolved)
