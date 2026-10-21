@@ -264,6 +264,9 @@ impl VerterHost {
         } else {
             match crate::typeinfo::current_store_view_for_query(self) {
                 Some(current_view) => {
+                    // Admission snapshots the selected request's capture
+                    // receivers, so install it before constructing the resolver.
+                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
                     let host_ctx =
                         crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(
@@ -274,10 +277,6 @@ impl VerterHost {
                     let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
                         crate::resolver_core::HostCapabilities<M>,
                     > = &host_ctx;
-                    // The request runs under its context whether or not it
-                    // captures: the dispatch reads cancellation and budget
-                    // from the installed request context.
-                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                     let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                     run(&dispatch)
                 }

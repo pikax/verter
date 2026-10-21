@@ -300,6 +300,8 @@ impl VerterHost {
         let request_clock = verter_audit::observe::Stopwatch::start_for(ctx.observe_mode());
         let result = match crate::typeinfo::current_store_view_for_query(self) {
             Some(current_view) => {
+                // Resolver admission must snapshot this request's receivers.
+                let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                 // Bind the dispatch ctor to a request-scoped
                 // `HostResolverContext` so cache validators inside the
                 // dispatch chain inherit the overlay-aware view instead of
@@ -314,7 +316,6 @@ impl VerterHost {
                     let host_ctx_ref: &dyn verter_type_engine::resolver_core::resolver_context::ResolverContext<
                         crate::resolver_core::HostCapabilities<M>,
                     > = &host_ctx;
-                    let _ctx_guard = RequestContextGuard::install(Arc::clone(&ctx));
                     let dispatch = ProjectSemanticDispatch::new(host_ctx_ref);
                     dispatch.execute_type_node(query)
                 })
