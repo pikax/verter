@@ -53,7 +53,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
         Self(HostRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view: RequestStoreView::new(base, overlay),
         })
     }
@@ -67,7 +67,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
         Self(HostRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view: RequestStoreView::new(base.view(), overlay),
         })
     }
@@ -81,7 +81,25 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
         Self(HostRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
+            view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
+        })
+    }
+
+    /// Bind a request context to a batch-captured fixed view.
+    #[must_use]
+    pub(crate) fn from_cold_seed_with_capture(
+        inner: &'a crate::VerterHost,
+        base: &'a crate::resolver_store::ColdSeedHostStoreView,
+        overlay: Arc<CanonicalCompletionOverlay>,
+        observation: verter_type_engine::request_observers::CaptureTargets,
+    ) -> Self {
+        Self(HostRequestLifecycle {
+            mode: std::marker::PhantomData,
+            inner,
+            snapshot: inner
+                .capture_request_snapshot()
+                .with_capture_targets(observation),
             view: RequestStoreView::new_cold_seed(base.view(), overlay, base.is_current()),
         })
     }
@@ -97,7 +115,7 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
         Self(HostRequestLifecycle {
             mode: std::marker::PhantomData,
             inner,
-            snapshot: inner.capture_request_snapshot(),
+            snapshot: inner.capture_request_snapshot_in::<M>(),
             view: RequestStoreView::new_cold_seed(base, overlay, is_current),
         })
     }
@@ -105,6 +123,10 @@ impl<'a, M: ObserveExec> RequestBoundAdapter<HostRequestLifecycle<'a, M>> {
 
 impl<M: ObserveExec> RequestBoundLifecycle for HostRequestLifecycle<'_, M> {
     type Observe = M;
+
+    fn capture_targets(&self) -> &verter_type_engine::request_observers::CaptureTargets {
+        self.snapshot.capture_targets()
+    }
 
     fn host(&self) -> &crate::VerterHost {
         self.inner
@@ -138,6 +160,7 @@ impl<M: ObserveExec> RequestBoundLifecycle for HostRequestLifecycle<'_, M> {
         canonical_id: &str,
     ) -> Option<crate::resolver_core::CachedValue<PreparedDeclBundle>> {
         self.inner.prepared_decl_bundle_with_store_view_in::<M>(
+            self.capture_targets(),
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,
@@ -155,6 +178,7 @@ impl<M: ObserveExec> RequestBoundLifecycle for HostRequestLifecycle<'_, M> {
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_type_decl_in_with_store_view::<M>(
+            self.capture_targets(),
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,
@@ -174,6 +198,7 @@ impl<M: ObserveExec> RequestBoundLifecycle for HostRequestLifecycle<'_, M> {
         verter_session_query::inputs::prepared::PreparationFailure,
     > {
         self.inner.prepared_value_decl_in_with_store_view::<M>(
+            self.capture_targets(),
             &self.view,
             Some(self.view.overlay().bundle_memo()),
             canonical_id,

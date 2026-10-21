@@ -143,17 +143,39 @@ mod canary_flow_return_audit_emission_zero_alloc {
         // Warm the TLS probes (request-context slot, accumulator
         // slot) so one-time lazy initialisation is pre-paid.
         for _ in 0..64 {
-            record_flow_return_started::<verter_audit::observe::Captured>(&canonical, &symbol);
-            record_flow_slice_budget_exceeded::<verter_audit::observe::Captured>(&exceeded);
-            record_flow_cycle_reentry::<verter_audit::observe::Captured>(1, &symbol);
+            record_flow_return_started::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &canonical,
+                &symbol,
+            );
+            record_flow_slice_budget_exceeded::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &exceeded,
+            );
+            record_flow_cycle_reentry::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                1,
+                &symbol,
+            );
         }
 
         let baseline = alloc_count();
         const ITERATIONS: usize = 10_000;
         for i in 0..ITERATIONS {
-            record_flow_return_started::<verter_audit::observe::Captured>(&canonical, &symbol);
-            record_flow_slice_budget_exceeded::<verter_audit::observe::Captured>(&exceeded);
-            record_flow_cycle_reentry::<verter_audit::observe::Captured>(i as u32, &symbol);
+            record_flow_return_started::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &canonical,
+                &symbol,
+            );
+            record_flow_slice_budget_exceeded::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                &exceeded,
+            );
+            record_flow_cycle_reentry::<verter_audit::observe::Captured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+                i as u32,
+                &symbol,
+            );
         }
         let after = alloc_count();
         let delta = after - baseline;

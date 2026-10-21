@@ -561,6 +561,8 @@ pub(crate) trait RequestBoundLifecycle: Sync {
     /// The capture execution this request context runs.
     type Observe: ObserveExec;
 
+    fn capture_targets(&self) -> &verter_type_engine::request_observers::CaptureTargets;
+
     /// The host this request runs against.
     fn host(&self) -> &crate::VerterHost;
 
@@ -622,7 +624,11 @@ pub(crate) trait RequestBoundLifecycle: Sync {
         &self,
         canonical_id: &str,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
-        crate::VerterHost::ensure_indexed_ready_serve_in::<Self::Observe>(self.host(), canonical_id)
+        crate::VerterHost::ensure_indexed_ready_serve_in::<Self::Observe>(
+            self.host(),
+            self.capture_targets(),
+            canonical_id,
+        )
     }
 
     /// Load the canonical. The adapter performs the canonical completion
@@ -652,7 +658,8 @@ pub(crate) trait RequestBoundLifecycle: Sync {
     }
 
     fn indexed_for_current_content(&self, canonical: &str) -> Option<Arc<IndexedReady>> {
-        self.host().current_content_pinned_indexed(canonical)
+        self.host()
+            .current_content_pinned_indexed_in::<Self::Observe>(self.capture_targets(), canonical)
     }
 
     fn artifact_key_for_current_content(
@@ -913,14 +920,18 @@ where
     #[inline]
     fn base_indexed_ready_serve(&self, canonical_id: &str) -> Option<IndexedInputServe> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::base_indexed_ready_serve");
-        crate::VerterHost::ensure_indexed_ready_serve_in::<L::Observe>(self.0.host(), canonical_id)
-            .map(|serve| {
-                self.0
-                    .request_view()
-                    .overlay()
-                    .input_artifacts
-                    .retain(serve)
-            })
+        crate::VerterHost::ensure_indexed_ready_serve_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical_id,
+        )
+        .map(|serve| {
+            self.0
+                .request_view()
+                .overlay()
+                .input_artifacts
+                .retain(serve)
+        })
     }
 
     #[inline]
@@ -960,7 +971,11 @@ where
     #[inline]
     fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
         verter_type_engine::count_resolver_context_call!("IndexedInputs::get_whole_hash");
-        crate::VerterHost::get_whole_hash_in::<L::Observe>(self.0.host(), canonical)
+        crate::VerterHost::get_whole_hash_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical,
+        )
     }
 
     #[inline]
@@ -1015,7 +1030,11 @@ where
         verter_type_engine::count_resolver_context_call!(
             "IndexedInputs::get_raw_analysis_snapshot"
         );
-        crate::VerterHost::get_raw_analysis_snapshot_in::<L::Observe>(self.0.host(), canonical)
+        crate::VerterHost::get_raw_analysis_snapshot_in::<L::Observe>(
+            self.0.host(),
+            self.0.capture_targets(),
+            canonical,
+        )
     }
 }
 
@@ -1145,7 +1164,11 @@ where
         verter_type_engine::count_resolver_context_call!("RouteLookup::routed_shallow_state");
         self.0
             .host()
-            .routed_shallow_state_with_view(canonical_id, self.0.session_view())
+            .routed_shallow_state_with_view_in::<L::Observe>(
+                self.0.capture_targets(),
+                canonical_id,
+                self.0.session_view(),
+            )
             .map(|state| {
                 self.0
                     .request_view()

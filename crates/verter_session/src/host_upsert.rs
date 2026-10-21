@@ -615,6 +615,7 @@ impl VerterHost {
         defer_workspace_commit: bool,
         result_demand: UpsertResultDemand,
     ) -> Result<(Option<HostUpdateResult>, Option<WorkspaceParsedCommit>), HostError> {
+        let observation = verter_type_engine::request_observers::CaptureTargets::installed::<M>();
         use crate::host_executor::HostSourceData;
         use verter_scheduler::job::RequestResult;
         verter_session_query::probe_scope!(UPSERT_POST_COMMIT);
@@ -852,6 +853,7 @@ impl VerterHost {
             let profile = profile_ref.value_mut();
             if whole_hash_changed {
                 verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+                    &observation,
                     "compile_cache_overrides",
                     &canonical_id,
                 );
@@ -863,6 +865,7 @@ impl VerterHost {
                 profile.latest_diagnostics.clear();
                 profile.diagnostics_generation += 1;
                 verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+                    &observation,
                     "compile_slots",
                     &canonical_id,
                 );
@@ -889,6 +892,7 @@ impl VerterHost {
             self.compile_output_pure_content()
                 .remove_canonical(&canonical_id);
             verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+                &observation,
                 "compile_output_pure_content",
                 &canonical_id,
             );
@@ -947,6 +951,7 @@ impl VerterHost {
             derived.evicted = false;
             if drained_derived {
                 verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+                    &observation,
                     "derived_raw_cache",
                     &canonical_id,
                 );
@@ -969,6 +974,7 @@ impl VerterHost {
             dep.generation = dep.generation.saturating_add(1);
         }
         verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+            &observation,
             "dependency_cache",
             &canonical_id,
         );
@@ -988,6 +994,7 @@ impl VerterHost {
         // lazily on read through its own `fact_dep_signature` check (R3).
         self.register_facts_for_new_content(&canonical_id);
         verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+            &observation,
             "semantic_invalidate",
             &canonical_id,
         );
@@ -1016,6 +1023,7 @@ impl VerterHost {
             self.ws().record_parsed_edges(&canonical_id, &parsed_edges);
         }
         verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+            &observation,
             "workspace_parsed_edges",
             &canonical_id,
         );
@@ -1095,6 +1103,7 @@ impl VerterHost {
         self.ingest_injected_ambient_roots(Some(canonical_id.as_ref()));
         self.bump_store_view_epoch();
         verter_type_engine::request_observers::push_cache_drained_at_upsert::<M>(
+            &observation,
             "store_view_epoch",
             &canonical_id,
         );

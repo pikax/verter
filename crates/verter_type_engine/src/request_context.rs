@@ -613,11 +613,14 @@ impl SynthesisScopeGuard {
     /// request context (if any). `M` is the entering unit's capture
     /// execution; the uncaptured one reads no request context.
     #[inline(always)]
-    pub fn enter<M: verter_audit::observe::ObserveExec>() -> Self {
+    pub fn enter<M: verter_audit::observe::ObserveExec>(
+        observation: &crate::request_observers::CaptureTargets,
+    ) -> Self {
+        let _ = observation;
         #[cfg(feature = "semantic-observe")]
         {
             let ctx = if M::CAPTURED {
-                current_captured_request_context()
+                observation.request.clone()
             } else {
                 None
             };
@@ -650,13 +653,16 @@ impl Drop for SynthesisScopeGuard {
 /// `M` is the instantiating dispatcher's capture execution; the uncaptured
 /// one reads no request context.
 #[inline(always)]
-pub fn note_expanded_instantiate_for_synthesis_scope<M: verter_audit::observe::ObserveExec>() {
+pub fn note_expanded_instantiate_for_synthesis_scope<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
+) {
+    let _ = observation;
     #[cfg(feature = "semantic-observe")]
     if !M::CAPTURED {
         return;
     }
     #[cfg(feature = "semantic-observe")]
-    if let Some(ctx) = current_captured_request_context() {
+    if let Some(ctx) = observation.request.as_deref() {
         if ctx.synthesis_active_depth.load(Ordering::Relaxed) > 0 {
             ctx.synthesis_expanded_instantiate_calls
                 .fetch_add(1, Ordering::Relaxed);
@@ -2021,7 +2027,7 @@ impl RequestContext {
                 (_, true) => verter_audit::AuditEvent::MappedMemberSelectedKeyUnique,
                 (_, false) => verter_audit::AuditEvent::MappedMemberSelectedKeyRepeated,
             };
-            verter_audit::observe!(|obs| obs.record_event(event));
+            <Self as verter_audit::AuditObserver>::record_event(self, event);
         }
         #[cfg(not(feature = "semantic-observe"))]
         let _ = identity;
@@ -2086,10 +2092,29 @@ impl RequestContext {
             } else {
                 verter_audit::AuditEvent::RecursiveSubstituteRepeated
             };
-            verter_audit::observe!(|obs| obs.record_event(event));
+            <Self as verter_audit::AuditObserver>::record_event(self, event);
         }
         #[cfg(not(feature = "semantic-observe"))]
         let _ = identity;
+    }
+}
+
+#[cfg(feature = "semantic-observe")]
+impl RequestContext {
+    /// Record through a receiver already bound to captured execution.
+    /// Untyped scheduler callers retain the mode guard on `RequestContextLike`.
+    #[inline(always)]
+    pub(crate) fn record_captured_cache_event(&self, event: CacheEventKind) {
+        let counter = match event {
+            CacheEventKind::Hit => &self.warm_hits,
+            CacheEventKind::Miss => &self.cold_builds,
+            CacheEventKind::JoinedWait => &self.joined_waits,
+            CacheEventKind::Sentinel => &self.sentinels,
+            CacheEventKind::ColdBuild => &self.cold_builds,
+            CacheEventKind::InflightAbortedRetry => &self.inflight_aborted_retries,
+            CacheEventKind::ColdAbortSwept => &self.cold_aborts_swept,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -2128,16 +2153,7 @@ impl RequestContextLike for RequestContext {
         if !self.observe_mode.is_captured() {
             return;
         }
-        let counter = match event {
-            CacheEventKind::Hit => &self.warm_hits,
-            CacheEventKind::Miss => &self.cold_builds,
-            CacheEventKind::JoinedWait => &self.joined_waits,
-            CacheEventKind::Sentinel => &self.sentinels,
-            CacheEventKind::ColdBuild => &self.cold_builds,
-            CacheEventKind::InflightAbortedRetry => &self.inflight_aborted_retries,
-            CacheEventKind::ColdAbortSwept => &self.cold_aborts_swept,
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
+        self.record_captured_cache_event(event);
     }
     fn install_tls(self: Arc<Self>) -> Box<dyn TlsUninstall + Send> {
         let guard = RequestContextGuard::install(self);
@@ -2806,7 +2822,7 @@ pub fn installed_root_selected_mode() -> Option<verter_audit::observe::ObserveMo
 ///
 /// Two forms:
 ///
-/// - `observe_request!(M => |ctx| body)` records from execution compiled
+/// - `observe_request!(M => on receiver => |ctx| body)` records from execution compiled
 ///   for the mode type `M` ([`verter_audit::observe::ObserveExec`]); the
 ///   uncaptured expansion is a constant-false branch that reads no
 ///   request-context slot. Per-operation paths use this form.
@@ -2821,17 +2837,19 @@ pub fn installed_root_selected_mode() -> Option<verter_audit::observe::ObserveMo
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe_request {
+    ($M:ty => on $receiver:expr => |$ctx:ident| $body:expr) => {{
+        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some($ctx) = $receiver {
+                $body;
+            }
+        }
+    }};
     (|$ctx:ident| $body:expr) => {{
         $crate::request_context::with_current_request_context(|$ctx| {
             if $ctx.observe_mode.is_captured() {
                 $body;
             }
         });
-    }};
-    ($M:ty => |$ctx:ident| $body:expr) => {{
-        if <$M as $crate::request_context::ObserveExec>::CAPTURED {
-            $crate::observe_request!(|$ctx| $body);
-        }
     }};
 }
 
@@ -2841,6 +2859,10 @@ macro_rules! observe_request {
 #[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! observe_request {
+    ($M:ty => on $receiver:expr => |$ctx:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe_request!(|$ctx| $body)
+    }};
     (|$ctx:ident| $body:expr) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {
@@ -2848,10 +2870,6 @@ macro_rules! observe_request {
                 $body;
             };
         }
-    }};
-    ($M:ty => |$ctx:ident| $body:expr) => {{
-        let _ = ::core::marker::PhantomData::<$M>;
-        $crate::observe_request!(|$ctx| $body);
     }};
 }
 

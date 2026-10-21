@@ -977,6 +977,7 @@ pub(super) fn registration_footprint(
 /// execution: only a captured one records the index lock acquisition.
 pub(super) fn register_published<M: verter_audit::observe::ObserveExec>(
     _mode: M,
+    observation: &crate::request_observers::CaptureTargets,
     canonical_to_entries: &CanonicalToEntries,
     family: &FamilyKey,
     populated: &[ModeSlot],
@@ -984,12 +985,16 @@ pub(super) fn register_published<M: verter_audit::observe::ObserveExec>(
     read_set_signature: &verter_session_query::facts::fact_cache::ReadSetSignature,
     dispatch_dep_signature: &DepSignature,
 ) {
+    let _ = observation;
     if populated.is_empty() || direct_edge_count(read_set_signature, dispatch_dep_signature) == 0 {
         return;
     }
     // The index's lock acquisition, as request audit contention.
     #[cfg(feature = "semantic-observe")]
-    crate::request_observers::record_family_map_lock_acquisition::<M>(std::time::Duration::ZERO);
+    crate::request_observers::record_family_map_lock_acquisition::<M>(
+        observation,
+        std::time::Duration::ZERO,
+    );
     canonical_to_entries.register_fenced(
         admission_seq,
         MemoRegistration {

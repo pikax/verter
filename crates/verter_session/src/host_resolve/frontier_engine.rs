@@ -231,6 +231,21 @@ impl VerterHost {
         canonical_id: &str,
         route_shallow_cache: &mut RouteShallowStateCache,
     ) -> Option<RoutedShallowServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.route_shallow_state_serve_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical_id,
+                route_shallow_cache,
+            )
+        })
+    }
+
+    fn route_shallow_state_serve_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        route_shallow_cache: &mut RouteShallowStateCache,
+    ) -> Option<RoutedShallowServe> {
         let normalized_canonical = self
             .normalized_analysis_canonical(canonical_id)
             .into_owned();
@@ -257,7 +272,9 @@ impl VerterHost {
         // scheduler scope misses the observe read entirely, so the
         // canonical `ensure_indexed_ready_serve` build (the fall-through
         // below) rebuilds it.
-        if let Some(indexed) = self.observe_content_pinned_indexed(normalized_canonical.as_str()) {
+        if let Some(indexed) =
+            self.observe_content_pinned_indexed_in::<M>(observation, normalized_canonical.as_str())
+        {
             // Reuse a baked indexed surface for route traversal ONLY while it
             // is edge-current. A wildcard-bearing artifact whose `export *`
             // edges were baked at an earlier generation (a dependency since
@@ -274,7 +291,9 @@ impl VerterHost {
                 route_shallow_cache.observe_serve(&serve);
                 return Some(serve);
             }
-            if let Some(fresh) = self.ensure_indexed_ready_serve(normalized_canonical.as_str()) {
+            if let Some(fresh) =
+                self.ensure_indexed_ready_serve_in::<M>(observation, normalized_canonical.as_str())
+            {
                 let serve = RoutedShallowServe {
                     state: Arc::clone(&fresh.indexed.shallow_state),
                     store_published: fresh.store_published,
@@ -302,7 +321,8 @@ impl VerterHost {
             return Some(cached.clone());
         }
 
-        let indexed_serve = self.ensure_indexed_ready_serve(normalized_canonical.as_str())?;
+        let indexed_serve =
+            self.ensure_indexed_ready_serve_in::<M>(observation, normalized_canonical.as_str())?;
         let serve = RoutedShallowServe {
             state: Arc::clone(&indexed_serve.indexed.shallow_state),
             store_published: indexed_serve.store_published,
@@ -321,6 +341,16 @@ impl VerterHost {
     ) -> Option<RoutedShallowServe> {
         let mut route_shallow_cache = RouteShallowStateCache::default();
         self.route_shallow_state_serve(canonical_id, &mut route_shallow_cache)
+    }
+
+    /// One-shot routed serve with the calling execution's capture receivers.
+    pub(crate) fn routed_shallow_state_serve_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+    ) -> Option<RoutedShallowServe> {
+        let mut route_shallow_cache = RouteShallowStateCache::default();
+        self.route_shallow_state_serve_in::<M>(observation, canonical_id, &mut route_shallow_cache)
     }
 
     /// Context-preserving routed shallow serve used by imported-root cold
@@ -408,8 +438,23 @@ impl VerterHost {
     /// (re-export edits, tombstoned dependencies). Base callers
     /// (`view = None`) fall through to the historical
     /// `routed_shallow_state` body — identical behaviour.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn routed_shallow_state_with_view(
         &self,
+        canonical_id: &str,
+        view: Option<&dyn crate::session_view::SessionView>,
+    ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.routed_shallow_state_with_view_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, view,
+            )
+        })
+    }
+
+    /// Serve a view's shallow surface with the calling execution's capture receivers.
+    pub(crate) fn routed_shallow_state_with_view_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<Arc<crate::resolver_core::ShallowFileState>> {
@@ -422,7 +467,11 @@ impl VerterHost {
                 // from the overlay source, never the base surface — no
                 // overlay-blindness) before it is served.
                 return self
-                    .materialize_overlay_indexed_ready_serve_with_view(canonical_id, view)
+                    .materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                        observation,
+                        canonical_id,
+                        view,
+                    )
                     .map(|serve| Arc::clone(&serve.indexed.shallow_state));
             } else {
                 // Base-passthrough view: the base-key read returns the
@@ -439,7 +488,8 @@ impl VerterHost {
                 }
             }
         }
-        self.routed_shallow_state(canonical_id)
+        self.routed_shallow_state_serve_in::<M>(observation, canonical_id)
+            .map(|serve| serve.state)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -854,7 +904,7 @@ impl VerterHost {
             dep_canonical,
             requested_name,
         )?;
-        component_meta_trace_custom!(M =>
+        component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
             "resolve_named_type_export_target_result",
             format!(
                 "owner={} requested={} source=route_db target={} exported={} materialized=false",

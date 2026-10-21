@@ -266,6 +266,7 @@ fn cached_import_route_resolution_refuses_a_known_miss_and_serves_a_positive() {
 
     assert_eq!(
         host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             owner,
             "./present"
         )
@@ -275,8 +276,12 @@ fn cached_import_route_resolution_refuses_a_known_miss_and_serves_a_positive() {
          the known-miss refusal must not degenerate into refusing every row",
     );
     assert!(
-        host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(owner, "./absent")
-            .is_none(),
+        host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
+            owner,
+            "./absent"
+        )
+        .is_none(),
         "a KNOWN-MISS row must never be served warm: a negative answer is not \
          evidence that the answer is still negative. Falling through to \
          `Some(resolution)` here re-serves the miss forever while the source \

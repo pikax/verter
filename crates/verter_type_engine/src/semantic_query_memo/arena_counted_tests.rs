@@ -108,6 +108,7 @@ fn counted_stale_child_is_refused_before_allocating_parent() {
     drop(root);
     assert!(matches!(
         arena.try_intern_owned::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
             SemanticNodeData::Alias(id),
             NodeScopeId::Global
         ),

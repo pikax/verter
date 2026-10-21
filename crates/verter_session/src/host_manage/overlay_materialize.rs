@@ -431,11 +431,29 @@ impl VerterHost {
     /// use the `normalized_analysis_canonical` rewrite instead (e.g. a
     /// runtime `.js` whose `.d.ts` companion is the analysis target) —
     /// see the in-body comment for the split.
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn materialize_overlay_indexed_ready_serve_with_view(
         &self,
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.materialize_overlay_indexed_ready_serve_with_view_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, view,
+            )
+        })
+    }
+
+    /// Materialize an overlay under the calling execution's capture mode.
+    pub(crate) fn materialize_overlay_indexed_ready_serve_with_view_in<
+        M: verter_audit::observe::ObserveExec,
+    >(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        view: &dyn crate::session_view::SessionView,
+    ) -> Option<crate::host_manage::prepared_decl::IndexedReadyServe> {
+        let _ = observation;
         // Two canonical ids are in play and MUST NOT be conflated —
         // they are carried together by [`OverlayArtifactIdentity`]:
         //
@@ -538,7 +556,7 @@ impl VerterHost {
             // refused its stack anywhere inside it leaves some product read off
             // an empty program, so the flight publishes nothing.
             match verter_parser::oxc_parse::refusals_within(|| {
-                self.materialize_overlay_cold(&identity, canonical_id, view)
+                self.materialize_overlay_cold::<M>(&identity, canonical_id, view)
             }) {
                 (materialized, None) => materialized.ok_or(()),
                 (_, Some(_)) => Err(()),
@@ -636,16 +654,18 @@ impl VerterHost {
     /// consult the LIVE scheduler, so a pre-stamp read would leave a
     /// fence-invisible window in which a base mutation lands between the
     /// content read and the stamp capture.
-    fn materialize_overlay_cold(
+    fn materialize_overlay_cold<M: verter_audit::observe::ObserveExec>(
         &self,
         identity: &OverlayArtifactIdentity,
         canonical_id: &str,
         view: &dyn crate::session_view::SessionView,
     ) -> Option<crate::project_type_store::IndexedFlightOutcome> {
         let analysis_canonical_id = identity.analysis_canonical();
-        self.provenance
-            .indexed_ready_materializes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.provenance
+                .indexed_ready_materializes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         // Flight generation stamps, captured BEFORE ANY work — content
         // reads included: the pre-publish fence below compares against
         // these, so every mid-flight base file-set or route-resolution
@@ -767,10 +787,12 @@ impl VerterHost {
             return None;
         }
         if cold_lease.parsed_now {
-            self.provenance
-                .decl_lowering
-                .eval_program_parses
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                self.provenance
+                    .decl_lowering
+                    .eval_program_parses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         // LEASE-ONLY run: `cold_lease` (acquired above) is held on this
         // stack, so the retained snapshot is pinned for the whole flight
@@ -947,9 +969,11 @@ impl VerterHost {
         // what made a content-addressed artifact carry
         // dependency-set-derived state and forced the global
         // edge-generation stamp that guarded it.
-        self.provenance
-            .shallow_state_builds
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            self.provenance
+                .shallow_state_builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut shallow_state_inner = crate::resolver_core::ShallowFileState::from_route_inventory(
             whole_hash,
             Arc::clone(&route_inventory),

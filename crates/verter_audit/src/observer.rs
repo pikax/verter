@@ -494,7 +494,7 @@ impl Drop for ObserverGuard {
 ///
 /// Two forms:
 ///
-/// - `observe!(M => |obs| body)` emits from execution compiled for the mode
+/// - `observe!(M => on receiver => |obs| body)` emits from execution compiled for the mode
 ///   type `M` ([`crate::observe::ObserveExec`]). The uncaptured expansion is
 ///   a constant-false branch: it reads no observer slot and builds no
 ///   payload. Hot paths — anything an execution unit runs per operation —
@@ -515,18 +515,17 @@ impl Drop for ObserverGuard {
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        if <$M as $crate::observe::ObserveExec>::CAPTURED {
+            if let ::core::option::Option::Some($obs) = $receiver {
+                $body;
+            }
+        }
+    }};
     (|$obs:ident| $body:expr) => {{
         if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
             let $obs: &dyn $crate::AuditObserver = &*observer;
             $body;
-        }
-    }};
-    ($M:ty => |$obs:ident| $body:expr) => {{
-        if <$M as $crate::observe::ObserveExec>::CAPTURED {
-            if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
-                let $obs: &dyn $crate::AuditObserver = &*observer;
-                $body;
-            }
         }
     }};
 }
@@ -538,6 +537,10 @@ macro_rules! observe {
 #[cfg(not(feature = "semantic-observe"))]
 #[macro_export]
 macro_rules! observe {
+    ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
+        let _ = ::core::marker::PhantomData::<$M>;
+        $crate::observe!(|$obs| $body)
+    }};
     (|$obs:ident| $body:expr) => {{
         #[allow(unreachable_code, unused_variables, clippy::redundant_closure_call)]
         if false {
@@ -545,9 +548,5 @@ macro_rules! observe {
                 $body;
             };
         }
-    }};
-    ($M:ty => |$obs:ident| $body:expr) => {{
-        let _ = ::core::marker::PhantomData::<$M>;
-        $crate::observe!(|$obs| $body)
     }};
 }

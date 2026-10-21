@@ -38,7 +38,12 @@ and serves through `LiveFactValidation::request_snapshot` /
 handles into every producer, memo and cache-runtime entry point below
 (`&RequestFlags` beside the context), and reads plain fields throughout. The snapshot holds handles only, so
 every read is live: a mid-request cancellation, project reset or workspace edit
-is observed by the next read. Per-method call counts of these ports, per lane,
+is observed by the next read. In a capture build the same snapshot retains
+`CaptureTargets` for the root-selected request. Dispatchers and resumed tasks
+keep these receivers, and typed store operations borrow them rather than
+recovering an observer or accumulator from worker TLS. The carrier is
+zero-size without `semantic-observe`; uncaptured access evaluates no optional
+request-port call. Per-method call counts of these ports, per lane,
 come from the default-off `semantic-observe` counter
 (`count_resolver_context_call!`, read by the `resolver_dispatch_profile`
 example in `verter_bench`). Production contexts

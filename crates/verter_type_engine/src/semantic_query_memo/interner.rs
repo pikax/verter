@@ -159,8 +159,10 @@ impl DepSignatureInterner {
     /// its intern hits into the request.
     pub fn intern_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         payload: &[DepEntry],
     ) -> DepSignature {
+        let _ = observation;
         // Normalise: sort + dedup so equivalent content collapses.
         let mut normalised: Vec<DepEntry> = payload.to_vec();
         normalised.sort_by(|a, b| a.canonical().cmp(b.canonical()).then_with(|| a.1.cmp(&b.1)));
@@ -195,7 +197,7 @@ impl DepSignatureInterner {
         });
         let rail = match hit {
             Some(rail) => {
-                crate::request_observers::record_dep_signature_intern_hit::<M>();
+                crate::request_observers::record_dep_signature_intern_hit::<M>(observation);
                 rail
             }
             None => {
@@ -240,7 +242,10 @@ impl DepSignatureInterner {
     /// [`Self::intern_in`] for an uncaptured fixture.
     #[cfg(any(test, feature = "test-support"))]
     pub fn intern(&self, payload: &[DepEntry]) -> DepSignature {
-        self.intern_in::<verter_audit::observe::Uncaptured>(payload)
+        self.intern_in::<verter_audit::observe::Uncaptured>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            payload,
+        )
     }
 
     /// Periodic sweep — removes empty buckets and dead `Weak`s, and

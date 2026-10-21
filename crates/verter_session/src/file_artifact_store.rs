@@ -1673,7 +1673,7 @@ impl FileArtifactStore {
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_in::<M>(canonical_id, expected_whole_hash, expected_parse_key, expected_file_language)
+            self.get_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, expected_parse_key, expected_file_language)
         })
     }
 
@@ -1682,12 +1682,15 @@ impl FileArtifactStore {
     /// request's mode.
     pub fn get_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         expected_whole_hash: Hash16,
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         self.get_base_artifacts::<M>(
+            observation,
             canonical_id,
             expected_whole_hash,
             expected_parse_key,
@@ -1701,11 +1704,13 @@ impl FileArtifactStore {
     #[must_use]
     pub(crate) fn get_base_artifacts<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         expected_whole_hash: Hash16,
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<FileArtifacts>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1727,7 +1732,7 @@ impl FileArtifactStore {
                     Arc::clone(&stored.payload)
                 })
         });
-        verter_type_engine::observe_request!(M =>|ctx| {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1786,7 +1791,7 @@ impl FileArtifactStore {
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_overlay_scoped_in::<M>(canonical_id, expected_whole_hash, discriminator, expected_parse_key, expected_file_language)
+            self.get_overlay_scoped_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id, expected_whole_hash, discriminator, expected_parse_key, expected_file_language)
         })
     }
 
@@ -1795,12 +1800,14 @@ impl FileArtifactStore {
     /// request's mode.
     pub fn get_overlay_scoped_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
         expected_whole_hash: Hash16,
         discriminator: Hash16,
         expected_parse_key: &verter_language::ParseKey,
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1827,7 +1834,7 @@ impl FileArtifactStore {
                         Arc::clone(&stored.payload.indexed)
                     })
             });
-        verter_type_engine::observe_request!(M =>|ctx| {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1881,7 +1888,7 @@ impl FileArtifactStore {
     /// execution unit: adopts the mode the installed request carries.
     pub fn get_any(&self, canonical_id: &str) -> Option<Arc<IndexedReady>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_any_in::<M>(canonical_id)
+            self.get_any_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical_id)
         })
     }
 
@@ -1890,8 +1897,10 @@ impl FileArtifactStore {
     /// request's mode.
     pub fn get_any_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical_id: &str,
     ) -> Option<Arc<IndexedReady>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -1914,7 +1923,7 @@ impl FileArtifactStore {
                 }
             }
         }
-        verter_type_engine::observe_request!(M =>|ctx| {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .indexed
@@ -1952,7 +1961,7 @@ impl FileArtifactStore {
         expected_file_language: &FileLanguage,
     ) -> Option<Arc<IndexedReady>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_in::<M>(
+            self.get_for_current_content_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
                 canonical_id,
                 expected_content_hash,
                 expected_parse_key,
@@ -1960,6 +1969,25 @@ impl FileArtifactStore {
             )
 
         })
+    }
+
+    /// Content-pinned lookup using the calling execution's capture receivers.
+    #[must_use]
+    pub fn get_for_current_content_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical_id: &str,
+        expected_content_hash: Hash16,
+        expected_parse_key: &verter_language::ParseKey,
+        expected_file_language: &FileLanguage,
+    ) -> Option<Arc<IndexedReady>> {
+        self.get_in::<M>(
+            observation,
+            canonical_id,
+            expected_content_hash,
+            expected_parse_key,
+            expected_file_language,
+        )
     }
 
     /// Next global access tick — the single monotonic source for the

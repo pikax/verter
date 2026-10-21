@@ -5311,7 +5311,13 @@ impl crate::VerterHost {
     pub(crate) fn capture_request_snapshot(
         &self,
     ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
-        verter_type_engine::resolver_core::RequestSnapshot::new(
+        self.capture_request_snapshot_in::<verter_audit::observe::Uncaptured>()
+    }
+
+    pub(crate) fn capture_request_snapshot_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+    ) -> verter_type_engine::resolver_core::RequestSnapshot<WorkspaceSlotClocks> {
+        verter_type_engine::resolver_core::RequestSnapshot::new_in::<M>(
             self.project_type_store().project_generation_clock(),
             self.aggregate_clock_reader(),
         )

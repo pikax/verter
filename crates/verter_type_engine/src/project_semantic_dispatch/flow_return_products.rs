@@ -427,6 +427,7 @@ impl FlowFrameProducts {
     }
 
     fn accepts_observation(&self, observation: &FlowWriteObservation) -> bool {
+        let _ = observation;
         if Rc::ptr_eq(&self.execution, &observation.execution) {
             return true;
         }
@@ -435,6 +436,7 @@ impl FlowFrameProducts {
     }
 
     pub fn writes_since(&self, observation: &FlowWriteObservation) -> Vec<FlowBindingRef> {
+        let _ = observation;
         if !self.accepts_observation(observation) {
             return Vec::new();
         }
@@ -454,6 +456,7 @@ impl FlowFrameProducts {
         observation: &FlowWriteObservation,
         algebra: &dyn FlowSemanticAlgebra,
     ) -> Self {
+        let _ = observation;
         let first = incoming.first().expect("a continuation has a predecessor");
         let mut joined = (*first).clone();
         if !first.accepts_observation(observation) || incoming.len() == 1 {

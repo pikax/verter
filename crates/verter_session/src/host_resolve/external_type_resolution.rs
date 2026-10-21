@@ -267,7 +267,7 @@ impl VerterHost {
         cache: &mut crate::resolver_core::component_meta::NativePropProjectionCache,
         _view: Option<&dyn crate::session_view::SessionView>,
     ) -> Option<crate::resolver_core::ResolvedImportedMacroSurface> {
-        component_meta_trace_custom!(M =>
+        component_meta_trace_custom!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(ctx).accumulator.as_deref() =>
             "resolve_component_meta_native_props",
             format!(
                 "owner={} import={} type={} store_view={} cache_entries={}",

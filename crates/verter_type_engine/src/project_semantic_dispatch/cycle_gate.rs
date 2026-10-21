@@ -82,7 +82,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             // No cold build ran on this thread — the family warm-served
             // (or a cross-thread join landed). Attribute the hit on the
             // active request; cheap when no context is installed.
-            crate::observe_request!(C::Observe => |req_ctx| {
+            crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |req_ctx| {
                 req_ctx.bump_type_resolution_ref_root_cycle_hit();
             });
         }

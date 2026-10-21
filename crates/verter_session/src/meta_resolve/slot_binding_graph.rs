@@ -502,7 +502,9 @@ pub(crate) fn resolve_slot_bindings_graph_native<M: verter_audit::observe::Obser
     // `RequestContext::synthesis_expanded_instantiate_calls`). The eagerness
     // guard asserts that synthesis-scoped count is zero — synthesis drives
     // the carrier walk in Navigate / Skeleton, never Expanded.
-    let _synthesis_scope = verter_type_engine::request_context::SynthesisScopeGuard::enter::<M>();
+    let _synthesis_scope = verter_type_engine::request_context::SynthesisScopeGuard::enter::<M>(
+        verter_type_engine::resolver_core::resolver_context::capture_targets(ctx.ctx),
+    );
     // Synthesis-entry info event. Per the audit contract the synthesis layer
     // emits at `info` level; the `tracing::info!` here uses the
     // module-path target so subscribers filtered to `verter_session`

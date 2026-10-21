@@ -74,7 +74,7 @@ export interface CheckboxProps {
     let initial_view = host.resolver_store_view_read().into_owned_view();
     assert!(
         matches!(
-            host.prepared_type_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(
+            host.prepared_type_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(&verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &initial_view,
                 None,
                 "/workspace/Checkbox.vue",
@@ -1308,6 +1308,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
     );
 
     let resolved = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
         provider,
         "./inner.d.ts",
     );
@@ -1326,6 +1327,7 @@ fn cached_import_route_resolution_reuses_untracked_current_version_across_epoch_
     );
 
     let resolved = host.cached_import_route_resolution::<verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
         provider,
         "./inner.d.ts",
     );

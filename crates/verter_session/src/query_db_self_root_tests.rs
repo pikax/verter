@@ -5854,6 +5854,7 @@ fn owner_resolution_set_published_only_by_owner_import_surface_db() {
         host.project_type_store().owner_import_surfaces(),
     )
     .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+        &verter_type_engine::request_observers::CaptureTargets::EMPTY,
         &host,
         owner,
         owner_whole_hash,

@@ -86,6 +86,7 @@ use verter_type_expr::PrimitiveName;
 //   - `substitute`— generic type-parameter substitution into the graph.
 //   - `relation`  — the authoritative semantic-node assignability engine.
 // `mod.rs` retains the dispatch entry points and shared dispatcher state.
+use crate::request_observers as observation;
 mod arena_ops;
 mod engine_binding;
 pub mod engine_resources;
@@ -419,6 +420,7 @@ impl ActiveInstantiations {
 /// and closes the stack-bound recursion hole Session 4 traced down to
 /// the `type TreeNode = { children: TreeNode[] }` materialisation path.
 pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabilities> {
+    observation: observation::CaptureTargets,
     binding: EngineBinding<C::MacroMirrors>,
     pub policy: EnginePolicy,
     cancellation: crate::resolver_core::request_ports::CancellationCheckpoint,
@@ -1084,7 +1086,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 binding.construction.arena(),
             );
         ThreadDispatch {
-            dispatch: Self::with_binding(ctx, binding),
+            dispatch: Self::with_binding(
+                ctx,
+                binding,
+                crate::resolver_core::resolver_context::capture_targets(ctx).clone(),
+            ),
             _construction: binding_graph_scope,
         }
     }
@@ -1095,6 +1101,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     fn with_binding(
         ctx: &'a dyn ResolverContext<C>,
         binding: EngineBinding<C::MacroMirrors>,
+        observation: observation::CaptureTargets,
     ) -> Self {
         // A dispatcher runs compiled for its context family's capture mode;
         // the host selects that family from the mode the installed request
@@ -1115,6 +1122,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let snapshot =
             crate::resolver_core::fact_validation_port::LiveFactValidation::request_snapshot(ctx);
         Self {
+            observation,
             binding,
             policy: ctx.engine_policy(),
             cancellation: snapshot.flags().cancellation_checkpoint(),
@@ -1170,7 +1178,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let mut binding = self.ctx.attach_engine();
         binding.graph = Arc::clone(&self.binding.graph);
         binding.construction = self.binding.construction.clone();
-        let dispatch = Self::with_binding(self.ctx, binding);
+        let dispatch = Self::with_binding(self.ctx, binding, self.observation.clone());
         Self {
             connected_demand: self.connected_demand.sibling(),
             ..dispatch
@@ -1186,6 +1194,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// its drive and gives it back.
     pub(super) fn exchange_request_state(&self, other: &Self) {
         let Self {
+            observation: _,
             binding: _,
             policy: _,
             cancellation: _,
@@ -2432,7 +2441,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if !<C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
             return;
         }
-        let Some(ctx) = crate::request_context::current_captured_request_context() else {
+        let Some(ctx) = self.observation.request.as_deref() else {
             return;
         };
         let depth = self.instantiate_active.borrow().len();
@@ -3013,7 +3022,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// dispatcher performs through it records optional capture only in the
     /// captured instantiation.
     pub fn graph(&self) -> crate::semantic_query_memo::GraphIn<'_, C::Observe> {
-        crate::semantic_query_memo::GraphIn::of(&self.binding.graph)
+        crate::semantic_query_memo::GraphIn::observed(&self.binding.graph, &self.observation)
     }
 
     /// The shared handle of the semantic graph store this dispatcher
@@ -3962,10 +3971,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &finalise,
             verter_session_query::facts::fact_read_set::FactReadSetFinalise::NonCacheable(_)
         );
-        let provenance = &self.binding.observers.provenance;
-        provenance
-            .memo_entry_fact_tracer_installs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support"))
+            || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+        {
+            let provenance = &self.binding.observers.provenance;
+            provenance
+                .memo_entry_fact_tracer_installs
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         finalise_rooted_build_output(self.ctx, output, finalise, carrier_prelude)
     }
 
@@ -4011,7 +4024,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             verter_audit::attribute!(SemanticWarmHit);
         }
-        verter_audit::observe!(C::Observe => |observer| {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
             use verter_audit::AuditEvent;
             let event = match key {
                 SemanticQueryKey::TypeOf { .. } => {
@@ -4298,7 +4311,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     // under-count post-trip dispatches once the
                     // early-exit lands, and bench attribution would lose
                     // the runaway signal.
-                    verter_audit::observe!(C::Observe => |observer| {
+                    verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                         use verter_audit::AuditEvent;
                         // The early-exit attribution must mirror EVERY kind
                         // the aggregate work-budget gate counts — including
@@ -4490,7 +4503,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // reduction in `build.rs`, mapped-type `ProjectPath` member
         // projection). Idempotent per tag (sets one bit). No-op when no
         // `RequestContext` is installed on the calling thread.
-        crate::observe_request!(C::Observe => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
 
         // Admission-time canonicalisation:
         //   - `ProjectMember { base, member, mode }` rewrites to
@@ -6207,6 +6220,8 @@ pub enum BuiltinUtilityResolution {
 /// request ports. Scope is resolved fresh per call, with no host reference or
 /// independent query driver.
 pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities> {
+    #[cfg(feature = "semantic-observe")]
+    observation: &'a observation::CaptureTargets,
     resources: &'a EngineBinding<C::MacroMirrors>,
     ctx: &'a dyn ResolverContext<C>,
 }
@@ -6214,6 +6229,8 @@ pub struct SessionDispatchHost<'a, C: crate::resolver_core::ResolverCapabilities
 impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, C> {
     pub fn from_facade(dispatch: &'a ProjectSemanticDispatch<'_, C>) -> Self {
         Self {
+            #[cfg(feature = "semantic-observe")]
+            observation: &dispatch.observation,
             resources: &dispatch.binding,
             ctx: dispatch.ctx,
         }
@@ -6256,7 +6273,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
                 // (`resolve_prepared_type_decl`, `resolve_builtin_utility`)
                 // route through this helper — dominant expected source of
                 // the warm-read pressure.
-                verter_audit::observe!(C::Observe => |obs| {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |obs| {
                     obs.record_event(
                         verter_audit::AuditEvent::PreparedDeclBundleCallsiteScopePayload,
                     );
@@ -6325,7 +6342,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> SessionDispatchHost<'a, 
         let identity = BuiltinUtility::from_name(name);
         if identity.is_some()
             || matches!(
-                self.resources.intrinsics.lookup::<C::Observe>(name),
+                self.resources.intrinsics.lookup::<C::Observe>(
+                    crate::resolver_core::resolver_context::capture_targets(self.ctx),
+                    name
+                ),
                 crate::intrinsic_registry::IntrinsicLookup::Found(_)
             )
         {

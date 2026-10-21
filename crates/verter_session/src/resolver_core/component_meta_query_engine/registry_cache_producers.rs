@@ -127,7 +127,7 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
             // from a host-cache peek. Differentiate warm positive from warm
             // negative (`None`) so the audit reflects how many of the warm hits
             // were actually "this symbol is known unresolvable".
-            verter_audit::observe!(M =>|obs| {
+            verter_audit::observe!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(self.ctx).observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRegistryWarm);
                 if cached.is_none() {
                     obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
@@ -234,8 +234,7 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
                 observed_keyed_hash
             },
             |observed_keyed_hash| {
-                Self::resolve_imported_registry_symbol_admission(
-                    self,
+                Self::resolve_imported_registry_symbol_admission(self,
                     ctx,
                     canonical_id,
                     source_owner,
@@ -286,7 +285,7 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
         // `resolve_imported_registry_symbol_with_budget` resolution. Joiners
         // that block on this closure do NOT re-enter — so the counter reflects
         // unique cold work, not per-waiter overhead.
-        verter_audit::observe!(M =>|obs| {
+        verter_audit::observe!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(self.ctx).observer.as_deref() =>|obs| {
             obs.record_event(verter_audit::AuditEvent::ImportedRegistryCold);
         });
         // Snapshot the project generation BEFORE the resolution dispatches any
@@ -385,7 +384,7 @@ impl<M: verter_audit::observe::ObserveExec> ComponentMetaQueryEngine<'_, M> {
         // symbol at all from the owner. The warm peek branch above handles the
         // warm-negative case separately.
         if result.is_none() {
-            verter_audit::observe!(M =>|obs| {
+            verter_audit::observe!(M => on verter_type_engine::resolver_core::resolver_context::capture_targets(self.ctx).observer.as_deref() =>|obs| {
                 obs.record_event(verter_audit::AuditEvent::ImportedRegistryNegative);
             });
         }

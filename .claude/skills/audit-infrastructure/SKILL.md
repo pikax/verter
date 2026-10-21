@@ -35,9 +35,13 @@ store handle, the session's `HostCapabilities<M>` request contexts) are
 compiled for `observe::Captured` or `observe::Uncaptured`, adopt the carried
 mode once where they start (`verter_audit::specialise!`,
 `capture::installed_mode`), and emit through the typed forms
-`observe!(M => ..)` / `observe_request!(M => ..)` /
-`component_meta_trace_structured!(M => ..)`, which test the constant
-`M::CAPTURED` and read no slot. Untyped forms are for once-per-request and
+`observe!(M => on observer => ..)` /
+`observe_request!(M => on request => ..)` /
+`component_meta_trace_structured!(M => on accumulator => ..)`, which borrow
+receivers from the request snapshot's `CaptureTargets`, test the constant
+`M::CAPTURED` and read no slot in either mode. Dispatchers retain these
+receivers across task resumptions, and graph/session helpers pass the borrow
+through their typed operations. Untyped forms are for once-per-request and
 once-per-phase boundaries only. See docs/arch/semantic-observe.md →
 "Concrete execution modes".
 The whole audit envelope compiles only under `semantic-observe`: the observer
@@ -206,7 +210,7 @@ Surface: `ok(value, audit)` / `err(error, audit)` constructors; `audit()`, `as_r
 
 ## Producer Entry-Points
 
-Every public audited entry-point follows the same lifecycle: stamp a request id, build a `RequestContext` keyed by the matching `RequestKind`, construct an `AuditRequestRegistration` BEFORE installing the TLS guard, run the producer body under either `RequestContextGuard` (active) or `install_noop_observer()` (filtered), assemble the typed payload from per-request counters, and finalise through the registration. Filtered kinds short-circuit to `None`; the producer body always runs regardless of audit state.
+Every public audited entry-point follows the same lifecycle: stamp a request id, build a `RequestContext` keyed by the matching `RequestKind`, construct an `AuditRequestRegistration` BEFORE installing the TLS guard, select `Captured` or `Uncaptured` once and install the required request context in both modes; active capture also installs its observer, assemble the typed payload from per-request counters, and finalise through the registration. Filtered kinds short-circuit to `None`; the producer body always runs regardless of audit state.
 
 ### Component-Meta
 
@@ -262,7 +266,7 @@ The three lifecycle methods on `HostAuditRuntime` (`register_active_request`, `f
 
 ## Substrate TLS — `current_observer()`
 
-Lower crates emit audit signals through `verter_audit::current_observer() -> Option<Arc<dyn AuditObserver>>` (`crates/verter_audit/src/observer.rs`). Reads a thread-local slot installed by either `RequestContextGuard::install` (active) or `install_noop_observer()` (filtered).
+Lower crates emit audit signals through `verter_audit::current_observer() -> Option<Arc<dyn AuditObserver>>` (`crates/verter_audit/src/observer.rs`). The root reads the thread-local slot installed by `RequestContextGuard::install` for active capture. Typed operations retain and borrow that receiver; uncaptured execution installs no no-op observer.
 
 `AuditObserver` trait carries default no-op implementations; producers override only what they care about:
 

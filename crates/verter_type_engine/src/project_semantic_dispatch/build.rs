@@ -271,13 +271,15 @@ pub(crate) struct AugmentationContributions {
 /// and after the exact augmenter-set fingerprint has been observed by the
 /// consumer's fact tracer.
 fn emit_module_augmentation_stitched_event<M: verter_audit::observe::ObserveExec>(
+    observation: &crate::request_observers::CaptureTargets,
     target: &verter_session_query::resolution::AugmentationTargetKind,
     augmenter_count: u32,
     fingerprint: crate::semantic_query::HashValue,
 ) {
+    let _ = observation;
     // Optional capture: the event and its payload are built only when an
     // accumulator is installed, and never in a default build.
-    crate::component_meta_trace_structured!(M => {
+    crate::component_meta_trace_structured!(M => on observation.accumulator.as_deref() => {
         use verter_audit::AugmentationTargetKindTag;
         use verter_session_query::resolution::AugmentationTargetKind;
 
@@ -1419,7 +1421,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         mut suspend: Option<&mut Option<Box<TypeofBuild>>>,
     ) -> crate::project_semantic_dispatch::walk::QueryBuildOutput {
         // Telemetry for the typeof traversal site.
-        verter_audit::observe!(C::Observe => |observer| {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
             observer.record_event(verter_audit::AuditEvent::BuildTypeofCall);
         });
         // Self-version rooting: observe the value-root scope
@@ -1438,7 +1440,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(indexed) => indexed,
             None => {
                 // Telemetry: prepared-value miss site.
-                verter_audit::observe!(C::Observe => |observer| {
+                verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |observer| {
                     observer.record_event(verter_audit::AuditEvent::BuildTypeofPreparedValueMiss);
                 });
                 return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
@@ -5326,9 +5328,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // workspace-parallel runs.
         if matches!(body_mode, crate::semantic_query::ProjectionMode::Expanded) {
             #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-            crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::observe_request!(C::Observe => |ctx| {
+            if cfg!(any(test, feature = "test-support"))
+                || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+            {
+                crate::loop5_instrumentation::SLOT_BINDING_EXPANDED_INSTANTIATE_CALLS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
                 ctx.expanded_instantiate_calls
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             });
@@ -5340,7 +5346,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // "an Expanded Instantiate fired INSIDE slot-binding synthesis"
             // — the eagerness defect `enrich_does_not_eagerly_instantiate_carrier`
             // gates on (must stay zero).
-            crate::request_context::note_expanded_instantiate_for_synthesis_scope::<C::Observe>();
+            crate::request_context::note_expanded_instantiate_for_synthesis_scope::<C::Observe>(
+                crate::resolver_core::resolver_context::capture_targets(self.ctx),
+            );
         }
 
         let decl_canonical = &base.defining_canonical;
@@ -5667,7 +5675,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // behaviour at solve.rs:2580.
         // Instrumentation: callsite attribution for
         // `prepared_decl_bundle_warm` reads from `build_instantiate`.
-        verter_audit::observe!(C::Observe => |obs| {
+        verter_audit::observe!(C::Observe => on self.observation.observer.as_deref() => |obs| {
             obs.record_event(verter_audit::AuditEvent::PreparedDeclBundleCallsiteBuildInstantiate);
         });
         let scope_payload = self
@@ -6807,6 +6815,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
         if let Some((target, fingerprint)) = &plan.stitched {
             emit_module_augmentation_stitched_event::<C::Observe>(
+                crate::resolver_core::resolver_context::capture_targets(self.ctx),
                 target,
                 plan.contributor_roots.len() as u32,
                 *fingerprint,
@@ -7782,6 +7791,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             }));
         }
         emit_module_augmentation_stitched_event::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(self.ctx),
             &target,
             contributor_roots.len() as u32,
             augmenter_set.fingerprint,
@@ -15937,7 +15947,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // mapped-member materialization cache would key on. The
         // classifier records the tuple in the per-request observed
         // set and bumps the matching unique/repeated counter pair.
-        crate::observe_request!(C::Observe => |ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,
@@ -16055,7 +16065,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> SemanticNodeId {
         self.graph().record_mapped_per_k_materialization();
         // Instrumentation — selected-key variant.
-        crate::observe_request!(C::Observe => |ctx| {
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
             ctx.classify_mapped_member_materialization(
                 crate::request_context::MappedMemberIdentity {
                     parameter_node: mapper.parameter_node.0,

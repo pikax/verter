@@ -77,8 +77,14 @@ impl VerterHost {
             self.resolve_project_intrinsic_canonical(owner_canonical_id, "vue/jsx")?;
 
         // Ensure module facts are materialized for the resolved canonicals.
-        let _ = self.ensure_indexed_ready_serve_in::<M>(&vue_canonical);
-        let _ = self.ensure_indexed_ready_serve_in::<M>(&jsx_canonical);
+        let _ = self.ensure_indexed_ready_serve_in::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            &vue_canonical,
+        );
+        let _ = self.ensure_indexed_ready_serve_in::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            &jsx_canonical,
+        );
 
         let fallback_members = self
             .expand_project_intrinsic_shape_for_canonical(
@@ -188,7 +194,10 @@ impl VerterHost {
             .map(|(resolved_id, _)| resolved_id)
             .filter(|resolved_id| resolved_id != canonical_id);
         let scope = tag_scope_canonical.as_deref().unwrap_or(canonical_id);
-        let _ = self.ensure_indexed_ready_serve_in::<M>(scope);
+        let _ = self.ensure_indexed_ready_serve_in::<M>(
+            verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+            scope,
+        );
         // The tag's value SOURCE (`HTMLAttributes & { … }`) projects to its
         // `ExpandedObjectShape` in NODE DOMAIN through the query engine's
         // intrinsic tag-member rail, resolved in the `NativeElements` scope: the

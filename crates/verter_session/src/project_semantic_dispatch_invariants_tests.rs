@@ -931,6 +931,72 @@ fn host_for_relation_tests() -> VerterHost {
     })
 }
 
+// Reads optional audit capture: runs in the instrumentation lane.
+#[cfg(feature = "semantic-observe")]
+#[test]
+fn captured_dispatch_emits_to_its_bound_observer_after_ambient_observer_changes() {
+    use std::sync::atomic::Ordering;
+    use verter_audit::observe::{Captured, ObserveMode};
+    use verter_type_engine::request_context::{RequestContext, RequestContextGuard};
+
+    let host = host_for_relation_tests();
+    let request = RequestContext::for_root_entry(
+        1,
+        Arc::from("/captured.ts"),
+        || verter_audit::RequestKind::TypeResolution,
+        ObserveMode::Captured,
+        false,
+        false,
+        None,
+        0,
+        verter_execution::cancellation::CancellationToken::new(),
+    );
+    let _request = RequestContextGuard::install(Arc::clone(&request));
+    let view = host.resolver_store_view().into_owned_view();
+    let context = crate::resolver_core::HostResolverContext::<'_, Captured>::new(
+        &host,
+        &view,
+        Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new()),
+    );
+    let dispatch = ProjectSemanticDispatch::new(&context);
+    let graph = dispatch.graph();
+    let string = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::String));
+    let number = graph.intern_node(SemanticNodeData::Primitive(PrimitiveKind::Number));
+    let before = request.substitute_top_level_calls.load(Ordering::Relaxed);
+    let nested = RequestContext::for_root_entry(
+        2,
+        Arc::from("/nested.ts"),
+        || verter_audit::RequestKind::TypeResolution,
+        ObserveMode::Captured,
+        false,
+        false,
+        None,
+        0,
+        verter_execution::cancellation::CancellationToken::new(),
+    );
+    let _nested = RequestContextGuard::install(Arc::clone(&nested));
+    let _ambient = verter_audit::observer::clear_observer();
+    let locks = request.node_arena_lock_acquisitions.load(Ordering::Relaxed);
+    let _node = graph.intern_node(SemanticNodeData::Literal(LiteralValue::String(
+        "bound-receiver".into(),
+    )));
+    assert_eq!(
+        dispatch.substitute_semantic_type_param(string, string, number),
+        number
+    );
+    assert_eq!(
+        request.substitute_top_level_calls.load(Ordering::Relaxed) - before,
+        1,
+        "a captured execution keeps its receiver instead of looking it up per emission",
+    );
+    assert!(request.node_arena_lock_acquisitions.load(Ordering::Relaxed) > locks);
+    assert_eq!(
+        nested.node_arena_lock_acquisitions.load(Ordering::Relaxed),
+        0
+    );
+    assert_eq!(nested.substitute_top_level_calls.load(Ordering::Relaxed), 0);
+}
+
 fn empty_surface(members: Vec<SurfaceMember>) -> SurfaceView {
     verter_type_engine::test_surface_view! {
         members: Arc::from(members.into_boxed_slice()),

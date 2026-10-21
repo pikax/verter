@@ -179,12 +179,24 @@ sealed trait with exactly two implementors, `Captured` and `Uncaptured`, and
 `verter_audit::specialise!(mode => M, { ... })` expands its body once per mode
 with `M` naming that mode's type (only the `Uncaptured` expansion in a default
 build). Code compiled for `M` emits through the typed forms
-`observe!(M => |obs| ...)`, `observe_request!(M => |ctx| ...)`,
-`component_meta_trace_structured!(M => ...)` and
-`component_meta_trace_custom!(M => ...)`, each a branch on the constant
+`observe!(M => on observer => |obs| ...)`,
+`observe_request!(M => on request => |ctx| ...)`,
+`component_meta_trace_structured!(M => on accumulator => ...)` and
+`component_meta_trace_custom!(M => on accumulator => ...)`, each a branch on the constant
 `M::CAPTURED`: the uncaptured expansion reads no observer, request-context,
 accumulator or timing slot and builds no payload. Specialization is bounded
-to these two modes, not every host/counter combination.
+to these two modes, not every host/counter combination. The typed forms
+require an explicit borrowed receiver; neither captured nor uncaptured
+emission recovers a receiver from TLS.
+
+`RequestSnapshot` retains `CaptureTargets` at lifecycle admission. The
+dispatcher clones those handles once and carries them into its sibling task
+dispatchers; `GraphIn` borrows them for interning and cache operations. Session
+helpers pass the same borrow through typed lookups. The mode-aware
+`resolver_context::capture_targets` accessor returns a static empty carrier
+for uncaptured execution without calling a request port. With the feature
+disabled the carrier is zero-size. Required request-context, budget,
+cancellation and fact-tracing access remains independent.
 
 The mode rides the structures an execution unit already carries:
 

@@ -145,9 +145,11 @@ impl OwnerImportSurfaceDb {
     #[must_use]
     pub(crate) fn lookup_owner_hash_candidate<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
+        let _ = observation;
         if self.schema_version != verter_type_engine::cache_schema::CACHE_CLUSTER_SCHEMA_VERSION {
             return None;
         }
@@ -157,7 +159,7 @@ impl OwnerImportSurfaceDb {
             }
             _ => None,
         };
-        verter_type_engine::observe_request!(M =>|ctx| {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .owner_import
@@ -184,7 +186,7 @@ impl OwnerImportSurfaceDb {
         expected_owner_whole_hash: Hash16,
     ) -> Option<Arc<OwnerImportSurface>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.lookup_owner_hash_candidate::<M>(owner_canonical, expected_owner_whole_hash)
+            self.lookup_owner_hash_candidate::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), owner_canonical, expected_owner_whole_hash)
         })
     }
 
@@ -474,6 +476,7 @@ mod tests {
 
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &host,
                 "/w/owner.ts",
                 owner_hash,
@@ -506,6 +509,7 @@ mod tests {
         let refused_hash = [9u8; 16];
         let refused = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &host,
                 "/w/refused.ts",
                 refused_hash,
@@ -563,6 +567,7 @@ mod tests {
         // Cold-admit a surface whose signature carries the leaf chain fact.
         let admitted = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db)
             .get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                &verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &host,
                 "/w/owner.ts",
                 owner_hash,
@@ -593,7 +598,7 @@ mod tests {
         let ((), finalise) = verter_type_engine::fact_signature_helpers::install_fact_tracer(
             &verter_type_engine::fact_signature_helpers::FactTracerBasisSource::unbound(&host),
             || {
-                let warm = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db).get_or_compute::<_, _, verter_audit::observe::Uncaptured>(
+                let warm = crate::host_manage::source_owner_import::OwnerImportRequestDriver::new(&db).get_or_compute::<_, _, verter_audit::observe::Uncaptured>(&verter_type_engine::request_observers::CaptureTargets::EMPTY,
                 &host,
                 "/w/owner.ts",
                 owner_hash,

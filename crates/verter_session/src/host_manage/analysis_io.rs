@@ -142,7 +142,7 @@ impl VerterHost {
         scope: crate::host_manage::template_class_facts::TemplateClassPublicationScope,
     ) -> crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.build_template_class_semantic_facts_in::<M>(canonical, whole_hash, source, script, raw, scope)
+            self.build_template_class_semantic_facts_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, whole_hash, source, script, raw, scope)
         })
     }
 
@@ -151,6 +151,7 @@ impl VerterHost {
     /// request's mode.
     pub(crate) fn build_template_class_semantic_facts_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
         whole_hash: verter_session_query::analysis::types::Hash16,
         source: Arc<str>,
@@ -158,6 +159,7 @@ impl VerterHost {
         raw: &verter_compiler::compile::template_data::RawTemplateData,
         scope: crate::host_manage::template_class_facts::TemplateClassPublicationScope,
     ) -> crate::host_manage::template_class_facts::SessionTemplateClassSemanticFacts {
+        let _ = observation;
         let current_key = self.authoritative_current_artifact_key(canonical);
         if scope.is_base_publishable()
             && current_key.as_ref().is_some_and(|key| {
@@ -165,7 +167,13 @@ impl VerterHost {
                     && self
                         .project_type_store()
                         .indexed()
-                        .get_in::<M>(canonical, whole_hash, &key.parse_key, &key.file_language_id)
+                        .get_in::<M>(
+                            observation,
+                            canonical,
+                            whole_hash,
+                            &key.parse_key,
+                            &key.file_language_id,
+                        )
                         .is_some()
             })
         {
@@ -387,7 +395,7 @@ impl VerterHost {
             &self.provenance,
         );
 
-        // Convert RawTemplateData â†’ TemplateAnalysisSnapshot using existing converter
+        // Convert RawTemplateData → TemplateAnalysisSnapshot using existing converter
         if let Some(raw) = raw {
             // Converter inputs come from the ONE shared projection (type-only
             // imports excluded, static async-component carriers linked).
@@ -991,7 +999,7 @@ impl VerterHost {
     /// execution unit: adopts the mode the installed request carries.
     pub(crate) fn get_whole_hash(&self, canonical: &str) -> Option<Hash16> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_whole_hash_in::<M>(canonical)
+            self.get_whole_hash_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical)
         })
     }
 
@@ -1000,8 +1008,10 @@ impl VerterHost {
     /// request's mode.
     pub(crate) fn get_whole_hash_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
     ) -> Option<Hash16> {
+        let _ = observation;
         {
             use crate::host_executor::HostSourceData;
             // Scheduler branch — gated only on an EXPLICIT evicted
@@ -1028,7 +1038,7 @@ impl VerterHost {
             // superseded canonical's stale artifact's OWN hash as the
             // file's current hash — bypassing the inventory every other
             // artifact-only lane answers through.
-            self.artifact_current_indexed_raw::<M>(canonical)
+            self.artifact_current_indexed_raw::<M>(observation, canonical)
                 .map(|facts| facts.whole_hash)
         }
     }
@@ -1193,15 +1203,33 @@ impl VerterHost {
         &self,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        verter_audit::specialise!(crate::capture::installed_mode() => M, {
+            self.current_content_pinned_indexed_in::<M>(
+                &verter_type_engine::request_observers::CaptureTargets::installed::<M>(),
+                canonical,
+            )
+        })
+    }
+
+    /// Content-pinned serve using the calling execution's capture receivers.
+    pub(crate) fn current_content_pinned_indexed_in<M: verter_audit::observe::ObserveExec>(
+        &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
+        canonical: &str,
+    ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         let current_key = self.authoritative_current_artifact_key(analysis_canonical)?;
-        let indexed = self.project_type_store.indexed().get_for_current_content(
-            analysis_canonical,
-            current_key.content_hash,
-            &current_key.parse_key,
-            &current_key.file_language_id,
-        )?;
+        let indexed = self
+            .project_type_store
+            .indexed()
+            .get_for_current_content_in::<M>(
+                observation,
+                analysis_canonical,
+                current_key.content_hash,
+                &current_key.parse_key,
+                &current_key.file_language_id,
+            )?;
         // The content pin keys on the owner's content hash. Parse artifacts
         // retain authored routing shape only; resolved canonicals and their
         // currency live in the request's captured resolution world. This base
@@ -1215,7 +1243,7 @@ impl VerterHost {
         // consumption is visible to every enclosing traced admission
         // point via the serve chokepoint flag, so it can no longer be
         // laundered into a warm shared-cache entry.
-        self.ensure_indexed_ready_serve(analysis_canonical)
+        self.ensure_indexed_ready_serve_in::<M>(observation, analysis_canonical)
             .map(|serve| serve.indexed)
     }
 
@@ -1243,7 +1271,7 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.observe_content_pinned_indexed_in::<M>(canonical)
+            self.observe_content_pinned_indexed_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical)
         })
     }
 
@@ -1252,18 +1280,24 @@ impl VerterHost {
     /// request's mode.
     pub(crate) fn observe_content_pinned_indexed_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let _ = observation;
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         match self.authoritative_current_artifact_key(analysis_canonical) {
-            Some(current_key) => self.project_type_store.indexed().get_for_current_content(
-                analysis_canonical,
-                current_key.content_hash,
-                &current_key.parse_key,
-                &current_key.file_language_id,
-            ),
-            None => self.artifact_current_indexed_raw::<M>(analysis_canonical),
+            Some(current_key) => self
+                .project_type_store
+                .indexed()
+                .get_for_current_content_in::<M>(
+                    observation,
+                    analysis_canonical,
+                    current_key.content_hash,
+                    &current_key.parse_key,
+                    &current_key.file_language_id,
+                ),
+            None => self.artifact_current_indexed_raw::<M>(observation, analysis_canonical),
         }
     }
 
@@ -1319,14 +1353,16 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn artifact_current_indexed<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let _ = observation;
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         let indexed = self
             .project_type_store
             .indexed()
-            .get_any_in::<M>(analysis_canonical)?;
+            .get_any_in::<M>(observation, analysis_canonical)?;
         // The single artifact-only authority gate (same contract as the
         // raw peek): a `DerivedRawState` entry means the scheduler is the
         // content authority, and an absent file's artifact must never
@@ -1356,7 +1392,7 @@ impl VerterHost {
         }
         // Reparse arm — same chokepoint-covered serve as
         // `current_content_pinned_indexed` above.
-        self.ensure_indexed_ready_serve_in::<M>(analysis_canonical)
+        self.ensure_indexed_ready_serve_in::<M>(observation, analysis_canonical)
             .map(|serve| serve.indexed)
     }
 
@@ -1496,14 +1532,16 @@ impl VerterHost {
     #[must_use]
     pub(crate) fn artifact_current_indexed_raw<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         canonical: &str,
     ) -> Option<Arc<crate::project_type_store::IndexedReady>> {
+        let _ = observation;
         let analysis_canonical = self.normalized_analysis_canonical(canonical);
         let analysis_canonical = analysis_canonical.as_ref();
         let indexed = self
             .project_type_store
             .indexed()
-            .get_any_in::<M>(analysis_canonical)?;
+            .get_any_in::<M>(observation, analysis_canonical)?;
         // The artifact-current authority answers ONLY through the single
         // authority gate: a canonical with no `DerivedRawState` entry — a
         // genuinely artifact-only scope the scheduler never tracked —
@@ -1693,8 +1731,16 @@ impl VerterHost {
         canonical: &str,
     ) -> Option<verter_type_engine::resolver_core::MaterializeScopeObservation> {
         let indexed = self
-            .current_content_pinned_indexed(canonical)
-            .or_else(|| self.artifact_current_indexed::<M>(canonical))?;
+            .current_content_pinned_indexed_in::<M>(
+                verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                canonical,
+            )
+            .or_else(|| {
+                self.artifact_current_indexed::<M>(
+                    verter_type_engine::resolver_core::resolver_context::capture_targets(ctx),
+                    canonical,
+                )
+            })?;
         let observed_whole_hash = indexed.whole_hash;
         let syntactic_export_set =
             verter_type_engine::fact_signature_helpers::parse_fact_ref_for_observed_current_content(
@@ -1833,7 +1879,7 @@ impl VerterHost {
 
             // Post-process: resolve imports and enrich bindings for all
             for (canonical, snapshot) in &mut results {
-                self.resolve_snapshot_imports::<M>(canonical, snapshot);
+                self.resolve_snapshot_imports::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, snapshot);
                 self.enrich_destructured_bindings(snapshot);
             }
             results
@@ -1862,7 +1908,7 @@ impl VerterHost {
             };
 
             for (canonical, snapshot) in &mut results {
-                self.resolve_snapshot_imports::<M>(canonical, snapshot);
+                self.resolve_snapshot_imports::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), canonical, snapshot);
                 self.enrich_destructured_bindings(snapshot);
             }
             results
@@ -2012,7 +2058,7 @@ impl VerterHost {
         specifier: &str,
     ) -> Option<Arc<str>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.resolve_dep_source_in::<M>(owner_canonical, resolved_canonical_id, specifier)
+            self.resolve_dep_source_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), owner_canonical, resolved_canonical_id, specifier)
         })
     }
 
@@ -2021,10 +2067,12 @@ impl VerterHost {
     /// request's mode.
     pub(crate) fn resolve_dep_source_in<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         owner_canonical: &str,
         resolved_canonical_id: &str,
         specifier: &str,
     ) -> Option<Arc<str>> {
+        let _ = observation;
         // SFC <template src> / <script src> external-block path: read the
         // workspace directly without promoting the file into host state.
         // Caches/scheduler would treat these as compilable; they aren't.
@@ -2038,7 +2086,9 @@ impl VerterHost {
         // genuinely artifact-only canonical (no `DerivedRawState`), so a
         // scheduler-tracked-but-stale scope never returns its stale
         // artifact's source here.
-        if let Some(indexed) = self.artifact_current_indexed::<M>(resolved_canonical_id) {
+        if let Some(indexed) =
+            self.artifact_current_indexed::<M>(observation, resolved_canonical_id)
+        {
             return Some(Arc::clone(&indexed.raw_source));
         }
         if let Some(source) = self.ws().read_file(resolved_canonical_id) {
@@ -2068,7 +2118,7 @@ impl VerterHost {
                 // Content-pinned artifact fallback — `artifact_current_indexed`
                 // answers only for a genuinely artifact-only canonical,
                 // mirroring the `resolved_canonical_id` read above.
-                self.artifact_current_indexed::<M>(&dep_id)
+                self.artifact_current_indexed::<M>(observation, &dep_id)
                     .map(|indexed| Arc::clone(&indexed.raw_source))
             })
             .or_else(|| self.ws().read_file(&dep_id))
@@ -2078,9 +2128,11 @@ impl VerterHost {
     /// using the host's file map, alias map, and parent's dependency set.
     pub(crate) fn resolve_snapshot_imports<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         parent_canonical_id: &str,
         snapshot: &mut FileAnalysisSnapshot,
     ) {
+        let _ = observation;
         verter_session_query::probe_scope!(RESOLVE_SNAPSHOT_IMPS);
         // Establish the owner's canonical post-parse artifact FIRST. The
         // snapshot being enriched here is the owner's, and its authored
@@ -2096,13 +2148,17 @@ impl VerterHost {
         //   the enclosing cacheability scope, so a consumer building a
         //   durable entry from a superseded basis refuses its own
         //   admission.
-        let _ = self.ensure_indexed_ready_serve_in::<M>(parent_canonical_id);
+        let _ = self.ensure_indexed_ready_serve_in::<M>(observation, parent_canonical_id);
 
         let mut resolved_imports = Vec::new();
         for (index, import) in snapshot.imports.iter().enumerate() {
             if import.resolved_canonical_id.is_none() {
                 let authoritative = self
-                    .authoritative_import_route::<M>(parent_canonical_id, &import.source)
+                    .authoritative_import_route::<M>(
+                        observation,
+                        parent_canonical_id,
+                        &import.source,
+                    )
                     .and_then(|resolution| {
                         resolution
                             .resolved_canonical_id
@@ -2152,7 +2208,7 @@ impl VerterHost {
             BindingInitializer, ComposableReturn, ReactivityKind,
         };
 
-        // Build a map of import source â†’ resolved canonical ID from the snapshot
+        // Build a map of import source → resolved canonical ID from the snapshot
         let import_resolved: rustc_hash::FxHashMap<&str, &str> = snapshot
             .imports
             .iter()
