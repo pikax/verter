@@ -47,7 +47,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
         V: verter_session_query::facts::store_view::StoreView + ?Sized,
     {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_with_view_in::<_, M>(host, owner_canonical, expected_owner_whole_hash, view)
+            self.get_with_view_in::<_, M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), host, owner_canonical, expected_owner_whole_hash, view)
         })
     }
 
@@ -56,6 +56,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
     /// request's mode.
     pub fn get_with_view_in<V, M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         host: &crate::VerterHost,
         owner_canonical: &str,
         expected_owner_whole_hash: Hash16,
@@ -64,9 +65,12 @@ impl<'a> OwnerImportRequestDriver<'a> {
     where
         V: verter_session_query::facts::store_view::StoreView + ?Sized,
     {
-        let candidate = self
-            .db
-            .lookup_owner_hash_candidate::<M>(owner_canonical, expected_owner_whole_hash)?;
+        let _ = observation;
+        let candidate = self.db.lookup_owner_hash_candidate::<M>(
+            observation,
+            owner_canonical,
+            expected_owner_whole_hash,
+        )?;
         if candidate.validated_at_generation
             != host.project_type_store().current_project_generation()
         {
@@ -84,6 +88,7 @@ impl<'a> OwnerImportRequestDriver<'a> {
     /// non-cacheable result is served from `ReturnOnly` without mutation.
     pub(crate) fn get_or_compute<V, F, M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         host: &crate::VerterHost,
         owner_canonical: &str,
         owner_whole_hash: Hash16,
@@ -97,9 +102,14 @@ impl<'a> OwnerImportRequestDriver<'a> {
             Arc<OwnerImportSurface>,
         >,
     {
-        if let Some(cached) =
-            self.get_with_view_in::<_, M>(host, owner_canonical, owner_whole_hash, view)
-        {
+        let _ = observation;
+        if let Some(cached) = self.get_with_view_in::<_, M>(
+            observation,
+            host,
+            owner_canonical,
+            owner_whole_hash,
+            view,
+        ) {
             // R28 fact-bubble-up on the WARM path — mirror of
             // `RouteDb::get_or_resolve_route_observing_facts`'s warm-hit
             // branch. Re-observe the surface's recorded chain deps (owner
@@ -149,9 +159,11 @@ impl<'a> OwnerImportRequestDriver<'a> {
                 decision
             },
         );
-        host.provenance
-            .owner_import_surface_fact_tracer_installs
-            .fetch_add(1, Ordering::Relaxed);
+        if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+            host.provenance
+                .owner_import_surface_fact_tracer_installs
+                .fetch_add(1, Ordering::Relaxed);
+        }
 
         let rebind =
             |surface: Arc<OwnerImportSurface>,
@@ -222,9 +234,11 @@ impl<'a> OwnerImportRequestDriver<'a> {
                     facts,
                 ),
             ) => {
-                host.provenance
-                    .owner_import_surface_fenced_serve_refusals
-                    .fetch_add(1, Ordering::Relaxed);
+                if cfg!(any(test, feature = "test-support")) || M::CAPTURED {
+                    host.provenance
+                        .owner_import_surface_fenced_serve_refusals
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 verter_type_engine::cache_runtime::admission::propagate_non_admission(
                     verter_audit::NonAdmissionReason::UnresolvedProvenance,
                 );

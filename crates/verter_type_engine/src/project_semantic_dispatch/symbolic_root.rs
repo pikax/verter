@@ -25,14 +25,20 @@ pub fn emit_slot_binding_graph_dispatch_facts<C: crate::resolver_core::ResolverC
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     if !sig.is_empty() {
-        crate::request_observers::record_dep_signature_merge::<C::Observe>();
+        crate::request_observers::record_dep_signature_merge::<C::Observe>(
+            crate::resolver_core::resolver_context::capture_targets(dispatch.ctx),
+        );
     }
 
     let bridged = crate::fact_signature_helpers::dep_signature_to_fact_signature(sig);
     crate::fact_signature_helpers::observe_fact_signature(&bridged);
-    if let Some(prov) = dispatch.graph().provenance() {
-        prov.slot_binding_graph_fact_tracer_emissions
-            .fetch_add(1, Relaxed);
+    if cfg!(any(test, feature = "test-support"))
+        || <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED
+    {
+        if let Some(prov) = dispatch.graph().provenance() {
+            prov.slot_binding_graph_fact_tracer_emissions
+                .fetch_add(1, Relaxed);
+        }
     }
 }
 

@@ -1210,16 +1210,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
-        // Watchdog hooks for hang investigation. Both calls are inert
-        // when the watchdog has not been spawned (single relaxed atomic
-        // load + early return). When active, they advance a heartbeat
-        // counter and respond to the watchdog's stall signal by
-        // printing a self-backtrace from inside this lowering.
+        // Captured execution can participate in hang investigation:
+        // advance its heartbeat and answer a stall signal with a
+        // self-backtrace. Uncaptured execution reads no watchdog state.
         // See `loop5_instrumentation.rs` watchdog module.
         #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::watchdog_beat();
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        if <C::Observe as verter_audit::observe::ObserveExec>::CAPTURED {
+            crate::loop5_instrumentation::watchdog_beat();
+            crate::loop5_instrumentation::watchdog_check_and_dump("shallow_lower_type_expr");
+        }
         let graph = self.graph();
         graph.record_decl_subexpression_lowering();
         match expr {
@@ -2356,7 +2355,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 // 258K-collision count tracks 258K cold MappedType
                 // dispatches, indicating (b) — the registry is
                 // doing what it can.
-                crate::observe_request!(C::Observe => |ctx| {
+                crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| {
                     let hb = mapper_decl.whole_hash;
                     let hash_u64 = u64::from_le_bytes([
                         hb[0], hb[1], hb[2], hb[3], hb[4], hb[5], hb[6], hb[7],

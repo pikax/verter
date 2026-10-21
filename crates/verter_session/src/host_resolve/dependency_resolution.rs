@@ -40,11 +40,13 @@ impl VerterHost {
 
     pub(crate) fn authoritative_import_route<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         owner_canonical: &str,
         import_source: &str,
     ) -> Option<crate::types::DependencyResolution> {
+        let _ = observation;
         let (resolution, source_kind) = if let Some(resolution) =
-            self.cached_import_route_resolution::<M>(owner_canonical, import_source)
+            self.cached_import_route_resolution::<M>(observation, owner_canonical, import_source)
         {
             // `DerivedRawState.import_routes` path — the shared
             // per-entry freshness oracle inside
@@ -54,7 +56,7 @@ impl VerterHost {
             //
             // Per-request audit attribution: classify the warm hit as
             // positive vs negative (known-miss).
-            verter_audit::observe!(M =>|obs| {
+            verter_audit::observe!(M => on observation.observer.as_deref() =>|obs| {
                 let known_miss = Self::import_route_is_known_miss(&resolution);
                 let event = if known_miss {
                     verter_audit::AuditEvent::ResolveImportWarmNegative
@@ -82,8 +84,7 @@ impl VerterHost {
             (None, "none")
         };
 
-        component_meta_trace_custom!(M =>
-            "authoritative_import_route_result",
+        component_meta_trace_custom!(M => on observation.accumulator.as_deref() =>"authoritative_import_route_result",
             format!(
                 "owner={} import={} source={} target={}",
                 owner_canonical,

@@ -375,7 +375,7 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
 
             // Intermediate-hop demand: the keyed query lowers the instance object in
@@ -464,7 +464,7 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             resolve_vue_macro_surface_with_ctx(
                 &host_ctx,
                 &ProjectSemanticDispatch::new(&host_ctx),
@@ -537,7 +537,7 @@ impl VerterHost {
         let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             // Base-view returner: hand back the DTO bundle. A partial surface is
             // already refused store admission inside `vue_macro_dtos_with_ctx`;
             // this direct query has no request-result completeness to fold.

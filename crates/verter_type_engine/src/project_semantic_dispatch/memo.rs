@@ -567,6 +567,8 @@ pub struct ShapeCacheOwnerScope<
     snapshot: &'db RequestSnapshot<W>,
     probe: &'t crate::fact_signature_helpers::CacheabilityProbe<'t, W>,
     mode: std::marker::PhantomData<M>,
+    #[cfg(feature = "semantic-observe")]
+    observation: &'db crate::request_observers::CaptureTargets,
 }
 
 impl<
@@ -576,7 +578,11 @@ impl<
 {
     #[must_use]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
-        MemoRead::new(self.db, self.ctx, self.snapshot.flags()).peek::<M>(key)
+        #[cfg(feature = "semantic-observe")]
+        let observation = self.observation;
+        #[cfg(not(feature = "semantic-observe"))]
+        let observation = &crate::request_observers::CaptureTargets::EMPTY;
+        MemoRead::new(self.db, self.ctx, self.snapshot.flags()).peek::<M>(observation, key)
     }
 
     pub fn get_or_compute<F>(
@@ -652,8 +658,10 @@ impl MemoRead<'_, ShapeCacheDb> {
     /// fact_dep_signature is still valid against `ctx`.
     pub(crate) fn peek<M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &crate::request_observers::CaptureTargets,
         key: &ShapeCacheKey,
     ) -> Option<MaterializedOutputTypeExpr> {
+        let _ = observation;
         let storage = self.db.attach_output();
         let ctx = self.facts;
 
@@ -664,7 +672,7 @@ impl MemoRead<'_, ShapeCacheDb> {
         // strict warm-read validation rejects a same-scope content edit.
         // The entry carries its own self-roots, validated strictly.
         let result = single_entry_peek(storage.entries, key, ctx, self.flags);
-        crate::observe_request!(M => |rctx| {
+        crate::observe_request!(M => on observation.request.as_deref() => |rctx| {
             // Every ShapeCacheDb subject is a member-shape-route identity
             // now that the TypeExpr-START route also keys its LOWERED
             // settled node (`MemberValueNode`) — so all peeks count into
@@ -1155,17 +1163,22 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     #[cfg(any(test, feature = "test-support"))]
     pub fn peek(&self, key: &ShapeCacheKey) -> Option<MaterializedOutputTypeExpr> {
         MemoRead::new(self.db, self.facts, self.snapshot.flags())
-            .peek::<verter_audit::observe::Uncaptured>(key)
+            .peek::<verter_audit::observe::Uncaptured>(
+                &crate::request_observers::CaptureTargets::EMPTY,
+                key,
+            )
     }
     /// Open the sole production admission scope for this DB. The sealed
     /// capability passed to `f` is the only route to a Shape-cache write.
     pub(crate) fn with_owner_scope<'db, M: verter_audit::observe::ObserveExec, F, R>(
         &'db self,
+        observation: &'db crate::request_observers::CaptureTargets,
         f: F,
     ) -> R
     where
         F: for<'t> FnOnce(ShapeCacheOwnerScope<'db, 't, W, M>) -> R,
     {
+        let _ = observation;
         let ctx = self.facts;
 
         crate::fact_signature_helpers::with_cacheability_scope(
@@ -1180,6 +1193,8 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
                     snapshot: self.snapshot,
                     probe,
                     mode: std::marker::PhantomData,
+                    #[cfg(feature = "semantic-observe")]
+                    observation,
                 })
             },
         )
@@ -1291,9 +1306,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
     where
         F: FnOnce() -> Option<(MaterializedOutputTypeExpr, Arc<[FactVersionRef]>)>,
     {
-        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(|scope| {
-            scope.get_or_compute(key, compute)
-        })
+        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            |scope| scope.get_or_compute(key, compute),
+        )
     }
     /// Test-only sibling of [`Self::get_or_compute_traced_for_test`] for
     /// [`Self::admit_computed`].
@@ -1304,9 +1320,10 @@ impl<W: verter_session_query::facts::clocks::WorkspaceClocks + Clone>
         value: MaterializedOutputTypeExpr,
         fact_dep_signature: Arc<[FactVersionRef]>,
     ) -> MaterializedOutputTypeExpr {
-        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(|scope| {
-            scope.admit_computed(key, value, fact_dep_signature)
-        })
+        self.with_owner_scope::<verter_audit::observe::Uncaptured, _, _>(
+            &crate::request_observers::CaptureTargets::EMPTY,
+            |scope| scope.admit_computed(key, value, fact_dep_signature),
+        )
     }
 }
 impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispatch<'_, C> {
@@ -1344,7 +1361,8 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
     where
         F: for<'t> FnOnce(ShapeCacheOwnerScope<'_, 't, C::Clocks, C::Observe>) -> R,
     {
-        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx, self.snapshot).with_owner_scope(f)
+        MemoPublish::new(self.binding.shapes.as_ref(), self.ctx, self.snapshot)
+            .with_owner_scope(&self.observation, f)
     }
 }
 

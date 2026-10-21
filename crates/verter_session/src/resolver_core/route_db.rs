@@ -325,7 +325,7 @@ impl RouteDb {
         view: &V,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            self.get_route_in::<_, M>(key, view)
+            self.get_route_in::<_, M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), key, view)
         })
     }
 
@@ -334,11 +334,13 @@ impl RouteDb {
     /// request's mode.
     pub fn get_route_in<V: StoreView, M: verter_audit::observe::ObserveExec>(
         &self,
+        observation: &verter_type_engine::request_observers::CaptureTargets,
         key: &RouteNameKey,
         view: &V,
     ) -> Option<crate::resolver_core::CachedValue<RouteResult>> {
+        let _ = observation;
         let result = self.routes.get_if_valid(key, view);
-        verter_type_engine::observe_request!(M =>|ctx| {
+        verter_type_engine::observe_request!(M => on observation.request.as_deref() =>|ctx| {
             if result.is_some() {
                 ctx.cache_counters
                     .route_db

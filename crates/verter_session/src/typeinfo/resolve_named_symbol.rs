@@ -551,7 +551,7 @@ fn resolve_named_symbol_request(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let host_ctx =
-            crate::resolver_core::HostResolverContext::<'_, M>::from_current(host, &current_view, overlay);
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         // The request composes construction ordinals across several dispatcher
         // operations (lowered wire arguments, the bare declaration, the
@@ -1105,12 +1105,7 @@ pub(crate) fn materialize_through_aliases<M: verter_audit::observe::ObserveExec>
                     ProjectionMode::Navigate | ProjectionMode::Shallow | ProjectionMode::Expanded
                 ) =>
             {
-                let nullability = match store.node_scope_in_scope(current) {
-                    Some(NodeScopeId::File { canonical_id, .. }) => {
-                        dispatch.nullability_for(&canonical_id)
-                    }
-                    _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
-                };
+                let nullability = root_nullability(store, dispatch, current);
                 let key = SemanticQueryKey::reduce_written_intersection_operands(
                     store,
                     members,
@@ -1202,6 +1197,20 @@ pub(crate) fn classify_base_surfacing(
             Ok(fallback) => Ok(fallback.unwrap_or(base)),
             Err(fault) => Err(fault),
         },
+    }
+}
+
+/// The `null` / `undefined` algebra a composite written in `node`'s file
+/// is constructed under: that file's `strictNullChecks`, and the strict
+/// algebra for a node no file owns.
+fn root_nullability<M: verter_audit::observe::ObserveExec>(
+    store: &verter_type_engine::semantic_query_memo::SemanticGraphStore,
+    dispatch: &ProjectSemanticDispatch<'_, crate::resolver_core::HostCapabilities<M>>,
+    node: SemanticNodeId,
+) -> verter_session_query::flow::policy::NullabilityPolicy {
+    match store.node_scope_in_scope(node) {
+        Some(NodeScopeId::File { canonical_id, .. }) => dispatch.nullability_for(&canonical_id),
+        _ => verter_session_query::flow::policy::NullabilityPolicy::Strict,
     }
 }
 

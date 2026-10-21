@@ -1327,7 +1327,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ),
         ValueRead,
     > {
-        crate::observe_request!(C::Observe => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
+        crate::observe_request!(C::Observe => on self.observation.request.as_deref() => |ctx| { ctx.record_dispatched_query_tag(key.tag()) });
         let (_connected_guard, preexisting_trip) = self.enter_connected_demand(false);
         let query_depth_guard =
             self.charge_query_entry(key, preexisting_trip, nesting.query_levels() > 0)?;

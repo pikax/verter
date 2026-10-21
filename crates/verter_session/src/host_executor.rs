@@ -339,7 +339,7 @@ impl HostStageExecutor {
         // request context is installed.
         #[cfg(feature = "semantic-observe")]
         let timing_on = verter_audit::specialise!(crate::capture::installed_mode() => M, {
-            verter_type_engine::request_observers::capture_timing_enabled::<M>()
+            verter_type_engine::request_observers::capture_timing_enabled::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>())
         });
 
         #[cfg(test)]

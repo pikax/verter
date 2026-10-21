@@ -801,7 +801,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, current_view, overlay);
             let dispatch =
                 verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch::new(&ctx);
             let entry = crate::component_meta_result_admission::ComponentMetaResultRead::new(
@@ -816,7 +816,7 @@ impl VerterHost {
             // was evicted between the warm-cache validation and reload.
             let cached = entry.payload.clone();
             let snapshot =
-                reload_component_meta_template_snapshot_in::<M>(self, &cached.canonical_id, cached.whole_hash)?;
+                reload_component_meta_template_snapshot_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), self, &cached.canonical_id, cached.whole_hash)?;
             let resolution = cached.resolution_template.rehydrate(snapshot, request_id);
 
             // Synthesize a from_cache audit record so consumers via
@@ -974,7 +974,7 @@ pub(crate) fn reload_component_meta_template_snapshot(
     whole_hash: verter_session_query::analysis::types::Hash16,
 ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
-        reload_component_meta_template_snapshot_in::<M>(host, canonical_id, whole_hash)
+        reload_component_meta_template_snapshot_in::<M>(&verter_type_engine::request_observers::CaptureTargets::installed::<M>(), host, canonical_id, whole_hash)
     })
 }
 
@@ -982,15 +982,18 @@ pub(crate) fn reload_component_meta_template_snapshot(
 /// unit outside one calls the plain form, which adopts the installed
 /// request's mode.
 pub(crate) fn reload_component_meta_template_snapshot_in<M: verter_audit::observe::ObserveExec>(
+    observation: &verter_type_engine::request_observers::CaptureTargets,
     host: &crate::VerterHost,
     canonical_id: &str,
     whole_hash: verter_session_query::analysis::types::Hash16,
 ) -> Option<verter_session_query::analysis::file_analysis::FileAnalysisSnapshot> {
+    let _ = observation;
     let key = host.authoritative_current_artifact_key(canonical_id)?;
     if key.content_hash != whole_hash {
         return None;
     }
     let indexed = host.project_type_store().indexed().get_in::<M>(
+        observation,
         canonical_id,
         whole_hash,
         &key.parse_key,

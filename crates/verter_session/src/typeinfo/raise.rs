@@ -125,7 +125,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             // Mint the typeinfo bytes-facade output capability (constructor
             // visible only within `crate::typeinfo::raise`): this FFI facade is a
@@ -173,7 +173,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let source = verter_type_expr::facts::SemanticTypeSource::SyntheticSlotBinding(
                 verter_retention::owned::Owned::new((**key).clone()),
@@ -235,7 +235,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let node = owned_projection_subject(&dispatch, node)?;
             let cap = TypeinfoRaiseOutputCap::new(&dispatch);
@@ -261,7 +261,7 @@ impl VerterHost {
         let overlay = std::sync::Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
         verter_audit::specialise!(crate::capture::installed_mode() => M, {
             let host_ctx =
-                crate::resolver_core::HostResolverContext::<'_, M>::from_current(self, &current_view, overlay);
+                crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let node = owned_projection_subject(&dispatch, node)?;
             let message = dispatch.checker_recovery_message(node)?;
@@ -304,7 +304,7 @@ impl VerterHost {
             let host_ctx = crate::resolver_core::HostResolverContext::<
                 '_,
                 M,
-            >::from_current(self, &current_view, overlay);
+            >::from_current_in(self, &current_view, overlay);
             let dispatch = ProjectSemanticDispatch::new(&host_ctx);
             let cap = TypeinfoRaiseOutputCap::new(&dispatch);
             Some(

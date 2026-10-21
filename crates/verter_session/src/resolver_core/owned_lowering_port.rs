@@ -271,6 +271,7 @@ impl SourceInputProvider for crate::VerterHost {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
         crate::VerterHost::prepared_type_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(
             self,
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             seed.view(),
             None,
             canonical_id,
@@ -291,6 +292,7 @@ impl SourceInputProvider for crate::VerterHost {
         let seed = crate::VerterHost::resolver_store_view(self).into_cold_seed_view();
         crate::VerterHost::prepared_value_decl_in_with_store_view::<verter_audit::observe::Uncaptured>(
             self,
+            &verter_type_engine::request_observers::CaptureTargets::EMPTY,
             seed.view(),
             None,
             canonical_id,

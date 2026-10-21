@@ -445,7 +445,7 @@ fn evaluate_inner(
     let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
     verter_audit::specialise!(crate::capture::installed_mode() => M, {
         let host_ctx =
-            crate::resolver_core::HostResolverContext::<'_, M>::from_current(host, &current_view, overlay);
+            crate::resolver_core::HostResolverContext::<'_, M>::from_current_in(host, &current_view, overlay);
         let dispatch = ProjectSemanticDispatch::new(&host_ctx);
         let scratch_canonical: Arc<str> = Arc::from(scratch_uri);
         let Some(shallow) = host.shallow_file_state(scratch_uri) else {
