@@ -354,7 +354,6 @@ pub(crate) struct ComponentMetaSpan {
     pub(crate) advisory_bytes: u64,
     pub(crate) trip: PartialReasonSet,
     pub(crate) schedule_cuts: u64,
-    pub(crate) certificates: u64,
 }
 
 thread_local! {
@@ -475,7 +474,6 @@ impl TaskSpanCarry {
                 open.advisory_bytes = open.advisory_bytes.saturating_add(span.advisory_bytes);
                 open.trip = open.trip.union(span.trip);
                 open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
-                open.certificates = open.certificates.saturating_add(span.certificates);
             }
         });
     }
@@ -539,17 +537,6 @@ fn remember_schedule_cut() {
     COMPONENT_META_SPANS.with(|spans| {
         for span in spans.borrow_mut().iter_mut() {
             span.schedule_cuts = span.schedule_cuts.saturating_add(1);
-        }
-    });
-}
-
-fn remember_certificate() {
-    if !span_open() {
-        return;
-    }
-    COMPONENT_META_SPANS.with(|spans| {
-        for span in spans.borrow_mut().iter_mut() {
-            span.certificates = span.certificates.saturating_add(1);
         }
     });
 }
@@ -1096,15 +1083,6 @@ impl<'a> ConnectedDemandLedger<'a> {
         self.tripped.set(tripped);
         remember_trip(reason);
         tripped
-    }
-
-    /// A producer proved an exact same-path recurrence. A same-path bit
-    /// without this note is not a certificate. Recorded on an open
-    /// component-meta span only: outside one, admission has no compute to
-    /// attribute it to.
-    pub(crate) fn note_divergence_certificate(&self) {
-        let _ = self;
-        remember_certificate();
     }
 }
 
@@ -1819,12 +1797,6 @@ impl ConnectedDemandLedger<'_> {
             _guard: guard,
         })
     }
-}
-
-/// Note a real divergence certificate on the open component-meta span.
-#[cfg(any(test, feature = "test-support"))]
-pub fn note_component_meta_divergence_for_test() {
-    remember_certificate();
 }
 
 /// Note a schedule cut on the open component-meta span.

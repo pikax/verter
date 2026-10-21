@@ -887,7 +887,10 @@ impl<'p, 'a, C: crate::resolver_core::ResolverCapabilities> QueryProgram<'p, 'a,
             key: key.clone(),
             producer: Some(producer),
             tracer: None,
-            taint: BuildLocalTaint::default(),
+            taint: BuildLocalTaint {
+                produces: super::instantiation_frame_identity(key),
+                ..BuildLocalTaint::default()
+            },
             build: None,
             active: None,
             depth: self.child_depth,
@@ -941,7 +944,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         // request alone, as it does nested in a synchronous build: its
         // frame produces it without the family memo's claim.
         if dispatch.request_local_is_open(key) {
-            dispatch.connected_demand.note_divergence_certificate();
             return Start::Answer(Ok(dispatch.recursion_delivery(key, Recursion::SamePath)));
         }
         if dispatch.completes_nested_request_locally(key) {
@@ -988,9 +990,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         match claim {
             Claim::Read(read) => Start::Answer(Ok(dispatch.answered(key, read, carrier, nesting))),
             Claim::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
                 Start::Answer(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Claim::Subscribed(subscription) => Start::Subscribe(PendingClaim {
@@ -1097,12 +1096,7 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
         };
         Ok(match claim {
             Claim::Read(read) => dispatch.answered(key, read, carrier, nesting),
-            Claim::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
-                dispatch.recursion_delivery(key, recursion)
-            }
+            Claim::Recursive(recursion) => dispatch.recursion_delivery(key, recursion),
             Claim::Subscribed(_) | Claim::Produce(_) => {
                 dispatch.recursion_delivery(key, Recursion::SamePath)
             }
@@ -1184,9 +1178,6 @@ impl<'p, 'a: 'p, C: crate::resolver_core::ResolverCapabilities> Program
                 External::Complete(Ok(dispatch.answered(key, read, carrier, nesting)))
             }
             Joined::Recursive(recursion) => {
-                if recursion == Recursion::SamePath {
-                    dispatch.connected_demand.note_divergence_certificate();
-                }
                 External::Complete(Ok(dispatch.recursion_delivery(key, recursion)))
             }
             Joined::Retry => {

@@ -649,6 +649,9 @@ pub struct ProjectSemanticDispatch<'a, C: crate::resolver_core::ResolverCapabili
     self_evaluation_receipts: SelfEvaluationReceipts,
     /// Literal target membership shared by the queries of one operation.
     literal_union_indexes: relation::LiteralUnionIndexes,
+    /// Unions an operation proved its composite reduction leaves as
+    /// written, with the file roots that proof inspected.
+    composite_fixed_points: evaluate::CompositeFixedPoints,
     /// The facts the root frame of the running drive traced soundly, left
     /// by its completion for the drive's entry to seal a refusal on.
     driven_root_traced: std::cell::RefCell<Option<TracedFacts>>,
@@ -698,6 +701,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> std::ops::Deref for Thre
     }
 }
 
+/// The connected-demand entry of a query decided in place
+/// ([`ProjectSemanticDispatch::enter_in_place_query`]): its nested level
+/// is released before its demand, as a query's are.
+pub(super) struct InPlaceQuery<'g> {
+    _depth: Option<connected_demand::ConnectedDemandGuard<'g>>,
+    _demand: connected_demand::ConnectedDemandGuard<'g>,
+}
+
 /// One operation of a dispatcher: a query execution or a root connected
 /// demand. The outermost operation entered with no construction owner of the
 /// graph open on its thread opens its own, which owns everything the
@@ -715,6 +726,7 @@ pub(crate) struct DispatchOperation<'g> {
     depth: &'g std::cell::Cell<u32>,
     self_evaluation_receipts: &'g SelfEvaluationReceipts,
     literal_union_indexes: &'g relation::LiteralUnionIndexes,
+    composite_fixed_points: &'g evaluate::CompositeFixedPoints,
     demand: &'g connected_demand::ConnectedDemandLedger<'g>,
     owner: Option<crate::semantic_query_memo::node_roots::NodeRootScope>,
 }
@@ -727,6 +739,8 @@ impl Drop for DispatchOperation<'_> {
         if depth == 0 {
             let indexes = std::mem::take(&mut *self.literal_union_indexes.borrow_mut());
             drop(indexes);
+            let fixed_points = std::mem::take(&mut *self.composite_fixed_points.borrow_mut());
+            drop(fixed_points);
             let receipts = std::mem::take(&mut *self.self_evaluation_receipts.borrow_mut());
             drop(receipts);
             self.demand.release_paid();
@@ -821,6 +835,18 @@ pub struct BuildLocalTaint {
     /// build reports them with its own diagnostics, so a refusal reaches
     /// every read composed over the refused operation.
     pub(super) operation_refusals: Vec<crate::project_semantic_dispatch::walk::ShallowDiagnostic>,
+    /// The identity of the instantiation this frame builds, when it builds
+    /// one ([`instantiation_frame_identity`]): a same-path claim finds the
+    /// frame producing the claimed instantiation by it.
+    pub(super) produces: Option<u64>,
+}
+
+/// The identity a frame building `key` records in
+/// [`BuildLocalTaint::produces`]: the hash of an `Instantiate` key, `None`
+/// for any other key.
+pub(super) fn instantiation_frame_identity(key: &SemanticQueryKey) -> Option<u64> {
+    use std::hash::BuildHasher;
+    matches!(key, SemanticQueryKey::Instantiate(_)).then(|| rustc_hash::FxBuildHasher.hash_one(key))
 }
 
 /// Append each of `roots` to `into` unless it is already there, keeping
@@ -1131,6 +1157,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open: std::cell::RefCell::new(rustc_hash::FxHashSet::default()),
             self_evaluation_receipts: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             literal_union_indexes: Default::default(),
+            composite_fixed_points: Default::default(),
             driven_root_traced: std::cell::RefCell::new(None),
             decision_seam: std::cell::RefCell::new(None),
             call_seam: std::cell::RefCell::new(None),
@@ -1196,6 +1223,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             request_local_open,
             self_evaluation_receipts,
             literal_union_indexes,
+            composite_fixed_points,
             driven_root_traced,
             decision_seam,
             call_seam,
@@ -1239,6 +1267,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         request_local_open.swap(&other.request_local_open);
         self_evaluation_receipts.swap(&other.self_evaluation_receipts);
         literal_union_indexes.swap(&other.literal_union_indexes);
+        composite_fixed_points.swap(&other.composite_fixed_points);
         driven_root_traced.swap(&other.driven_root_traced);
         decision_seam.swap(&other.decision_seam);
         call_seam.swap(&other.call_seam);
@@ -1263,6 +1292,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             depth: &self.operation_depth,
             self_evaluation_receipts: &self.self_evaluation_receipts,
             literal_union_indexes: &self.literal_union_indexes,
+            composite_fixed_points: &self.composite_fixed_points,
             demand: &self.connected_demand,
             owner,
         }
@@ -2198,6 +2228,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if let Some(top) = self.build_local_taint.borrow_mut().last_mut() {
             extend_unique_self_roots(&mut top.observed_self_roots, evidence.inspected_file_roots);
         }
+    }
+
+    /// Deposit the file roots a reused complete canonical proof inspected,
+    /// as [`Self::deposit_canonical_evidence`] deposits that proof's own
+    /// evidence.
+    pub(super) fn deposit_reused_canonical_roots(
+        &self,
+        roots: &[crate::semantic_query_memo::ObservedGraphSelfRoot],
+    ) {
+        if roots.is_empty() {
+            return;
+        }
+        self.canonical_evidence_epoch
+            .set(self.canonical_evidence_epoch.get().wrapping_add(1));
+        self.deposit_operand_self_roots(roots);
     }
 
     /// Merge a sealed runtime operand's producer roots into the candidate
@@ -4102,6 +4147,37 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         cache_read
     }
 
+    /// Enter a query that is decided in place rather than executed, charged
+    /// and refused exactly as its cold execution would be: the nested
+    /// connected demand, the query entry's work unit and nested level (a
+    /// tripped or cancelled demand, or a spent projection budget, refuses
+    /// it), and the cold build's budget gate, which spends one request
+    /// operation for a kind the request budget counts. `Err` is the output
+    /// that query would answer with. The returned guards hold the entry's
+    /// demand and level open while the caller decides it.
+    pub(super) fn enter_in_place_query(
+        &self,
+        key: &SemanticQueryKey,
+    ) -> Result<InPlaceQuery<'_>, Box<crate::project_semantic_dispatch::walk::QueryBuildOutput>>
+    {
+        let (demand, preexisting_trip) = self.enter_connected_demand(false);
+        let depth = match self.charge_query_entry(key, preexisting_trip, true) {
+            Ok(depth) => depth,
+            Err(read) => {
+                return Err(Box::new(
+                    self.conditional_read_output(narrow_value_cache_read(read)),
+                ))
+            }
+        };
+        if let Some(refusal) = self.cold_build_budget_refusal(key) {
+            return Err(Box::new(refusal));
+        }
+        Ok(InPlaceQuery {
+            _depth: depth,
+            _demand: demand,
+        })
+    }
+
     /// The operational refusal of a cold build before it starts: the
     /// connected demand cannot pay for one more build of a work-consuming
     /// kind, or the request's projection-operation budget is spent. The
@@ -4958,6 +5034,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // panic / early-return too (panic-safe pop), so an unwinding
             // cold build never leaks a stale frame onto the stack.
             let taint_guard = BuildLocalTaintGuard::push(&self.build_local_taint);
+            if let Some(frame) = self.build_local_taint.borrow_mut().last_mut() {
+                frame.produces = instantiation_frame_identity(key);
+            }
             // The build's carrier — every fact it traced, its fence and
             // prelude facts and its self-roots — is delivered to the tracers
             // active when it completes (`complete` bubbles it whether or not
@@ -5022,7 +5101,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let cache_read = if self.request_local_is_open(key) {
             // The key's own request-local completion is open: the same-path
             // re-entry a family-memo claim answers with its recursion carrier.
-            self.connected_demand.note_divergence_certificate();
             graph.recursion_read(
                 crate::semantic_query_memo::Recursion::SamePath,
                 (sentinel.take().expect("the completion runs once"))(),
@@ -5120,10 +5198,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         }
                     }
                     Acquired::Recursive(recursion) => {
+                        // A same-path carrier is a typed partial, never a
+                        // divergence certificate: a deferred position meets
+                        // itself on its path too.
                         if recursion == crate::semantic_query_memo::Recursion::WaitCycle {
                             self.connected_demand.note_schedule_cut();
-                        } else {
-                            self.connected_demand.note_divergence_certificate();
                         }
                         self.graph().recursion_read(
                             recursion,
@@ -5174,19 +5253,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let is_cold = cold_build_ran.get();
         (cache_read, is_cold, refusal_carrier)
     }
-}
-
-/// Whether every one of `arms` is among `members`. Past a few members the
-/// lookup is hashed, so comparing a written union with its reduction costs
-/// the union's width rather than its width squared: a distributed check
-/// over thousands of members is compared with its reduction once per pass.
-pub(super) fn every_arm_among(arms: &[SemanticNodeId], members: &[SemanticNodeId]) -> bool {
-    const SCANNED_MEMBERS: usize = 16;
-    if members.len() <= SCANNED_MEMBERS {
-        return arms.iter().all(|arm| members.contains(arm));
-    }
-    let members: rustc_hash::FxHashSet<SemanticNodeId> = members.iter().copied().collect();
-    arms.iter().all(|arm| members.contains(arm))
 }
 
 /// Whether a read of `key` nested in another computation completes for the
