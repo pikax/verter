@@ -376,6 +376,12 @@ pub fn force_partial_closed_operator_evaluation_for_tests() -> impl Drop {
     Restore(FORCE_PARTIAL_CLOSED_EVALUATION.replace(true))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MappedHelperHeadKind {
+    Signature,
+    Sequence,
+}
+
 /// Shell evaluation follows only operator operands. A selected result also
 /// reads value composition, and whole publication reads surface interiors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -388,12 +394,16 @@ pub(crate) enum DeferredEvaluationDemand {
     /// A mapped member consumes helpers and declared signature slots while
     /// retaining container interiors for their own later demands.
     MappedMemberValue,
+    /// Container elements keep recursive back-edges addressable. Separate
+    /// demands keep their memos distinct from a mapped value's root helper.
+    MappedMemberInterior,
+    MappedIndexInterior,
     /// Declared signature slots reduce inline structure and finite helpers
     /// while retaining recursive back-edges and named callable carriers.
     MappedSignatureSlot,
-    /// A named slot helper reduces to its value head before deciding
-    /// whether to retain its named carrier. Signature slots stay dormant.
-    MappedSignatureHead,
+    /// A named helper reduces to its value head before its consumer decides
+    /// which interiors to demand. Signature slots stay dormant.
+    MappedHelperHead,
     /// Resolve a closed mapped source without visiting its member interiors.
     MappedSource,
 }
@@ -404,8 +414,10 @@ impl DeferredEvaluationDemand {
             self,
             Self::MappedIndexValue
                 | Self::MappedMemberValue
+                | Self::MappedMemberInterior
+                | Self::MappedIndexInterior
                 | Self::MappedSignatureSlot
-                | Self::MappedSignatureHead
+                | Self::MappedHelperHead
         )
     }
 
@@ -416,8 +428,19 @@ impl DeferredEvaluationDemand {
     fn retains_container_interiors(self) -> bool {
         matches!(
             self,
-            Self::MappedMemberValue | Self::MappedSignatureSlot | Self::MappedSignatureHead
+            Self::MappedMemberValue
+                | Self::MappedMemberInterior
+                | Self::MappedSignatureSlot
+                | Self::MappedHelperHead
         )
+    }
+
+    fn container_interior(self) -> Self {
+        match self {
+            Self::MappedMemberValue => Self::MappedMemberInterior,
+            Self::MappedIndexValue => Self::MappedIndexInterior,
+            _ => self,
+        }
     }
 
     fn value_source_context(
@@ -440,6 +463,11 @@ enum DeferredEvaluationStage {
     EvaluateCurrent,
     AwaitMappedSignatureHead {
         carrier: SemanticNodeId,
+    },
+    AwaitMappedMemberHead {
+        carrier: SemanticNodeId,
+        base: crate::semantic_query::DeclIdentity,
+        args: Arc<[SemanticNodeId]>,
     },
     AwaitKeyOfBase,
     AwaitMappedSource {
@@ -2644,14 +2672,72 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 match std::mem::replace(&mut frame.stage, DeferredEvaluationStage::EvaluateCurrent)
                 {
                     DeferredEvaluationStage::AwaitMappedSignatureHead { carrier } => {
-                        match self.mapped_signature_head_needs_carrier(child.node) {
-                            Ok(true) => DeferredEvaluationAction::Finish(carrier),
-                            Ok(false) => DeferredEvaluationAction::Finish(child.node),
-                            Err(reasons) => {
-                                frame.completeness = frame
-                                    .completeness
-                                    .merge(ResultCompleteness::partial(reasons));
-                                DeferredEvaluationAction::Finish(carrier)
+                        if frame.completeness.is_partial()
+                            || frame.availability != crate::semantic_query::FactStatus::Complete
+                        {
+                            DeferredEvaluationAction::Finish(carrier)
+                        } else {
+                            match self.mapped_helper_head_contains(
+                                child.node,
+                                MappedHelperHeadKind::Signature,
+                            ) {
+                                Ok(true) => DeferredEvaluationAction::Finish(carrier),
+                                Ok(false) => frame.advance_or_finish(child.node),
+                                Err(reasons) => {
+                                    frame.completeness = frame
+                                        .completeness
+                                        .merge(ResultCompleteness::partial(reasons));
+                                    DeferredEvaluationAction::Finish(carrier)
+                                }
+                            }
+                        }
+                    }
+                    DeferredEvaluationStage::AwaitMappedMemberHead {
+                        carrier,
+                        base,
+                        args,
+                    } => {
+                        if frame.completeness.is_partial()
+                            || frame.availability != crate::semantic_query::FactStatus::Complete
+                        {
+                            DeferredEvaluationAction::Finish(carrier)
+                        } else if frame.context.mode != ProjectionMode::Expanded
+                            || !crate::semantic_query::may_reduce_operator(frame.context)
+                        {
+                            frame.advance_or_finish(child.node)
+                        } else {
+                            match self.mapped_helper_head_contains(
+                                child.node,
+                                MappedHelperHeadKind::Sequence,
+                            ) {
+                                Ok(true) => {
+                                    // Navigate keeps a sequence's self-edge as an
+                                    // ordinary application. The shared Expanded
+                                    // instantiator owns its recursive back-edge;
+                                    // demand that result before visiting elements.
+                                    let read = self.execute_read(SemanticQueryKey::Instantiate(
+                                        crate::semantic_query::InstantiateKey::new(
+                                            self.type_slot_for(
+                                                base.canonical_id.clone(),
+                                                base.owner,
+                                                base.decl_name.clone(),
+                                            ),
+                                            args,
+                                            self.instantiate_context_for(
+                                                &base.canonical_id,
+                                                frame.context,
+                                            ),
+                                        ),
+                                    ));
+                                    self.deferred_read_action(frame, read, || carrier)
+                                }
+                                Ok(false) => frame.advance_or_finish(child.node),
+                                Err(reasons) => {
+                                    frame.completeness = frame
+                                        .completeness
+                                        .merge(ResultCompleteness::partial(reasons));
+                                    DeferredEvaluationAction::Finish(carrier)
+                                }
                             }
                         }
                     }
@@ -3019,10 +3105,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                     ),
                                 ));
                                 let frame = frames.last_mut().expect("active evaluator frame");
-                                if demand == DeferredEvaluationDemand::MappedSignatureSlot {
+                                if matches!(demand, DeferredEvaluationDemand::MappedMemberValue | DeferredEvaluationDemand::MappedMemberInterior) {
                                     frame.merge_read(&read);
                                     crate::request_context::observe_component_meta_read_suppress(&read);
-                                    if let QueryResult::Value(body) = read.value {
+                                    if frame.completeness.is_partial()
+                                        || frame.availability != crate::semantic_query::FactStatus::Complete
+                                    {
+                                        DeferredEvaluationAction::Finish(current)
+                                    } else if let QueryResult::Value(body) = read.value {
+                                        frame.stage = DeferredEvaluationStage::AwaitMappedMemberHead {
+                                            carrier: current,
+                                            base: base.clone(),
+                                            args: Arc::clone(args.as_arc()),
+                                        };
+                                        DeferredEvaluationAction::Push { node: body, context }
+                                    } else {
+                                        DeferredEvaluationAction::Finish(current)
+                                    }
+                                } else if demand == DeferredEvaluationDemand::MappedSignatureSlot {
+                                    frame.merge_read(&read);
+                                    crate::request_context::observe_component_meta_read_suppress(&read);
+                                    if frame.completeness.is_partial()
+                                        || frame.availability != crate::semantic_query::FactStatus::Complete
+                                    {
+                                        DeferredEvaluationAction::Finish(current)
+                                    } else if let QueryResult::Value(body) = read.value {
                                         frame.stage = DeferredEvaluationStage::AwaitMappedSignatureHead {
                                             carrier: current,
                                         };
@@ -3130,8 +3237,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         | DeferredEvaluationStage::AwaitMappedKeySpace { .. } => {
                             DeferredEvaluationDemand::MappedSource
                         }
-                        DeferredEvaluationStage::AwaitMappedSignatureHead { .. } => {
-                            DeferredEvaluationDemand::MappedSignatureHead
+                        DeferredEvaluationStage::AwaitMappedSignatureHead { .. }
+                        | DeferredEvaluationStage::AwaitMappedMemberHead { .. } => {
+                            DeferredEvaluationDemand::MappedHelperHead
                         }
                         DeferredEvaluationStage::AwaitKeyOfBase => DeferredEvaluationDemand::Shell,
                         DeferredEvaluationStage::AwaitValueChildren { data, .. }
@@ -3139,9 +3247,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 parent.demand,
                                 DeferredEvaluationDemand::MappedMemberValue
                                     | DeferredEvaluationDemand::MappedIndexValue
+                                    | DeferredEvaluationDemand::MappedMemberInterior
+                                    | DeferredEvaluationDemand::MappedIndexInterior
                             ) && matches!(data.as_ref(), SemanticNodeData::Signature { .. }) =>
                         {
                             DeferredEvaluationDemand::MappedSignatureSlot
+                        }
+                        DeferredEvaluationStage::AwaitValueChildren { data, .. }
+                            if matches!(
+                                data.as_ref(),
+                                SemanticNodeData::Array { .. }
+                                    | SemanticNodeData::Tuple { .. }
+                                    | SemanticNodeData::Object(_)
+                            ) =>
+                        {
+                            parent.demand.container_interior()
                         }
                         _ => parent.demand,
                     };
@@ -3350,9 +3470,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             && !matches!(
                 demand,
                 DeferredEvaluationDemand::MappedMemberValue
-                    | DeferredEvaluationDemand::MappedSignatureHead
+                    | DeferredEvaluationDemand::MappedMemberInterior
+                    | DeferredEvaluationDemand::MappedHelperHead
             );
-        let whole_sequence = whole && demand != DeferredEvaluationDemand::MappedSignatureHead;
+        let whole_sequence = whole && demand != DeferredEvaluationDemand::MappedHelperHead;
         match data {
             SemanticNodeData::Union(arms) => Some(arms.iter().copied().collect()),
             SemanticNodeData::Array { element, .. } if whole_sequence => Some(vec![*element]),
@@ -3367,7 +3488,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 return_type,
                 return_carrier: crate::semantic_query::SignatureReturnCarrier::Declared(_),
                 ..
-            } if whole && demand != DeferredEvaluationDemand::MappedSignatureHead => Some(
+            } if whole && demand != DeferredEvaluationDemand::MappedHelperHead => Some(
                 params
                     .iter()
                     .map(|p| p.ty)
@@ -3383,9 +3504,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// used the evaluator's ordinary continuation and receipt tracking.
     /// Signature-bearing compositions, including nullable unions, keep their
     /// named carrier. Discovery still owns callable semantics.
-    fn mapped_signature_head_needs_carrier(
+    fn mapped_helper_head_contains(
         &self,
         head: SemanticNodeId,
+        kind: MappedHelperHeadKind,
     ) -> Result<bool, PartialReasonSet> {
         let mut pending = smallvec::SmallVec::<[SemanticNodeId; 8]>::from_slice(&[head]);
         let mut visited = VisitedNodes::default();
@@ -3403,7 +3525,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .node_data(node)
                 .ok_or(PartialReasonSet::MISSING_SEMANTIC_NODE_DATA)?;
             match data.as_ref() {
-                SemanticNodeData::Signature { .. } => return Ok(true),
+                SemanticNodeData::Signature { .. } if kind == MappedHelperHeadKind::Signature => {
+                    return Ok(true)
+                }
+                SemanticNodeData::Array { .. } | SemanticNodeData::Tuple { .. }
+                    if kind == MappedHelperHeadKind::Sequence =>
+                {
+                    return Ok(true)
+                }
                 SemanticNodeData::Alias(target) => pending.push(*target),
                 SemanticNodeData::Union(arms) => pending.extend(arms.iter().copied()),
                 SemanticNodeData::Intersection(arms) => pending.extend(arms.iter().copied()),

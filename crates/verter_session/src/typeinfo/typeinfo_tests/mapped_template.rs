@@ -5,6 +5,139 @@ use super::support::*;
 use std::collections::BTreeSet;
 use verter_session_oracle_macro::oracle_row;
 
+fn assert_mapped_recursive_container(indexed: bool) {
+    let host = make_host_with_footprint();
+    let path = "/recursive-containers.ts";
+    let index = if indexed { "['a' | 'b']" } else { "" };
+    upsert_ts(
+        &host,
+        path,
+        &format!(
+            r#"
+type List<T> = [T, List<T>];
+type Arr<T> = Arr<T>[];
+type Linked<T> = {{ v: T; next: Linked<T> }};
+type Pair<T> = [T, T[]];
+export type TupleProbe = {{ [K in 'a' | 'b']: List<number> }}{index};
+export type ArrayProbe = {{ [K in 'a' | 'b']: Arr<number> }}{index};
+export type ObjectProbe = {{ [K in 'a' | 'b']: Linked<number> }}{index};
+export type FiniteProbe = {{ [K in 'a' | 'b']: Pair<number> }}{index};
+"#
+        ),
+    );
+    for _ in 0..2 {
+        for name in ["FiniteProbe", "TupleProbe", "ArrayProbe", "ObjectProbe"] {
+            let (expr, record) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            let verter_audit::RequestKindPayload::TypeResolution(payload) = &record.kind_payload
+            else {
+                panic!("container publication must retain its resolution audit");
+            };
+            assert!(
+                !payload.cache_suppress
+                    && !payload.recursion_limit_reached
+                    && payload.walker_diagnostics.is_empty(),
+                "a finite recursive surface must remain cacheable: {payload:?}"
+            );
+            let values = if indexed {
+                vec![expr]
+            } else {
+                let props = object_props(&expr);
+                assert_eq!(prop_names(&props), vec!["a", "b"]);
+                props.into_values().map(|prop| prop.ty).collect()
+            };
+            for value in values {
+                match name {
+                    "FiniteProbe" | "TupleProbe" => {
+                        let TypeExpr::Tuple { elements, .. } = &value else {
+                            panic!("expected a tuple, got {value:?}");
+                        };
+                        assert_eq!(elements.len(), 2);
+                        assert_primitive(&elements[0].ty, PrimitiveName::Number);
+                        if name == "TupleProbe" {
+                            assert_ref(&elements[1].ty, "List");
+                        } else {
+                            let TypeExpr::Array { element, .. } = &elements[1].ty else {
+                                panic!("the finite pair must retain its array");
+                            };
+                            assert_primitive(element, PrimitiveName::Number);
+                        }
+                    }
+                    "ArrayProbe" => {
+                        let TypeExpr::Array { element, .. } = &value else {
+                            panic!("expected an array, got {value:?}");
+                        };
+                        assert_ref(element, "Arr");
+                    }
+                    "ObjectProbe" => {
+                        let props = object_props(&value);
+                        assert_primitive(&props["v"].ty, PrimitiveName::Number);
+                        assert_ref(&props["next"].ty, "Linked");
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mapped_members_keep_recursive_container_edges_addressable() {
+    assert_mapped_recursive_container(false);
+}
+
+#[test]
+fn mapped_indices_keep_recursive_container_edges_addressable() {
+    assert_mapped_recursive_container(true);
+}
+
+#[test]
+fn mapped_signature_slots_reduce_finite_container_helpers() {
+    let host = make_host_with_footprint();
+    let path = "/finite-signature-containers.ts";
+    upsert_ts(
+        &host,
+        path,
+        r#"
+type Inner<T extends { a: number }> = { x: T['a'] };
+type Items<T extends { a: number }> = T['a'][];
+type Pair<T extends { a: number }> = [T['a']];
+type Fn<T extends { a: number }> = (x: Inner<T>) => Inner<T>;
+export type ObjectProbe = { [K in 'a']: Fn<{ a: 1 }> };
+export type ArrayProbe = { [K in 'a']: () => Items<{ a: 1 }> };
+export type TupleProbe = { [K in 'a']: () => Pair<{ a: 1 }> };
+export type InlineProbe = { [K in 'a']: () => { a: 1 }['a'][] };
+"#,
+    );
+    for _ in 0..2 {
+        for name in ["ObjectProbe", "ArrayProbe", "TupleProbe", "InlineProbe"] {
+            let (expr, _) = resolve_expr(&host, path, name, &[], ProjectionMode::Expanded);
+            let props = object_props(&expr);
+            let signature = function_type(&props["a"].ty);
+            let returned = signature.return_type.as_deref().expect("declared return");
+            match name {
+                "ObjectProbe" => {
+                    assert_number_literal(&object_props(returned)["x"].ty, 1.0);
+                    assert_number_literal(&object_props(&signature.parameters[0].ty)["x"].ty, 1.0);
+                }
+                "ArrayProbe" | "InlineProbe" => {
+                    let TypeExpr::Array { element, .. } = returned else {
+                        panic!("expected an array, got {returned:?}");
+                    };
+                    assert_number_literal(element, 1.0);
+                }
+                "TupleProbe" => {
+                    let TypeExpr::Tuple { elements, .. } = returned else {
+                        panic!("expected a tuple, got {returned:?}");
+                    };
+                    assert_eq!(elements.len(), 1);
+                    assert_number_literal(&elements[0].ty, 1.0);
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+}
+
 #[test]
 fn mapped_member_signatures_keep_recursive_aliases_addressable() {
     let host = make_host_with_footprint();
