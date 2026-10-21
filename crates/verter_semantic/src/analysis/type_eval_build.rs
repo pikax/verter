@@ -7611,6 +7611,13 @@ pub(super) fn literal_holds_block_bodied_function(mut expression: &Expression<'_
             Expression::ParenthesizedExpression(parenthesized) => {
                 pending.push(&parenthesized.expression);
             }
+            Expression::TSSatisfiesExpression(satisfies) => pending.push(&satisfies.expression),
+            Expression::TSNonNullExpression(non_null) => pending.push(&non_null.expression),
+            Expression::TSAsExpression(assertion)
+                if verter_type_expr_oxc::is_const_assertion_type(&assertion.type_annotation) =>
+            {
+                pending.push(&assertion.expression);
+            }
             Expression::ObjectExpression(object) => {
                 pending.extend(
                     object

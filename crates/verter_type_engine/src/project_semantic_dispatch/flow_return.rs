@@ -9012,10 +9012,19 @@ fn indexed_literal_holds_body_return(
                 }
             }
             TypeExpr::Object(object) => {
-                pending.extend(object.properties.iter().filter_map(|member| match member {
-                    ObjectMember::Property(property) => Some(&property.ty),
-                    _ => None,
-                }));
+                for member in &object.properties {
+                    match member {
+                        ObjectMember::Property(property) => pending.push(&property.ty),
+                        ObjectMember::Method(method)
+                            if method.has_implementation_body
+                                && method.function.return_type.is_none()
+                                && method.function.flow_return.is_none() =>
+                        {
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
             }
             TypeExpr::Array { element, .. } => pending.push(element),
             TypeExpr::Tuple { elements, .. } => {

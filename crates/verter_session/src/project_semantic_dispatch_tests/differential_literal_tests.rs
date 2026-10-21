@@ -551,6 +551,8 @@ fn a_call_inside_a_literal_types_as_its_return() {
 
 /// Object and array literals holding block-bodied function values, as
 /// module values and as call arguments, beside an expression-bodied one.
+/// Explicit method `this` parameters keep contextual inference from masking
+/// missing body-return routing; computed returns avoid literal-widening rules.
 const BLOCK_BODIES_IN_LITERALS: &str = r##"
 declare function keep<T>(value: T): T;
 export const property = { run: () => {} };
@@ -560,6 +562,14 @@ export const element = keep([() => {}]);
 export const nested = { a: 1, b: [function () { return "s"; }] };
 export const expression = keep({ run: () => 1 });
 export function inBody() { return keep({ run: () => {} }); }
+export function methodInBody() { return keep({ run(this: void) { return 1 + 1; } }); }
+export function nestedMethodInBody() { return keep({ o: { run(this: void) { return 1 + 1; } } }); }
+export function methodInArrayInBody() { return keep([{ run(this: void) { return 1 + 1; } }]); }
+export function annotatedMethodInBody() { return keep({ run(): "s" { return "s"; } }); }
+export const nestedConst = { nested: ({ run: () => { return 1; } } as const) };
+export const nestedSatisfies = { nested: ({ run: () => { return 1; } } satisfies { run: () => number }) };
+export const nestedNonNull = { nested: ({ run: () => { return 1; } }!) };
+export const nestedAssertion = { nested: ({ run: () => { return 1; } } as { run: () => 1 }) };
 "##;
 
 /// A block-bodied function value inside an object or array literal types
@@ -582,6 +592,32 @@ fn a_block_bodied_function_inside_a_literal_types_its_body_return() {
         ),
         (Read::Type("typeof expression"), "{ run: () => 1; }"),
         (Read::Return("inBody"), "{ run: () => void; }"),
+        (Read::Return("methodInBody"), "{ run(this: void): number; }"),
+        (
+            Read::Return("nestedMethodInBody"),
+            "{ o: { run(this: void): number; }; }",
+        ),
+        (
+            Read::Return("methodInArrayInBody"),
+            "{ run(this: void): number; }[]",
+        ),
+        (Read::Return("annotatedMethodInBody"), "{ run(): \"s\"; }"),
+        (
+            Read::Type("typeof nestedConst"),
+            "{ nested: { readonly run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedSatisfies"),
+            "{ nested: { run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedNonNull"),
+            "{ nested: { run: () => number; }; }",
+        ),
+        (
+            Read::Type("typeof nestedAssertion"),
+            "{ nested: { run: () => 1; }; }",
+        ),
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

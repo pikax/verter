@@ -6,7 +6,8 @@
 case-reducer types they read). Only the members a slice's action creators
 read are kept; bodies are declarations only. The utility aliases at the top
 of the file (`Exclude`, `Pick`, `Omit`, `Record`) restate TypeScript's own
-library declarations so the fixture type-checks without a library.
+library declarations. `ReturnType` and `Parameters` come from the benchmark
+library (`lib.bench.d.ts`) that the `rtk_slice_*` tests load under `noLib`.
 
 Redux Toolkit is MIT licensed (see `LICENSE.md` in this directory). The
 fixture is read by the `rtk_slice_*` tests in `../mapped_expand_tests.rs`
