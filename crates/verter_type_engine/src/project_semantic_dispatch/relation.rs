@@ -12978,19 +12978,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// are followed (`type V = void` is `void` itself); a union such as
     /// `void | undefined` is not `void`, and a carrier that cannot be
     /// resolved is not assumed to be.
+    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
+        self.resolves_to_primitive(result, |kind| {
+            matches!(kind, PrimitiveKind::Void | PrimitiveKind::Any)
+        })
+    }
+
+    /// Whether `node` is a primitive `accept` admits once transparent
+    /// aliases and declaration carriers are followed, as the checker reads a
+    /// type's flags: `type V = void` is `void` itself, a union containing
+    /// one is not, and a carrier that cannot be resolved is not assumed to be.
     ///
     /// The chain is followed to its end, however long: it ends at a node it
-    /// passed (a cycle is not `void`), and a carrier read the connected
+    /// passed (a cycle matches nothing), and a carrier read the connected
     /// ledger refuses resolves nothing.
-    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
-        let mut current = result;
+    pub(super) fn resolves_to_primitive(
+        &self,
+        node: SemanticNodeId,
+        accept: impl Fn(PrimitiveKind) -> bool,
+    ) -> bool {
+        let mut current = node;
         let mut passed = FxHashSet::default();
         while passed.insert(current) {
             // The node read ends here, before any carrier resolution runs.
             let alias_target = match self.graph().node_data(current).as_deref() {
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Any)) => {
-                    return true;
-                }
+                Some(SemanticNodeData::Primitive(kind)) => return accept(*kind),
                 Some(SemanticNodeData::Alias(inner)) => Some(*inner),
                 Some(
                     SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },

@@ -157,7 +157,9 @@ fn fixed_annotations_are_checked_before_inference() {
     assert_named_answers(
         "interface Cell<in out T> { get(): T }\n\
          interface Mixed<in out T, U> { value: T; other: U }\n\
-         interface RestMixed<in out T, U extends unknown[]> { value: T; f: (...args: U) => void }\n",
+         interface RestMixed<in out T, U extends unknown[]> { value: T; f: (...args: U) => void }\n\
+         type V = void;\n\
+         interface VoidCell<in out T, out U, W> { value: T; f: () => U; w: W }\n",
         &[
             (
                 "Cell<'a'> extends Cell<string> | { other: infer U } ? 1 : 0",
@@ -169,9 +171,26 @@ fn fixed_annotations_are_checked_before_inference() {
             ),
             ("Mixed<'a', 1> extends Mixed<string, infer U> ? U : 0", "0"),
             ("Mixed<'a', 1> extends Mixed<'a', infer U> ? U : 0", "1"),
-            ("RestMixed<'a', []> extends RestMixed<string, infer U> ? 1 : 0", "1"),
-            ("RestMixed<'a', []> extends RestMixed<string, [number]> ? 1 : 0", "1"),
-            ("RestMixed<string, []> extends RestMixed<'a', infer U> ? 1 : 0", "0"),
+            (
+                "RestMixed<'a', []> extends RestMixed<string, infer U> ? 1 : 0",
+                "1",
+            ),
+            (
+                "RestMixed<'a', []> extends RestMixed<string, [number]> ? 1 : 0",
+                "1",
+            ),
+            (
+                "RestMixed<string, []> extends RestMixed<'a', infer U> ? 1 : 0",
+                "0",
+            ),
+            (
+                "VoidCell<'a', number, 1> extends VoidCell<string, void, infer W> ? 1 : 0",
+                "1",
+            ),
+            (
+                "VoidCell<'a', number, 1> extends VoidCell<string, V, infer W> ? 1 : 0",
+                "1",
+            ),
         ],
     );
 }

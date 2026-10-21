@@ -494,10 +494,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 .zip(target_args)
                 .any(|(variance, &target)| {
                     variance.mask == Variance::COVARIANT
-                        && matches!(
-                            self.graph().node_data(target).as_deref(),
-                            Some(SemanticNodeData::Primitive(PrimitiveKind::Void))
-                        )
+                        && self.resolves_to_primitive(target, |kind| kind == PrimitiveKind::Void)
                 })
     }
 
