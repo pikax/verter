@@ -2699,25 +2699,27 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if self.cancellation.is_cancelled() {
                     return self.opaque(QueryError::Miss);
                 }
-                // Conditional relation targets are structural
-                // consumers unless the check side is already an
-                // object-like relation subject. Deferred / primitive
-                // checks cannot decide an Object-vs-Record relation,
-                // so their `extends` arm must carrier-stop and avoid
-                // publishing nested `Partial<T>` / `keyof T` /
-                // mapped-type keyspaces. Object-like checks such as
-                // `A extends Record<U, Record<K, any>>` need the
-                // target lowered under the outer demand so the
-                // relation engine sees the concrete Record shape.
-                //
-                // The selected true/false branch keeps the outer
-                // demand because that branch is the conditional's
-                // published result.
-                let relation_input_context =
-                    crate::semantic_query::ProjectionReductionContext::structural_transit_with_mode(
-                        reduction_context.mode,
-                    )
-                    .with_orthogonal_axes_from(reduction_context);
+                // Relation operands retain their declaration identity and
+                // arguments until the shared relation authority consumes
+                // them. Eager expansion here would compare object bodies
+                // instead of applying the generic's variance annotations.
+                // The check consumes its value at the caller's demand; the
+                // target pattern stays structural. The selected branch keeps
+                // the caller's publication context.
+                let mut check_head = check.as_ref();
+                while let TypeExpr::Parenthesized(inner) = check_head {
+                    check_head = inner;
+                }
+                let check_context = if matches!(check_head, TypeExpr::TypeOf { .. }) {
+                    // A value-root lookup names no generic declaration whose
+                    // variance could apply. Navigation would leave its module
+                    // object's member values unread, and the relation compares
+                    // those values.
+                    reduction_context
+                } else {
+                    Self::conditional_operand_context(reduction_context)
+                };
+                let extends_context = Self::conditional_target_context(reduction_context);
                 let check_id = self.lower_type_expr_with_infer_factory(
                     infer_binders,
                     check,
@@ -2727,26 +2729,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     scope_payload,
                     shadowing,
                     substitutions,
-                    reduction_context,
+                    check_context,
                 );
-                let check_is_object_relation_subject = matches!(
-                    graph.node_data(check_id).as_deref(),
-                    Some(
-                        SemanticNodeData::Object(_)
-                            | SemanticNodeData::Intersection(_)
-                            | SemanticNodeData::Alias(_)
-                            | SemanticNodeData::DeclRef { .. }
-                            | SemanticNodeData::InstantiationRef { .. }
-                            | SemanticNodeData::Opaque(
-                                crate::semantic_query::QueryError::DeclPlaceholder { .. }
-                            )
-                    )
-                );
-                let extends_context = if check_is_object_relation_subject {
-                    reduction_context
-                } else {
-                    relation_input_context
-                };
                 let extends_path = infer_binders.path_for_expr(expr).child(
                     crate::semantic_query::infer_binder_names::
                         InferSyntaxPathStep::ConditionalExtends,

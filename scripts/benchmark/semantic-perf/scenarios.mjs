@@ -90,6 +90,20 @@ export function allScenarios() {
     ),
   );
 
+  out.push(
+    scenario(
+      "core-variance-annotations",
+      "variance",
+      "authored invariance takes precedence over the variance of the members",
+      "type __Flat<T> = [T] extends [infer U] ? U : never;\n" +
+        "type __D<T> = T extends unknown ? T : never;\n" +
+        "type __Obj<T> = { [K in keyof T]: T[K] };\n" +
+        "interface Cell<in out T> { get(): T }\n" +
+        "interface Cons<in T> { set(x: T): void }\n",
+      "Cell<'a'> extends Cell<string> ? 1 : 0",
+    ),
+  );
+
   // Finite member paths and imported value annotations past native query depth.
   for (const depth of [22, 23, 200]) {
     out.push(
@@ -918,6 +932,7 @@ export const SCENARIO_TIERS = {
   "contextual-this-100": "standard",
   "contextual-this-400": "standard",
   "baseline-empty": "quick",
+  "core-variance-annotations": "quick",
   "switch-discriminated-128": "quick",
   "switch-discriminated-512": "standard",
   "switch-discriminated-1000": "standard",

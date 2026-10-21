@@ -5144,6 +5144,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     ) -> Option<RelationResult> {
         const MAX_DISCRIMINATED_COMBINATIONS: usize = 25;
         let graph = self.graph();
+        let source = match self.unwrap_identity_carrier_for_relation(source) {
+            IdentityCarrierUnwrap::Concrete(source) => source,
+            IdentityCarrierUnwrap::Unresolvable => return None,
+        };
         let source_view = match graph.node_data(source)?.as_ref() {
             SemanticNodeData::Object(view) => view.clone(),
             _ => return None,
@@ -9028,7 +9032,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // throughout: `[marker]` is no more `[marker]` than the marker is
         // itself.
         let identical_unread = source == target && self.graph().node_reaches_unresolved(source);
-        (marker(source) || marker(target) || identical_unread) && !top(target)
+        let source_marker = marker(source);
+        // A declaration carrier against composition is a plan to read that
+        // declaration in each arm, rather than a fact about an unread value.
+        let source_distributes = source_marker
+            && self.graph().node_data(source).is_some_and(|source| {
+                self.graph()
+                    .node_data(target)
+                    .is_some_and(|target| declaration_source_distributes(&source, &target))
+            });
+        ((source_marker && !source_distributes) || marker(target) || identical_unread)
+            && !top(target)
     }
 
     /// The O(tag) fast-reject prefilter (RI-5): decides the trivial
@@ -9242,16 +9256,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let _ = concrete_read.discard();
             return result;
         }
-        // An alias application on one side stands for the type its body
-        // instantiates to: a reference to the other side's declaration
-        // relates by type arguments as that reference would.
-        let through_alias = [
-            self.alias_application_reference_to(source, target)
-                .map(|resolved| (resolved, target)),
-            self.alias_application_reference_to(target, source)
-                .map(|resolved| (source, resolved)),
-        ];
-        for (source, target) in through_alias.into_iter().flatten() {
+        // Alias applications on either side stand for the references their
+        // bodies instantiate to. Normalize both before comparing arguments.
+        let through_alias = (
+            self.declaration_reference_for_relation(source)
+                .unwrap_or(source),
+            self.declaration_reference_for_relation(target)
+                .unwrap_or(target),
+        );
+        if through_alias != (source, target) {
+            let (source, target) = through_alias;
             if let Some(result) = self.infer_from_type_arguments(source, target, bindings) {
                 let _ = concrete_read.discard();
                 return result;
@@ -9286,6 +9300,35 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )
         };
         let (source_is_binder, target_is_binder) = (is_binder(source), is_binder(target));
+        // A target composition still needs the source's declaration at each
+        // arm: unwrapping it now would bypass same-generic variance there.
+        // A source composition keeps its existing distribution order.
+        let target_composition = source != concrete[0]
+            && matches!(
+                self.graph().node_data(concrete[1]).as_deref(),
+                Some(SemanticNodeData::Union(_) | SemanticNodeData::Intersection(_))
+            );
+        let source_reference = if target_composition {
+            self.reference_operand_for_relation(source)
+                .unwrap_or(source)
+        } else {
+            source
+        };
+        let preserve_source_reference = target_composition
+            && self
+                .graph()
+                .node_data(source_reference)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
+            && matches!(
+                self.graph().node_data(concrete[0]).as_deref(),
+                Some(
+                    SemanticNodeData::Object(_)
+                        | SemanticNodeData::Array { .. }
+                        | SemanticNodeData::Tuple { .. }
+                        | SemanticNodeData::Signature { .. }
+                )
+            );
         // A binder takes the other operand as written, a carrier the lane
         // cannot resolve included (an inference candidate is recorded
         // verbatim and resolves at the bound's own demand points). The
@@ -9302,6 +9345,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        let source = if preserve_source_reference {
+            source_reference
+        } else {
+            source
         };
         // A declaration naming a homomorphic mapped type over a parameter
         // the session infers reverse-maps where it is unwrapped.
@@ -10574,6 +10622,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let Some(targets) = self.weak_target_surfaces(target) else {
             return false;
         };
+        // Constituent relations retain declaration identity for variance, but
+        // this whole-target guard reads the properties of its surface.
+        let source = if self
+            .graph()
+            .node_data(source)
+            .as_deref()
+            .is_some_and(is_declaration_reference)
+        {
+            let IdentityCarrierUnwrap::Concrete(source) =
+                self.unwrap_identity_carrier_for_relation(source)
+            else {
+                return false;
+            };
+            source
+        } else {
+            source
+        };
         self.weak_surfaces_reject(source, target, &targets)
     }
 
@@ -11379,24 +11444,36 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &self,
             id: SemanticNodeId,
         ) -> IdentityCarrierUnwrap {
-            self.unwrap_identity_carrier_walk(id, &mut |_| {})
+            self.unwrap_identity_carrier_walk(CarrierWalkPoint { node: id, depth: 0 }, &mut |_| {})
         }
     }
 
-    /// [`Self::unwrap_identity_carrier_for_relation`], reporting each node
-    /// the walk reaches to `on_step` before it reads anything for that node:
-    /// a reached node is where a walk that stopped there resumes.
+    /// [`Self::unwrap_identity_carrier_for_relation`] from `start`, reporting
+    /// each point the walk reaches to `on_step` before it reads anything for
+    /// that node: a reached point is where a walk that stopped there resumes.
+    ///
+    /// Each declaration step instantiates the declaration the carrier names,
+    /// nested in the instantiations of the steps before it, so a walk stops
+    /// at the instantiation budget with the checker's TS2589 recovery: an
+    /// alias that re-applies itself on a growing argument
+    /// (`type Wrap<T> = Grow<T>`, `type Grow<T> = T extends never ? 0 :
+    /// Wrap<[T]>`) mints a fresh application at every step and never meets a
+    /// node it has seen.
     pub(super) fn unwrap_identity_carrier_walk(
         &self,
-        id: SemanticNodeId,
-        on_step: &mut dyn FnMut(SemanticNodeId),
+        start: CarrierWalkPoint,
+        on_step: &mut dyn FnMut(CarrierWalkPoint),
     ) -> IdentityCarrierUnwrap {
         let graph = self.graph();
         let transit = ProjectionReductionContext::structural_transit();
-        let mut current = id;
+        let mut current = start.node;
+        let mut depth = start.depth;
         let mut seen = crate::semantic_query::small_node_set::SmallNodeSet::default();
         while seen.insert(current) {
-            on_step(current);
+            on_step(CarrierWalkPoint {
+                node: current,
+                depth,
+            });
             let Some(data) = graph.node_data(current) else {
                 return IdentityCarrierUnwrap::Unresolvable;
             };
@@ -11612,6 +11689,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             // body it does not have.
             if self.string_mapping_of(current).is_some() {
                 return IdentityCarrierUnwrap::Concrete(current);
+            }
+            if self.cancellation.is_cancelled() {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            depth += 1;
+            if let Err(refusal) = crate::semantic_query::checker_policy::instantiation_budget(
+                self.connected_demand.instantiation_within_budget(depth),
+            ) {
+                return IdentityCarrierUnwrap::Concrete(
+                    self.recover_at_operation_budget(refusal, Some(current)),
+                );
             }
             let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
                 self.type_slot_for(
@@ -13710,19 +13798,31 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// are followed (`type V = void` is `void` itself); a union such as
     /// `void | undefined` is not `void`, and a carrier that cannot be
     /// resolved is not assumed to be.
+    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
+        self.resolves_to_primitive(result, |kind| {
+            matches!(kind, PrimitiveKind::Void | PrimitiveKind::Any)
+        })
+    }
+
+    /// Whether `node` is a primitive `accept` admits once transparent
+    /// aliases and declaration carriers are followed, as the checker reads a
+    /// type's flags: `type V = void` is `void` itself, a union containing
+    /// one is not, and a carrier that cannot be resolved is not assumed to be.
     ///
     /// The chain is followed to its end, however long: it ends at a node it
-    /// passed (a cycle is not `void`), and a carrier read the connected
+    /// passed (a cycle matches nothing), and a carrier read the connected
     /// ledger refuses resolves nothing.
-    fn signature_result_accepts_any(&self, result: SemanticNodeId) -> bool {
-        let mut current = result;
+    pub(super) fn resolves_to_primitive(
+        &self,
+        node: SemanticNodeId,
+        accept: impl Fn(PrimitiveKind) -> bool,
+    ) -> bool {
+        let mut current = node;
         let mut passed = FxHashSet::default();
         while passed.insert(current) {
             // The node read ends here, before any carrier resolution runs.
             let alias_target = match self.graph().node_data(current).as_deref() {
-                Some(SemanticNodeData::Primitive(PrimitiveKind::Void | PrimitiveKind::Any)) => {
-                    return true;
-                }
+                Some(SemanticNodeData::Primitive(kind)) => return accept(*kind),
                 Some(SemanticNodeData::Alias(inner)) => Some(*inner),
                 Some(
                     SemanticNodeData::DeclRef { .. } | SemanticNodeData::InstantiationRef { .. },
@@ -13967,6 +14067,15 @@ enum FramePop {
 pub enum IdentityCarrierUnwrap {
     Concrete(SemanticNodeId),
     Unresolvable,
+}
+
+/// A point an identity-carrier walk reached: the node, and how many
+/// declaration instantiations, each nested in the one before, the walk took
+/// to reach it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CarrierWalkPoint {
+    pub(super) node: SemanticNodeId,
+    pub(super) depth: u32,
 }
 
 /// A PROOF that two nodes have no common inhabitant, carrying the CHECKER'S
@@ -17184,15 +17293,20 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
                 && !(matches!(data, SemanticNodeData::TemplateLiteral { .. })
                     && self.template_is_settled(node))
         };
+        // The canonical frame retained this declaration so composition can
+        // distribute before each arm demands its arguments or structure.
+        let reference_source_distributes =
+            declaration_source_distributes(&source_data, &target_data);
         if !nominal_defers_gate
-            && (deferred(source, &source_data) || deferred(target, &target_data))
+            && ((deferred(source, &source_data) && !reference_source_distributes)
+                || deferred(target, &target_data))
         {
             results.push(RelationResult::Unknown);
             return;
         }
 
         // ── Remaining opaque carriers → Unknown ────────────────────────
-        if matches!(&*source_data, SemanticNodeData::Opaque(_))
+        if (matches!(&*source_data, SemanticNodeData::Opaque(_)) && !reference_source_distributes)
             || matches!(&*target_data, SemanticNodeData::Opaque(_))
         {
             results.push(RelationResult::Unknown);
@@ -17769,14 +17883,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> bool {
         let graph = self.graph();
         [source, target].into_iter().any(|node| {
-            matches!(
-                graph.node_data(node).as_deref(),
-                Some(
-                    SemanticNodeData::DeclRef { .. }
-                        | SemanticNodeData::InstantiationRef { .. }
-                        | SemanticNodeData::Opaque(QueryError::DeclPlaceholder { .. })
-                )
-            )
+            graph
+                .node_data(node)
+                .as_deref()
+                .is_some_and(is_declaration_reference)
         })
     }
 }
