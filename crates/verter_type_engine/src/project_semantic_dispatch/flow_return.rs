@@ -6396,20 +6396,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 display_name: name.clone(),
             })
         };
-        // PASS 1 — every binder of this clause, bare. Sibling references
-        // in a constraint / default resolve against these, in either
-        // direction.
+        // PASS 1 — every binder of this clause, bare: what a self or later
+        // sibling reference in a constraint / default resolves to.
         for tp in type_parameters.iter() {
             env.insert(
                 tp.name.to_string(),
                 intern_binder(&OwnedStr::from(&tp.name), None, None),
             );
         }
-        // PASS 2 — the constraints and defaults, lowered under the
-        // composed environment, then the final binders.
+        // PASS 2 — left to right, the constraints and defaults, then the
+        // final binders. A sibling declared BEFORE a bound reads as its
+        // final, bound-carrying binder, as the shared binder-frame
+        // constructor lowers a clause: `U extends A` keeps `A`'s own
+        // constraint reachable from `U`'s, which a bare `A` would lose.
         let mut type_param_decls: Vec<crate::semantic_query::TypeParamDecl> =
-            Vec::with_capacity(type_parameters.len());
-        let mut finalized: Vec<(String, SemanticNodeId)> =
             Vec::with_capacity(type_parameters.len());
         for tp in type_parameters.iter() {
             let mut lower = |gated: &verter_session_query::flow::slice::GatedType| {
@@ -6429,7 +6429,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             let default = tp.default.as_ref().map(&mut lower);
             let display_name = OwnedStr::from(&tp.name);
             let binder = intern_binder(&display_name, constraint, default);
-            finalized.push((tp.name.to_string(), binder));
+            env.insert(tp.name.to_string(), binder);
             type_param_decls.push(crate::semantic_query::TypeParamDecl {
                 name: display_name,
                 param: binder,
@@ -6441,7 +6441,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 is_const: false,
             });
         }
-        env.extend(finalized);
         let mut exact_binders = outer
             .map(|outer| outer.exact_binders.clone())
             .unwrap_or_default();

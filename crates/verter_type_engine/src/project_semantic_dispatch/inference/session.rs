@@ -1,9 +1,9 @@
 //! The inference owner's session state: the per-parameter candidate
-//! journals one collecting session accumulates, its reverse-projection
-//! journals, the checkpoint an alternative rolls back to, and the
-//! one-way lifecycle from collection to a committed fixation. The
-//! transaction holds the session stack; only this module mutates a
-//! session.
+//! journals one collecting session accumulates, the reverse-projection
+//! journals of each reverse mapping in flight, the checkpoint an
+//! alternative rolls back to, and the one-way lifecycle from collection to
+//! a committed fixation. The transaction holds the session stack; only this
+//! module mutates a session.
 
 use std::sync::Arc;
 
@@ -40,16 +40,18 @@ pub enum InferenceSessionState {
 pub(crate) struct SessionCheckpoint {
     /// `candidates.len()` per [`InferenceInfo`], in info order.
     candidate_lens: Vec<usize>,
-    /// Registered reverse-projection targets are append-only.
+    /// The reverse mappings in flight at the checkpoint.
+    reverse_depth: usize,
+    /// Registered reverse-projection targets of the innermost reverse
+    /// mapping are append-only.
     projection_info_len: usize,
     /// `candidates.len()` per existing reverse projection target.
     projection_candidate_lens: Vec<usize>,
     /// Recovered reverse members accumulated so far.
     recovered_len: usize,
-    /// The reverse pass's full/partial status at the checkpoint.
+    /// The innermost reverse mapping's full/partial status at the
+    /// checkpoint.
     reverse_partial: bool,
-    /// Aggregate candidates already deposited by the reverse pass.
-    aggregate_candidate_len: usize,
 }
 
 /// One inference candidate deposited for a type parameter (design §4.2).
@@ -106,14 +108,16 @@ impl ReverseRecoveredEntry {
     }
 }
 
-/// Session-owned journals for exact reverse-homomorphic mapped inference.
+/// Session-owned journals for one exact reverse-homomorphic mapped
+/// inference in flight: opened when relation descent reaches a homomorphic
+/// mapped target over a parameter the session infers, and closed when that
+/// reverse mapping has deposited its aggregate.
 #[derive(Debug)]
 pub struct ReverseProjectionState {
     spec: super::super::relation::ReverseHomomorphicSpec,
     projection_infos: Vec<ProjectionInferenceInfo>,
     recovered: Vec<ReverseRecoveredEntry>,
     partial: bool,
-    aggregate_candidates: Vec<InferenceCandidate>,
 }
 
 impl ReverseProjectionState {
@@ -123,7 +127,6 @@ impl ReverseProjectionState {
             projection_infos: Vec::new(),
             recovered: Vec::new(),
             partial: false,
-            aggregate_candidates: Vec::new(),
         }
     }
 }
@@ -139,11 +142,12 @@ pub struct InferenceInfoSetup {
     /// Call inference owns const policy per declaration parameter. Other
     /// inference domains use the neutral ordinary policy.
     pub(in crate::project_semantic_dispatch) const_policy: ConstParamPolicy,
-    /// Whether the declared parameter carries a constraint. A FRESH
-    /// primitive-literal candidate stays fresh only for an UNCONSTRAINED
-    /// parameter (a constrained parameter's preserved literal is regular
-    /// — the upper-bound check regularizes it).
-    pub(in crate::project_semantic_dispatch) has_constraint: bool,
+    /// The declared parameter's constraint. A FRESH primitive-literal
+    /// candidate stays fresh only for an UNCONSTRAINED parameter (a
+    /// constrained parameter's preserved literal is regular — the
+    /// upper-bound check regularizes it); the tuple plan reads a variadic
+    /// parameter's fixed arity from it.
+    pub(in crate::project_semantic_dispatch) constraint: Option<SemanticNodeId>,
 }
 
 impl InferenceInfoSetup {
@@ -152,7 +156,7 @@ impl InferenceInfoSetup {
             param_node,
             param_name,
             const_policy: ConstParamPolicy::NonConst,
-            has_constraint: false,
+            constraint: None,
         }
     }
 
@@ -160,13 +164,13 @@ impl InferenceInfoSetup {
         param_node: SemanticNodeId,
         param_name: Arc<str>,
         const_policy: ConstParamPolicy,
-        has_constraint: bool,
+        constraint: Option<SemanticNodeId>,
     ) -> Self {
         Self {
             param_node,
             param_name,
             const_policy,
-            has_constraint,
+            constraint,
         }
     }
 }
@@ -240,7 +244,7 @@ struct InferenceInfo {
     param_node: SemanticNodeId,
     param_name: Arc<str>,
     const_policy: ConstParamPolicy,
-    has_constraint: bool,
+    constraint: Option<SemanticNodeId>,
     /// Deposited candidates (session-local deltas — ReturnOnly, never
     /// published as-is).
     candidates: Vec<InferenceCandidate>,
@@ -275,9 +279,8 @@ pub struct InferenceSession {
     /// Per-parameter candidate state.
     infos: Vec<InferenceInfo>,
     info_positions: FxHashMap<SemanticNodeId, usize>,
-    /// Reverse-projection journals, present only for a reverse-homomorphic
-    /// session selected at open.
-    reverse_projection: Option<ReverseProjectionState>,
+    /// The journals of each reverse mapping in flight, innermost last.
+    reverse_frames: Vec<ReverseProjectionState>,
     /// Immutable fixed bindings retained across staging and commit.
     staged_bindings: Option<Arc<[InferBinding]>>,
     /// The reentry-stack depth when this session opened. Every frame
@@ -291,11 +294,7 @@ pub struct InferenceSession {
 }
 
 impl InferenceSession {
-    pub(crate) fn new(
-        id: SessionId,
-        setup: InferenceSessionSetup,
-        reverse_projection: Option<ReverseProjectionState>,
-    ) -> Self {
+    pub(crate) fn new(id: SessionId, setup: InferenceSessionSetup) -> Self {
         let infos: Vec<_> = setup
             .infos
             .iter()
@@ -303,7 +302,7 @@ impl InferenceSession {
                 param_node: info.param_node,
                 param_name: Arc::clone(&info.param_name),
                 const_policy: info.const_policy,
-                has_constraint: info.has_constraint,
+                constraint: info.constraint,
                 candidates: Vec::new(),
                 implied_arity: None,
             })
@@ -318,7 +317,7 @@ impl InferenceSession {
             setup,
             infos,
             info_positions,
-            reverse_projection,
+            reverse_frames: Vec::new(),
             staged_bindings: None,
             opened_at_depth: 0,
             state: InferenceSessionState::Collecting,
@@ -331,10 +330,35 @@ impl InferenceSession {
         self.setup.context_key()
     }
 
-    pub(crate) fn reverse_spec(&self) -> Option<&super::super::relation::ReverseHomomorphicSpec> {
-        self.reverse_projection
-            .as_ref()
-            .map(|reverse| &reverse.spec)
+    /// Open the journals of a reverse mapping of `spec`. Only a collecting
+    /// session opens one.
+    pub(crate) fn open_reverse_frame(
+        &mut self,
+        spec: super::super::relation::ReverseHomomorphicSpec,
+    ) -> bool {
+        if self.state != InferenceSessionState::Collecting || !self.infers(spec.base_infer) {
+            return false;
+        }
+        self.reverse_frames.push(ReverseProjectionState::new(spec));
+        true
+    }
+
+    /// Close the innermost reverse mapping's journals.
+    pub(crate) fn close_reverse_frame(&mut self) {
+        self.reverse_frames.pop();
+    }
+
+    /// Whether a reverse mapping is in flight: its registered projection
+    /// targets alter how a sub-relation reduces.
+    pub(crate) fn reverse_active(&self) -> bool {
+        !self.reverse_frames.is_empty()
+    }
+
+    /// Whether a reverse mapping of `mapped_node` is in flight.
+    pub(crate) fn reverse_in_flight(&self, mapped_node: SemanticNodeId) -> bool {
+        self.reverse_frames
+            .iter()
+            .any(|frame| frame.spec.mapped_node == mapped_node)
     }
 
     /// The candidates the session's parameters collected so far.
@@ -350,13 +374,14 @@ impl InferenceSession {
     /// alternative-scoping primitive: a LOSING overload / signature-group
     /// alternative's deposits must not survive into fixation.
     pub(crate) fn checkpoint(&self) -> SessionCheckpoint {
-        let reverse = self.reverse_projection.as_ref();
+        let reverse = self.reverse_frames.last();
         SessionCheckpoint {
             candidate_lens: self
                 .infos
                 .iter()
                 .map(|info| info.candidates.len())
                 .collect(),
+            reverse_depth: self.reverse_frames.len(),
             projection_info_len: reverse.map_or(0, |state| state.projection_infos.len()),
             projection_candidate_lens: reverse
                 .map(|state| {
@@ -369,7 +394,6 @@ impl InferenceSession {
                 .unwrap_or_default(),
             recovered_len: reverse.map_or(0, |state| state.recovered.len()),
             reverse_partial: reverse.is_some_and(|state| state.partial),
-            aggregate_candidate_len: reverse.map_or(0, |state| state.aggregate_candidates.len()),
         }
     }
 
@@ -394,7 +418,15 @@ impl InferenceSession {
         for (info, len) in self.infos.iter_mut().zip(checkpoint.candidate_lens.iter()) {
             info.candidates.truncate(*len);
         }
-        let Some(reverse) = self.reverse_projection.as_mut() else {
+        if checkpoint.reverse_depth > self.reverse_frames.len() {
+            verter_debug_assert!(
+                false,
+                "a reverse-mapping checkpoint outlived the reverse mapping it was taken in"
+            );
+            return;
+        }
+        self.reverse_frames.truncate(checkpoint.reverse_depth);
+        let Some(reverse) = self.reverse_frames.last_mut() else {
             return;
         };
         if checkpoint.projection_candidate_lens.len() != checkpoint.projection_info_len
@@ -419,9 +451,6 @@ impl InferenceSession {
             .truncate(checkpoint.projection_info_len);
         reverse.recovered.truncate(checkpoint.recovered_len);
         reverse.partial = checkpoint.reverse_partial;
-        reverse
-            .aggregate_candidates
-            .truncate(checkpoint.aggregate_candidate_len);
     }
 
     /// Register canonical indexed-access nodes for the current reverse
@@ -433,7 +462,7 @@ impl InferenceSession {
         if self.state != InferenceSessionState::Collecting {
             return false;
         }
-        let Some(reverse) = self.reverse_projection.as_mut() else {
+        let Some(reverse) = self.reverse_frames.last_mut() else {
             return false;
         };
         for (position, target) in targets.iter().enumerate() {
@@ -450,7 +479,7 @@ impl InferenceSession {
 
     /// Whether `node` is registered as a projection target in this session.
     pub(crate) fn is_projection_target(&self, node: SemanticNodeId) -> bool {
-        self.reverse_projection.as_ref().is_some_and(|reverse| {
+        self.reverse_frames.last().is_some_and(|reverse| {
             reverse
                 .projection_infos
                 .iter()
@@ -469,7 +498,7 @@ impl InferenceSession {
         if self.state != InferenceSessionState::Collecting {
             return false;
         }
-        let Some(info) = self.reverse_projection.as_mut().and_then(|reverse| {
+        let Some(info) = self.reverse_frames.last_mut().and_then(|reverse| {
             reverse
                 .projection_infos
                 .iter_mut()
@@ -491,8 +520,8 @@ impl InferenceSession {
         &self,
         checkpoint: &SessionCheckpoint,
     ) -> Vec<InferenceCandidate> {
-        self.reverse_projection
-            .as_ref()
+        self.reverse_frames
+            .last()
             .map(|reverse| {
                 reverse.projection_infos[checkpoint.projection_info_len..]
                     .iter()
@@ -506,7 +535,7 @@ impl InferenceSession {
         if self.state != InferenceSessionState::Collecting {
             return;
         }
-        if let Some(reverse) = self.reverse_projection.as_mut() {
+        if let Some(reverse) = self.reverse_frames.last_mut() {
             reverse.recovered.push(recovered);
         }
     }
@@ -515,14 +544,14 @@ impl InferenceSession {
         if self.state != InferenceSessionState::Collecting {
             return;
         }
-        if let Some(reverse) = self.reverse_projection.as_mut() {
+        if let Some(reverse) = self.reverse_frames.last_mut() {
             reverse.partial = true;
         }
     }
 
     pub(crate) fn reverse_is_partial(&self) -> bool {
-        self.reverse_projection
-            .as_ref()
+        self.reverse_frames
+            .last()
             .is_some_and(|reverse| reverse.partial)
     }
 
@@ -530,8 +559,8 @@ impl InferenceSession {
         &self,
         checkpoint: &SessionCheckpoint,
     ) -> Vec<ReverseRecoveredEntry> {
-        self.reverse_projection
-            .as_ref()
+        self.reverse_frames
+            .last()
             .map(|reverse| {
                 reverse.recovered[checkpoint.recovered_len..]
                     .iter()
@@ -557,16 +586,14 @@ impl InferenceSession {
         else {
             return false;
         };
-        let Some(reverse) = self.reverse_projection.as_mut() else {
+        if self.reverse_frames.is_empty() {
             return false;
-        };
-        let aggregate = InferenceCandidate {
+        }
+        self.infos[info_index].candidates.push(InferenceCandidate {
             node: candidate,
             priority,
             variance: VariancePhase::Covariant,
-        };
-        reverse.aggregate_candidates.push(aggregate.clone());
-        self.infos[info_index].candidates.push(aggregate);
+        });
         true
     }
 
@@ -610,7 +637,7 @@ impl InferenceSession {
         let unconstrained = self
             .infos
             .iter()
-            .any(|info| info.param_node == param_node && !info.has_constraint);
+            .any(|info| info.param_node == param_node && info.constraint.is_none());
         if unconstrained {
             self.fresh_literal_deposits.push((param_node, literal));
         }
@@ -671,6 +698,15 @@ impl InferenceSession {
             .iter()
             .find(|info| info.param_node == param_node)
             .and_then(|info| info.implied_arity)
+    }
+
+    /// The declared constraint of `param_node`, when the session's setup
+    /// carries it (a call's type parameters).
+    pub(crate) fn declared_constraint(&self, param_node: SemanticNodeId) -> Option<SemanticNodeId> {
+        self.info_positions
+            .get(&param_node)
+            .and_then(|&position| self.infos.get(position))
+            .and_then(|info| info.constraint)
     }
 
     pub(crate) fn call_const_policy(&self, param_node: SemanticNodeId) -> Option<ConstParamPolicy> {
@@ -785,12 +821,7 @@ impl InferenceSession {
         for info in &mut self.infos {
             info.candidates.clear();
         }
-        if let Some(reverse) = self.reverse_projection.as_mut() {
-            reverse.projection_infos.clear();
-            reverse.recovered.clear();
-            reverse.partial = false;
-            reverse.aggregate_candidates.clear();
-        }
+        self.reverse_frames.clear();
         self.staged_bindings = None;
         self.state = InferenceSessionState::Abandoned;
         true

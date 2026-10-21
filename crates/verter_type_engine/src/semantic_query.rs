@@ -8429,8 +8429,6 @@ pub enum InferencePassKind {
     Ordinary,
     /// Candidate-local inference while deciding call applicability.
     CallApplicability,
-    /// Exact `{ [P in keyof infer T]: X }` reverse projection.
-    ReverseHomomorphicMapped,
 }
 
 /// Content-free identity of the set of inferable (open) type parameters in an
@@ -8521,6 +8519,11 @@ pub enum InferenceCandidatePriority {
     /// `InferencePriority.NakedTypeVariable`): kept only when no direct
     /// inference reaches the variable.
     MatchedUnionRemainder,
+    /// The slice of a tuple inferred to a variadic element of a target
+    /// tuple ending in an optional element (the checker's
+    /// `InferencePriority.SpeculativeTuple`): kept only when no direct
+    /// inference reaches the variable.
+    SpeculativeTuple,
     /// A complete reverse-homomorphic mapped candidate.
     HomomorphicMapped,
     /// A reverse-homomorphic candidate with one or more unrecovered
@@ -8536,10 +8539,11 @@ pub enum InferenceCandidatePriority {
 #[must_use]
 pub const fn inference_candidate_precedence(priority: InferenceCandidatePriority) -> u8 {
     match priority {
-        InferenceCandidatePriority::NakedTypeParameter => 5,
-        InferenceCandidatePriority::ReturnType => 4,
-        InferenceCandidatePriority::Argument => 3,
-        InferenceCandidatePriority::MatchedUnionRemainder => 2,
+        InferenceCandidatePriority::NakedTypeParameter => 6,
+        InferenceCandidatePriority::ReturnType => 5,
+        InferenceCandidatePriority::Argument => 4,
+        InferenceCandidatePriority::MatchedUnionRemainder => 3,
+        InferenceCandidatePriority::SpeculativeTuple => 2,
         InferenceCandidatePriority::HomomorphicMapped => 1,
         InferenceCandidatePriority::PartialHomomorphicMapped => 0,
     }
