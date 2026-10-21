@@ -8373,9 +8373,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 .ctx
                 .prepared_decl_bundle(&identity.canonical_id)
                 .map(|bundle| {
-                    crate::resolver_core::bare_name_resolve::DeclarationScopePayload::from_bundle(
+                    self.declaration_scope_payload(
                         &bundle,
+                        identity.canonical_id.as_ref(),
                         identity.owner,
+                        identity.decl_name.as_ref(),
                     )
                 });
             let shadowing =

@@ -2936,6 +2936,82 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         value_ref: &verter_type_expr::ValueRef,
         prc: crate::semantic_query::ProjectionReductionContext,
     ) -> Option<SemanticQueryKey> {
+        self.typeof_reference_key_in_scope(canonical, owner, None, None, value_ref, prc)
+    }
+
+    /// The qualified value a `typeof` path written in a declaration body
+    /// heads, with the number of path segments it consumes, when its head
+    /// names a member of an enclosing namespace: in a block of a global
+    /// namespace, the member any script's block of an enclosing namespace
+    /// declares ([`Self::enclosing_namespace_value_root`]), innermost first,
+    /// down to the namespace whose member the body's `name_resolution`
+    /// binds in the file's own blocks ([`namespace_scoped_typeof_root`]),
+    /// which answers when no more inner namespace declares the head. `None`
+    /// when the path reads from its written root.
+    pub(super) fn namespace_scoped_value_root(
+        &self,
+        name_resolution: Option<
+            &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        >,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        path: &[String],
+    ) -> Option<(verter_type_expr::OwnedStr, usize)> {
+        let bound = name_resolution
+            .and_then(|names| namespace_scoped_typeof_root(names, canonical, owner, path));
+        let enclosing = scope_payload
+            .and_then(|payload| payload.enclosing_global_namespace())
+            .and_then(|namespace| {
+                let outer_bound = bound.as_ref().and_then(|(qualified, consumed)| {
+                    namespace_of_member(qualified.as_ref(), &path[..*consumed].join("."))
+                });
+                self.enclosing_namespace_value_root(canonical, namespace, path, outer_bound)
+            });
+        enclosing.or(bound)
+    }
+
+    /// [`Self::typeof_reference_key`] for a reference written in a
+    /// declaration body whose `name_resolution` binds the names its
+    /// enclosing namespaces declare: a path such a name heads reads from the
+    /// namespace member it names ([`namespace_scoped_typeof_root`]), or, in
+    /// a block of a global namespace (`scope_payload`), from the member
+    /// another script's block of an enclosing namespace declares
+    /// ([`Self::namespace_scoped_value_root`]).
+    pub(super) fn typeof_reference_key_in_scope(
+        &self,
+        canonical: &verter_type_expr::OwnedStr,
+        owner: verter_type_expr::TopLevelOwnerId,
+        name_resolution: Option<
+            &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+        >,
+        scope_payload: Option<&crate::resolver_core::bare_name_resolve::DeclarationScopePayload>,
+        value_ref: &verter_type_expr::ValueRef,
+        prc: crate::semantic_query::ProjectionReductionContext,
+    ) -> Option<SemanticQueryKey> {
+        if let Some((root, consumed)) = self.namespace_scoped_value_root(
+            name_resolution,
+            scope_payload,
+            canonical.as_ref(),
+            owner,
+            &value_ref.path,
+        ) {
+            let root_key = crate::semantic_query::ValueRootKey {
+                scope: crate::semantic_query::ScopeId {
+                    canonical_id: canonical.clone(),
+                    owner,
+                    local_scope: None,
+                    binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(owner),
+                },
+                name: root,
+            };
+            let rest: verter_type_expr::OwnedSlice<verter_type_expr::OwnedStr> = value_ref.path
+                [consumed..]
+                .iter()
+                .map(|segment| verter_type_expr::OwnedStr::from(segment.as_str()))
+                .collect();
+            return Some(self.typeof_key_with_path(root_key, rest, prc));
+        }
         let (root, rest) = value_ref.path.split_first()?;
         let root_key = crate::semantic_query::ValueRootKey {
             scope: crate::semantic_query::ScopeId {
@@ -6459,4 +6535,49 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             self.build_classify_materialization_cycle_gate(key)
         }
     }
+}
+
+/// The namespace `qualified` (`A.B.T`) is a member named `name` (`T`) of
+/// (`A.B`). `None` when `qualified` is no namespace's member of that name.
+pub(super) fn namespace_of_member<'a>(qualified: &'a str, name: &str) -> Option<&'a str> {
+    qualified.strip_suffix(name)?.strip_suffix('.')
+}
+
+/// The namespace member a `typeof` path written in a namespaced declaration's
+/// body heads, as the qualified root it reads from and the number of path
+/// segments that root consumes. `name_resolution` binds each name relative to
+/// an enclosing namespace (`C.v` inside `namespace A.B` to `A.B.C.v`), or
+/// through an `import X = N.M` the namespace body declares (`X.v` to
+/// `N.M.v`); the longest bound prefix of the path names the member. `None`
+/// when no prefix is such a namespace-scope binding of `canonical`'s `owner`
+/// to another qualified member (a file-scope name, an import), so the path
+/// reads from its written root.
+pub(super) fn namespace_scoped_typeof_root(
+    name_resolution: &rustc_hash::FxHashMap<verter_type_expr::OwnedStr, ResolvedRootIdentity>,
+    canonical: &str,
+    owner: verter_type_expr::TopLevelOwnerId,
+    path: &[String],
+) -> Option<(verter_type_expr::OwnedStr, usize)> {
+    let mut joined = String::new();
+    let mut prefixes = Vec::with_capacity(path.len());
+    for segment in path {
+        if !joined.is_empty() {
+            joined.push('.');
+        }
+        joined.push_str(segment);
+        prefixes.push(joined.clone());
+    }
+    prefixes
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, prefix)| {
+            let identity = name_resolution.get(prefix.as_str())?;
+            let qualified = identity.symbol_name.as_ref();
+            (identity.canonical_id.as_ref() == canonical
+                && identity.owner == owner
+                && qualified != prefix.as_str()
+                && qualified.contains('.'))
+            .then(|| (identity.symbol_name.clone(), index + 1))
+        })
 }
