@@ -3,6 +3,7 @@ use crate::VerterHost;
 use std::sync::Arc;
 use verter_session_query::resolution::ProjectId;
 use verter_type_engine::resolver_core::ambient_resolve::*;
+use verter_type_engine::resolver_core::request_ports::AmbientSymbolSpace;
 use verter_workspace::AmbientLibSpec;
 use verter_workspace::MemoryOptions;
 use verter_workspace::MemoryWorkspace;
@@ -52,7 +53,8 @@ fn resolves_registered_ambient_symbol_to_virtual_canonical() {
     .unwrap();
     let key = ws.project_stable_key(ProjectId(0)).unwrap();
     let host = host_with_ws(Arc::clone(&ws));
-    let r = resolve_ambient_global(&host, "/ws/main.ts", key, "Pick").unwrap();
+    let r = resolve_ambient_global(&host, "/ws/main.ts", key, "Pick", AmbientSymbolSpace::Type)
+        .unwrap();
     assert!(
         r.canonical_id.starts_with("ambient:/"),
         "ambient hit MUST surface the project-scoped virtual id; got {}",
@@ -80,7 +82,13 @@ fn unknown_symbol_returns_none_without_recording_edge() {
     .unwrap();
     let key = ws.project_stable_key(ProjectId(0)).unwrap();
     let host = host_with_ws(Arc::clone(&ws));
-    let r = resolve_ambient_global(&host, "/ws/main.ts", key, "DoesNotExist");
+    let r = resolve_ambient_global(
+        &host,
+        "/ws/main.ts",
+        key,
+        "DoesNotExist",
+        AmbientSymbolSpace::Type,
+    );
     assert!(r.is_none());
     // No reverse-dep edge recorded for the consumer.
     let virt = verter_workspace::ambient_virtual_canonical_id(key, "lib.es5.d.ts");

@@ -1830,13 +1830,18 @@ pub fn project_root_summary<C: crate::resolver_core::ResolverCapabilities>(
             // `fold_node`'s Intersection arm, but each arm classified root-only,
             // and a DANGLING arm is dropped here while the full fold fails the
             // whole composite (the DOCUMENTED ASYMMETRY).
+            let keeps_empty_object =
+                crate::project_semantic_dispatch::canonical_algebra::is_kept_primitive_over_empty_object(
+                    dispatch.graph(),
+                    members.as_ref(),
+                );
             let mut arms: Vec<RootOnlySummary> = members
                 .iter()
                 .filter_map(|member| project_root_summary(dispatch, *member, active))
                 .collect();
             arms.retain(|arm| {
                 arm.tag != FactShapeTag::ObjectSurfaceSentinel
-                    && arm.tag != FactShapeTag::EmptyObject
+                    && (keeps_empty_object || arm.tag != FactShapeTag::EmptyObject)
             });
             if arms.is_empty() {
                 RootOnlySummary::from_summary(summary::empty_object())

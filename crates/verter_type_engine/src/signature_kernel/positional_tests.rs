@@ -321,7 +321,7 @@ mod tuple_plan {
         tuple_inference_plan, TupleElementKind, TupleInferenceStep, VariadicArityFacts,
     };
     use TupleElementKind::{Optional as O, Required as R, Rest as S, Variadic as V};
-    use TupleInferenceStep::{Element, RestElement, Slice, SliceElementType};
+    use TupleInferenceStep::{Element, RestArray, RestElement, Slice, SliceElementType};
 
     /// Arity facts keyed by target position.
     #[derive(Default)]
@@ -494,6 +494,83 @@ mod tuple_plan {
         assert_eq!(
             tuple_inference_plan(&[R, R, R], true, &[V, V], &constrained),
             Vec::new()
+        );
+    }
+
+    /// Each half of a split is the checker's `sliceTupleType`: an implied
+    /// arity that overruns the fixed ends clamps the first slice as a
+    /// JavaScript `slice` does instead of dropping it, the second half
+    /// infers independently, and a second half beginning past the source's
+    /// fixed prefix takes its rest array.
+    #[test]
+    fn split_slices_clamp_and_infer_independently() {
+        let none_implied = Arity {
+            implied: vec![(1, 0)],
+            ..Arity::default()
+        };
+        // `[string, ...A, ...B, boolean]` against four required elements
+        // with nothing implied for `A`: `A` takes `[1, len - 5)`, which
+        // clamps to `[1, 3)`, and `B` the slice between the fixed ends.
+        assert_eq!(
+            tuple_inference_plan(&[R, R, R, R], true, &[R, V, V, R], &none_implied),
+            vec![
+                Element {
+                    source: 0,
+                    target: 0
+                },
+                slice(1, 1, 1),
+                slice(1, 1, 2),
+                Element {
+                    source: 3,
+                    target: 3
+                },
+            ]
+        );
+        // An implied arity past the source's end leaves the second half
+        // empty rather than suppressing the first.
+        let overlong = Arity {
+            implied: vec![(0, 4)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[V, V], &overlong),
+            vec![slice(0, 0, 0), slice(2, 0, 1)]
+        );
+        // `[1, ...string[]]` split after two: the first half skips no end
+        // element, and the second begins past the fixed prefix and takes the
+        // rest array.
+        let past_prefix = Arity {
+            implied: vec![(0, 2)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, S], true, &[V, V], &past_prefix),
+            vec![
+                slice(0, 0, 0),
+                RestArray {
+                    start: 1,
+                    target: 1
+                }
+            ]
+        );
+        // A constraint arity past the source's length clamps the leading
+        // variadic's slice, and the trailing one's negative start counts
+        // from the end.
+        let leading = Arity {
+            constraint: vec![(0, 3)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[V, S], &leading),
+            vec![slice(0, 0, 0)]
+        );
+        let trailing = Arity {
+            constraint: vec![(1, 3)],
+            ..Arity::default()
+        };
+        assert_eq!(
+            tuple_inference_plan(&[R, R], true, &[S, V], &trailing),
+            vec![slice(1, 0, 1)]
         );
     }
 

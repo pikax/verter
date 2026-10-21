@@ -135,8 +135,11 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                         // references to it.
                         self.instantiate_context_for(
                             declaration.canonical_id.as_ref(),
+                            // The apparent surface supplies members and signature
+                            // carriers. Their interiors are demanded only by a
+                            // selected member or signature read.
                             ProjectionReductionContext::structural_transit_with_mode(
-                                ProjectionMode::Navigate,
+                                ProjectionMode::Shallow,
                             ),
                         ),
                     ),

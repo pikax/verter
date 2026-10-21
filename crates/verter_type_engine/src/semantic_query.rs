@@ -8510,8 +8510,9 @@ pub enum InferenceCandidatePriority {
     Argument,
     /// The whole source of an inference to a union target holding one
     /// naked type variable, when a fixed target member matched every source
-    /// member (the checker's `InferencePriority.NakedTypeVariable`): kept
-    /// only when no direct inference reaches the variable.
+    /// member, or to the sole naked variable of an intersection (the checker's
+    /// `InferencePriority.NakedTypeVariable`): kept only when no direct
+    /// inference reaches the variable.
     MatchedUnionRemainder,
     /// The slice of a tuple inferred to a variadic element of a target
     /// tuple ending in an optional element (the checker's
@@ -9960,6 +9961,21 @@ impl SemanticQueryKey {
         Self::ReduceIntersection {
             input: IntersectionInputRef::from_operands(graph, &members),
             purpose: IntersectionPurpose::CheckerReduction,
+            context: SemanticContextId::production(),
+        }
+    }
+
+    /// `ReduceIntersection` of a WRITTEN intersection type node's arms
+    /// under `nullability` ([`IntersectionPurpose::WrittenTypeNode`]).
+    #[must_use]
+    pub fn reduce_written_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Self {
+        Self::ReduceIntersection {
+            input: IntersectionInputRef::from_operands(graph, members),
+            purpose: IntersectionPurpose::WrittenTypeNode(nullability),
             context: SemanticContextId::production(),
         }
     }

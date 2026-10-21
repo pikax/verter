@@ -408,6 +408,11 @@ pub enum TupleInferenceStep {
         end: usize,
         target: usize,
     },
+    /// The source's rest array — an array of the union of its element
+    /// types from `start`, the end of its fixed prefix — infers to the
+    /// variadic target element: a slice that begins past the fixed prefix
+    /// (`sliceTupleType` through `getRestArrayTypeOfTupleType`).
+    RestArray { start: usize, target: usize },
 }
 
 /// The inferences a concrete `source` (a tuple, or an array when
@@ -417,7 +422,10 @@ pub enum TupleInferenceStep {
 /// fixed suffix; the middle is inferred whole: a lone variadic takes the
 /// slice, a lone rest the union of the slice, two variadics split at the
 /// first's implied arity, and a variadic beside a rest splits at its fixed
-/// constraint arity. A middle the plan cannot split infers nothing.
+/// constraint arity. Each slice is the checker's: its bounds clamp as a
+/// JavaScript `slice` does, so an implied arity past the source's length
+/// yields a shorter or empty slice rather than none, and the two halves of a
+/// split infer independently. A middle the plan cannot split infers nothing.
 #[must_use]
 pub fn tuple_inference_plan(
     source: &[TupleElementKind],
@@ -470,97 +478,93 @@ pub fn tuple_inference_plan(
             }),
         );
     } else {
-        let slice =
-            |start: usize, end: usize| (start + end <= source_arity).then_some((start, end));
+        let fixed_prefix = fixed_length(source);
+        let has_variable = fixed_prefix < source_arity;
+        // `sliceTupleType(source, index, endSkipCount)`: past the fixed
+        // prefix the source's rest array (an empty tuple without one),
+        // otherwise the source's elements over the JavaScript `slice` range
+        // `[index, arity - endSkipCount)`, whose negative or overlong end
+        // clamps rather than failing.
+        let slice_tuple = |index: usize, end_skip: isize, target: usize, speculative: bool| {
+            if index > fixed_prefix && has_variable {
+                return TupleInferenceStep::RestArray {
+                    start: fixed_prefix,
+                    target,
+                };
+            }
+            let (start, end) = js_slice_range(
+                source_arity,
+                index as isize,
+                source_arity as isize - end_skip,
+            );
+            TupleInferenceStep::Slice {
+                start,
+                end,
+                target,
+                speculative,
+            }
+        };
+        // `getElementTypeOfSliceOfTupleType(source, index, endSkipCount)`:
+        // nothing when the slice is empty.
+        let slice_element_type = |index: usize, end_skip: usize, target: usize| {
+            (index + end_skip < source_arity).then_some(TupleInferenceStep::SliceElementType {
+                start: index,
+                end: end_skip,
+                target,
+            })
+        };
         match target.get(start..middle_target_end) {
             Some([TupleElementKind::Variadic, TupleElementKind::Variadic]) => {
                 if let Some(arity) = facts.implied_arity(start) {
-                    let first = (end + source_arity)
-                        .checked_sub(arity)
-                        .and_then(|first_end| slice(start, first_end));
-                    if let (Some((s0, e0)), Some((s1, e1))) = (first, slice(start + arity, end)) {
-                        steps.push(TupleInferenceStep::Slice {
-                            start: s0,
-                            end: e0,
-                            target: start,
-                            speculative: false,
-                        });
-                        steps.push(TupleInferenceStep::Slice {
-                            start: s1,
-                            end: e1,
-                            target: start + 1,
-                            speculative: false,
-                        });
-                    }
+                    steps.push(slice_tuple(
+                        start,
+                        (end + source_arity) as isize - arity as isize,
+                        start,
+                        false,
+                    ));
+                    steps.push(slice_tuple(start + arity, end as isize, start + 1, false));
                 }
             }
             Some([TupleElementKind::Variadic, TupleElementKind::Rest]) => {
                 if let Some(arity) = facts.fixed_constraint_arity(start) {
-                    let first = source_arity
-                        .checked_sub(start + arity)
-                        .and_then(|first_end| slice(start, first_end));
-                    if let Some((s0, e0)) = first {
-                        steps.push(TupleInferenceStep::Slice {
-                            start: s0,
-                            end: e0,
-                            target: start,
-                            speculative: false,
-                        });
-                        if let Some((s1, e1)) =
-                            slice(start + arity, end).filter(|(s, e)| s + e < source_arity)
-                        {
-                            steps.push(TupleInferenceStep::SliceElementType {
-                                start: s1,
-                                end: e1,
-                                target: start + 1,
-                            });
-                        }
-                    }
+                    steps.push(slice_tuple(
+                        start,
+                        source_arity as isize - (start + arity) as isize,
+                        start,
+                        false,
+                    ));
+                    steps.extend(slice_element_type(start + arity, end, start + 1));
                 }
             }
             Some([TupleElementKind::Rest, TupleElementKind::Variadic]) => {
                 if let Some(arity) = facts.fixed_constraint_arity(start + 1) {
-                    let end_index = source_arity.checked_sub(end_fixed(target));
-                    let start_index = end_index.and_then(|index| index.checked_sub(arity));
-                    if let (Some(end_index), Some(start_index)) = (end_index, start_index) {
-                        if start_index >= start {
-                            if let Some((s0, e0)) =
-                                slice(start, end + arity).filter(|(s, e)| s + e < source_arity)
-                            {
-                                steps.push(TupleInferenceStep::SliceElementType {
-                                    start: s0,
-                                    end: e0,
-                                    target: start,
-                                });
-                            }
-                            steps.push(TupleInferenceStep::Slice {
-                                start: start_index,
-                                end: source_arity - end_index,
-                                target: start + 1,
-                                speculative: false,
-                            });
-                        }
-                    }
-                }
-            }
-            Some([TupleElementKind::Variadic]) => {
-                if let Some((s, e)) = slice(start, end) {
+                    steps.extend(slice_element_type(start, end + arity, start));
+                    // The trailing slice is a plain tuple of the source's
+                    // elements over `[end_index - arity, end_index)`.
+                    let end_index = source_arity - end;
+                    let (s, e) = js_slice_range(
+                        source_arity,
+                        end_index as isize - arity as isize,
+                        end_index as isize,
+                    );
                     steps.push(TupleInferenceStep::Slice {
                         start: s,
                         end: e,
-                        target: start,
-                        speculative: target.last() == Some(&TupleElementKind::Optional),
+                        target: start + 1,
+                        speculative: false,
                     });
                 }
             }
+            Some([TupleElementKind::Variadic]) => {
+                steps.push(slice_tuple(
+                    start,
+                    end as isize,
+                    start,
+                    target.last() == Some(&TupleElementKind::Optional),
+                ));
+            }
             Some([TupleElementKind::Rest]) => {
-                if let Some((s, e)) = slice(start, end).filter(|(s, e)| s + e < source_arity) {
-                    steps.push(TupleInferenceStep::SliceElementType {
-                        start: s,
-                        end: e,
-                        target: start,
-                    });
-                }
+                steps.extend(slice_element_type(start, end, start));
             }
             _ => {}
         }
@@ -570,4 +574,17 @@ pub fn tuple_inference_plan(
         target: target_arity - i - 1,
     }));
     steps
+}
+
+/// The JavaScript `Array.prototype.slice(begin, end)` range over `len`
+/// elements, as a `(start, end)` pair of a [`TupleInferenceStep::Slice`]:
+/// a negative bound counts from the end, an overlong one clamps to the
+/// length, and an end before the beginning is the empty slice.
+fn js_slice_range(len: usize, begin: isize, end: isize) -> (usize, usize) {
+    let clamp = |index: isize| match usize::try_from(index) {
+        Ok(index) => index.min(len),
+        Err(_) => len.saturating_sub(index.unsigned_abs()),
+    };
+    let start = clamp(begin);
+    (start, len - clamp(end).max(start))
 }
