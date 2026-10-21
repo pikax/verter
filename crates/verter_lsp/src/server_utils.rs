@@ -549,6 +549,9 @@ pub(crate) fn compute_specifier_replacements(
             },
         ) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(_) => return None,
         };
         let Some(resolved) = resolved else {
@@ -928,61 +931,20 @@ pub(crate) fn collect_resolved_provider_dependencies(
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_session::ScriptModuleReference],
-) -> Option<Vec<verter_session_query::resolution::ResolveResult>> {
-    let mut seen = HashSet::new();
-    let mut resolved = Vec::new();
+) -> Option<super::ResolvedProviderDependencies> {
+    let mut collector = ProviderDependencyCollector::new(resolution_view, reader, importer_id);
 
     for reference in module_references {
         let kind = module_reference_request_kind(reference);
         match reference.analyzability {
             verter_session_query::analysis::types::ModuleReferenceAnalyzability::Exact => {
                 if let Some(specifier) = &reference.literal_specifier {
-                    let result = match resolve_import_from_published_snapshot(
-                        resolution_view,
-                        reader,
-                        importer_id,
-                        specifier,
-                        verter_session_query::resolution::ResolutionContext {
-                            kind,
-                            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
-                        },
-                    ) {
-                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                            admitted.into_result()
-                        }
-                        verter_workspace::ResolutionPublication::Refused(_) => return None,
-                    };
-                    if let Some(result) = result {
-                        let key = (result.source_id.clone(), result.provider_id.clone());
-                        if seen.insert(key) {
-                            resolved.push(result);
-                        }
-                    }
+                    collector.resolve(specifier, kind)?;
                 }
             }
             verter_session_query::analysis::types::ModuleReferenceAnalyzability::FiniteSet => {
                 for specifier in &reference.finite_specifiers {
-                    let result = match resolve_import_from_published_snapshot(
-                        resolution_view,
-                        reader,
-                        importer_id,
-                        specifier,
-                        verter_session_query::resolution::ResolutionContext {
-                            kind,
-                            phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
-                        },
-                    ) {
-                        verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                            admitted.into_result()
-                        }
-                        verter_workspace::ResolutionPublication::Refused(_) => return None,
-                    };
-                    if let Some(result) = result {
-                        let key = (result.source_id.clone(), result.provider_id.clone());
-                        if seen.insert(key) {
-                            resolved.push(result);
-                        }
-                    }
+                    collector.resolve(specifier, kind)?;
                 }
             }
             verter_session_query::analysis::types::ModuleReferenceAnalyzability::UnknownDynamic => {
@@ -990,7 +952,7 @@ pub(crate) fn collect_resolved_provider_dependencies(
         }
     }
 
-    Some(resolved)
+    Some(collector.resolved)
 }
 
 pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
@@ -999,48 +961,82 @@ pub(super) fn collect_resolved_provider_dependencies_from_analyzed_refs(
     reader: &dyn verter_workspace::WorkspaceRead,
     importer_id: &str,
     module_references: &[verter_session_query::analysis::types::AnalyzedModuleReference],
-) -> Option<Vec<verter_session_query::resolution::ResolveResult>> {
-    let mut seen = HashSet::new();
-    let mut resolved = Vec::new();
+) -> Option<super::ResolvedProviderDependencies> {
+    let mut collector = ProviderDependencyCollector::new(resolution_view, reader, importer_id);
 
     for reference in module_references {
-        let specifiers: Vec<&str> = if let Some(specifier) = reference.literal_specifier.as_deref()
-        {
-            vec![specifier]
+        let kind = analyzed_module_reference_request_kind(reference);
+        if let Some(specifier) = reference.literal_specifier.as_deref() {
+            collector.resolve(specifier, kind)?;
         } else {
-            reference
-                .finite_specifiers
-                .iter()
-                .map(String::as_str)
-                .collect()
-        };
-
-        for specifier in specifiers {
-            let result = match resolve_import_from_published_snapshot(
-                resolution_view,
-                reader,
-                importer_id,
-                specifier,
-                verter_session_query::resolution::ResolutionContext {
-                    kind: analyzed_module_reference_request_kind(reference),
-                    phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
-                },
-            ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    admitted.into_result()
-                }
-                verter_workspace::ResolutionPublication::Refused(_) => return None,
-            };
-            if let Some(result) = result {
-                let key = (result.source_id.clone(), result.provider_id.clone());
-                if seen.insert(key) {
-                    resolved.push(result);
-                }
+            for specifier in &reference.finite_specifiers {
+                collector.resolve(specifier, kind)?;
             }
         }
     }
 
-    Some(resolved)
+    Some(collector.resolved)
+}
+
+/// Resolves an importer's provider-graph specifiers into one
+/// [`super::ResolvedProviderDependencies`], deduplicated by
+/// `(source, provider)`, keeping whether the workspace retained each one.
+struct ProviderDependencyCollector<'a> {
+    resolution_view: Option<&'a super::PublishedResolutionView>,
+    reader: &'a dyn verter_workspace::WorkspaceRead,
+    importer_id: &'a str,
+    seen: HashSet<(String, String)>,
+    resolved: super::ResolvedProviderDependencies,
+}
+
+impl<'a> ProviderDependencyCollector<'a> {
+    fn new(
+        resolution_view: Option<&'a super::PublishedResolutionView>,
+        reader: &'a dyn verter_workspace::WorkspaceRead,
+        importer_id: &'a str,
+    ) -> Self {
+        Self {
+            resolution_view,
+            reader,
+            importer_id,
+            seen: HashSet::new(),
+            resolved: super::ResolvedProviderDependencies::default(),
+        }
+    }
+
+    /// `None` when the resolution was refused: the importer's dependency
+    /// set is then unknown, and the caller publishes none of it.
+    fn resolve(
+        &mut self,
+        specifier: &str,
+        kind: verter_session_query::resolution::ResolveRequestKind,
+    ) -> Option<()> {
+        let (result, retained) = match resolve_import_from_published_snapshot(
+            self.resolution_view,
+            self.reader,
+            self.importer_id,
+            specifier,
+            verter_session_query::resolution::ResolutionContext {
+                kind,
+                phase: verter_session_query::resolution::ResolvePhase::ProviderGraph,
+            },
+        ) {
+            verter_workspace::ResolutionPublication::Admitted(admitted) => {
+                (admitted.into_result(), true)
+            }
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                (unretained.into_result(), false)
+            }
+            verter_workspace::ResolutionPublication::Refused(_) => return None,
+        };
+        if let Some(result) = result {
+            let key = (result.source_id.clone(), result.provider_id.clone());
+            if self.seen.insert(key) {
+                self.resolved.push(result, retained);
+            }
+        }
+        Some(())
+    }
 }
 
 pub(crate) fn module_reference_request_kind(
@@ -1598,6 +1594,9 @@ where
         };
         let canonical_id = match resolve_import(parent, &import.source) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return Err(refusal);
             }
@@ -1637,6 +1636,9 @@ where
     for import in imports {
         let canonical_id = match resolve_import(parent, &import.source) {
             verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
+            verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                unretained.into_result()
+            }
             verter_workspace::ResolutionPublication::Refused(refusal) => {
                 return Err(refusal);
             }
@@ -1687,6 +1689,9 @@ pub(super) fn collect_priority_carrier_public_api_targets_from_module_references
             ) {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => {
                     admitted.into_result()
+                }
+                verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                    unretained.into_result()
                 }
                 verter_workspace::ResolutionPublication::Refused(_) => return None,
             };

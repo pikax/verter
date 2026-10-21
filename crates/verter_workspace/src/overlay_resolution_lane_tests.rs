@@ -415,6 +415,9 @@ fn resident_overlay_state_is_charged_while_it_lives() {
     );
 }
 
+/// A refused overlay charge is retention pressure: the complete answer is
+/// delivered unretained — never published as admitted, so no consumer can
+/// root a retained entry on it.
 #[test]
 fn a_refused_charge_serves_the_overlay_answer_uncached() {
     use crate::traits::WorkspaceAccess;
@@ -432,6 +435,18 @@ fn a_refused_charge_serves_the_overlay_answer_uncached() {
             "the answer is complete"
         );
         assert!(!outcome.trace().reused(), "and never retained");
+        assert_eq!(
+            outcome.non_admission_reason(),
+            Some(verter_audit::NonAdmissionReason::RetentionPressure)
+        );
+        match outcome.into_publication() {
+            crate::ResolutionPublication::Unretained(unretained) => assert_eq!(
+                unretained.result().map(|result| result.source_id.as_str()),
+                Some("/p/dep.ts"),
+                "delivered unretained"
+            ),
+            other => panic!("a refused overlay charge is delivered unretained, got {other:?}"),
+        }
     }
     assert_eq!(lane_and_values(&workspace), (0, 0));
 }

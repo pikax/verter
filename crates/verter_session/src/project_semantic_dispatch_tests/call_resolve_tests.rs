@@ -3388,6 +3388,140 @@ fn a_source_call_infers_from_every_argument_position() {
     }
 }
 
+#[test]
+fn a_conditional_alias_in_a_call_result_reduces_after_substitution() {
+    let canonical = "/w/conditional_call.ts";
+    let host = host();
+    upsert_source(
+        &host,
+        canonical,
+        r#"
+type __BenchInit = 0;
+type UR<T> = T extends string ? "s" : T;
+declare function f<T>(): { value: UR<T> };
+const a = f<number>();
+type __Probe = typeof a.value;
+const b = f<string>();
+type StringResult = typeof b.value;
+type Wrapped<T> = UR<T>;
+declare function wrapped<T>(): { value: Wrapped<T> };
+const c = wrapped<number>();
+type WrappedResult = typeof c.value;
+export function open<T>() { return f<T>(); }
+export function openMapped<T>() {
+    const p = f<T>();
+    return null! as { [K in keyof typeof p]: (typeof p)[K] };
+}
+export function fixedKeys<T>() {
+    const p = f<T>();
+    return null! as { [K in keyof typeof p]: number };
+}
+export function closedMapped() { return null! as { [K in keyof typeof a]: number }; }
+type ClosedMapResult = ReturnType<typeof closedMapped>;
+export function excludedMapped() {
+    return null! as { [K in keyof typeof a]: Exclude<(typeof a)[K], undefined> };
+}
+type ClosedExcludeMapResult = ReturnType<typeof excludedMapped>;
+export {};
+"#,
+    );
+    host.resolve_named_symbol_with_audit(canonical, "__BenchInit", None)
+        .into_parts()
+        .0
+        .expect("initialization resolves")
+        .expect("initialization has a node");
+    for request in ["cold", "warm"] {
+        for probe in [
+            "__Probe",
+            "StringResult",
+            "WrappedResult",
+            "ClosedMapResult",
+            "ClosedExcludeMapResult",
+        ] {
+            let (outcome, _) = host
+                .resolve_named_symbol_with_audit(canonical, probe, None)
+                .into_parts();
+            let node = outcome.expect("probe resolves").expect("probe has a node");
+            let data = host
+                .project_type_store()
+                .semantic_graph()
+                .node_data(node.id());
+            let correct = match data.as_deref() {
+                Some(SemanticNodeData::Literal(verter_type_expr::LiteralValue::String(s)))
+                    if probe == "StringResult" =>
+                {
+                    s == "s"
+                }
+                Some(SemanticNodeData::Primitive(PrimitiveKind::Number)) => {
+                    matches!(probe, "__Probe" | "WrappedResult")
+                }
+                Some(SemanticNodeData::Object(surface))
+                    if matches!(probe, "ClosedMapResult" | "ClosedExcludeMapResult") =>
+                {
+                    surface.positive_members().len() == 1
+                        && surface.positive_members()[0].string_name() == Some("value")
+                        && matches!(
+                            host.project_type_store()
+                                .semantic_graph()
+                                .node_data(surface.positive_members()[0].value)
+                                .as_deref(),
+                            Some(SemanticNodeData::Primitive(PrimitiveKind::Number))
+                        )
+                }
+                _ => false,
+            };
+            assert!(correct,
+                "the {request} {probe} call result must select its substituted branch, got {data:?}");
+        }
+    }
+    for function in ["open", "openMapped", "fixedKeys", "closedMapped"] {
+        let open = host
+            .get_flow_return_type_with_audit(
+                &FlowFunctionReturnIdentity {
+                    anchor: AuthoredAnchor {
+                        canonical_id: verter_type_expr::OwnedStr::from(canonical),
+                        owner: verter_type_expr::TopLevelOwnerId::ordinary_file(),
+                        symbol: verter_type_expr::OwnedStr::from(function),
+                        space: LocatorSymbolSpace::Value,
+                    },
+                    function_part: FunctionPartIdentity::DeclarationBody,
+                    overload_ordinal: 0,
+                },
+                verter_type_engine::semantic_query::ReturnProjectionDemand::whole_return(),
+            )
+            .into_result()
+            .expect("generic call has a complete return");
+        let graph = host.project_type_store().semantic_graph();
+        let data = graph
+            .node_data(open.return_type())
+            .expect("open alias has data");
+        if matches!(function, "openMapped" | "fixedKeys" | "closedMapped") {
+            assert!(
+                matches!(data.as_ref(), SemanticNodeData::Mapped { .. }),
+                "a flow return retains its shallow mapped carrier until publication: {data:?}"
+            );
+            continue;
+        }
+        let SemanticNodeData::Object(surface) = data.as_ref() else {
+            panic!("open alias retains its shallow surface: {data:?}");
+        };
+        let value = graph
+            .node_data(
+                surface
+                    .positive_members()
+                    .first()
+                    .expect("open alias has a member")
+                    .value,
+            )
+            .expect("open member has data");
+        assert!(
+            matches!(value.as_ref(), SemanticNodeData::InstantiationRef { base, args }
+        if base.decl_name.as_ref() == "UR" && matches!(graph.node_data(args[0]).as_deref(), Some(SemanticNodeData::TypeParam { .. }))),
+            "an unbound conditional alias stays addressable: {value:?}"
+        );
+    }
+}
+
 /// `f<T>(xs: [T, …, T]): T` over each of `counts` positions, called with as
 /// many `1`s, selects `T := number`.
 fn deposits_select_number(counts: &[usize]) {

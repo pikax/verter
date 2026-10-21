@@ -327,6 +327,7 @@ impl SemanticGraphStore {
                     children.push(mapper.value_expr);
                 }
                 children.extend(mapper.name_remap);
+                children.extend(mapper.modifiers_type);
                 // A wildcard-free match covers VARIANTS, not struct FIELDS:
                 // the mapper's own parameter node is a descent too.
                 children.push(mapper.parameter_node);

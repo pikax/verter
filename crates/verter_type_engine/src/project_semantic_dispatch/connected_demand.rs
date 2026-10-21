@@ -296,8 +296,19 @@ pub struct ConnectedDemandLedger<'a> {
     active: Cell<bool>,
     work_used: Cell<usize>,
     work_limit: Cell<usize>,
+    /// Every construction byte the demand charged: the bytes it reserved
+    /// and the advisory footprint (`advisory_bytes_used`).
     bytes_used: Cell<u64>,
+    /// The part of `bytes_used` charged while the advisory
+    /// construction-byte rail is off: accounted, never enforced, so no
+    /// later reservation is refused for it.
+    advisory_bytes_used: Cell<u64>,
     bytes_limit: Cell<u64>,
+    /// Whether a canonical construction's footprint
+    /// ([`Self::charge_construction`]) may be refused at `bytes_limit`: the
+    /// advisory construction-byte rail, off unless explicitly enabled. Off,
+    /// the footprint is still charged to `bytes_used`, as advisory bytes.
+    construction_byte_refusal: Cell<bool>,
     query_depth: Cell<u16>,
     query_depth_limit: Cell<u16>,
     instantiation_depth_limit: u32,
@@ -339,6 +350,8 @@ pub(crate) struct RequestEffects {
 pub(crate) struct ComponentMetaSpan {
     pub(crate) work: usize,
     pub(crate) bytes: u64,
+    /// The part of `bytes` that is advisory construction footprint.
+    pub(crate) advisory_bytes: u64,
     pub(crate) trip: PartialReasonSet,
     pub(crate) schedule_cuts: u64,
     pub(crate) certificates: u64,
@@ -459,6 +472,7 @@ impl TaskSpanCarry {
             for open in spans.borrow_mut().iter_mut() {
                 open.work = open.work.saturating_add(span.work);
                 open.bytes = open.bytes.saturating_add(span.bytes);
+                open.advisory_bytes = open.advisory_bytes.saturating_add(span.advisory_bytes);
                 open.trip = open.trip.union(span.trip);
                 open.schedule_cuts = open.schedule_cuts.saturating_add(span.schedule_cuts);
                 open.certificates = open.certificates.saturating_add(span.certificates);
@@ -493,13 +507,16 @@ fn remember_work(n: usize) {
     });
 }
 
-fn remember_bytes(n: u64) {
+/// Record `n` construction bytes on every open span, `advisory` of them
+/// advisory footprint.
+fn remember_bytes(n: u64, advisory: u64) {
     if n == 0 || !span_open() {
         return;
     }
     COMPONENT_META_SPANS.with(|spans| {
         for span in spans.borrow_mut().iter_mut() {
             span.bytes = span.bytes.saturating_add(n);
+            span.advisory_bytes = span.advisory_bytes.saturating_add(advisory);
         }
     });
 }
@@ -544,7 +561,12 @@ impl std::fmt::Debug for ConnectedDemandLedger<'_> {
             .field("work_used", &self.work_used.get())
             .field("work_limit", &self.work_limit.get())
             .field("bytes_used", &self.bytes_used.get())
+            .field("advisory_bytes_used", &self.advisory_bytes_used.get())
             .field("bytes_limit", &self.bytes_limit.get())
+            .field(
+                "construction_byte_refusal",
+                &self.construction_byte_refusal.get(),
+            )
             .field("query_depth", &self.query_depth.get())
             .field("query_depth_limit", &self.query_depth_limit.get())
             .field("instantiation_depth_limit", &self.instantiation_depth_limit)
@@ -576,7 +598,9 @@ impl<'a> ConnectedDemandLedger<'a> {
             work_used,
             work_limit,
             bytes_used,
+            advisory_bytes_used,
             bytes_limit,
+            construction_byte_refusal,
             query_depth,
             query_depth_limit,
             instantiation_depth_limit,
@@ -597,7 +621,9 @@ impl<'a> ConnectedDemandLedger<'a> {
         work_used.swap(&other.work_used);
         work_limit.swap(&other.work_limit);
         bytes_used.swap(&other.bytes_used);
+        advisory_bytes_used.swap(&other.advisory_bytes_used);
         bytes_limit.swap(&other.bytes_limit);
+        construction_byte_refusal.swap(&other.construction_byte_refusal);
         query_depth.swap(&other.query_depth);
         query_depth_limit.swap(&other.query_depth_limit);
         tripped.swap(&other.tripped);
@@ -629,7 +655,9 @@ impl<'a> ConnectedDemandLedger<'a> {
                     .unwrap_or(MAX_CONNECTED_PROJECTION_WORK),
             ),
             bytes_used: Cell::new(0),
+            advisory_bytes_used: Cell::new(0),
             bytes_limit: Cell::new(MAX_CONNECTED_CONSTRUCTION_BYTES),
+            construction_byte_refusal: Cell::new(false),
             query_depth: Cell::new(0),
             query_depth_limit: Cell::new(MAX_CONNECTED_QUERY_DEPTH),
             #[cfg(not(any(test, feature = "test-support")))]
@@ -701,6 +729,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         if root {
             self.work_used.set(0);
             self.bytes_used.set(0);
+            self.advisory_bytes_used.set(0);
             self.paid.borrow_mut().clear();
             self.request_effects.set(RequestEffects::default());
             self.schedule_cut.set(false);
@@ -793,7 +822,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         }
         self.work_used.set(work_used + 1);
         remember_work(1);
-        self.accrue(1, 0);
+        self.accrue(1, 0, 0);
         Ok(())
     }
 
@@ -832,20 +861,31 @@ impl<'a> ConnectedDemandLedger<'a> {
 
     /// Construction room for a batch, before committing any reservation.
     pub(crate) fn construction_bytes_available(&self) -> usize {
-        usize::try_from(self.bytes_limit.get().saturating_sub(self.bytes_used.get()))
+        usize::try_from(self.bytes_limit.get().saturating_sub(self.enforced_bytes()))
             .unwrap_or(usize::MAX)
     }
 
-    /// Add `work` units and `bytes` to the open recording, if any: the cost
-    /// the computation on top of the scope stack performs itself.
+    /// The construction bytes the byte allowance holds the demand to: every
+    /// byte it charged but its advisory footprint.
+    fn enforced_bytes(&self) -> u64 {
+        self.bytes_used
+            .get()
+            .saturating_sub(self.advisory_bytes_used.get())
+    }
+
+    /// Add `work` units and `bytes` construction bytes, `advisory` of them
+    /// advisory footprint, to the open recording, if any: the cost the
+    /// computation on top of the scope stack performs itself.
     #[inline(always)]
-    fn accrue(&self, work: usize, bytes: usize) {
+    fn accrue(&self, work: usize, bytes: u64, advisory: u64) {
         if !self.scope_open.get() {
             return;
         }
         if let Some(scope) = self.scopes.borrow_mut().last_mut() {
             scope.exclusive.work = scope.exclusive.work.saturating_add(work as u64);
-            scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes as u64);
+            scope.exclusive.bytes = scope.exclusive.bytes.saturating_add(bytes);
+            scope.exclusive.advisory_bytes =
+                scope.exclusive.advisory_bytes.saturating_add(advisory);
         }
     }
 
@@ -880,11 +920,12 @@ impl<'a> ConnectedDemandLedger<'a> {
         verter_debug_assert!(work_used.saturating_add(consumed) <= self.work_limit.get());
         self.work_used.set(work_used + consumed);
         remember_work(consumed);
-        self.accrue(consumed, 0);
+        self.accrue(consumed, 0, 0);
     }
 
-    /// Reserve `bytes` of construction before building what they hold.
-    /// `Err` carries the sticky trip set when the demand cannot pay for them
+    /// Reserve `bytes` of construction before building what they hold,
+    /// against the byte allowance less what the demand already reserved —
+    /// never less its advisory footprint. `Err` carries the sticky trip set when the demand cannot pay for them
     /// ([`PartialReasonSet::CONNECTED_MEMORY_LIMIT`] when this reservation
     /// is the one refused).
     pub fn reserve_bytes(&self, bytes: usize) -> Result<(), PartialReasonSet> {
@@ -899,16 +940,54 @@ impl<'a> ConnectedDemandLedger<'a> {
         if !tripped.is_empty() {
             return Err(tripped);
         }
-        let used = self.bytes_used.get();
-        match used.checked_add(bytes as u64) {
-            Some(total) if total <= self.bytes_limit.get() => {
-                self.bytes_used.set(total);
-                remember_bytes(bytes as u64);
-                self.accrue(0, bytes);
+        let bytes = bytes as u64;
+        match self.enforced_bytes().checked_add(bytes) {
+            Some(enforced) if enforced <= self.bytes_limit.get() => {
+                self.charge_bytes(bytes, 0);
+                remember_bytes(bytes, 0);
+                self.accrue(0, bytes, 0);
                 Ok(())
             }
             _ => Err(self.record_trip(PartialReasonSet::CONNECTED_MEMORY_LIMIT)),
         }
+    }
+
+    /// Pay for a canonical construction before it builds: `units` work
+    /// units, refused past the work allowance, and `bytes` of construction
+    /// footprint. The footprint is always charged; it is refused at the
+    /// byte allowance only when the advisory construction-byte rail is
+    /// enabled ([`Self::set_construction_byte_refusal_for_tests`]).
+    /// Otherwise it is advisory: it never stops the construction, and no
+    /// later reservation of the demand is refused for it. `Err` carries the
+    /// sticky trip set, and nothing is charged for the refused part.
+    pub(crate) fn charge_construction(
+        &self,
+        units: usize,
+        bytes: usize,
+    ) -> Result<(), PartialReasonSet> {
+        self.charge_units(units)?;
+        if self.construction_byte_refusal.get() {
+            return self.reserve_bytes(bytes);
+        }
+        verter_debug_assert!(
+            self.active.get(),
+            "construction bytes must be charged inside a connected-demand guard"
+        );
+        let bytes = bytes as u64;
+        self.charge_bytes(bytes, bytes);
+        remember_bytes(bytes, bytes);
+        self.accrue(0, bytes, bytes);
+        Ok(())
+    }
+
+    /// Charge `bytes` construction bytes, `advisory` of them advisory
+    /// footprint, without weighing them against the allowance.
+    fn charge_bytes(&self, bytes: u64, advisory: u64) {
+        verter_debug_assert!(advisory <= bytes);
+        self.bytes_used
+            .set(self.bytes_used.get().saturating_add(bytes));
+        self.advisory_bytes_used
+            .set(self.advisory_bytes_used.get().saturating_add(advisory));
     }
 
     /// What the active demand has charged so far.
@@ -945,7 +1024,7 @@ impl<'a> ConnectedDemandLedger<'a> {
         } else if reasons.contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT) {
             (
                 usize::try_from(self.bytes_limit.get()).unwrap_or(usize::MAX),
-                self.bytes_used.get(),
+                self.enforced_bytes(),
                 "construction-bytes",
             )
         } else {
@@ -978,6 +1057,19 @@ impl<'a> ConnectedDemandLedger<'a> {
             "test limits must be set before entering a connected demand"
         );
         self.bytes_limit.set(bytes);
+    }
+
+    /// Enable or disable the advisory construction-byte rail for the next
+    /// connected demand: enabled, a canonical construction whose footprint
+    /// passes the byte allowance is refused. Test-only, and refused inside
+    /// an active demand.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_construction_byte_refusal_for_tests(&self, enabled: bool) {
+        assert!(
+            !self.active.get(),
+            "test limits must be set before entering a connected demand"
+        );
+        self.construction_byte_refusal.set(enabled);
     }
 
     /// The construction bytes the last connected demand reserved. Test-only:
@@ -1208,6 +1300,7 @@ impl ConnectedDemandLedger<'_> {
         BudgetProfileSpec {
             work: self.work_limit.get(),
             bytes: self.bytes_limit.get(),
+            construction_byte_refusal: self.construction_byte_refusal.get(),
             query_depth: self.query_depth_limit.get(),
             instantiation_depth: self.instantiation_depth_limit,
             tail_steps: self.tail_steps_limit,
@@ -1319,6 +1412,11 @@ impl ConnectedDemandLedger<'_> {
             let total = LogicalUsage {
                 work: if demand_paid { 0 } else { exclusive.work },
                 bytes: if demand_paid { 0 } else { exclusive.bytes },
+                advisory_bytes: if demand_paid {
+                    0
+                } else {
+                    exclusive.advisory_bytes
+                },
                 operations: if request_paid {
                     0
                 } else {
@@ -1372,6 +1470,11 @@ impl ConnectedDemandLedger<'_> {
                 let owed = LogicalUsage {
                     work: if demand_paid { 0 } else { exclusive.work },
                     bytes: if demand_paid { 0 } else { exclusive.bytes },
+                    advisory_bytes: if demand_paid {
+                        0
+                    } else {
+                        exclusive.advisory_bytes
+                    },
                     operations: if request_paid {
                         0
                     } else {
@@ -1430,10 +1533,9 @@ impl ConnectedDemandLedger<'_> {
         let replayed_work = total.work as usize;
         let replayed_bytes = total.bytes;
         self.work_used.set(self.work_used.get() + replayed_work);
-        self.bytes_used
-            .set(self.bytes_used.get().saturating_add(replayed_bytes));
+        self.charge_bytes(replayed_bytes, total.advisory_bytes);
         remember_work(replayed_work);
-        remember_bytes(replayed_bytes);
+        remember_bytes(replayed_bytes, total.advisory_bytes);
         self.paid.borrow_mut().extend(unpaid);
         // Within `comparison_room`, so within `u32`.
         Ok(u32::try_from(total.comparisons).unwrap_or(u32::MAX))
@@ -1555,20 +1657,31 @@ impl ConnectedDemandLedger<'_> {
         self.active.get()
     }
 
-    /// The work units and construction bytes the active demand charged.
-    pub(crate) fn charged(&self) -> (usize, u64) {
-        (self.work_used.get(), self.bytes_used.get())
+    /// The work units and construction bytes the active demand charged,
+    /// and the part of those bytes that is advisory footprint.
+    pub(crate) fn charged(&self) -> (usize, u64, u64) {
+        (
+            self.work_used.get(),
+            self.bytes_used.get(),
+            self.advisory_bytes_used.get(),
+        )
     }
 
     /// Leave the active demand as a sealed refusal's evaluation left it:
-    /// its work and bytes charged and `trip` tripped.
-    pub(crate) fn apply_refusal(&self, work: usize, bytes: u64, trip: PartialReasonSet) {
+    /// its work and bytes charged, `advisory` of those bytes advisory
+    /// footprint, and `trip` tripped.
+    pub(crate) fn apply_refusal(
+        &self,
+        work: usize,
+        bytes: u64,
+        advisory: u64,
+        trip: PartialReasonSet,
+    ) {
         self.work_used
             .set(self.work_used.get().saturating_add(work));
-        self.bytes_used
-            .set(self.bytes_used.get().saturating_add(bytes));
+        self.charge_bytes(bytes, advisory);
         remember_work(work);
-        remember_bytes(bytes);
+        remember_bytes(bytes, advisory);
         self.record_trip(trip);
     }
 
@@ -1803,5 +1916,82 @@ mod envelope_tests {
         reserve(u64::from(RELATION_COMPARISONS) * RELATION_PAIR_BYTES as u64)
             .expect("the relation allowance's bytes are granted beside them");
         drop(guard);
+    }
+}
+
+#[cfg(test)]
+mod advisory_bytes_tests {
+    use super::*;
+
+    /// A canonical construction's footprint, charged while the advisory
+    /// construction-byte rail is off, is accounted in the demand's bytes but
+    /// never enforced: a reservation after it still has the whole byte
+    /// allowance, whether the footprint was charged cold, replayed from the
+    /// computation's receipt, or applied from a sealed refusal. Enabled, the
+    /// rail refuses the same footprint.
+    #[test]
+    fn an_advisory_footprint_never_refuses_a_later_reservation() {
+        let flags = crate::resolver_core::resolver_context::RequestFlags::new(
+            crate::resolver_core::resolver_context::ProjectGenerationClock::new(Arc::new(
+                std::sync::atomic::AtomicU64::new(0),
+            )),
+        );
+        let ledger = ConnectedDemandLedger::new(DemandCancellation::from_flags(&flags));
+        ledger.set_byte_limit_for_tests(100);
+
+        let receipt = {
+            let (_guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger.open_cost_scope(CostIdentity::new(Arc::<[u8]>::from([7])));
+            ledger
+                .charge_construction(1, 1_000)
+                .expect("the rail is off: the footprint never refuses");
+            ledger
+                .reserve_bytes(100)
+                .expect("the whole allowance remains after the advisory footprint");
+            assert_eq!(ledger.bytes_used_for_tests(), 1_100, "both are accounted");
+            assert!(ledger
+                .reserve_bytes(1)
+                .unwrap_err()
+                .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
+            ledger
+                .seal_cost_scope(None)
+                .expect("a complete computation")
+        };
+        assert_eq!(receipt.exclusive().bytes, 1_100);
+        assert_eq!(receipt.exclusive().advisory_bytes, 1_000);
+
+        {
+            let (_guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger
+                .replay_admit(&receipt, None, Nesting::InPlace)
+                .expect("a replay is never refused for its bytes");
+            assert_eq!(ledger.bytes_used_for_tests(), 1_100);
+            ledger
+                .reserve_bytes(0)
+                .expect("the replayed footprint is advisory, as it was cold");
+            assert!(
+                ledger.reserve_bytes(1).is_err(),
+                "the replayed reservation is still enforced"
+            );
+        }
+
+        {
+            let (_guard, trip) = ledger.enter(false);
+            assert!(trip.is_none());
+            ledger.apply_refusal(0, 1_000, 1_000, PartialReasonSet::empty());
+            ledger
+                .reserve_bytes(100)
+                .expect("a sealed refusal's advisory footprint is not enforced either");
+        }
+
+        ledger.set_construction_byte_refusal_for_tests(true);
+        let (_guard, trip) = ledger.enter(false);
+        assert!(trip.is_none());
+        assert!(ledger
+            .charge_construction(1, 1_000)
+            .unwrap_err()
+            .contains(PartialReasonSet::CONNECTED_MEMORY_LIMIT));
     }
 }

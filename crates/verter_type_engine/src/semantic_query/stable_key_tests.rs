@@ -1423,6 +1423,7 @@ fn union_reducer_keeps_homomorphic_and_concrete_mappings_apart() {
                 name_remap: None,
                 kind: MapperKind::Computed,
                 over_type_variable,
+                modifiers_type: None,
             },
         })
     };

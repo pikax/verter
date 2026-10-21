@@ -20,6 +20,7 @@
 //! | [`UnsupportedPosition`] | `UnmodeledPosition` | No value at this position; an enclosing completed structural producer may retain it as a typed gap. Never proves absence. |
 //! | [`Partial`] | `BudgetExceeded`, `Cancelled`, `UnstableState` | Typed partial — `ReturnOnly`, never shared, never warmed. |
 //! | [`Failure`] | `Other`, `UnsupportedIntrinsic`, `ValueDomainMismatch` | Genuine typed failure (the §22 error type). |
+//! | [`PermissiveWildcard`] | `PermissiveWildcard` | A known internal type for permissive relation proofs. Complete as a value; an error-channel occurrence still fails and cannot become public syntax. |
 //! | [`CheckerRecovery`] | `CheckerRecovery` with a `Certified` basis | The checker's own error type after a diagnostic it recovers from: the §22 error type, raised AS its recovery (`any`) — never a failure shell, never absence. A complete answer. |
 //! | [`BudgetRecovery`] | `CheckerRecovery` with a `Budget` basis | The checker's error type after an operation exhausted Verter's allowance for it: raised AS its recovery like [`CheckerRecovery`], but a resource partial — `ReturnOnly`, never shared, never warmed. |
 //!
@@ -38,6 +39,7 @@
 //! [`UnsupportedPosition`]: QueryErrorDisposition::UnsupportedPosition
 //! [`Partial`]: QueryErrorDisposition::Partial
 //! [`Failure`]: QueryErrorDisposition::Failure
+//! [`PermissiveWildcard`]: QueryErrorDisposition::PermissiveWildcard
 //! [`CheckerRecovery`]: QueryErrorDisposition::CheckerRecovery
 //! [`BudgetRecovery`]: QueryErrorDisposition::BudgetRecovery
 
@@ -72,6 +74,9 @@ pub enum QueryErrorDisposition {
     Partial,
     /// A genuine typed failure — the §22 error type.
     Failure,
+    /// A known internal type used by permissive relation proofs, distinct
+    /// from a failed query. It has no public TypeScript spelling.
+    PermissiveWildcard,
     /// The checker's own error type after a diagnostic it recovers from. The
     /// §22 error type like [`Failure`](Self::Failure) — it dominates the
     /// absorbers and relates like `any` — but a COMPLETE answer: it raises as
@@ -263,8 +268,11 @@ pub const fn classify_query_error(err: &QueryError) -> QueryErrorClass {
             QueryErrorDisposition::Partial,
             ClosedLiteralDomainUnresolvedReason::Fault,
         ),
+        QueryError::PermissiveWildcard => (
+            QueryErrorDisposition::PermissiveWildcard,
+            ClosedLiteralDomainUnresolvedReason::Fault,
+        ),
         QueryError::Other(_)
-        | QueryError::PermissiveWildcard
         | QueryError::ValueDomainMismatch { .. }
         | QueryError::ForeignSemanticOperand => (
             QueryErrorDisposition::Failure,
