@@ -495,6 +495,32 @@ impl ObservationArtifact {
         Ok(())
     }
 
+    /// Accept this artifact as the output of a live capture: it carries an
+    /// identity and rows, the adapter claimed no comparison, and at least one
+    /// sample recorded a compile measurement. A grid that validates but
+    /// measured nothing anywhere observed nothing.
+    pub fn check_live_capture(&self) -> Result<(), ObserveError> {
+        if self.artifact_id.is_empty() || self.rows.is_empty() {
+            return Err(invalid("a live capture must carry an artifact id and rows"));
+        }
+        if let Some(row) = self.rows.iter().find(|row| row.comparison_eligible) {
+            return Err(invalid(format!(
+                "{}: the adapter never sets comparison_eligible",
+                row.row_id
+            )));
+        }
+        if !self.rows.iter().any(|row| {
+            row.samples
+                .iter()
+                .any(|sample| sample.measurement.is_some())
+        }) {
+            return Err(invalid(
+                "a live observation must record at least one compile measurement",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_header(&self, manifests: &[ProbeStateManifest]) -> Result<(), ObserveError> {
         if self.workflow_run_id.is_empty()
             || self.rust_version.is_empty()

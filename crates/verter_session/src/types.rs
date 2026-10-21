@@ -4161,6 +4161,11 @@ pub struct HostRetentionSnapshot {
     /// Resolver component-meta states (one key per document, mode and view
     /// fingerprint; follows the current view, released on close).
     pub component_meta_states: usize,
+    /// Identity strings (canonical ids, symbol names) the project store's
+    /// intern pool holds. A close sheds every entry only the pool still
+    /// references, so after a close this counts only identities a live
+    /// reader still holds.
+    pub identity_pool_entries: usize,
     /// Registered source snapshots (the base registration per document plus
     /// the current overlay; superseded overlays are retracted).
     pub registered_sources: usize,
