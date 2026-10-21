@@ -19,6 +19,8 @@ use super::ProjectSemanticDispatch;
 mod context;
 #[path = "call_resolve_contextual.rs"]
 mod contextual;
+#[path = "call_resolve_elaboration.rs"]
+mod elaboration;
 use crate::semantic_query::{
     ArgumentLiteralMode, CallArgKey, CallKind, CanonicalTypeSubstitution, ConstParamPolicy,
     ContextualInferenceMode, FreshnessKey, FunctionParam, InferenceCandidatePriority,
@@ -223,6 +225,9 @@ struct CallArgument {
     /// A context-sensitive literal as the first inference pass reads it
     /// ([`CallArgKey::Eager`]).
     first_pass: Option<SemanticNodeId>,
+    /// The authored argument this one is — the spread, for each argument a
+    /// tuple spread expands to: where the checker reports its failure.
+    authored: u32,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -270,7 +275,9 @@ struct SuspendedCandidate {
     checkpoint: SessionCheckpoint,
     /// The first-pass argument the candidate relates next.
     next_argument: usize,
-    failure: Option<crate::semantic_query::CheckerDiagnosticCode>,
+    /// The diagnostic the first pass already met, as a reusable recipe so a
+    /// resumed candidate reports it at the site it finally binds.
+    failure: Option<crate::semantic_query::CheckerDiagnosticRecipe>,
     deferred_for_relation_scc: bool,
     /// The generic function arguments the first pass skipped so far: the
     /// argument's position, its one generic signature and its parameter.
@@ -1583,6 +1590,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             });
         let mut resuming = resume_at.is_some();
         let mut only_candidate = None;
+        // With explicit type arguments every candidate is instantiated, and
+        // the checker reports the argument error of the ONE candidate whose
+        // arity fits rather than TS2769 — continuing with it when it is also
+        // the candidate it recovers with (`getLongestCandidateIndex`: the
+        // first that takes as many parameters as the call has arguments).
+        let mut explicit_recovery = (visible.len() > 1 && !key.explicit_type_args.is_empty())
+            .then(|| self.sole_arity_fitting_candidate(visible, arguments))
+            .flatten();
         let mut raw_pairing = RawCandidatePairing::new(raw);
         for &applicability in passes {
             for (position, candidate) in visible.iter().enumerate() {
@@ -1619,7 +1634,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 };
                 self.dispatch_txn.borrow_mut().call.applicability = applicability;
                 let prepared = if self.dispatch_txn.borrow().call.contextual.is_some() {
-                    self.prepare_contextual_candidate(key, candidate, arguments, &mut budget)
+                    self.prepare_contextual_candidate(
+                        key,
+                        candidate,
+                        arguments,
+                        &mut budget,
+                        position + 1 == visible.len(),
+                    )
                 } else {
                     Ok(arguments.clone())
                 };
@@ -1660,7 +1681,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return CandidateVerdict::Degraded(failure);
                     }
                 }
-                if visible.len() == 1 {
+                if visible.len() == 1 || explicit_recovery == Some(position) {
+                    explicit_recovery = None;
                     only_candidate = Some((candidate, raw_candidate));
                 }
             }
@@ -2065,8 +2087,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         key: &ResolveCallKey,
     ) -> Result<Vec<CallArgument>, ResolveCallFailure> {
         let mut result = Vec::new();
-        for argument in key.args.iter() {
+        for (authored, argument) in key.args.iter().enumerate() {
             record_argument_work(1);
+            let authored = u32::try_from(authored).map_err(|_| ResolveCallFailure::Undecidable)?;
             let context_sensitive = argument.is_context_sensitive();
             let (node, spread, literal_mode, (const_view, first_pass), literal_provenance) =
                 match argument {
@@ -2130,6 +2153,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
                     first_pass: first_pass
                         .map(|view| self.substitute_canonical(view, &key.context.substitution)),
+                    authored,
                 });
                 continue;
             }
@@ -2163,6 +2187,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         context_sensitive,
                         const_view: None,
                         first_pass: None,
+                        authored,
                     }));
                 }
                 _ => result.push(CallArgument {
@@ -2174,6 +2199,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     context_sensitive,
                     const_view: None,
                     first_pass: None,
+                    authored,
                 }),
             }
         }
@@ -2320,11 +2346,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     return CandidateVerdict::Mismatch;
                 }
             };
-            failure = Some(if too_few && effective_rest {
-                crate::semantic_query::CheckerDiagnosticCode::ArgumentCountAtLeast
-            } else {
-                crate::semantic_query::CheckerDiagnosticCode::ArgumentCount
-            });
+            let mut arity = ArityEvidence::default();
+            arity.add(
+                required,
+                maximum.unwrap_or(ordinary_params.len()),
+                effective_rest,
+                arguments.len(),
+            );
+            failure = arity.recipe(arguments);
         }
         let arguments = if too_few || too_many {
             &arguments[..0]
@@ -2535,6 +2564,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 argument.clone(),
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             // An argument relation whose operands need a demand its frame has
@@ -2644,9 +2674,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if recovery
                         && (visible_type_params.is_empty() || contextual_diagnostic.is_some()) =>
                 {
-                    failure.get_or_insert(
-                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
-                    );
+                    if failure.is_none() {
+                        failure = Some(argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        ));
+                    }
                 }
                 RelationStep::NotAssignable => {
                     return self.reject_call_candidate(session_id, &checkpoint)
@@ -3018,6 +3052,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 arguments.len(),
                 argument.clone(),
                 graph,
+                self.construction_meter(),
                 &mut canonical_evidence,
             );
             self.deposit_canonical_evidence(canonical_evidence);
@@ -3052,9 +3087,13 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             ) {
                 Ok(Some(true)) => {}
                 Ok(Some(false)) if recovery => {
-                    failure.get_or_insert(
-                        crate::semantic_query::CheckerDiagnosticCode::ArgumentNotAssignable,
-                    );
+                    if failure.is_none() {
+                        failure = Some(argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        ));
+                    }
                 }
                 Ok(Some(false)) => {
                     if self
@@ -3065,10 +3104,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         .as_ref()
                         .is_some_and(|state| state.was_context_sensitive(index))
                     {
-                        let code = self.contextual_argument_failure(source, target, budget);
+                        let recipe = argument_not_assignable(
+                            argument.authored,
+                            source,
+                            self.declared_report_target(ordinary_params, index, target),
+                        );
                         if let Some(state) = self.dispatch_txn.borrow_mut().call.contextual.as_mut()
                         {
-                            state.diagnostic = Some(code);
+                            state.diagnostic = Some(recipe);
                         }
                     }
                     return self.reject_call_candidate(session_id, &checkpoint);
@@ -3571,10 +3614,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 selected_signature,
                 substitution,
                 fresh_literal_returns,
-                recovery_diagnostic: failure.map(|code| crate::semantic_query::CheckerDiagnostic {
-                    code,
-                    operation: crate::semantic_query::CheckerDiagnosticOperation::CallResolution,
-                }),
+                recovery_diagnostic: failure.map(Box::new),
             },
             concrete_seeds,
             holds,
@@ -4760,6 +4800,109 @@ enum RestShape {
 }
 
 impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'a, C> {
+    /// The position of the one candidate of `visible` whose arity fits the
+    /// call's `arguments`, when it is also the first that takes at least
+    /// as many parameters as there are arguments (or has a rest). `None`
+    /// when no candidate, or several, fit, or the call spreads an argument
+    /// of unknown length.
+    fn sole_arity_fitting_candidate(
+        &self,
+        visible: &[SignatureRef],
+        arguments: &[CallArgument],
+    ) -> Option<usize> {
+        if arguments.iter().any(|argument| argument.indefinite_spread) {
+            return None;
+        }
+        let consumer = crate::semantic_query::ResolveCallConsumer::witness();
+        let mut fitting = None;
+        let mut longest = None;
+        for (position, candidate) in visible.iter().enumerate() {
+            let data = self.graph().node_data(candidate.node)?;
+            let params = match data.as_ref() {
+                SemanticNodeData::Signature { params, .. } => Arc::clone(params.as_arc()),
+                SemanticNodeData::DeferredCallable(callable) => {
+                    Arc::clone(callable.parts(&consumer).params)
+                }
+                _ => return None,
+            };
+            let (_, ordinary) = crate::semantic_query::split_this_receiver(&params);
+            let rest = ordinary
+                .last()
+                .filter(|param| param.rest)
+                .map(|param| RestParam {
+                    param,
+                    shape: self.rest_shape(param.ty),
+                });
+            let (required, maximum, _) = call_candidate_arity(ordinary, rest.as_ref());
+            if longest.is_none() && maximum.is_none_or(|maximum| maximum >= arguments.len()) {
+                longest = Some(position);
+            }
+            if arguments.len() >= required
+                && maximum.is_none_or(|maximum| arguments.len() <= maximum)
+            {
+                if fitting.is_some() {
+                    return None;
+                }
+                fitting = Some(position);
+            }
+        }
+        // The checker reports the fitting candidate's argument error but
+        // recovers with the longest candidate's signature
+        // (`getLongestCandidateIndex`). Recovery here is the fitting
+        // candidate, which answers the same only when both return the same
+        // instantiated type.
+        let (fitting, longest) = (fitting?, longest?);
+        if fitting == longest {
+            return Some(fitting);
+        }
+        let return_of =
+            |position: usize| match self.graph().node_data(visible[position].node)?.as_ref() {
+                SemanticNodeData::Signature { return_type, .. } => Some(*return_type),
+                _ => None,
+            };
+        (return_of(fitting)? == return_of(longest)?).then_some(fitting)
+    }
+
+    /// The parameter type a TS2345 names for the argument at `index`: an
+    /// optional parameter's declared type, without the `undefined` its
+    /// relation target adds (`optional_parameter_target`) — the checker
+    /// prints it without the optionality's `undefined`, even where the
+    /// declaration spells one (`x?: string | undefined` is `'string'`).
+    pub(super) fn declared_report_target(
+        &self,
+        params: &[FunctionParam],
+        index: usize,
+        target: SemanticNodeId,
+    ) -> SemanticNodeId {
+        if !params
+            .get(index)
+            .is_some_and(|param| param.optional && !param.rest)
+        {
+            return target;
+        }
+        let graph = self.graph();
+        let Some(data) = graph.node_data(target) else {
+            return target;
+        };
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return target;
+        };
+        let rest: Vec<SemanticNodeId> = members
+            .iter()
+            .copied()
+            .filter(|&m| {
+                !matches!(
+                    graph.node_data(m).as_deref(),
+                    Some(SemanticNodeData::Primitive(PrimitiveKind::Undefined))
+                )
+            })
+            .collect();
+        if rest.len() == members.iter().count() || rest.is_empty() {
+            return target;
+        }
+        self.intern_normalized_union_or_intersection(&rest, true)
+    }
+
     /// Classify one rest parameter's type. Reference carriers and alias
     /// chains of ANY authored depth resolve through the shared cycle-safe
     /// structural unwrap before classification, so a named alias
@@ -4790,6 +4933,106 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
 struct RestParam<'p> {
     param: &'p FunctionParam,
     shape: RestShape,
+}
+
+/// The checker's TS2345 for the authored argument at `authored`: `source`
+/// is not assignable to its parameter's `target`.
+pub(super) fn argument_not_assignable(
+    authored: u32,
+    source: SemanticNodeId,
+    target: SemanticNodeId,
+) -> crate::semantic_query::CheckerDiagnosticRecipe {
+    use crate::semantic_query::{
+        CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+        CheckerDiagnosticSubject,
+    };
+    CheckerDiagnosticRecipe::call(
+        CheckerDiagnosticCode::ArgumentNotAssignable,
+        CheckerDiagnosticArguments::Types { source, target },
+        CheckerDiagnosticSubject::Argument(authored),
+    )
+}
+
+/// The arities of the candidates a call's argument count fits none of, as
+/// the checker's arity error reads them (`getArgumentArityError`).
+#[derive(Debug, Default, Clone, Copy)]
+struct ArityEvidence {
+    /// The fewest arguments any candidate requires.
+    min: Option<usize>,
+    /// The most parameters any candidate declares.
+    max: usize,
+    /// The most any candidate requiring fewer than the call supplies
+    /// requires.
+    max_below: Option<usize>,
+    /// The fewest parameters any candidate declaring more than the call
+    /// supplies declares.
+    min_above: Option<usize>,
+    /// Whether any candidate has an effective rest parameter.
+    rest: bool,
+}
+
+impl ArityEvidence {
+    /// Add a candidate requiring `required` arguments and declaring
+    /// `parameters`, `rest` its last, against a call supplying `got`.
+    fn add(&mut self, required: usize, parameters: usize, rest: bool, got: usize) {
+        self.min = Some(self.min.map_or(required, |min| min.min(required)));
+        self.max = self.max.max(parameters);
+        if required < got {
+            self.max_below = Some(self.max_below.map_or(required, |below| below.max(required)));
+        }
+        if got < parameters {
+            self.min_above = Some(
+                self.min_above
+                    .map_or(parameters, |above| above.min(parameters)),
+            );
+        }
+        self.rest |= rest;
+    }
+
+    /// The checker's arity error for a call supplying `arguments` (the
+    /// expanded list): TS2575 for a count between the fewest and the most
+    /// the candidates take, else TS2555 where one has a rest parameter and
+    /// TS2554 otherwise — too few reported at the callee, too many from the
+    /// first argument no candidate accepts. `None` before any candidate.
+    fn recipe(
+        &self,
+        arguments: &[CallArgument],
+    ) -> Option<crate::semantic_query::CheckerDiagnosticRecipe> {
+        use crate::semantic_query::{
+            CheckerDiagnosticArguments, CheckerDiagnosticCode, CheckerDiagnosticRecipe,
+            CheckerDiagnosticSubject,
+        };
+        let count = |n: usize| u32::try_from(n).ok();
+        let (min, got) = (self.min?, arguments.len());
+        if min < got && got < self.max {
+            return Some(CheckerDiagnosticRecipe::call(
+                CheckerDiagnosticCode::NoOverloadExpectsArgumentCount,
+                CheckerDiagnosticArguments::ArgumentCountGap {
+                    got: count(got)?,
+                    below: count(self.max_below?)?,
+                    above: count(self.min_above?)?,
+                },
+                CheckerDiagnosticSubject::Operation,
+            ));
+        }
+        Some(CheckerDiagnosticRecipe::call(
+            if self.rest {
+                CheckerDiagnosticCode::ArgumentCountAtLeast
+            } else {
+                CheckerDiagnosticCode::ArgumentCount
+            },
+            CheckerDiagnosticArguments::ArgumentCount {
+                min: count(min)?,
+                max: (!self.rest).then(|| count(self.max)).flatten(),
+                got: count(got)?,
+            },
+            if got < min {
+                CheckerDiagnosticSubject::Operation
+            } else {
+                CheckerDiagnosticSubject::ExcessArguments(arguments.get(self.max)?.authored)
+            },
+        ))
+    }
 }
 
 fn call_candidate_arity(
@@ -4854,6 +5097,7 @@ fn mapped_parameter_type(
     argument_count: usize,
     argument: CallArgument,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> Option<SemanticNodeId> {
     // An INDEFINITE spread supplies an unknown-length tail, so it never
@@ -4862,7 +5106,7 @@ fn mapped_parameter_type(
     if !argument.indefinite_spread {
         if let Some(param) = params.get(index) {
             if !param.rest {
-                return Some(optional_parameter_target(param, graph, evidence));
+                return Some(optional_parameter_target(param, graph, meter, evidence));
             }
         }
     }
@@ -4925,6 +5169,7 @@ fn mapped_parameter_type(
 fn optional_parameter_target(
     param: &FunctionParam,
     graph: &crate::semantic_query_memo::SemanticGraphStore,
+    meter: crate::project_semantic_dispatch::canonical_algebra::ConstructionMeter<'_>,
     evidence: &mut crate::project_semantic_dispatch::canonical_algebra::CanonicalEvidence,
 ) -> SemanticNodeId {
     if !param.optional {
@@ -4938,11 +5183,13 @@ fn optional_parameter_target(
     // (`T | undefined`) routes through the one authority (which also
     // flattens a union-typed `T`); the evidence threads to the caller's
     // disposition boundary.
-    let composite = crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union(
-        graph,
-        &[param.ty, undefined],
-        verter_session_query::flow::policy::NullabilityPolicy::Strict,
-    );
+    let composite =
+        crate::project_semantic_dispatch::canonical_algebra::intern_ordered_union_charged(
+            graph,
+            &[param.ty, undefined],
+            verter_session_query::flow::policy::NullabilityPolicy::Strict,
+            meter,
+        );
     evidence.absorb(composite.evidence);
     composite.node
 }

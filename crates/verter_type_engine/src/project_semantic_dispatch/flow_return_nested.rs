@@ -626,6 +626,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             heritage_self_roots: Vec::new(),
             inferred_predicate: None,
             checker_diagnostics: Vec::new(),
+            call_diagnostic_sites: rustc_hash::FxHashMap::default(),
             declared_reads: false,
             dead_writes: false,
             dead_written: rustc_hash::FxHashSet::default(),

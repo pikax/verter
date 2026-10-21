@@ -1,7 +1,7 @@
 //! Operation-owned retention accounting shared by resolver attempts.
 
+use rustc_hash::FxHashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -23,7 +23,7 @@ struct InputResolutionRetentionState {
     budgets: InputResolutionBudgets,
     alias_geometry: AtomicU32,
     alias_geometry_high_water: AtomicU32,
-    completed_witnesses: Mutex<HashMap<CompletedWitnessRetentionKey, u64>>,
+    completed_witnesses: Mutex<FxHashMap<CompletedWitnessRetentionKey, u64>>,
     #[cfg(test)]
     forced_completed_witness_count: AtomicU32,
     #[cfg(test)]
@@ -46,7 +46,7 @@ impl InputResolutionRetention {
                 budgets,
                 alias_geometry: AtomicU32::new(0),
                 alias_geometry_high_water: AtomicU32::new(0),
-                completed_witnesses: Mutex::new(HashMap::new()),
+                completed_witnesses: Mutex::new(FxHashMap::default()),
                 #[cfg(test)]
                 forced_completed_witness_count: AtomicU32::new(0),
                 #[cfg(test)]
@@ -93,6 +93,10 @@ impl InputResolutionRetention {
                 });
             }
         }
+    }
+
+    pub(crate) fn same_operation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
     }
 
     pub(crate) fn retain_completed_witness(

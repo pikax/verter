@@ -63,6 +63,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         data: &SemanticNodeData,
         context: ProjectionReductionContext,
         inputs: &LocatorViewInputs<'_>,
+        suspend: bool,
     ) -> ReferenceProjectionPlan {
         let (specifier, qualifier, typeof_query) =
             data.import_type_head().expect("ImportType head");
@@ -85,23 +86,39 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             context,
         )
         .with_authored_resolution_debt(inputs.authored_resolution_debt);
-        match self.plan_import_type_head(
+        let plan = self.plan_import_type_head(
             &resolver_context,
             owner_canonical.as_ref(),
             specifier,
             &qualifier,
             typeof_query,
             type_args.len(),
-        ) {
-            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
+        );
+        let argument_context = match &plan {
             CarrierResolutionPlan::NeedsArgs(continuation) => {
-                let argument_context = self.reference_argument_context(&continuation, context);
-                ReferenceProjectionPlan::NeedsArgs {
-                    continuation,
-                    args: type_args,
+                self.reference_argument_context(continuation, context)
+            }
+            CarrierResolutionPlan::Ready(_) => context,
+        };
+        match plan {
+            CarrierResolutionPlan::NeedsArgs(CarrierArgsContinuation::ReadTypeof { key }) => {
+                let read = Box::new(TypeofRead {
+                    key: *key,
+                    type_args,
                     argument_context,
+                });
+                if suspend {
+                    ReferenceProjectionPlan::Typeof(read)
+                } else {
+                    self.read_typeof_in_place(*read)
                 }
             }
+            CarrierResolutionPlan::Ready(value) => ReferenceProjectionPlan::Ready(value.node),
+            CarrierResolutionPlan::NeedsArgs(continuation) => ReferenceProjectionPlan::NeedsArgs {
+                continuation,
+                args: type_args,
+                argument_context,
+            },
         }
     }
 
@@ -126,7 +143,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 base,
                 args.as_arc(),
                 memo,
+                inputs,
                 ancestors,
+            );
+        }
+        if matches!(data, SemanticNodeData::IndexedAccess { .. }) {
+            return self.finish_indexed_projection(
+                node,
+                context,
+                data,
+                memo,
+                self.in_deferred_interior(ancestors),
             );
         }
         ProjectionFinish::Node(self.finish_projection_structure(
@@ -136,8 +163,126 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             inputs,
             substitutions,
             memo,
-            self.in_deferred_interior(ancestors),
         ))
+    }
+
+    /// The slot `child`, `parent`'s child at `index`, projects in. An
+    /// application a tuple spreads, under a carrier mode that splices it, is
+    /// [`ProjectionSlot::Spread`]: the tuple's own positions and length are
+    /// the application's, so it is instantiated there as the checker
+    /// instantiates it, while the same application stays a carrier anywhere
+    /// else. Its two readings are memoized apart, so neither depends on
+    /// which occurrence the projection meets first.
+    pub(super) fn child_projection_slot(
+        &self,
+        parent: &SemanticNodeData,
+        index: usize,
+        child: SemanticNodeId,
+        context: ProjectionReductionContext,
+    ) -> ProjectionSlot {
+        let spread = matches!(
+            context.mode,
+            ProjectionMode::Navigate | ProjectionMode::Shallow
+        ) && matches!(
+            parent,
+            SemanticNodeData::Tuple { elements, .. }
+                if elements
+                    .get(index)
+                    .is_some_and(|element| element.rest && element.value == child)
+        ) && matches!(
+            self.graph().node_data(child).as_deref(),
+            Some(SemanticNodeData::InstantiationRef { .. })
+        );
+        if spread {
+            ProjectionSlot::Spread
+        } else {
+            ProjectionSlot::Plain
+        }
+    }
+
+    /// The slot the node being finished projects in, read off the frame of
+    /// the composite enclosing it, whose cursor has just passed it.
+    pub(super) fn finishing_projection_slot(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        ancestors: &[ProjectionFrame],
+    ) -> ProjectionSlot {
+        match ancestors.last() {
+            Some(ProjectionFrame::CompositeResume {
+                data, next_child, ..
+            }) => next_child
+                .checked_sub(1)
+                .map_or(ProjectionSlot::Plain, |index| {
+                    self.child_projection_slot(data.as_ref(), index, node, context)
+                }),
+            _ => ProjectionSlot::Plain,
+        }
+    }
+
+    /// Select through the shared indexed-access query at navigation altitude,
+    /// then let this projection's worklist resolve the selected value at the
+    /// caller's demand. A namespace's lazy TypeOf members can then suspend.
+    fn finish_indexed_projection(
+        &self,
+        node: SemanticNodeId,
+        context: ProjectionReductionContext,
+        data: &SemanticNodeData,
+        memo: &ViewMemo,
+        deferred_position: bool,
+    ) -> ProjectionFinish {
+        let SemanticNodeData::IndexedAccess { object, index } = data else {
+            unreachable!("indexed projection carries an indexed access")
+        };
+        let object_context = self.indexed_access_operand_context(*object, context);
+        let object_id = projected(memo, *object, object_context);
+        let index = match index {
+            IndexKey::String(value) => IndexKey::String(value.clone()),
+            IndexKey::Number(value) => IndexKey::Number(*value),
+            IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
+            // A key that already names a nominal identity is
+            // answered without projecting it at all; the projection
+            // is computed only on the fallback path.
+            IndexKey::Computed(value) => self
+                .unique_symbol_identity_for_typeof_node(*value)
+                .map(IndexKey::UniqueSymbol)
+                .unwrap_or_else(|| {
+                    let projected = projected(memo, *value, context);
+                    self.unique_symbol_identity_for_typeof_node(projected)
+                        .map(IndexKey::UniqueSymbol)
+                        .unwrap_or_else(|| self.normalized_index_key_node(projected))
+                }),
+        };
+        let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
+        let should_defer = !proven_empty
+            && (!may_reduce_operator(context)
+                || context.mode == ProjectionMode::Skeleton
+                || deferred_position
+                || !matches!(
+                    self.graph().node_data(object_id).as_deref(),
+                    Some(SemanticNodeData::Object(_))
+                ));
+        if should_defer {
+            ProjectionFinish::Node(self.graph().intern_preserving_scope(
+                node,
+                SemanticNodeData::IndexedAccess {
+                    object: object_id,
+                    index,
+                },
+            ))
+        } else {
+            match self.execute_type_node(SemanticQueryKey::IndexedAccess {
+                base: object_id,
+                index,
+                mode: ProjectionMode::Navigate,
+            }) {
+                QueryResult::Value(SemanticQueryOutput { value, .. }) if value != node => {
+                    ProjectionFinish::Project(value)
+                }
+                QueryResult::Value(_) => ProjectionFinish::Node(node),
+                _ => ProjectionFinish::Node(self.opaque(QueryError::Miss)),
+            }
+        }
     }
 
     /// An application over its projected arguments: the application itself
@@ -150,6 +295,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         base: &crate::semantic_query::DeclIdentity,
         args: &Arc<[SemanticNodeId]>,
         memo: &ViewMemo,
+        inputs: &LocatorViewInputs<'_>,
         ancestors: &[ProjectionFrame],
     ) -> ProjectionFinish {
         let graph = self.graph();
@@ -159,9 +305,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             args.iter()
                 .map(|argument| {
                     let context = self.argument_operand_context(*argument, argument_context);
-                    self.canonical_argument_carrier(
-                        self.answer_member(projected(memo, *argument, context), context),
-                    )
+                    self.canonical_argument_carrier(self.answer_member(
+                        projected(memo, *argument, context),
+                        context,
+                        inputs,
+                    ))
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -234,10 +382,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 ),
             ));
         }
-        if matches!(
+        // The carrier modes keep an application a carrier, except one a
+        // tuple spreads over closed arguments, which is instantiated to
+        // splice (`[...Deep<[0, 0]>, 1]`).
+        let keeps_carrier = matches!(
             context.mode,
             ProjectionMode::Navigate | ProjectionMode::Skeleton | ProjectionMode::Shallow
-        ) {
+        ) && !(self.finishing_projection_slot(node, context, ancestors)
+            == ProjectionSlot::Spread
+            && !projected_args.iter().any(|argument| {
+                super::super::raise::builtin_lowering_argument_is_open(self, *argument)
+            }));
+        if keeps_carrier {
             ProjectionFinish::Node(rebuild(projected_args))
         } else if self.is_instantiate_active(
             base.canonical_id.as_ref(),
@@ -267,9 +423,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
-    /// The type a closed `keyof` or indexed access nested in a published
-    /// `Expanded` answer denotes. The checker reduces an operator over
-    /// closed operands when it builds the type, so the answer holds what the
+    /// What a closed `keyof` or indexed access nested in a published
+    /// `Expanded` answer reads. The checker reduces an operator over closed
+    /// operands when it builds the type, so the answer holds what the
     /// operator reads in an object, tuple, signature, type argument or union
     /// as its root does: an access reads its member (a member naming a
     /// declaration is that declaration, as the checker prints it), and a
@@ -290,7 +446,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         &self,
         operator: SemanticNodeId,
         context: ProjectionReductionContext,
-    ) -> Option<SemanticNodeId> {
+    ) -> Option<ClosedOperatorRead> {
         if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
             return None;
         }
@@ -298,41 +454,168 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         if graph.binder_dependencies_for(operator).may_mention_binder() {
             return None;
         }
-        let reduced = match graph.node_data(operator).as_deref() {
-            Some(SemanticNodeData::KeyOf { base }) => self.key_set_of(*base),
+        let read = match graph.node_data(operator).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => {
+                ClosedOperatorRead::Evaluated(self.key_set_of(*base)?)
+            }
             Some(SemanticNodeData::IndexedAccess { .. }) => {
                 match self.named_indexed_access(operator, context) {
-                    Some(named) => named.into_complete_active_query_build_node(self),
-                    None => self
-                        .evaluate_deferred_semantic_node_with_context(operator, context)
-                        .into_complete_active_query_build_node(self),
+                    Some(named) => ClosedOperatorRead::Named(
+                        named.into_complete_active_query_build_node(self)?,
+                    ),
+                    None => ClosedOperatorRead::Evaluated(
+                        self.evaluate_deferred_semantic_node_with_context(operator, context)
+                            .into_complete_active_query_build_node(self)?,
+                    ),
                 }
             }
-            _ => None,
-        }?;
-        (reduced != operator
-            && !matches!(
-                graph.node_data(reduced).as_deref(),
-                Some(SemanticNodeData::Opaque(_) | SemanticNodeData::KeyOf { .. })
-            ))
-        .then_some(reduced)
+            _ => return None,
+        };
+        let node = read.node();
+        // A `keyof` that settles to a `keyof` read nothing; an access may
+        // read a member written `keyof P`, which is what it denotes.
+        let reads_nothing = match graph.node_data(node).as_deref() {
+            Some(SemanticNodeData::Opaque(_)) => true,
+            Some(SemanticNodeData::KeyOf { .. }) => matches!(
+                graph.node_data(operator).as_deref(),
+                Some(SemanticNodeData::KeyOf { .. })
+            ),
+            _ => false,
+        };
+        (node != operator && !reads_nothing).then_some(read)
+    }
+
+    /// The answer a closed operator held at `context` reads, as `then`
+    /// takes it. A member an access evaluated to is projected as the
+    /// answer projects it, so the closed operators inside it read as they
+    /// do written directly (`{ b: Y['c'] }` read through `X['a']` answers
+    /// `{ b: 1 }`); a declaration the access names stays that name.
+    ///
+    /// An operator whose read reaches the same operator again (`X['a']`
+    /// over `type X = { a: { b: X['a'] } }`) keeps it as written there:
+    /// the re-entry reads the dispatcher's in-progress record, never a
+    /// depth limit.
+    fn read_answer_operator(
+        &self,
+        operator: SemanticNodeId,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+        then: impl FnOnce(SemanticNodeId) -> SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        if self.carrier_normalizing.borrow().contains(&operator) {
+            return None;
+        }
+        let read = self.reduce_closed_answer_operator(operator, context)?;
+        self.carrier_normalizing.borrow_mut().push(operator);
+        let answer = match read {
+            ClosedOperatorRead::Named(node) => Some(node),
+            ClosedOperatorRead::Evaluated(node) => {
+                self.project_operator_read(node, context, inputs)
+            }
+        }
+        .map(then);
+        self.carrier_normalizing.borrow_mut().pop();
+        answer
+    }
+
+    /// `read` projected at `context` as a root of its own, in place. A
+    /// projection that stopped keeps the operator and folds its partiality
+    /// into the build.
+    fn project_operator_read(
+        &self,
+        read: SemanticNodeId,
+        context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
+    ) -> Option<SemanticNodeId> {
+        // The operator is closed, so what it reads binds nothing of the
+        // body being projected.
+        let mut substitutions = Vec::new();
+        let mut memo = ViewMemo::default();
+        let mut seam = ProjectionSeam::inline();
+        let outcome = match self.begin_projection(
+            read,
+            context,
+            inputs,
+            &mut substitutions,
+            &mut memo,
+            &mut seam,
+        ) {
+            Ok(mut run) => match self.drain_projection(
+                &mut run,
+                inputs,
+                &mut substitutions,
+                &mut memo,
+                &mut seam,
+                None,
+            ) {
+                ProjectionPoll::Done(outcome) => outcome,
+                ProjectionPoll::Need(_) => {
+                    unreachable!("an inline projection evaluates its instantiations in place")
+                }
+            },
+            Err(outcome) => outcome,
+        };
+        match outcome.completeness {
+            ResultCompleteness::Complete => Some(outcome.node),
+            ResultCompleteness::Partial(reasons) => {
+                self.fold_local_partial_completeness(reasons);
+                None
+            }
+        }
+    }
+
+    /// The published `Expanded` answer a demand reads through its root
+    /// access, answered in `scope`'s file: `read`, the member the access
+    /// reads, projected as the answer projects a body written in place, so
+    /// the closed operators inside it read as they do there (`X['a']` over
+    /// `type X = { a: { b: Y['c'] } }` answers `{ b: 1 }`). A projection
+    /// that stopped answers `read` and folds its partiality into the
+    /// request.
+    pub fn published_answer_read(
+        &self,
+        read: SemanticNodeId,
+        scope: &NodeScopeId,
+    ) -> SemanticNodeId {
+        let _operation = self.enter_operation(false);
+        // A member read through a closed access names nothing of the
+        // answering file: its references are already resolved.
+        let env = rustc_hash::FxHashMap::default();
+        let name_resolution = rustc_hash::FxHashMap::default();
+        let shadowing = crate::resolver_core::scope_shadowing::ScopeShadowing::empty();
+        let inputs = LocatorViewInputs {
+            env: &env,
+            scope,
+            name_resolution: &name_resolution,
+            scope_payload: None,
+            shadowing: &shadowing,
+            authored_resolution_debt: None,
+            self_value: None,
+        };
+        let context = ProjectionReductionContext::published(ProjectionMode::Expanded);
+        match self.project_operator_read(read, context, &inputs) {
+            Some(projected) => self.reduce_answer_constituents(projected, context, &inputs),
+            None => read,
+        }
     }
 
     /// A projected child as the composite holding it keeps it: a closed
-    /// indexed access reads its member; anything else, a `keyof` included
-    /// (an object, tuple, signature or type argument prints it as `keyof
-    /// P`), stays itself.
+    /// indexed access reads its member, and reads on while that member is a
+    /// closed access; anything else, a `keyof` included (an object, tuple,
+    /// signature or type argument prints it as `keyof P`), stays itself.
     pub(super) fn answer_member(
         &self,
         child: SemanticNodeId,
         context: ProjectionReductionContext,
+        inputs: &LocatorViewInputs<'_>,
     ) -> SemanticNodeId {
         if context.mode != ProjectionMode::Expanded || !may_reduce_operator(context) {
             return child;
         }
         match self.graph().node_data(child).as_deref() {
             Some(SemanticNodeData::IndexedAccess { .. }) => self
-                .reduce_closed_answer_operator(child, context)
+                .read_answer_operator(child, context, inputs, |read| {
+                    self.answer_member(read, context, inputs)
+                })
                 .unwrap_or(child),
             _ => child,
         }
@@ -342,7 +625,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// its closed operator arms: an arm's `keyof` settles to its keys, so
     /// the answer reduces over them, and an arm's access reads its member,
     /// through every union or intersection the root is made of. The root
-    /// itself, an operator or not, stays for its demand to read, and an arm
+    /// itself, an operator or not, stays for its demand to read (typeinfo's
+    /// `materialize_through_aliases` bridge, which projects what a root
+    /// access reads through [`Self::published_answer_read`]), and an arm
     /// inside any other composite keeps the carrier that composite prints.
     ///
     /// This runs on the projection's result, never on a memoized node: a
@@ -381,8 +666,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// An arm of the answer's own union or intersection, its closed
-    /// operators read. Unions and intersections nest only as deep as they
-    /// are written.
+    /// operators read: what an operator arm reads is itself an arm (a
+    /// member written `keyof P` settles to its keys, a member union's arms
+    /// join the answer's). Unions and intersections nest only as deep as
+    /// they are written.
     fn reduce_answer_constituent(
         &self,
         node: SemanticNodeId,
@@ -393,7 +680,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let data = graph.node_data(node);
         match data.as_deref() {
             Some(SemanticNodeData::KeyOf { .. } | SemanticNodeData::IndexedAccess { .. }) => self
-                .reduce_closed_answer_operator(node, context)
+                .read_answer_operator(node, context, inputs, |read| {
+                    self.reduce_answer_constituent(read, context, inputs)
+                })
                 .unwrap_or(node),
             Some(SemanticNodeData::Union(arms)) => {
                 let ids: Vec<_> = arms
@@ -547,7 +836,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         inputs: &LocatorViewInputs<'_>,
         _substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         memo: &ViewMemo,
-        deferred_position: bool,
     ) -> SemanticNodeId {
         let graph = self.graph();
         match data {
@@ -619,7 +907,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Union(arms) => {
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| self.answer_member(projected(memo, *arm, context), context))
+                    .map(|arm| self.answer_member(projected(memo, *arm, context), context, inputs))
                     .collect();
                 let nullability = self.answer_nullability(context, inputs);
                 let erases_nullish = !nullability.is_strict()
@@ -646,7 +934,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Intersection(arms) => {
                 let ids: Vec<_> = arms
                     .iter()
-                    .map(|arm| self.answer_member(projected(memo, *arm, context), context))
+                    .map(|arm| self.answer_member(projected(memo, *arm, context), context, inputs))
                     .collect();
                 if ids.as_slice() == &***arms {
                     // Identity projection — see the Union arm.
@@ -667,7 +955,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 )
             }
             SemanticNodeData::Array { element, readonly } => {
-                let new_element = self.answer_member(projected(memo, *element, context), context);
+                let new_element = self.answer_member(projected(memo, *element, context), context, inputs);
                 if new_element == *element {
                     node
                 } else {
@@ -683,9 +971,19 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             SemanticNodeData::Tuple { elements, readonly } => {
                 let projected_elements: Vec<_> = elements
                     .iter()
-                    .map(|element| TupleElement {
+                    .enumerate()
+                    .map(|(index, element)| TupleElement {
                         label: element.label.clone(),
-                        value: self.answer_member(projected(memo, element.value, context), context),
+                        value: self.answer_member(
+                            projected_in(
+                                memo,
+                                element.value,
+                                context,
+                                self.child_projection_slot(data, index, element.value, context),
+                            ),
+                            context,
+                            inputs,
+                        ),
                         optional: element.optional,
                         rest: element.rest,
                     })
@@ -710,10 +1008,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|expression| projected(memo, *expression, context))
                     .collect();
+                // A literal hole folds into the template's text, as the
+                // checker's template construction folds it.
+                let (quasis, expressions) = match self.folded_literal_holes(quasis, &expressions) {
+                    Some((folded, holes)) => {
+                        (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                    }
+                    None => ((*quasis).clone(), expressions),
+                };
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::TemplateLiteral {
-                        quasis: (*quasis).clone(),
+                        quasis,
                         expressions: crate::semantic_query::PayloadArray::from(expressions.into_boxed_slice()),
                     },
                 )
@@ -754,7 +1060,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         },
                         value: self.answer_member(
                             projected(memo, member.value, member_context),
-                            member_context,
+                            member_context, inputs
                         ),
                         optional: member.optional,
                         readonly: member.readonly,
@@ -784,11 +1090,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .index_signatures
                     .iter()
                     .map(|signature| IndexSignature {
-                        key_type: self.answer_member(projected(memo, signature.key_type, context), context),
-                        value_type: self.answer_member(
-                            projected(memo, signature.value_type, context),
-                            context,
-                        ),
+                        key_type: self.answer_member(projected(memo, signature.key_type, context), context, inputs),
+                        value_type: self.answer_member(projected(memo, signature.value_type, context), context, inputs),
                         readonly: signature.readonly,
                         spans: signature.spans,
                         declaration_origin: signature.declaration_origin.clone(),
@@ -863,7 +1166,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .iter()
                     .map(|parameter| FunctionParam {
                         name: parameter.name.clone(),
-                        ty: self.answer_member(projected(memo, parameter.ty, context), context),
+                        ty: self.answer_member(projected(memo, parameter.ty, context), context, inputs),
                         optional: parameter.optional,
                         rest: parameter.rest,
                         span: parameter.span,
@@ -877,15 +1180,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         param: projected(memo, parameter.param, context),
                         constraint: parameter
                             .constraint
-                            .map(|value| self.answer_member(projected(memo, value, context), context)),
+                            .map(|value| self.answer_member(projected(memo, value, context), context, inputs)),
                         default: parameter
                             .default
-                            .map(|value| self.answer_member(projected(memo, value, context), context)),
+                            .map(|value| self.answer_member(projected(memo, value, context), context, inputs)),
                         is_const: parameter.is_const,
                     })
                     .collect();
                 let projected_return =
-                    self.answer_member(projected(memo, *return_type, context), context);
+                    self.answer_member(projected(memo, *return_type, context), context, inputs);
                 let signature = graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::Signature {
@@ -947,50 +1250,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                 }
             }
-            SemanticNodeData::IndexedAccess { object, index } => {
-                let object_context = self.indexed_access_operand_context(*object, context);
-                let object_id = projected(memo, *object, object_context);
-                let index = match index {
-                    IndexKey::String(value) => IndexKey::String(value.clone()),
-                    IndexKey::Number(value) => IndexKey::Number(*value),
-                    IndexKey::UniqueSymbol(identity) => IndexKey::UniqueSymbol(identity.clone()),
-                    // A key that already names a nominal identity is
-                    // answered without projecting it at all; the projection
-                    // is computed only on the fallback path.
-                    IndexKey::Computed(value) => self
-                        .unique_symbol_identity_for_typeof_node(*value)
-                        .map(IndexKey::UniqueSymbol)
-                        .unwrap_or_else(|| {
-                            let projected = projected(memo, *value, context);
-                            self.unique_symbol_identity_for_typeof_node(projected)
-                                .map(IndexKey::UniqueSymbol)
-                                .unwrap_or_else(|| self.normalized_index_key_node(projected))
-                        }),
-                };
-                let proven_empty = matches!(&index, IndexKey::Computed(key) if self.known_key_space_domain(*key).is_some_and(|domain| domain.is_empty()));
-                let should_defer = !proven_empty
-                    && (!may_reduce_operator(context)
-                        || context.mode == ProjectionMode::Skeleton
-                        || deferred_position
-                        || !matches!(graph.node_data(object_id).as_deref(), Some(SemanticNodeData::Object(_))));
-                if should_defer {
-                    graph.intern_preserving_scope(
-                        node,
-                        SemanticNodeData::IndexedAccess {
-                            object: object_id,
-                            index,
-                        },
-                    )
-                } else {
-                    match self.execute_type_node(SemanticQueryKey::IndexedAccess {
-                        base: object_id,
-                        index,
-                        mode: context.mode,
-                    }) {
-                        QueryResult::Value(SemanticQueryOutput { value, .. }) => value,
-                        _ => self.opaque(QueryError::Miss),
-                    }
-                }
+            SemanticNodeData::IndexedAccess { .. } => {
+                unreachable!("an indexed access finishes through its selection plan")
             }
             SemanticNodeData::InstantiationRef { .. } => {
                 unreachable!("an application finishes through its instantiation plan")
@@ -1015,6 +1276,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             | SemanticNodeData::ImportType(_) => {
                 unreachable!("leaf or staged node reached projection finish")
             }
+        }
+    }
+}
+
+/// What a closed answer operator read: the declaration an access names,
+/// kept as the name the checker prints, or a node it evaluated to.
+enum ClosedOperatorRead {
+    Named(SemanticNodeId),
+    Evaluated(SemanticNodeId),
+}
+
+impl ClosedOperatorRead {
+    fn node(&self) -> SemanticNodeId {
+        match self {
+            Self::Named(node) | Self::Evaluated(node) => *node,
         }
     }
 }

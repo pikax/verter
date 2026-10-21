@@ -501,3 +501,50 @@ fn an_optional_spread_property_over_an_existing_one_is_their_union() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Module values whose object or array literal initializers hold calls,
+/// beside a bare call and a call-free literal.
+const CALLS_IN_LITERALS: &str = r##"
+type __BenchInit = 0;
+declare function g(): 1;
+declare function f(): number;
+declare const n: number;
+export const r = [g()];
+export let rLet = [g()];
+export const o = { a: f() };
+export const oLit = { a: g() };
+export const nested = { a: [f()] };
+export const deep = [{ a: f(), b: [g(), 2] }];
+export const mixed = { a: f(), b: "s", c: n };
+export const fresh = [g(), 2];
+export let lo = { a: g(), b: 1 };
+export const rc = [g(), 2] as const;
+export const os = { a: f(), b: 1 } satisfies { a: number; b: number };
+export const S = f();
+export const plain = { a: n };
+"##;
+
+/// A call that is an array-literal element or an object-literal property
+/// value types as its return: a call's result is no fresh literal, so a
+/// literal return type stays as it is where an authored literal beside it
+/// widens.
+#[test]
+fn a_call_inside_a_literal_types_as_its_return() {
+    let matrix = Matrix::new(CALLS_IN_LITERALS);
+    let failures = matrix.types(&[
+        ("typeof r", "1[]"),
+        ("typeof rLet", "1[]"),
+        ("typeof o", "{ a: number; }"),
+        ("typeof oLit", "{ a: 1; }"),
+        ("typeof nested", "{ a: number[]; }"),
+        ("typeof deep", "{ a: number; b: number[]; }[]"),
+        ("typeof mixed", "{ a: number; b: string; c: number; }"),
+        ("typeof fresh", "number[]"),
+        ("typeof lo", "{ a: 1; b: number; }"),
+        ("typeof rc", "readonly [1, 2]"),
+        ("typeof os", "{ a: number; b: number; }"),
+        ("typeof S", "number"),
+        ("typeof plain", "{ a: number; }"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

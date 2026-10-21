@@ -123,7 +123,7 @@ fn read_flow_return(host: &Arc<VerterHost>, function: &str) -> FlowReturnRead {
             result
                 .checker_diagnostics()
                 .iter()
-                .map(|diagnostic| diagnostic.code.code())
+                .map(|diagnostic| diagnostic.code().code())
                 .collect(),
         ),
         other => panic!("`{function}` produced no flow return: {other:?}"),

@@ -87,15 +87,13 @@ impl VerterHost {
         // the shared helper so this path, shallow-state canonicalization, and
         // known-miss revalidation agree on every edge.
         let resolved = match self.resolve_route_edge_canonical(owner_canonical, source_specifier) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                admitted.into_result()?
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => publication.into_delivered().flatten()?,
         };
 
         // Carrier-GENERIC route-edge revalidation: a framework CARRIER target

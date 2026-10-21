@@ -165,8 +165,11 @@ mod signature_predicate;
 pub use signature_predicate::{PredicateSubject, SignaturePredicate};
 mod checker_diagnostic;
 pub use checker_diagnostic::{
-    CheckerDiagnostic, CheckerDiagnosticCode, CheckerDiagnosticOperation, RecoveryBasis,
+    CheckerDiagnostic, CheckerDiagnosticArguments, CheckerDiagnosticChainLine,
+    CheckerDiagnosticCode, CheckerDiagnosticOccurrence, CheckerDiagnosticOperation,
+    CheckerDiagnosticRecipe, CheckerDiagnosticSubject, RecoveryBasis,
 };
+pub(crate) use checker_diagnostic::{CheckerDiagnosticPrinter, CheckerDiagnosticSite};
 /// The checker compatibility policy: the limits at which the checker gives up
 /// on a type operation, and the diagnostic it reports there.
 pub mod checker_policy;
@@ -2452,7 +2455,7 @@ pub enum ResolvedCallResult {
         /// (`getCandidateForOverloadFailure`): the call's value is then
         /// the checker's recovery answer, never a silent success. `None`
         /// for an applicable winner.
-        recovery_diagnostic: Option<CheckerDiagnostic>,
+        recovery_diagnostic: Option<CheckerDiagnosticRecipe>,
     },
     /// The callee is genuine dynamic `any` — a COMPLETE result, not a
     /// fallback.
@@ -2516,7 +2519,7 @@ pub enum ResolveCallFailure {
     NoApplicableOverload,
     /// A definite applicability failure with a checker diagnostic. The
     /// diagnostic travels with the refusal; it is never a successful value.
-    Diagnosed(CheckerDiagnostic),
+    Diagnosed(CheckerDiagnosticRecipe),
     /// Applicability depended on unsupported or unresolved semantic work.
     Undecidable,
     /// The call-resolution work envelope tripped.
@@ -2870,6 +2873,30 @@ construction_ordinal_seam! {
     }
 }
 
+construction_ordinal_seam! {
+    /// TypeScript's modifiers type for a mapping over the lowered key source
+    /// `key_source` that is not written `keyof X`
+    /// ([`MapperKey::modifiers_type`]): when the key source is a type
+    /// parameter constrained to `keyof X`, `X`; otherwise none.
+    #[must_use]
+    fn modifiers_type_of_key_parameter(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        key_source: SemanticNodeId,
+    ) -> Option<SemanticNodeId> {
+        let constraint = match graph.node_data(key_source).as_deref() {
+            Some(SemanticNodeData::TypeParam {
+                constraint: Some(constraint),
+                ..
+            }) => *constraint,
+            _ => return None,
+        };
+        match graph.node_data(constraint).as_deref() {
+            Some(SemanticNodeData::KeyOf { base }) => Some(*base),
+            _ => None,
+        }
+    }
+}
+
 /// Mapper identity for mapped-type queries. Separates the key space from the
 /// value expression so two mappers that share the same key space but differ
 /// in the value expression do not alias.
@@ -2901,6 +2928,14 @@ pub struct MapperKey {
     /// written over a concrete type (`{ [K in keyof (A | B)]: … }`) maps
     /// that type's own keys.
     pub over_type_variable: bool,
+    /// TypeScript's modifiers type (`getModifiersTypeFromMappedType`) when it
+    /// is not `source`: for a mapping whose key source is a type parameter
+    /// constrained to `keyof X` (`{ [P in K]: X[P] }` with `K extends keyof
+    /// X`, the shape of `Pick`), `X` or the type that instantiated it. Each
+    /// produced property keeps the `readonly` and `?` of `X`'s member under a
+    /// `Keep` modifier. `None` for a `keyof` mapping, whose modifiers type is
+    /// `source`, and for any other key source, which has none.
+    pub modifiers_type: Option<SemanticNodeId>,
 }
 
 /// Indexed-access key operand. Mirrors the three TypeScript forms:
@@ -8480,8 +8515,9 @@ pub enum InferenceCandidatePriority {
     Argument,
     /// The whole source of an inference to a union target holding one
     /// naked type variable, when a fixed target member matched every source
-    /// member (the checker's `InferencePriority.NakedTypeVariable`): kept
-    /// only when no direct inference reaches the variable.
+    /// member, or to the sole naked variable of an intersection (the checker's
+    /// `InferencePriority.NakedTypeVariable`): kept only when no direct
+    /// inference reaches the variable.
     MatchedUnionRemainder,
     /// A complete reverse-homomorphic mapped candidate.
     HomomorphicMapped,
@@ -9924,6 +9960,21 @@ impl SemanticQueryKey {
         Self::ReduceIntersection {
             input: IntersectionInputRef::from_operands(graph, &members),
             purpose: IntersectionPurpose::CheckerReduction,
+            context: SemanticContextId::production(),
+        }
+    }
+
+    /// `ReduceIntersection` of a WRITTEN intersection type node's arms
+    /// under `nullability` ([`IntersectionPurpose::WrittenTypeNode`]).
+    #[must_use]
+    pub fn reduce_written_intersection_operands(
+        graph: &crate::semantic_query_memo::SemanticGraphStore,
+        members: &[SemanticNodeId],
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> Self {
+        Self::ReduceIntersection {
+            input: IntersectionInputRef::from_operands(graph, members),
+            purpose: IntersectionPurpose::WrittenTypeNode(nullability),
             context: SemanticContextId::production(),
         }
     }
