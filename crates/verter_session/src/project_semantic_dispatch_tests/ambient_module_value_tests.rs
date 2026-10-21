@@ -70,6 +70,13 @@ fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
         "interface Opt { k: 99 }",
         "interface Base { k: 99 } type Opt = Base;",
     );
+    let module_dependent = ASSIGNED_NAMESPACE
+        .replace(
+            "declare module \"pkg\" {",
+            "declare module \"pkg\" { interface Root { k: 99 } type Base = Root;",
+        )
+        .replace("interface Opt { k: 99 }", "type Opt = Base;");
+    let module_edited = module_dependent.replace("k: 99", "k: 100");
     let edited = dependent.replace("k: 99", "k: 100");
     let retargeted = edited.replace(
         "export = NS",
@@ -79,6 +86,8 @@ fn an_ambient_assigned_namespace_type_tracks_contributor_edits() {
         for (ambient, expected) in [
             (ASSIGNED_NAMESPACE, "99"),
             (dependent.as_str(), "99"),
+            (module_dependent.as_str(), "99"),
+            (module_edited.as_str(), "100"),
             (edited.as_str(), "100"),
             (retargeted.as_str(), "101"),
             (ASSIGNED_NAMESPACE, "99"),
@@ -197,34 +206,56 @@ declare module "pkg" {
 
 #[test]
 fn an_ambient_assigned_namespace_resolves_alias_consumers() {
+    use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
+
     let files = [(
         "assigned.d.ts",
         r#"
 declare module "pkg" {
+  interface Root { k: 99 }
+  type RootAlias = Root;
   namespace NS {
     interface Base { k: 99 }
     type Opt = Base;
     type Scalar = 99;
     type Alias = Scalar;
+    type RootOpt = RootAlias;
   }
+  export = NS;
+}
+declare module "other-pkg" {
+  interface Root { k: 7 }
+  type RootAlias = Root;
+  namespace NS { type RootOpt = RootAlias; }
   export = NS;
 }
 "#,
     )];
-    let failures = mismatches_in(
-        ProbeProject {
-            files: &files,
-            ..ProbeProject::default()
-        },
-        r#"import type { Base, Opt, Alias } from "pkg"; import * as Pkg from "pkg";"#,
-        &[
-            ("Opt extends { k: 99 } ? true : false", "true"),
-            ("Pkg.Opt extends { k: 99 } ? true : false", "true"),
-            ("Alias", "99"),
-            ("Pkg.Alias", "99"),
-            ("Base extends { k: 99 } ? true : false", "true"),
-        ],
-    );
+    let project = ProbeProject {
+        files: &files,
+        ..ProbeProject::default()
+    };
+    let host = probe_host(project);
+    let mut failures = Vec::new();
+    for _ in 0..2 {
+        failures.extend(mismatches_on_host(
+            &host,
+            project,
+            r#"import type { Base, Opt, Alias, RootOpt } from "pkg"; import * as Pkg from "pkg";
+import type { RootOpt as OtherOpt } from "other-pkg"; import * as OtherPkg from "other-pkg";"#,
+            &[
+                ("Opt extends { k: 99 } ? true : false", "true"),
+                ("Pkg.Opt extends { k: 99 } ? true : false", "true"),
+                ("Alias", "99"),
+                ("Pkg.Alias", "99"),
+                ("Base extends { k: 99 } ? true : false", "true"),
+                ("RootOpt[\"k\"]", "99"),
+                ("Pkg.RootOpt[\"k\"]", "99"),
+                ("OtherOpt[\"k\"]", "7"),
+                ("OtherPkg.RootOpt[\"k\"]", "7"),
+            ],
+        ));
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -295,7 +326,11 @@ fn an_ambient_assigned_namespace_exports_enum_member_types() {
     use super::checker_probe_lane_tests::{mismatches_on_host, probe_host};
 
     let mut failures = Vec::new();
-    for global in ["", "declare enum E { X = 0 }"] {
+    for global in [
+        "",
+        "declare enum E { X = 0 }",
+        "declare namespace NS { enum E { X = 0 } }",
+    ] {
         let ambient = format!(
             r#"
 declare module "pkg" {{
@@ -304,6 +339,10 @@ declare module "pkg" {{
     type EnumAlias = E.X;
     interface Holder {{ k: E.X }}
   }}
+  export = NS;
+}}
+declare module "other-pkg" {{
+  namespace NS {{ enum E {{ X = 7 }} type EnumAlias = E.X; }}
   export = NS;
 }}
 {global}
@@ -319,7 +358,8 @@ declare module "pkg" {{
             failures.extend(mismatches_on_host(
                 &host,
                 project,
-                r#"import type { E, EnumAlias, Holder } from "pkg"; import * as Pkg from "pkg";"#,
+                r#"import type { E, EnumAlias, Holder } from "pkg"; import * as Pkg from "pkg";
+import type { E as OtherE, EnumAlias as OtherAlias } from "other-pkg"; import * as OtherPkg from "other-pkg";"#,
                 &[
                     ("E.X extends 99 ? true : false", "true"),
                     ("Pkg.E.X extends 99 ? true : false", "true"),
@@ -327,6 +367,10 @@ declare module "pkg" {{
                     ("Pkg.EnumAlias extends 99 ? true : false", "true"),
                     ("Holder[\"k\"] extends 99 ? true : false", "true"),
                     ("Pkg.Holder[\"k\"] extends 99 ? true : false", "true"),
+                    ("OtherE.X extends 7 ? true : false", "true"),
+                    ("OtherPkg.E.X extends 7 ? true : false", "true"),
+                    ("OtherAlias extends 7 ? true : false", "true"),
+                    ("OtherPkg.EnumAlias extends 7 ? true : false", "true"),
                 ],
             ));
         }

@@ -402,6 +402,7 @@ fn structural_hash_discriminates_lexical_and_ambient_namespace_scope_ordinals() 
     let hashes = [
         NodeLocalScopeId::Lexical(LocalScopeId(0)),
         NodeLocalScopeId::AugmentationNamespace(0),
+        NodeLocalScopeId::AugmentationModule(0),
     ]
     .map(|address| {
         let scope = NodeScopeId::File {
@@ -415,7 +416,11 @@ fn structural_hash_discriminates_lexical_and_ambient_namespace_scope_ordinals() 
             &SemanticNodeData::new_bare_ref(Arc::from("Foo"), scope, Arc::from([])),
         )
     });
-    assert_ne!(hashes[0], hashes[1], "distinct inventories must hash apart");
+    for (index, hash) in hashes.iter().enumerate() {
+        for other in &hashes[..index] {
+            assert_ne!(hash, other, "distinct inventories must hash apart");
+        }
+    }
 }
 
 #[test]

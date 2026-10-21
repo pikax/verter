@@ -692,11 +692,13 @@ impl PayloadHeap for EnumLiteralType {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
         let Self {
             enum_decl,
+            module_specifier,
             member,
             base,
             member_count,
         } = self;
         enum_decl.visit_payload_heap(visitor);
+        module_specifier.visit_payload_heap(visitor);
         member.visit_payload_heap(visitor);
         base.visit_payload_heap(visitor);
         member_count.visit_payload_heap(visitor);

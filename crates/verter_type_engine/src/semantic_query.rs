@@ -977,6 +977,9 @@ pub enum NodeLocalScopeId {
     /// An index into the owning file generation's retained
     /// `augmentation_namespace_blocks` inventory.
     AugmentationNamespace(u32),
+    /// An index into the owning file generation's retained
+    /// `augmentation_blocks` inventory, for a module-root declaration body.
+    AugmentationModule(u32),
 }
 
 /// The typed index into the owning file's lexical local-scope table.
@@ -1163,6 +1166,8 @@ pub struct EnumLiteralType {
     /// resolves to. Its `decl_name` is the enum's qualified name
     /// (`NS.Inner`), which is how the checker prints it.
     pub enum_decl: DeclIdentity,
+    /// The ambient module declaring the enum, when it has no file-scope identity.
+    pub module_specifier: Option<OwnedStr>,
     /// The member's name.
     pub member: OwnedStr,
     /// The value the member stands for.
@@ -1218,17 +1223,17 @@ construction_ordinal_seam! {
                 _ => None,
             })
             .collect();
-        let mut present: std::collections::HashMap<&DeclIdentity, u32> =
+        let mut present: std::collections::HashMap<(&DeclIdentity, &Option<OwnedStr>), u32> =
             std::collections::HashMap::new();
         for literal in literals.iter().flatten() {
-            *present.entry(&literal.enum_decl).or_default() += 1;
+            *present.entry((&literal.enum_decl, &literal.module_specifier)).or_default() += 1;
         }
-        let mut printed: std::collections::HashSet<&DeclIdentity> = std::collections::HashSet::new();
+        let mut printed = std::collections::HashSet::new();
         let mut arms = Vec::with_capacity(members.len());
         for (member, literal) in members.iter().zip(literals.iter()) {
             match literal {
-                Some(literal) if present.get(&literal.enum_decl) == Some(&literal.member_count) => {
-                    if printed.insert(&literal.enum_decl) {
+                Some(literal) if present.get(&(&literal.enum_decl, &literal.module_specifier)) == Some(&literal.member_count) => {
+                    if printed.insert((&literal.enum_decl, &literal.module_specifier)) {
                         arms.push(PrintedUnionArm::Enum(literal.enum_decl.clone()));
                     }
                 }

@@ -749,10 +749,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         let scope_canonical = canonical_id.as_ref();
         let scope_owner = *owner;
         let (prefix, member) = dotted_name.rsplit_once('.')?;
-        if let Some((_, qualified)) =
+        if let Some((specifier, qualified)) =
             self.ambient_namespace_target(scope, prefix, super::build::GlobalSpace::Value)
         {
-            let enumeration = self.enum_declaration(scope_canonical, scope_owner, &qualified)?;
+            let augmentation =
+                verter_session_query::declarations::AugmentationScopeKind::Module(specifier);
+            let enumeration = self.enum_declaration_in_augmentation(
+                scope_canonical,
+                scope_owner,
+                &qualified,
+                Some(&augmentation),
+            )?;
             return self.enum_member_type(&enumeration, member);
         }
         let (head, rest) = prefix.split_once('.').unwrap_or((prefix, ""));
@@ -782,8 +789,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 if consumed != path.len() {
                     return None;
                 }
-                let enumeration =
-                    self.enum_declaration(&root.scope.canonical_id, root.scope.owner, &root.name)?;
+                let indexed = self
+                    .ctx
+                    .ensure_indexed_ready_serve(&root.scope.canonical_id)?
+                    .indexed;
+                let augmentation =
+                    Self::ambient_value_scope(&root.scope, &indexed.shallow_state.headers);
+                let enumeration = self.enum_declaration_in_augmentation(
+                    &root.scope.canonical_id,
+                    root.scope.owner,
+                    &root.name,
+                    augmentation,
+                )?;
                 return self.enum_member_type(&enumeration, member);
             }
         }

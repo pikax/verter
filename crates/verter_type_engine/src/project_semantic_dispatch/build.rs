@@ -1578,29 +1578,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A value rooted while lowering an ambient namespace body keeps the
         // exact module scope. Same-named namespaces in other modules and
         // file declarations cannot replace this inventory entry.
-        let ambient_scope = if value_root.scope.binder_scope_id
-            == crate::semantic_query::BinderScopeId::file_scope(value_root.scope.owner)
-        {
-            None
-        } else {
-            shallow
-                .headers
-                .augmentation_blocks
-                .iter()
-                .find_map(|block| {
-                    use verter_session_query::declarations::AugmentationScopeKind;
-                    let AugmentationScopeKind::Module(specifier) = &block.scope else {
-                        return None;
-                    };
-                    (block.owner == value_root.scope.owner
-                        && value_root.scope.binder_scope_id
-                            == crate::semantic_query::BinderScopeId::augmentation_module_scope(
-                                block.owner,
-                                verter_type_expr::OwnedStr::from(specifier.as_str()),
-                            ))
-                    .then_some(&block.scope)
-                })
-        };
+        let ambient_scope = Self::ambient_value_scope(&value_root.scope, &shallow.headers);
 
         // An `import X = N.M` alias names what `N.M` names: a path it heads
         // reads from the entity's qualified path.
@@ -2033,42 +2011,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // export-target walk yields the DECLARING decl — every downstream
         // consumer (the class-surface slot in particular) keys and lowers
         // under THAT identity, never the stale re-export root.
-        let effective = match ambient_scope {
-            Some(augmentation) => self
-                .ctx
-                .prepared_decl_bundle(&root_identity.canonical_id)
-                .and_then(|bundle| {
-                    match self.ctx.prepare_augmentation_value(
-                        &bundle,
-                        augmentation,
-                        root_identity.owner,
-                        &root_identity.symbol_name,
-                    ) {
-                        verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(
-                            Some(prepared),
-                        ) => Some((
-                            root_identity.canonical_id.clone(),
-                            root_identity.owner,
-                            root_identity.symbol_name.clone(),
-                            verter_retention::heap_size::OwnedValue::new(prepared),
-                        )),
-                        verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => None,
-                        verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
-                        | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
-                            self.fold_into_top_build_local_taint(false, true);
-                            crate::fact_tracing::note_non_cacheable_read_fan_out(
-                                verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
-                            );
-                            None
-                        }
-                    }
-                }),
-            None => self.effective_prepared_value_decl(
-                &root_identity.canonical_id,
-                root_identity.owner,
-                &root_identity.symbol_name,
-            ),
-        };
+        let effective = self.effective_prepared_value_decl_in_augmentation(
+            &root_identity.canonical_id,
+            root_identity.owner,
+            &root_identity.symbol_name,
+            ambient_scope,
+        );
         let Some((effective_canonical, effective_owner, effective_symbol, prepared)) = effective
         else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
@@ -2520,6 +2468,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             effective_owner,
             effective_symbol.clone(),
             &prepared,
+            ambient_scope,
         ) {
             // The enum object: every member, a constant one and a computed
             // one alike, as a readonly property of its literal type.
@@ -4198,6 +4147,66 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             verter_type_expr::OwnedStr::from(target.name.as_str()),
             prepared,
         ))
+    }
+
+    /// The exact ambient inventory wins over file/export fallback when a
+    /// caller already carries its module scope.
+    pub(super) fn effective_prepared_value_decl_in_augmentation(
+        &self,
+        canonical: &str,
+        owner: verter_type_expr::TopLevelOwnerId,
+        symbol: &str,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
+    ) -> Option<EffectivePreparedValueDecl> {
+        let Some(augmentation) = augmentation else {
+            return self.effective_prepared_value_decl(canonical, owner, symbol);
+        };
+        let bundle = self.ctx.prepared_decl_bundle(canonical)?;
+        match self
+            .ctx
+            .prepare_augmentation_value(&bundle, augmentation, owner, symbol)
+        {
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(Some(prepared)) => {
+                Some((
+                    canonical.into(),
+                    owner,
+                    symbol.into(),
+                    verter_retention::heap_size::OwnedValue::new(prepared),
+                ))
+            }
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::Ready(None) => None,
+            verter_session_query::inputs::prepared::PreparedDeclOutcome::LeaseMiss
+            | verter_session_query::inputs::prepared::PreparedDeclOutcome::Failed(_) => {
+                self.fold_into_top_build_local_taint(false, true);
+                crate::fact_tracing::note_non_cacheable_read_fan_out(
+                    verter_session_query::facts::reuse::NonCacheableReadReason::UnobservableSource,
+                );
+                None
+            }
+        }
+    }
+
+    /// Recover a module-scoped value root's retained augmentation inventory.
+    pub(super) fn ambient_value_scope<'headers>(
+        scope: &crate::semantic_query::ScopeId,
+        headers: &'headers verter_session_query::declarations::header_index::DeclHeaderIndex,
+    ) -> Option<&'headers verter_session_query::declarations::AugmentationScopeKind> {
+        if scope.binder_scope_id == crate::semantic_query::BinderScopeId::file_scope(scope.owner) {
+            return None;
+        }
+        headers.augmentation_blocks.iter().find_map(|block| {
+            use verter_session_query::declarations::AugmentationScopeKind;
+            let AugmentationScopeKind::Module(specifier) = &block.scope else {
+                return None;
+            };
+            (block.owner == scope.owner
+                && scope.binder_scope_id
+                    == crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                        block.owner,
+                        specifier.as_str().into(),
+                    ))
+            .then_some(&block.scope)
+        })
     }
 
     /// `ResolveOverloadSet` — the ordered candidates of ONE of a callee's
@@ -8682,28 +8691,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         blocks
     }
 
-    /// Whether the ambient module `block` declares the value `name` — a
-    /// member it names under its own scope, which the identity
-    /// `(canonical, owner, name)` addresses (no file-scope value of the
-    /// file shadows it, and no other module block of the file declares it).
+    /// Whether the exact ambient module inventory declares a value or namespace.
     pub(super) fn ambient_block_declares_value(
         &self,
         block: &AmbientModuleBlock,
         name: &str,
     ) -> bool {
-        let Some(indexed) = self
-            .ctx
+        self.ctx
             .ensure_indexed_ready_serve(block.canonical.as_ref())
-            .map(|serve| serve.indexed)
-        else {
-            return false;
-        };
-        let shallow = &indexed.shallow_state;
-        shallow.visible_value_binding(block.owner, name).is_none()
-            && shallow
-                .value_fallback_augmentation_scope(block.owner, name)
-                .as_ref()
-                == Some(&block.scope)
+            .is_some_and(|serve| {
+                let headers = &serve.indexed.shallow_state.headers;
+                headers
+                    .augmentation_value_header_in(&block.scope, block.owner, name)
+                    .is_some()
+                    || headers
+                        .augmentation_namespace_blocks
+                        .iter()
+                        .any(|(scope, namespace)| {
+                            scope == &block.scope
+                                && namespace.owner == block.owner
+                                && namespace.qualified_name == name
+                                && namespace.instantiated
+                        })
+            })
     }
 
     fn ambient_assigned_namespace(&self, block: &AmbientModuleBlock) -> Option<Arc<str>> {
@@ -8795,9 +8805,6 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         ) {
             return scope;
         }
-        let Some((prefix, _)) = symbol.rsplit_once('.') else {
-            return scope;
-        };
         let span = headers
             .augmentation_type_header_in(augmentation, *owner, symbol)
             .map(|header| header.span)
@@ -8806,6 +8813,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     .augmentation_value_header_in(augmentation, *owner, symbol)
                     .map(|header| header.span)
             });
+        let Some((prefix, _)) = symbol.rsplit_once('.') else {
+            *local_scope = headers
+                .augmentation_blocks
+                .iter()
+                .position(|block| {
+                    &block.scope == augmentation
+                        && block.owner == *owner
+                        && span.is_some_and(|span| {
+                            block.span.start <= span.start && span.end <= block.span.end
+                        })
+                })
+                .and_then(|ordinal| u32::try_from(ordinal).ok())
+                .map(NodeLocalScopeId::AugmentationModule);
+            return scope;
+        };
         *local_scope = headers
             .augmentation_namespace_blocks
             .iter()
@@ -8844,7 +8866,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             canonical_id,
             owner,
             whole_hash,
-            local_scope: Some(NodeLocalScopeId::AugmentationNamespace(ordinal)),
+            local_scope: Some(local_scope),
         } = scope
         else {
             return None;
@@ -8857,16 +8879,25 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             return None;
         }
         let headers = &indexed.shallow_state.headers;
-        let (augmentation, block) = headers
-            .augmentation_namespace_blocks
-            .get(*ordinal as usize)?;
+        let (augmentation, scope_owner, mut prefix) = match local_scope {
+            NodeLocalScopeId::AugmentationNamespace(ordinal) => {
+                let (augmentation, block) = headers
+                    .augmentation_namespace_blocks
+                    .get(*ordinal as usize)?;
+                (augmentation, block.owner, block.qualified_name.as_str())
+            }
+            NodeLocalScopeId::AugmentationModule(ordinal) => {
+                let block = headers.augmentation_blocks.get(*ordinal as usize)?;
+                (&block.scope, block.owner, "")
+            }
+            NodeLocalScopeId::Lexical(_) => return None,
+        };
         let AugmentationScopeKind::Module(specifier) = augmentation else {
             return None;
         };
-        if block.owner != *owner {
+        if scope_owner != *owner {
             return None;
         }
-        let mut prefix = block.qualified_name.as_str();
         loop {
             let qualified = if prefix.is_empty() {
                 name.to_owned()
@@ -21436,7 +21467,17 @@ impl AmbientModuleBlock {
                 canonical_id: verter_type_expr::OwnedStr::from(self.canonical.clone()),
                 owner: self.owner,
                 local_scope: None,
-                binder_scope_id: crate::semantic_query::BinderScopeId::file_scope(self.owner),
+                binder_scope_id: match &self.scope {
+                    verter_session_query::declarations::AugmentationScopeKind::Module(
+                        specifier,
+                    ) => crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                        self.owner,
+                        specifier.as_str().into(),
+                    ),
+                    verter_session_query::declarations::AugmentationScopeKind::Global => {
+                        crate::semantic_query::BinderScopeId::augmentation_global_scope(self.owner)
+                    }
+                },
             },
             name: name.into(),
         }

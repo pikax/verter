@@ -67,6 +67,10 @@ pinned by the canonical file, exact owner and whole-file hash. Lexical table
 indices use the distinct `NodeLocalScopeId::Lexical(LocalScopeId)` variant;
 an equal ordinal never selects the ambient namespace inventory. Scope hashing
 and stable-key encoding preserve this discriminator.
+Module-root declaration bodies retain their `augmentation_blocks` ordinal as
+`NodeLocalScopeId::AugmentationModule`, with the same generation and owner
+fences. A namespace alias that reaches a module-root alias therefore keeps the
+exact module inventory when that alias demands its own sibling dependencies.
 Both locator-shape lowering and contribution projection use that scope. Lexical
 references consult the exact module inventory, walking enclosing namespace
 prefixes before the module root, before file/import/global lookup. They stay
@@ -97,6 +101,13 @@ module declares the same namespace and value names. Enum member types
 follow the shared ambient import value route before enum projection. An enum
 member referenced by a sibling alias first binds its owning enum in the lexical
 namespace inventory, before file/global lookup, then uses the same enum projector.
+Ambient value import roots carry the module's structural binder identity and
+test declaration presence in that exact inventory; another module or file-level
+namesake never makes that presence ambiguous. Enum preparation shares the exact
+augmentation-value reader with `typeof`. Enum literals retain the declaring
+module specifier alongside their declaration identity through interning, stable
+keys, union printing, publication proof and widening, so subsequent enum demands
+cannot fall back to a file-global enum of the same qualified name.
 Namespace classes retain both their instance type and constructor value through
 the ordinary class header and body lowerers, including explicit exports and
 generic defaults.

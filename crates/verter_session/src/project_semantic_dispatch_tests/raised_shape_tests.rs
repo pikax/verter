@@ -2762,6 +2762,7 @@ fn publication_score_corpus(
             graph.intern_node(SemanticNodeData::EnumLiteral(
                 verter_type_engine::semantic_query::EnumLiteralType {
                     enum_decl: decl_identity_unscoped("/w/m.ts", "Status"),
+                    module_specifier: None,
                     member: verter_type_expr::OwnedStr::from("Idle"),
                     base: zero,
                     member_count: 2,
