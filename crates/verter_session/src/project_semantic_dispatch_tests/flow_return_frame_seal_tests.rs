@@ -13,7 +13,6 @@ use std::sync::Arc;
 use super::*;
 use crate::types::{HostConfig, UpsertRequest};
 use crate::VerterHost;
-use verter_type_engine::project_semantic_dispatch::flow_products::FlowNarrowed;
 use verter_type_engine::semantic_query::{
     FlowReturnDegradation, FlowReturnKey, SemanticQueryKey, SemanticQueryOutput, SemanticQueryValue,
 };
@@ -599,7 +598,7 @@ use verter_type_engine::project_semantic_dispatch::flow_return::flow_admission_f
 /// Project a recorded observation onto arena-free structural text so two
 /// hosts are comparable.
 fn canonical(observation: ProductObservation, host: &VerterHost) -> CanonicalProductObservation {
-    use super::flow_products::WideningMembership;
+    use super::flow_products::{FlowNarrowed, WideningMembership};
     fn structural_type(ty: &verter_type_expr::TypeExpr) -> String {
         use verter_type_expr::TypeExpr;
         match ty {

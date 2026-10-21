@@ -207,8 +207,9 @@ default builds, or work this sweep could not finish, with the reason.
 4. Always-zero audit wire fields with no writer (`resolver_store_view_calls`,
    `materialize_structure_*`). The audit envelope's additions are purely
    additive and these fields stay on the wire as zero-valued schema until a
-   wire-contract retirement; removing them is owned by the audit and typeinfo
-   wire owners, not this sweep. A default build no longer emits them at all:
+   wire-contract retirement. Their backing counters, bump helper, carrier
+   fields and snapshot reads are removed; audit builders emit literal zeros.
+   A default build no longer emits them at all:
    it returns no captured record.
 5. Diagnostic tools that read audit records — `packages/benchmark/src/_audit-component.ts`,
    `scripts/benchmark/trace-component-corpus.mjs` and the native and WASM

@@ -13,6 +13,25 @@ use super::{
 use verter_session_query::analysis::types::Hash16;
 
 #[test]
+fn audit_builder_clears_legacy_materializer_fields_from_reused_payloads() {
+    let mut builder = AuditBuilder::new(1, "compat.vue".into());
+    builder.record_component_meta_payload(ComponentMetaPayload {
+        materialize_structure_calls: 23,
+        materialize_structure_cache_hits: 17,
+        ..Default::default()
+    });
+    builder.record_component_meta_store(1, 2, 3, 4);
+    let record = builder.finish();
+    let payload = record.component_meta_payload().unwrap();
+    assert_eq!(payload.materialize_structure_calls, 0);
+    assert_eq!(payload.materialize_structure_cache_hits, 0);
+    assert_eq!(payload.node_arena_lock_acquisitions, 1);
+    assert_eq!(payload.family_map_lock_acquisitions, 2);
+    assert_eq!(payload.dep_signature_merges, 3);
+    assert_eq!(payload.dep_signature_intern_hits, 4);
+}
+
+#[test]
 fn audit_builder_captures_total_timing() {
     let builder = AuditBuilder::new(1, "test.vue".into());
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -236,7 +255,7 @@ fn component_meta_payload_accessor_returns_none_for_other_kinds() {
 /// Drive a small SFC + dependency through the cold resolver and
 /// return the published `RequestAuditRecord`. Fixture exercises:
 ///   - cross-file imported `interface` (forces `imported_root_proof`),
-///   - multiple props (forces `materialize_structure_calls`),
+///   - multiple props (exercises structural projection),
 ///   - a DIAMOND import graph — `Props` references two imported types
 ///     (`FromA`, `FromB`) declared in two separate modules that BOTH
 ///     re-export their declaration through the SAME shared base module

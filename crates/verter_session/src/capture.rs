@@ -190,6 +190,55 @@ pub(crate) fn uncaptured_state(audit_enabled: bool) -> AuditCaptureState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn compatibility_zeros_exist_only_in_captured_component_meta_records() {
+        use crate::component_meta_host::ComponentMetaHost;
+        #[cfg(not(feature = "semantic-observe"))]
+        use crate::component_meta_host::ComponentMetaHostError;
+        let host = ComponentMetaHost::new_standalone(HostConfig {
+            audit_enabled: true,
+            footprint_capture: true,
+            ..HostConfig::default()
+        });
+        host.upsert_base(
+            "/compat.vue",
+            "<script setup lang=\"ts\">defineProps<{ value: string }>()</script>",
+        )
+        .unwrap();
+        let session = host.open_session().unwrap();
+        for attempt in 0..2 {
+            let (outcome, record) = session
+                .get_component_meta_with_audit("/compat.vue")
+                .into_parts();
+            #[cfg(feature = "semantic-observe")]
+            {
+                outcome
+                    .expect("captured metadata resolves")
+                    .expect("the fixture has component metadata");
+                assert_eq!(record.capture_state, AuditCaptureState::ActiveStored);
+                assert_eq!(record.from_cache, attempt > 0);
+                let payload =
+                    serde_json::to_value(record.component_meta_payload().unwrap()).unwrap();
+                assert_eq!(payload["materialize_structure_calls"], "0");
+                assert_eq!(payload["materialize_structure_cache_hits"], "0");
+                let bypass = serde_json::to_value(&record.store.bypass_diagnostics).unwrap();
+                assert_eq!(bypass["resolver_store_view_calls"], "0");
+            }
+            #[cfg(not(feature = "semantic-observe"))]
+            {
+                assert!(matches!(
+                    outcome,
+                    Err(ComponentMetaHostError::AuditNotEnabled)
+                ));
+                assert_eq!(record.capture_state, AuditCaptureState::Unavailable);
+                assert!(
+                    record.component_meta_payload().is_none(),
+                    "attempt {attempt}"
+                );
+            }
+        }
+    }
+
     /// Every audited entry installs the same REQUIRED request context
     /// whichever capture mode it selects: an MCP tool's body sees its own
     /// canonical, the host's projection budget and a live cancellation scope

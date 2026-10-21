@@ -539,8 +539,9 @@ impl ComponentMetaSession {
     ///   `AuditNotEnabled` when the host config does not enable
     ///   `audit_enabled` + `footprint_capture`; or `AuditRecordMissing`
     ///   when the bounded store evicted the record before retrieval).
-    ///   The carrier carries a cheap default-filled record so a consumer
-    ///   can still read `audit` regardless of outcome: `AuditDisabled`
+    ///   The carrier carries a capture-status marker so a consumer
+    ///   can still read `audit` regardless of outcome: `Unavailable`
+    ///   without capture compiled in (with no kind payload), `AuditDisabled`
     ///   whenever host capture is off (including a closed-session refusal
     ///   on an unaudited host), `FilteredNoop` otherwise.
     pub fn get_component_meta_with_audit(
@@ -778,8 +779,9 @@ impl ComponentMetaSession {
 /// Build the cheap default-filled [`crate::component_meta_audit::RequestAuditRecord`]
 /// the audited component-meta seam returns on its no-record paths
 /// (audit disabled, non-fault miss, or evicted record). No per-request
-/// counters are collected — the payload is the zero-valued default and
-/// `capture_state` records why the full record was unavailable.
+/// counters are collected. An unavailable build carries no kind payload;
+/// instrumented refusals retain the compatibility default payload, with
+/// `capture_state` recording why no full record was captured.
 fn cheap_component_meta_record(
     canonical_id: &str,
     capture_state: verter_audit::AuditCaptureState,
@@ -801,9 +803,12 @@ fn cheap_component_meta_record(
         scheduler: None,
         files: Vec::new(),
         waits: None,
+        #[cfg(feature = "semantic-observe")]
         kind_payload: verter_audit::RequestKindPayload::ComponentMeta(
             crate::component_meta_audit::ComponentMetaPayload::default(),
         ),
+        #[cfg(not(feature = "semantic-observe"))]
+        kind_payload: verter_audit::RequestKindPayload::None,
         capture_state,
         trace_id: String::new(),
     }
