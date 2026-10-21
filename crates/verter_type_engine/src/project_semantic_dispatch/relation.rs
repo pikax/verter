@@ -9216,7 +9216,11 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// match but a reference to the declaration a fixed member references
     /// (`isTypeCloselyMatchedBy`) is then paired with that member: `R |
     /// PromiseLike<R>` against `T | PromiseLike<T>` infers `T` from the
-    /// two references and from `R` alone. When every member matched, the
+    /// two references and from `R` alone. A member referencing another
+    /// generic interface or class, against a fixed member referencing one
+    /// whose type arguments mention the variable, pairs with that member
+    /// the same way: the checker infers into it, never into the variable
+    /// ([`Self::infers_into_fixed_reference`]). When every member matched, the
     /// whole source is a lower-priority inference to the variable
     /// ([`NakedUnionInference::Matched`]). `None` when no inference session
     /// collects or the target is no such union — a type parameter the
@@ -9316,6 +9320,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         for target_member in &fixed {
             let (paired, rest): (Vec<_>, Vec<_>) = unmatched.into_iter().partition(|member| {
                 member != target_member && self.references_one_declaration(*member, *target_member)
+            });
+            closely.extend(paired.into_iter().map(|member| (member, *target_member)));
+            unmatched = rest;
+        }
+        // Then each takes the remaining members the checker infers into it
+        // through another declaration's reference: they relate and infer
+        // there, never reaching the variable.
+        for target_member in &fixed {
+            let (paired, rest): (Vec<_>, Vec<_>) = unmatched.into_iter().partition(|member| {
+                member != target_member
+                    && self.infers_into_fixed_reference(*member, *target_member, *parameter)
             });
             closely.extend(paired.into_iter().map(|member| (member, *target_member)));
             unmatched = rest;

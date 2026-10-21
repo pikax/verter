@@ -853,6 +853,46 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         matches!((raw(left), raw(right)), (Some(a), Some(b)) if same_declaration(&a, &b))
     }
 
+    /// Whether the checker infers from the union source member `member` into
+    /// the fixed target member `fixed` rather than into the target's naked
+    /// type variable `parameter` (`inferToMultipleTypes` marks a source
+    /// matched once inferring it into a fixed member reaches the variable, or
+    /// meets a circularity that leaves the variable uninferred): both are
+    /// references to generic interfaces or classes — a runtime nominal
+    /// through the global declaration it refers to — and `fixed`'s type
+    /// arguments mention `parameter`. `R1 | Thenable<R1>` against `T |
+    /// PromiseLike<T>` infers `T` from `Thenable<R1>` through
+    /// `PromiseLike<T>`'s members and from `R1` alone, never as `R1 |
+    /// Thenable<R1>`.
+    pub(super) fn infers_into_fixed_reference(
+        &self,
+        member: SemanticNodeId,
+        fixed: SemanticNodeId,
+        parameter: SemanticNodeId,
+    ) -> bool {
+        use verter_session_query::declarations::TypeDeclKind;
+        let declaration = |node| {
+            let (declaration, args) = self.raw_generic_reference(node)?;
+            let declaration = self
+                .runtime_nominal_declaration(node, &declaration)
+                .unwrap_or(declaration);
+            let prepared = self.ctx.prepared_type_decl_return_only(
+                declaration.canonical_id.as_ref(),
+                declaration.owner,
+                declaration.decl_name.as_ref(),
+            )?;
+            matches!(prepared.kind, TypeDeclKind::Interface | TypeDeclKind::Class)
+                .then_some((declaration, args))
+        };
+        let (Some((_, _)), Some((_, fixed_args))) = (declaration(member), declaration(fixed))
+        else {
+            return false;
+        };
+        fixed_args
+            .iter()
+            .any(|argument| self.mentions_node(*argument, parameter))
+    }
+
     /// The global declaration a runtime-nominal application (`Promise<T>`,
     /// `Map<K, V>`) refers to: the merged global interface of that name the
     /// project its node is written in reads

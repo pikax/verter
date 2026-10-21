@@ -604,3 +604,38 @@ fn a_tuple_wrapper_reads_an_optional_element_with_its_undefined() {
     ]);
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A thenable interface whose `then` mirrors the library `Promise`'s: its
+/// callback parameters are unions with `undefined` and `null` whose returns
+/// name the interface again under the method's own defaulted type
+/// parameters.
+const MIRRORED_THENABLE: &str = "interface PL<T> { then<TResult1 = T, TResult2 = never>(onfulfilled?: ((value: T) => TResult1 | PL<TResult1>) | undefined | null, onrejected?: ((reason: any) => TResult2 | PL<TResult2>) | undefined | null): PL<TResult1 | TResult2>; }\n";
+
+/// Relating the library `Promise<1>` to a thenable interface of its own
+/// shape infers each `then` in the other's context: `TResult1 |
+/// PL<TResult1>` against `TResult1 | PromiseLike<TResult1>` infers the
+/// variable from `PL<TResult1>` through `PromiseLike<TResult1>` and from
+/// `TResult1` alone, as the checker's `inferToMultipleTypes` does. The
+/// read finishes: no level instantiates the next with a candidate holding
+/// the previous level's reference (`TResult1 | PL<TResult1>` nesting once
+/// more per `then`, past the lane's deadline).
+///
+/// Mutation: inferring a reference to another declaration into the naked
+/// variable exhausts the deadline.
+#[test]
+fn a_mirrored_thenable_relation_terminates() {
+    let rows = [(
+        Read::Type("Promise<1> extends PL<infer U> ? U : 0"),
+        vec!["1"],
+    )];
+    let matrix = Matrix::new(MIRRORED_THENABLE)
+        .lib(GLOBALS_LIB)
+        .settings(&[STRICT]);
+    let verdict = &matrix.verdicts(&rows)[0][0];
+    assert!(
+        !matches!(verdict.class, "HANG" | "PANIC"),
+        "{}: {}",
+        verdict.class,
+        verdict.lane
+    );
+}
