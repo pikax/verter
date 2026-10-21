@@ -92,6 +92,18 @@ export function localSemanticEnginesUnderVerterLsp(
   return [...engines.values()];
 }
 
+/**
+ * Semantic engines under `hostPid` that no Verter LSP owns: the editor's own and
+ * the editor-shared ones. Losing the Verter server must never take these down.
+ */
+export function semanticEnginesOutsideVerterLsp(
+  rows: readonly ProcessRecord[],
+  hostPid: number,
+): ProcessRecord[] {
+  const owned = new Set(localSemanticEnginesUnderVerterLsp(rows).map((row) => row.pid));
+  return descendantsOf(rows, hostPid).filter((row) => isSemanticEngine(row) && !owned.has(row.pid));
+}
+
 export async function readProcessInventory(timeoutMs = 5_000): Promise<ProcessRecord[]> {
   if (process.platform === "win32") {
     const script =
@@ -112,7 +124,7 @@ export async function readProcessInventory(timeoutMs = 5_000): Promise<ProcessRe
   return parsePosixProcessInventory(stdout);
 }
 
-function isVerterLsp(row: ProcessRecord): boolean {
+export function isVerterLsp(row: ProcessRecord): boolean {
   return /^verter-lsp(?:\.exe)?$/i.test(row.name);
 }
 

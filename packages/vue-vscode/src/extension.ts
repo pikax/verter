@@ -1437,20 +1437,23 @@ async function startVueLanguageServer(
   const HEARTBEAT_INITIAL_TIMEOUT_MS = 60_000;
   let heartbeatInitialized = false;
 
-  function armHeartbeatTimer(timeout: number) {
+  // The timer is bound to the epoch it was armed over: a watchdog left running
+  // over a replaced server must never report the replacement as lost.
+  function armHeartbeatTimer(timeout: number, epoch: number) {
     if (heartbeatTimer) clearTimeout(heartbeatTimer);
     heartbeatTimer = setTimeout(() => {
       heartbeatTimer = undefined;
+      if (!lifecycle.isCurrent(epoch)) return;
       const reason = `no heartbeat from Verter LSP for ${timeout / 1000}s`;
       log.error(`No heartbeat from Verter LSP for ${timeout / 1000}s — server appears frozen.`);
-      onServerLost(lifecycle.currentEpoch, reason);
+      onServerLost(epoch, reason);
     }, timeout);
   }
 
-  function resetHeartbeatTimer() {
+  function resetHeartbeatTimer(epoch: number) {
     const timeout = heartbeatInitialized ? HEARTBEAT_TIMEOUT_MS : HEARTBEAT_INITIAL_TIMEOUT_MS;
     heartbeatInitialized = true; // After first reset from heartbeat, use normal timeout
-    armHeartbeatTimer(timeout);
+    armHeartbeatTimer(timeout, epoch);
   }
 
   /**
@@ -1462,34 +1465,42 @@ async function startVueLanguageServer(
    * against a server that had never come up, which is how a permanently
    * unstartable server produced restarts forever at a fixed cadence.
    */
-  function armHeartbeatWatchdog() {
+  function armHeartbeatWatchdog(epoch: number) {
     // Start with initial grace period (60s) — background init may take time.
     // The first heartbeat received switches to the normal 30s timeout.
     heartbeatInitialized = false;
-    armHeartbeatTimer(HEARTBEAT_INITIAL_TIMEOUT_MS);
+    armHeartbeatTimer(HEARTBEAT_INITIAL_TIMEOUT_MS, epoch);
   }
 
-  function registerServerNotifications(lc: LanguageClient) {
+  function registerServerNotifications(lc: LanguageClient, epoch: number) {
+    // A queued notification from a replaced client describes a server that is
+    // no longer serving: it must not feed the watchdog, signal readiness or
+    // publish carrier-store state as the current server's.
     lc.onNotification(NotificationType.Heartbeat, () => {
-      resetHeartbeatTimer();
+      if (!lifecycle.isCurrent(epoch)) return;
+      resetHeartbeatTimer(epoch);
       // Log heartbeat in E2E test mode so tests can verify heartbeat receipt
       if (process.env.VERTER_E2E_TEST) {
         log.trace("$/verter/heartbeat received");
       }
     });
     lc.onNotification(NotificationType.Ready, (params: { gen: number }) => {
+      if (!lifecycle.isCurrent(epoch)) return;
       log.info(`Verter ready (init generation ${params.gen})`);
       startupProbe?.markReady();
       options.onReady?.();
     });
     lc.onNotification(NotificationType.TypeProviderSyncComplete, (params: { gen: number }) => {
+      if (!lifecycle.isCurrent(epoch)) return;
       log.info(`TypeProviderSyncComplete (init generation ${params.gen})`);
       options.onTypeProviderSyncComplete?.();
     });
     lc.onNotification(NotificationType.CarrierStoreChanged, () => {
+      if (!lifecycle.isCurrent(epoch)) return;
       options.onCarrierStoreChanged?.();
     });
     lc.onNotification(NotificationType.CarrierStoreReady, (params: { carrierStoreDir: string }) => {
+      if (!lifecycle.isCurrent(epoch)) return;
       log.info(`Carrier store dir reported by LSP: ${params.carrierStoreDir}`);
       // Forward to VS Code's own TS server plugin so a plain `.ts` served by
       // VS Code's TS service reads the same store the LSP publishes into.
@@ -1524,7 +1535,7 @@ async function startVueLanguageServer(
     void restartSupervisor.requestAutomaticRestart(reason);
   }
 
-  registerServerNotifications(client);
+  registerServerNotifications(client, initialEpoch);
 
   // ── Extension-hosted TypeScript language service (Experiment E) ──
   // When --type-provider=extension is used, the Rust LSP sends $/verter/tsQuery
@@ -1628,9 +1639,15 @@ async function startVueLanguageServer(
   const restartSupervisor = createRestartSupervisor({
     restart: () =>
       restartLanguageServer({
-        stop: () => {
+        stop: async () => {
+          // The old server's watchdog must not outlive it: left running it would
+          // fire during the replacement's start.
+          stopHeartbeatTimer();
           plainScriptSync.disconnect();
-          return client.stop();
+          await client.stop();
+          // A clean stop reaped the engines this server announced; keeping their
+          // pids would let a later crash signal a recycled pid.
+          typeProviderPids.clear();
         },
         createAndStart: async () => {
           if (attempt.isDisposed) {
@@ -1651,7 +1668,7 @@ async function startVueLanguageServer(
           );
           bindPlainScriptSync(client);
           registerTypeProviderPidListener(client);
-          registerServerNotifications(client);
+          registerServerNotifications(client, epoch);
           // The standalone MCP child is attempt-owned, not client-owned: a
           // crash-recovery restart keeps the running server, while a
           // config-change restart re-reads the `verter.mcp.*` settings here.
@@ -1670,7 +1687,7 @@ async function startVueLanguageServer(
           }
           lifecycle.markRunning(epoch);
           // Only a server that is actually up gets a freeze watchdog.
-          armHeartbeatWatchdog();
+          armHeartbeatWatchdog(epoch);
         },
         killTrackedTypeProvider,
         resetServices: () => {
@@ -1701,7 +1718,7 @@ async function startVueLanguageServer(
     if (outcome === "restarted" && showMsg) {
       window.showInformationMessage("Verter Language server restarted");
     }
-    if (outcome === "failed") {
+    if (outcome === "failed" && !attempt.isDisposed) {
       // A requested restart that did not come back is not retried behind the
       // user's back: the server stays visibly stopped until asked again.
       stopHeartbeatTimer();
@@ -1751,7 +1768,7 @@ async function startVueLanguageServer(
   }
   lifecycle.markRunning(initialEpoch);
   // Only a server that is actually up gets a freeze watchdog.
-  armHeartbeatWatchdog();
+  armHeartbeatWatchdog(initialEpoch);
 
   return {
     getClient,

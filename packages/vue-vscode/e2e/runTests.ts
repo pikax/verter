@@ -29,6 +29,7 @@ import {
 } from "./lib/parityTestInventory";
 import { e2eRouteLabel, selectE2eRunRoutes, type E2eRoute } from "./lib/routeInventory";
 import { installFixtureDeps } from "./lib/fixtureDeps";
+import { assertOwnedProcessesReaped, ownedProcessFile } from "./lib/teardownOwnership";
 import {
   E2E_BASE_SERVER_PROFILE_ENV,
   E2E_SERVER_PROFILE_ENV,
@@ -502,6 +503,7 @@ async function main() {
       // Delete any stale run summary before the run so a prior-run summary can
       // never false-green a current zero-exit crash that writes no fresh summary.
       clearRunArtifacts(logFile);
+      fs.rmSync(ownedProcessFile(logFile), { force: true });
       // The runner's profile is USER-scope, and several suites write WORKSPACE-scope
       // settings into `<fixture>/.vscode/settings.json` at runtime (the decorations
       // suite, `revealDefinition`). That file is gitignored, so it survives between
@@ -627,6 +629,10 @@ async function main() {
           // exit code is unreliable on some hosts.
           extensionHostError = error;
         }
+        // The editor has exited: whatever its Verter language server owned must be
+        // gone with it. A failing summary below still reports first.
+        const reapedCount = await assertOwnedProcessesReaped(logFile);
+        console.log(`  Teardown reaped ${reapedCount} owned process(es).`);
         // The @vscode/test-electron process exit code is an UNRELIABLE pass/fail signal
         // on some hosts (Windows: VS Code can exit 0 even when the extension test run
         // rejected). The authoritative oracle is the run summary the mocha runner writes

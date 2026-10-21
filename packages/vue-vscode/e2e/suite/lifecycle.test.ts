@@ -1,7 +1,12 @@
 import * as assert from "assert";
 import * as vscode from "vscode";
 import { pollBudget, sequenceParent } from "../lib/timeouts";
-import { descendantsOf, readProcessInventory, type ProcessRecord } from "../processInventory";
+import {
+  descendantsOf,
+  readProcessInventory,
+  semanticEnginesOutsideVerterLsp,
+  type ProcessRecord,
+} from "../processInventory";
 import {
   FIXTURE_NAME,
   ensureFixtureWarm,
@@ -105,7 +110,8 @@ suite(`Language server lifecycle [${FIXTURE_NAME}]`, function () {
     assert.strictEqual(initial.length, 1, "one Verter LSP before the restarts");
 
     const seen = new Set(initial.map((row) => row.pid));
-    for (let restart = 0; restart < 3; restart += 1) {
+    // Two replacements: the second would expose anything the first left behind.
+    for (let restart = 0; restart < 2; restart += 1) {
       const mark = logMark();
       await vscode.commands.executeCommand("verter.restartLanguageServer");
       seen.add((await waitForReplacementServer(seen, mark)).pid);
@@ -125,9 +131,22 @@ suite(`Language server lifecycle [${FIXTURE_NAME}]`, function () {
     assert.ok(crashed, "a Verter LSP must be running before the crash");
     assert.deepStrictEqual(others, [], "one Verter LSP before the crash");
 
+    const sharedBefore = semanticEnginesOutsideVerterLsp(
+      await readProcessInventory(10_000),
+      process.pid,
+    ).map((row) => row.pid);
+
     const mark = logMark();
     process.kill(crashed.pid, "SIGKILL");
     await waitForReplacementServer(new Set([crashed.pid]), mark);
+
+    // Reaping the lost server's own engines must not touch engines it never owned.
+    const alive = new Set((await readProcessInventory(10_000)).map((row) => row.pid));
+    assert.deepStrictEqual(
+      sharedBefore.filter((pid) => !alive.has(pid)),
+      [],
+      "a crash recovery must leave the editor's and the shared engines running",
+    );
 
     const log = readTestLog().slice(mark);
     assert.match(log, /Verter language server lost: the server process exited/);

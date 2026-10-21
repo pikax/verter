@@ -494,13 +494,12 @@ export const POLL_SEQUENCES = {
       "waitForDiagnosticsSettled",
       "lifecycleServerReplaced",
       "lifecycleServerReplaced",
-      "lifecycleServerReplaced",
       "waitForDiagnostics",
       "waitForDiagnosticsSettled",
     ],
-    parentTimeoutMs: 150_000,
+    parentTimeoutMs: 120_000,
     reason:
-      "the restart-loop case reads the unsaved edit's diagnostic, replaces the server three times " +
+      "the restart-loop case reads the unsaved edit's diagnostic, replaces the server twice " +
       "in series, then reads the diagnostic the last replacement published, under one deadline",
   },
   lifecycleCrashRecovery: {

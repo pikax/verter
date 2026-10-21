@@ -980,6 +980,63 @@ describe("one crash-recovery authority", () => {
     lifetime.dispose();
   });
 
+  it("ignores a replaced client's server notifications", async () => {
+    const lifetime = new StartAttemptScope();
+    const onReady = vi.fn();
+    const onCarrierStoreChanged = vi.fn();
+    const onCarrierStoreReady = vi.fn();
+    const server = await activateVueLanguageServer(makeContext(), log, undefined, {
+      lifetime,
+      onReady,
+      onCarrierStoreChanged,
+      onCarrierStoreReady,
+    });
+    await server.restart(false);
+    const startsAfterRestart = mocks.state.startCalls;
+
+    // Queued behind the replacement: none of these describe the serving server.
+    fireNotificationOn(0, "$/verter/ready", { gen: 1 });
+    fireNotificationOn(0, "$/verter/carrierStoreChanged", {});
+    fireNotificationOn(0, "$/verter/carrierStoreReady", { carrierStoreDir: "/stale" });
+    expect(onReady).not.toHaveBeenCalled();
+    expect(onCarrierStoreChanged).not.toHaveBeenCalled();
+    expect(onCarrierStoreReady).not.toHaveBeenCalled();
+
+    // A stale heartbeat must not shorten the replacement's initial grace window.
+    fireNotificationOn(0, "$/verter/heartbeat", {});
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(mocks.state.startCalls).toBe(startsAfterRestart);
+
+    fireNotificationOn(1, "$/verter/ready", { gen: 1 });
+    expect(onReady).toHaveBeenCalledTimes(1);
+
+    lifetime.dispose();
+  });
+
+  it("recovers a crash of a server whose slow replacement outlived the old watchdog", async () => {
+    const lifetime = new StartAttemptScope();
+    const server = await startAttempt(makeContext(), lifetime);
+
+    // The replacement takes longer to start than the replaced server's watchdog
+    // had left; that watchdog must be gone, not report the replacement as lost.
+    await vi.advanceTimersByTimeAsync(20_000);
+    mocks.state.holdStart = true;
+    const restarting = server.restart(false);
+    await vi.advanceTimersByTimeAsync(55_000);
+    mocks.state.releaseStart?.();
+    mocks.state.holdStart = false;
+    await restarting;
+    const startsBeforeCrash = mocks.state.startCalls;
+    expect(startsBeforeCrash).toBe(2);
+
+    errorHandlerOf(1).closed();
+    expect(liveStatusBarItem()?.text).toMatch(/restarting \(1\/5\)/);
+    await vi.advanceTimersByTimeAsync(DEFAULT_RESTART_POLICY.initialBackoffMs);
+    expect(mocks.state.startCalls).toBe(startsBeforeCrash + 1);
+
+    lifetime.dispose();
+  });
+
   it("never shows a replaced client's engine status as the current one", async () => {
     const lifetime = new StartAttemptScope();
     const server = await startAttempt(makeContext(), lifetime);
