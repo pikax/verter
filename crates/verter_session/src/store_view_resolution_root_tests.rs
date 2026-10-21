@@ -50,6 +50,9 @@ fn admitted_witness(host: &VerterHost) -> (Option<String>, ReadSetSignature) {
     let target = outcome.result().map(|result| result.source_id.clone());
     match outcome.into_publication() {
         ResolutionPublication::Admitted(admitted) => (target, admitted.signature().clone()),
+        ResolutionPublication::Unretained(_) => {
+            panic!("precondition: resolving {SPECIFIER} must admit a witness; it was not retained")
+        }
         ResolutionPublication::Refused(refusal) => panic!(
             "precondition: resolving {SPECIFIER} must admit a witness; refused {:?}",
             refusal.reason()
@@ -333,6 +336,9 @@ fn the_resolution_fact_generation_moves_only_on_a_real_fact_advance() {
     );
     let discovery_witness = match discovery.into_publication() {
         ResolutionPublication::Admitted(admitted) => admitted.signature().clone(),
+        ResolutionPublication::Unretained(_) => panic!(
+            "precondition: the first-observation demand must admit a witness; it was not retained"
+        ),
         ResolutionPublication::Refused(refusal) => panic!(
             "precondition: the first-observation demand must admit a witness; \
              refused {:?}",

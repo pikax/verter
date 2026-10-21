@@ -16,6 +16,412 @@
 
 use super::differential_harness_tests::{Matrix, Read, Setting, ALL};
 
+#[test]
+fn an_infer_variable_in_a_nested_conditional_check_stays_deferred() {
+    let source = r#"
+interface TextFactory { new (): { boxed: true }; (): string }
+type PC<T> = { new (...args: any[]): T & {} } | { (): T };
+type PCM<T> = PC<T> | (T extends (...args: any[]) => any
+    ? { new (): any; (): T; prototype: any } : never);
+type Wrapped<T> = PC<T> | ([T] extends [((...args: any[]) => any) | undefined]
+    ? { new (): any; (): T; prototype: any } : never);
+export function base() { return null! as (TextFactory extends PC<infer V> ? V : never); }
+export function direct() { return null! as (TextFactory extends PCM<infer V> ? V : never); }
+export function tuple() { return null! as (TextFactory extends Wrapped<infer V> ? V : never); }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("base", "string"),
+        ("direct", "string"),
+        ("tuple", "string"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Equivalent call-result demands over the pinned Vue definitions. The
+/// expected signatures and prop types were measured with TypeScript 7.0.2's
+/// native compiler with `--lib es2020` in all four strictness settings.
+/// Both demands share one SDK-registered host per setting. Dependencies keep
+/// a single project owner, and neither SDK nor package discovery is repeated
+/// for the second demand.
+fn vue_call_result_fixture(setting: Setting, strict: bool) {
+    let mut events = String::new();
+    let mut strict_emits = Vec::new();
+    let mut loose_emits = Vec::new();
+    for i in 0..8 {
+        let (option, strict, loose) = if i % 3 == 2 {
+            (
+                "null".to_string(),
+                format!("((event: \"e{i}\", ...args: any[]) => void)"),
+                format!("((event: \"e{i}\", ...args: unknown[]) => void)"),
+            )
+        } else {
+            let ty = if i % 3 == 0 { "number" } else { "string" };
+            (
+                format!("(v: {ty}, flag?: boolean) => true"),
+                format!("((event: \"e{i}\", v: {ty}, flag?: boolean | undefined) => void)"),
+                format!("((event: \"e{i}\", v: {ty}, flag?: boolean) => void)"),
+            )
+        };
+        events.push_str(&format!("e{i}: {option};\n"));
+        strict_emits.push(strict);
+        loose_emits.push(loose);
+    }
+    let mut options = String::new();
+    let mut required = String::new();
+    let mut strict_optional = String::new();
+    let mut loose_optional = String::new();
+    for i in 0..16 {
+        let (option, value) = match i % 8 {
+            0 => ("StringConstructor".to_string(), "string".to_string()),
+            1 => (
+                "{ type: NumberConstructor; required: true }".to_string(),
+                "number".to_string(),
+            ),
+            2 => (
+                "{ type: PropType<string[]>; required: true }".to_string(),
+                "string[]".to_string(),
+            ),
+            3 => ("BooleanConstructor".to_string(), "boolean".to_string()),
+            4 => (
+                "[NumberConstructor, StringConstructor]".to_string(),
+                "string | number".to_string(),
+            ),
+            5 => (
+                format!("{{ type: PropType<{{ x{i}: number }}>; required: true }}"),
+                format!("{{ x{i}: number; }}"),
+            ),
+            6 => (
+                "{ type: StringConstructor; default: \"fallback\" }".to_string(),
+                "string".to_string(),
+            ),
+            _ => (
+                "{ type: DateConstructor; required: true }".to_string(),
+                "Date".to_string(),
+            ),
+        };
+        options.push_str(&format!("p{i}: {option};\n"));
+        if matches!(i % 8, 0 | 4) {
+            strict_optional.push_str(&format!("readonly p{i}?: {value} | undefined; "));
+            loose_optional.push_str(&format!("readonly p{i}?: {value}; "));
+        } else {
+            required.push_str(&format!("readonly p{i}: {value}; "));
+        }
+    }
+    let source = format!(
+        "import type {{ EmitFn, ExtractPropTypes, PropType }} from 'vue';\n\
+         type UR<T> = T extends string ? \"s\" : T;\n\
+         declare function f<T>(): {{ value: UR<T> }};\n\
+         const a = f<number>();\n\
+         type Events = {{ {events} }};\n\
+         declare function emits<T>(): EmitFn<T>;\n\
+         const e = emits<Events>();\n\
+         type Options = {{ {options} }};\n\
+         declare function props<T>(): ExtractPropTypes<T>;\n\
+         const p = props<Options>();\n"
+    );
+    let strict_emits = strict_emits.join(" & ");
+    let loose_emits = loose_emits.join(" & ");
+    let strict_props = format!("{{ {required} {strict_optional} }}");
+    let loose_props = format!("{{ {required} {loose_optional} }}");
+    let failures = Matrix::new(&source)
+        .installed_packages()
+        .installed_typescript_libs(&["es2020"])
+        .settings(&[setting])
+        .types(&[
+            (
+                "typeof e",
+                if strict { &strict_emits } else { &loose_emits },
+            ),
+            (
+                "{ readonly [K in keyof typeof p]: (typeof p)[K] }",
+                if strict { &strict_props } else { &loose_props },
+            ),
+            ("typeof a.value", "number"),
+            ("StringConstructor extends BooleanConstructor ? 1 : 2", "2"),
+            (
+                "[NumberConstructor, StringConstructor] extends BooleanConstructor ? 1 : 2",
+                "2",
+            ),
+            (
+                "[NumberConstructor, StringConstructor] extends { required: true } ? 1 : 2",
+                "2",
+            ),
+            (
+                "typeof Symbol.iterator extends typeof Symbol.match ? 1 : 2",
+                "2",
+            ),
+        ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_strict() {
+    vue_call_result_fixture(ALL[0], true);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_loose() {
+    vue_call_result_fixture(ALL[1], false);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_strict_without_no_implicit_any() {
+    vue_call_result_fixture(ALL[2], true);
+}
+#[test]
+fn vue_callable_and_prop_aliases_in_call_results_loose_without_no_implicit_any() {
+    vue_call_result_fixture(ALL[3], false);
+}
+
+#[test]
+fn generic_signature_conditional_identity_decides_closed_arguments() {
+    let source = r#"
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Renamed<X, Y> = (<S>() => S extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Left = { a: 1 };
+type Right = { a: 1 };
+type __BenchInit = 0;
+export function open<X, Y>() { return null! as Eq<X, Y>; }
+export function reflexive<X>() { return null! as Eq<X, X>; }
+"#;
+    let matrix = Matrix::new(source).settings(&ALL);
+    let mut failures = matrix.types(&[
+        ("Eq<{ a: 1 }, { a: 1 }>", "true"),
+        ("Eq<{ a: 1 }, { a: 2 }>", "false"),
+        ("Eq<{ a: 1 }, { a: number }>", "false"),
+        ("Eq<any, unknown>", "false"),
+        ("Eq<unknown, any>", "false"),
+        ("Eq<Left, Right>", "true"),
+        ("Renamed<{ a: 1 }, { a: 1 }>", "true"),
+        ("Renamed<{ a: 1 }, { a: 2 }>", "false"),
+    ]);
+    failures.extend(matrix.returns(&[
+        (
+            "open",
+            "(<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false",
+        ),
+        ("reflexive", "true"),
+    ]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn generic_signature_identity_ignores_operand_construction_details() {
+    let source = r#"
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+type Left = { a: 1; b: 2 };
+type Right = { b: 2; a: 1 };
+interface Base { a: 1 }
+interface Derived extends Base { b: 2 }
+declare const key: unique symbol;
+declare const otherKey: unique symbol;
+export function reordered() { return null! as Eq<Left, Right>; }
+export function nested() { return null! as Eq<{ v: Left }, { v: Right }>; }
+export function union() { return null! as Eq<1 | 2, 2 | 1>; }
+export function tuple() { return null! as Eq<[x: 1], [y: 1]>; }
+export function signature() { return null! as Eq<(x: 1) => 2, (y: 1) => 2>; }
+export function readonly() { return null! as Eq<{ readonly a: 1 }, { a: 1 }>; }
+export function optional() { return null! as Eq<{ a?: 1 }, { a: 1 }>; }
+export function tupleReadonly() { return null! as Eq<readonly [1], [1]>; }
+export function signatureOptional() { return null! as Eq<(x?: 1) => 2, (y: 1) => 2>; }
+export function generic() { return null! as Eq<<T>(x: T) => T, <U>(y: U) => U>; }
+export function keySpelling() { return null! as Eq<{ 1: 2 }, { "1": 2 }>; }
+export function nominal() { return null! as Eq<typeof key, typeof key>; }
+export function nominalBroad() { return null! as Eq<typeof key, symbol>; }
+export function nominalDifferent() { return null! as Eq<typeof key, typeof otherKey>; }
+export function optionalUndefined() { return null! as Eq<{ a?: 1 }, { a?: 1 | undefined }>; }
+export function inherited() { return null! as Eq<Derived, { a: 1; b: 2 }>; }
+export function authoredIntersection() { return null! as Eq<{ a: 1 } & { b: 2 }, { a: 1; b: 2 }>; }
+export function conditionalSignature() { return null! as Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 1 ? 1 : 2>; }
+export function differentConditionalSignature() { return null! as Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 2 ? 1 : 2>; }
+"#;
+    let failures = Matrix::new(source).settings(&ALL).returns(&[
+        ("reordered", "true"),
+        ("nested", "true"),
+        ("union", "true"),
+        ("tuple", "true"),
+        ("signature", "true"),
+        ("readonly", "false"),
+        ("optional", "false"),
+        ("tupleReadonly", "false"),
+        ("signatureOptional", "false"),
+        ("generic", "true"),
+        ("keySpelling", "true"),
+        ("nominal", "true"),
+        ("nominalBroad", "false"),
+        ("nominalDifferent", "false"),
+        ("optionalUndefined", "true"),
+        ("inherited", "true"),
+        ("authoredIntersection", "false"),
+        ("conditionalSignature", "true"),
+        ("differentConditionalSignature", "false"),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn named_generic_signature_identity_is_stable_when_warm() {
+    use crate::{FileLanguage, HostConfig, UpsertRequest, VerterHost};
+    use std::sync::Arc;
+    use verter_type_expr::{LiteralValue, TypeExpr};
+
+    for (strict_null_checks, no_implicit_any, exact_optional) in [
+        (true, true, false),
+        (true, false, false),
+        (false, true, false),
+        (false, false, false),
+        (true, true, true),
+    ] {
+        let config = format!(
+            r#"{{ "compilerOptions": {{ "strictNullChecks": {strict_null_checks}, "noImplicitAny": {no_implicit_any}, "exactOptionalPropertyTypes": {exact_optional} }} }}"#
+        );
+        let host = VerterHost::new_standalone_with_tsconfig_projects(
+            HostConfig::default(),
+            &[("/identity", &config)],
+        );
+        for (file, source) in [
+            ("left.ts", "export type Left = { a: 1; b: 2 };"),
+            ("right.ts", "export type Right = { b: 2; a: 1 };"),
+            (
+                "probe.ts",
+                r#"
+import type { Left } from './left';
+import type { Right } from './right';
+type Eq<X, Y> = (<T>() => T extends X ? 1 : 2) extends (<T>() => T extends Y ? 1 : 2) ? true : false;
+export type ObjectOrder = Eq<{ a: 1; b: 2 }, { b: 2; a: 1 }>;
+export type UnionOrder = Eq<1 | 2, 2 | 1>;
+export type TupleLabels = Eq<[x: 1], [y: 1]>;
+export type ParameterNames = Eq<(x: 1) => 2, (y: 1) => 2>;
+export type ImportedAliases = Eq<{ v: Left }, { v: Right }>;
+export type Unequal = Eq<{ a: 1 }, { a: 2 }>;
+export type OptionalUndefined = Eq<{ a?: 1 }, { a?: 1 | undefined }>;
+interface Base { a: 1 }
+interface Derived extends Base { b: 2 }
+export type Inherited = Eq<Derived, { a: 1; b: 2 }>;
+export type ConditionalSignature = Eq<<T>() => T extends 1 ? 1 : 2, <U>() => U extends 1 ? 1 : 2>;
+"#,
+            ),
+        ] {
+            let canonical = format!("/identity/{file}");
+            let _ = host
+                .upsert(UpsertRequest {
+                    canonical_id: Some(canonical.clone()),
+                    input_id: canonical,
+                    source: Arc::from(source),
+                    file_language: FileLanguage::script_ts(),
+                    aliases: vec![],
+                })
+                .expect("fixture admitted");
+        }
+        let read = |symbol: &str| -> TypeExpr {
+            let node = host
+                .resolve_named_symbol_with_audit("/identity/probe.ts", symbol, None)
+                .into_parts()
+                .0
+                .expect("the named demand completes")
+                .expect("the symbol exists");
+            let bytes = host
+                .project_node_to_type_expr_json_bytes(&node)
+                .expect("the answer projects");
+            serde_json::from_slice(&bytes).expect("a wire answer")
+        };
+        for (symbol, expected) in [
+            ("ObjectOrder", true),
+            ("UnionOrder", true),
+            ("TupleLabels", true),
+            ("ParameterNames", true),
+            ("ImportedAliases", true),
+            ("Unequal", false),
+            ("OptionalUndefined", !exact_optional),
+            ("Inherited", true),
+            ("ConditionalSignature", true),
+        ] {
+            for _ in 0..2 {
+                let answer = read(symbol);
+                assert!(
+                    matches!(answer, TypeExpr::Literal(LiteralValue::Boolean(value)) if value == expected),
+                    "{symbol}: {answer:?}"
+                );
+            }
+        }
+        let _ = host
+            .upsert(UpsertRequest {
+                canonical_id: Some("/identity/right.ts".into()),
+                input_id: "/identity/right.ts".into(),
+                source: Arc::from("export type Right = { b: 2; a: 2 };"),
+                file_language: FileLanguage::script_ts(),
+                aliases: vec![],
+            })
+            .expect("changed dependency admitted");
+        assert!(matches!(
+            read("ImportedAliases"),
+            TypeExpr::Literal(LiteralValue::Boolean(false))
+        ));
+    }
+}
+
+#[test]
+fn any_infer_tuple_uses_unknown_and_preserves_open_checks() {
+    let source = r#"
+export function open<T>() { return null! as (T extends [infer A] ? A : 0); }
+"#;
+    let matrix = Matrix::new(source).settings(&ALL);
+    let mut failures = matrix.types(&[
+        ("any extends [infer A] ? A : 0", "unknown"),
+        ("any extends [infer A] ? [A] : 0", "[unknown] | 0"),
+        ("any extends [infer A extends string] ? A : 0", "string | 0"),
+        ("any extends infer A ? A : 0", "any"),
+        ("[1] extends [infer A] ? A : 0", "1"),
+        ("unknown extends [infer A] ? A : 0", "0"),
+    ]);
+    failures.extend(matrix.returns(&[("open", "T extends [infer A] ? A : 0")]));
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn generic_signature_context_infers_composite_arguments() {
+    let failures = Matrix::new("").settings(&ALL).types(&[
+        (
+            "(<T>(x: T) => void) extends (<U>(x: U[]) => void) ? 1 : 0",
+            "1",
+        ),
+        ("(<T>(x: T) => T) extends (<U>(x: U[]) => U[]) ? 1 : 0", "1"),
+        ("(<T>() => T) extends (<U>() => U[]) ? 1 : 0", "1"),
+        (
+            "(<T>(x: T, y: T) => void) extends (<U>(x: U, y: string) => void) ? 1 : 0",
+            "0",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn any_infer_branch_union_uses_project_nullability() {
+    let failures = Matrix::new("").settings(&ALL).nullness(&[
+        (
+            Read::Type("any extends [infer A] ? [A] : undefined"),
+            "[unknown] | undefined",
+            "[unknown]",
+        ),
+        (
+            Read::Type("any extends [infer A] ? [A] : null"),
+            "[unknown] | null",
+            "[unknown]",
+        ),
+        (
+            Read::Type("keyof (any extends [infer A] ? { v: A } : undefined)"),
+            "never",
+            "\"v\"",
+        ),
+        (
+            Read::Type("keyof (any extends [infer A] ? { v: A } : null)"),
+            "never",
+            "\"v\"",
+        ),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Generic functions holding each conditional; overloads choosing between a
 /// parameter a deferred conditional argument may relate to and `unknown`;
 /// and method overloads choosing between a deferred conditional parameter
@@ -349,6 +755,37 @@ fn instantiated_and_constrained_conditionals_decide_as_the_checker_decides_them(
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn distributive_conditionals_split_boolean_and_boolean_union_members() {
+    let source = r#"
+type __BenchInit = 0;
+type Exclude<T, U> = T extends U ? never : T;
+type Extract<T, U> = T extends U ? T : never;
+type F<T> = T extends true ? "t" : "f";
+type Box<T> = T extends unknown ? { value: T } : never;
+type Wrapped<T> = [T] extends [true] ? "t" : "f";
+type Bool = boolean;
+type BoolUnion = boolean | 0;
+type Nested<T> = T extends infer U ? U extends true ? U : never : never;
+"#;
+    let failures = Matrix::new(source).settings(&ALL).types(&[
+        ("F<boolean>", "\"f\" | \"t\""),
+        ("Exclude<boolean | 0, false>", "0 | true"),
+        ("Exclude<boolean | 0, true>", "0 | false"),
+        ("Extract<boolean | 0, true>", "true"),
+        ("F<Bool>", "\"f\" | \"t\""),
+        ("Exclude<BoolUnion, false>", "0 | true"),
+        ("Box<boolean>", "{ value: false; } | { value: true; }"),
+        ("Nested<boolean>", "true"),
+        ("Wrapped<boolean>", "\"f\""),
+        ("[boolean] extends [true] ? \"t\" : \"f\"", "\"f\""),
+        ("boolean extends true ? \"t\" : \"f\"", "\"f\""),
+        ("F<true>", "\"t\""),
+        ("F<false>", "\"f\""),
+    ]);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Vue's ref unwrapping read through the real `vue` package, whose
 /// `UnwrapRef` and `Ref` reach the probe through the `vue` → runtime-dom →
 /// runtime-core → reactivity re-export chain. `Ref` declares its value as a
@@ -589,6 +1026,65 @@ fn a_written_arm_proves_only_a_check_that_neither_distributes_nor_absorbs() {
                 read.text(),
                 verdict.class,
                 verdict.lane
+            );
+        }
+    }
+}
+
+/// Named type queries must not publish a whole-boolean branch when an
+/// unreadable extends arm prevents per-member decisions. Return-flow reads
+/// already retain a gap for this input, so exercise the public named demand.
+#[test]
+fn a_written_arm_cannot_select_a_whole_distributive_boolean() {
+    use crate::u6_flow_shape_corpus_tests::u6_flow_expect_tests::checker_syntax;
+    use std::sync::Arc;
+    use verter_type_engine::semantic_query::{QueryError, SemanticNodeData};
+
+    let source = format!(
+        "{UNREADABLE_ARM_SOURCE}\n\
+         type Bool = boolean;\n\
+         type FBool<T> = T extends boolean | Dom<1> ? {{ v: T }} : 0;\n\
+         type Direct = FBool<boolean>;\n\
+         type Aliased = FBool<Bool>;\n\
+         type Whole = boolean extends boolean | Dom<1> ? 1 : 2;\n"
+    );
+    let host = Matrix::new(&source).settings(&ALL).host(&[]);
+    for setting in ALL {
+        let canonical = format!("{}/probe.ts", setting.root);
+        for (name, answer) in [
+            ("Whole", "1"),
+            ("Direct", "{ v: false; } | { v: true; }"),
+            ("Aliased", "{ v: false; } | { v: true; }"),
+        ] {
+            let result = host
+                .resolve_named_symbol_with_audit(&canonical, name, None)
+                .into_result()
+                .expect("the named demand does not fault");
+            let Some(node) = result else {
+                assert_ne!(name, "Whole", "the non-distributive control resolves");
+                continue;
+            };
+            let store_view = host.resolver_store_view_read().into_owned_view();
+            let overlay = Arc::new(crate::resolver_core::CanonicalCompletionOverlay::new());
+            let host_ctx =
+                crate::resolver_core::HostResolverContext::new(&host, &store_view, overlay);
+            let dispatch = super::ProjectSemanticDispatch::new(&host_ctx);
+            let expected = checker_syntax::parse(answer).expect("valid checker type");
+            let data = dispatch.graph().node_data(node.id());
+            let gap = name != "Whole"
+                && matches!(
+                    data.as_deref(),
+                    Some(
+                        SemanticNodeData::Conditional { .. }
+                            | SemanticNodeData::Opaque(
+                                QueryError::IncompleteSemanticOperand { .. }
+                            )
+                    )
+                );
+            assert!(
+                gap || checker_syntax::matches_node(&dispatch, node.id(), &expected, 0),
+                "{name} [{}] must be {answer} or an unresolved conditional, got {data:?}",
+                setting.label
             );
         }
     }

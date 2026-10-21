@@ -1525,7 +1525,12 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             // request spend above is the charge that outlives this dispatch.
             let demand = self.connected_demand();
             if demand.is_active() {
-                demand.apply_refusal(effects.work, effects.bytes, effects.trip);
+                demand.apply_refusal(
+                    effects.work,
+                    effects.bytes,
+                    effects.advisory_bytes,
+                    effects.trip,
+                );
             }
         }
         true
@@ -1628,6 +1633,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> super::ProjectSemanticDispat
             request: request_spent,
             work: span.work,
             bytes: span.bytes,
+            advisory_bytes: span.advisory_bytes,
             trip: span.trip,
         };
         let divergence_certificate = span.certificates > 0;

@@ -1827,6 +1827,10 @@ const CLEAN_CHECKER_MATCH_PRESERVATION_COHORT: &[(&str, &str)] = &[
         "216313b7c5a1ee161a92125b9e43c98bb3478ce97fcb255af8dd11b768382eb9",
     ),
     (
+        "N72_typeof_function_guard",
+        "d1a55fac525fbcbfe5d7a6f146be25c3275f5626817ca0685ef6f18378a241f4",
+    ),
+    (
         "N73_typeof_object_keeps_null",
         "95343cc9fd971495876ad1406249ffc7167c107bea92a77eade69daaa71d4d54",
     ),
@@ -3617,7 +3621,7 @@ mod corpus_suite {
             ),
             (
                 "N72_typeof_function_guard",
-                "checker prints `{ v: string | number; }`; the renderer spells the (KnownOwed-divergent) node `{ v: Union(string | any) }` — print syntax AND semantics differ; the divergence is held by the KnownOwed arm of the semantic test",
+                "checker prints `{ v: string | number; }`; the renderer spells the same node `{ v: Union(number | string) }`",
             ),
             (
                 "N73_typeof_object_keeps_null",
@@ -5486,12 +5490,10 @@ const OPEN_DEBTS: &[&str] = &[
     // method. It publishes the unnarrowed union as a typed ReturnOnly.
     "N60_class_method_assertion_narrows",
     // Discriminant / `in` key SPELLINGS outside the decidable-guard set:
-    // a const-typed literal key, a numeric key, and a `typeof`-narrowed
-    // callable. The optional-member row is the one
+    // a const-typed literal key and a numeric key. The optional-member row is the one
     // NARROWER-than-checker answer in this group; its note says so.
     "N69_in_operator_const_literal_key",
     "N70_in_operator_numeric_key",
-    "N72_typeof_function_guard",
     // Evolving `let` bindings, the `never`-default switch admission, the
     // `??` short circuit, index-signature reads, and a closure created
     // inside a narrowed arm.

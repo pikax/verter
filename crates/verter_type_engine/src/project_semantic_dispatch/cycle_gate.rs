@@ -589,6 +589,7 @@ fn cycle_gate_body_contains_recursive_ref(
                 if let Some(remap) = mapper.name_remap {
                     stack.push(remap);
                 }
+                stack.extend(mapper.modifiers_type);
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
                 for &expr in expressions.iter() {
@@ -745,6 +746,7 @@ fn cycle_gate_collect_ref_identities(
                 if let Some(remap) = mapper.name_remap {
                     stack.push(remap);
                 }
+                stack.extend(mapper.modifiers_type);
             }
             SemanticNodeData::TemplateLiteral { expressions, .. } => {
                 for &expr in expressions.iter() {

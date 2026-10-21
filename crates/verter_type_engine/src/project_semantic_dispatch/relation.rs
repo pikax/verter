@@ -106,6 +106,21 @@ use crate::semantic_query::{
 };
 use crate::semantic_query_memo::InlineMemberFlight;
 
+/// An immutable target's literal values, shared only within its operation.
+/// `None` preserves the ordinary ordered relation for a nonliteral member.
+#[derive(Debug)]
+pub(super) struct LiteralUnionIndex {
+    values: Option<FxHashSet<super::canonical_algebra::LiteralValueIdentity>>,
+    roots: Vec<crate::semantic_query_memo::ObservedGraphSelfRoot>,
+    receipt: Arc<super::cost_receipt::DemandCostReceipt>,
+}
+
+pub(super) type LiteralUnionIndexes =
+    std::cell::RefCell<FxHashMap<SemanticNodeId, Arc<LiteralUnionIndex>>>;
+
+#[derive(Hash, PartialEq, Eq)]
+struct LiteralUnionIndexKey(SemanticNodeId);
+
 #[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
     static REDISCHARGE_EXECUTE_VISITS: std::cell::Cell<usize> =
@@ -1624,9 +1639,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         {
             return false;
         }
-        let small_union = |data: &SemanticNodeData| {
-            matches!(data, SemanticNodeData::Union(members)
-                if self.relation_union_members(&members.members_arc()).len() < 4)
+        let small_union = |node, data: &SemanticNodeData| {
+            let SemanticNodeData::Union(members) = data else {
+                return false;
+            };
+            // A prepared literal index proves there are no alias arms to
+            // flatten. Re-scanning that same target just to classify the
+            // checker's small-union recursion exemption is quadratic too.
+            let literal_only = self
+                .literal_union_indexes
+                .borrow()
+                .get(&node)
+                .is_some_and(|index| index.values.is_some());
+            if literal_only {
+                members.len() < 4
+            } else {
+                self.relation_union_members(&members.members_arc()).len() < 4
+            }
         };
         let is_union = |data: &SemanticNodeData| matches!(data, SemanticNodeData::Union(_));
         match (&*source_data, &*target_data) {
@@ -1637,8 +1666,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             {
                 false
             }
-            (source, target) if !is_union(target) && small_union(source) => false,
-            (source, target) if simple(source) && small_union(target) => false,
+            (source_data, target_data)
+                if !is_union(target_data) && small_union(source, source_data) =>
+            {
+                false
+            }
+            (source_data, target_data)
+                if simple(source_data) && small_union(target, target_data) =>
+            {
+                false
+            }
             _ => true,
         }
     }
@@ -4426,6 +4463,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 SemanticNodeData::InstantiationRef { args, .. } => {
                     stack.extend(args.iter().copied());
                 }
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_)
+                    if self.subtree_contains_infer(node) =>
+                {
+                    let resolved = self.resolve_carrier_subject_fact(
+                        node,
+                        ProjectionReductionContext::structural_transit_with_mode(
+                            crate::semantic_query::ProjectionMode::Navigate,
+                        ),
+                    );
+                    if !resolved.status.is_complete() || resolved.node == node {
+                        return InferInventory::Unsupported;
+                    }
+                    stack.push(resolved.node);
+                }
                 // A template literal infers into the holes that are
                 // declarations themselves.
                 SemanticNodeData::TemplateLiteral { expressions, .. } => {
@@ -4996,6 +5047,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         position: InferPosition,
         excess_prepass_completed: bool,
     ) -> RelationResult {
+        // Inference visits every union constituent; a successful constructor
+        // cannot hide a stronger candidate from a callable constituent.
+        let collect_all = excess_prepass_completed && self.relation_session_active();
+        let mut any_assignable = false;
         let mut any_unknown = false;
         for (source, target) in alternatives {
             // Each alternative is relation work of its own, whether or not
@@ -5011,7 +5066,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 self.relate_member(*source, *target, bindings, position)
             };
             match result {
-                result @ RelationResult::Assignable { .. } => return result,
+                result @ RelationResult::Assignable { .. } => {
+                    if !collect_all {
+                        return result;
+                    }
+                    any_assignable = true;
+                }
                 RelationResult::Unknown => {
                     self.relation_session_rollback(&checkpoint);
                     bindings.truncate(bindings_len);
@@ -5023,7 +5083,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        if any_unknown {
+        if any_assignable {
+            assignable(bindings)
+        } else if any_unknown {
             RelationResult::Unknown
         } else {
             RelationResult::NotAssignable
@@ -6229,18 +6291,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     // ──────────────────────────────────────────────────────────────────
-    // `RelationKind::Identity` — bounded to the nominal axis
+    // `RelationKind::Identity` — semantic type identity
     // ──────────────────────────────────────────────────────────────────
 
     /// Reduce a [`RelationKind::Identity`] judgement.
     ///
-    /// BOUNDED: this authority owns the NOMINAL half of type identity —
-    /// whether two subjects denote the same `unique symbol` declaration.
-    /// Scope-insensitive STRUCTURAL constituent identity (the exhaustive
-    /// comparator the canonical union / intersection algebra needs) is a
-    /// DIFFERENT authority; answering it here would be two engines for one
-    /// question, so a non-nominal subject stays undecided — `ReturnOnly`,
-    /// never warm — rather than borrowing the assignability lattice.
+    /// Nominal types retain declaration identity. Closed structural types
+    /// compare by their semantic shape, independently of the construction
+    /// details that the canonical algebra deliberately preserves.
     fn reduce_identity(&self, key: &RelateMemoKey) -> RelationResult {
         if !self.relation_reads_node_pair_only(key) {
             return RelationResult::Unknown;
@@ -6253,21 +6311,338 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        match (
+        if let (Some(a), Some(b)) = (
             self.relation_nominal_identity(source),
             self.relation_nominal_identity(target),
         ) {
-            (Some(a), Some(b)) => {
-                if a == b {
-                    assignable(&[])
-                } else {
-                    RelationResult::NotAssignable
+            return if a == b {
+                assignable(&[])
+            } else {
+                RelationResult::NotAssignable
+            };
+        }
+        if let Some(result) =
+            self.enter_checker_recursion([key.source, key.target], [source, target])
+        {
+            return result;
+        }
+        // A heritage body represents one declaration's resolved members.
+        // Authored intersections keep their composite identity instead.
+        let heritage_surface = |node| {
+            if matches!(
+                self.graph().node_data(node).as_deref(),
+                Some(SemanticNodeData::Intersection(members))
+                    if members.origin_category()
+                        == crate::semantic_query::composite::CompositeOriginCategory::Heritage
+            ) {
+                self.resolve_typeinfo_surface_view_with_node(
+                    node,
+                    ProjectionReductionContext::structural_transit(),
+                )
+                .map(|(_, terminal)| terminal)
+            } else {
+                Some(node)
+            }
+        };
+        let (Some(source), Some(target)) = (heritage_surface(source), heritage_surface(target))
+        else {
+            return RelationResult::Unknown;
+        };
+        self.reduce_structural_identity(source, target)
+    }
+
+    /// Semantic identity is stricter than mutual assignability: readonly,
+    /// optionality and the exact member types matter. Construction order,
+    /// tuple labels and parameter names do not.
+    fn reduce_structural_identity(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> RelationResult {
+        if !self.charge_relation_work(1) {
+            return RelationResult::Unknown;
+        }
+        let graph = self.graph();
+        let (Some(a), Some(b)) = (graph.node_data(source), graph.node_data(target)) else {
+            return RelationResult::Unknown;
+        };
+        if matches!(
+            a.as_ref(),
+            SemanticNodeData::Opaque(_) | SemanticNodeData::RawFallback { .. }
+        ) || matches!(
+            b.as_ref(),
+            SemanticNodeData::Opaque(_) | SemanticNodeData::RawFallback { .. }
+        ) {
+            return RelationResult::Unknown;
+        }
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        evidence.record_file_root(graph, source);
+        evidence.record_file_root(graph, target);
+        self.deposit_canonical_evidence(evidence);
+        if source == target {
+            return assignable(&[]);
+        }
+        let identity = |a, b| match self.relate_type_identity(a, b) {
+            Some(true) => assignable(&[]),
+            Some(false) => RelationResult::NotAssignable,
+            None => RelationResult::Unknown,
+        };
+        match (a.as_ref(), b.as_ref()) {
+            (SemanticNodeData::Object(a), SemanticNodeData::Object(b)) => {
+                if a.positive_members().len() != b.positive_members().len()
+                    || a.call_signatures.len() != b.call_signatures.len()
+                    || a.construct_signatures.len() != b.construct_signatures.len()
+                    || a.index_signatures.len() != b.index_signatures.len()
+                {
+                    return RelationResult::NotAssignable;
+                }
+                if b.positive_members()
+                    .iter()
+                    .any(|member| member.key.as_known().is_none())
+                {
+                    return RelationResult::Unknown;
+                }
+                let target_members = b.key_index();
+                let mut result = assignable(&[]);
+                for member in a.positive_members() {
+                    let Some(key) = member.key.cloned_known() else {
+                        return RelationResult::Unknown;
+                    };
+                    let crate::semantic_query::SurfaceKeyProjection::Exact(other) =
+                        target_members.project_known_key(&key)
+                    else {
+                        return RelationResult::NotAssignable;
+                    };
+                    if member.optional != other.optional
+                        || member.readonly != other.readonly
+                        || member.visibility != other.visibility
+                        || (member.visibility != verter_type_expr::MemberVisibility::Public
+                            && (member.declaration_origin != other.declaration_origin
+                                || member.spans != other.spans))
+                    {
+                        return RelationResult::NotAssignable;
+                    }
+                    let strict = self.relation_strict_config();
+                    let member_type = |value| {
+                        if member.optional && !strict.exact_optional_property_types {
+                            let undefined = graph
+                                .intern_node(SemanticNodeData::Primitive(PrimitiveKind::Undefined));
+                            self.intern_normalized_union(
+                                &[value, undefined],
+                                verter_session_query::flow::policy::NullabilityPolicy::from_strict_null_checks(
+                                    strict.strict_null_checks,
+                                ),
+                            )
+                        } else {
+                            value
+                        }
+                    };
+                    result = result_and(
+                        result,
+                        identity(member_type(member.value), member_type(other.value)),
+                    );
+                    if matches!(result, RelationResult::NotAssignable) {
+                        return result;
+                    }
+                }
+                for (a, b) in a
+                    .call_signatures
+                    .iter()
+                    .zip(b.call_signatures.iter())
+                    .chain(
+                        a.construct_signatures
+                            .iter()
+                            .zip(b.construct_signatures.iter()),
+                    )
+                {
+                    result = result_and(result, identity(*a, *b));
+                }
+                for index in a.index_signatures.iter() {
+                    let mut matched = RelationResult::NotAssignable;
+                    for other in b.index_signatures.iter() {
+                        if !self.charge_relation_work(1) {
+                            return RelationResult::Unknown;
+                        }
+                        if index.readonly == other.readonly {
+                            matched = result_or(
+                                matched,
+                                result_and(
+                                    identity(index.key_type, other.key_type),
+                                    identity(index.value_type, other.value_type),
+                                ),
+                            );
+                        }
+                        if matches!(matched, RelationResult::Assignable { .. }) {
+                            break;
+                        }
+                    }
+                    result = result_and(result, matched);
+                }
+                result
+            }
+            (
+                SemanticNodeData::Array {
+                    element: a,
+                    readonly: ra,
+                },
+                SemanticNodeData::Array {
+                    element: b,
+                    readonly: rb,
+                },
+            ) if ra == rb => identity(*a, *b),
+            (
+                SemanticNodeData::Tuple {
+                    elements: a,
+                    readonly: ra,
+                },
+                SemanticNodeData::Tuple {
+                    elements: b,
+                    readonly: rb,
+                },
+            ) => {
+                if ra != rb || a.len() != b.len() {
+                    return RelationResult::NotAssignable;
+                }
+                let mut result = assignable(&[]);
+                for (a, b) in a.iter().zip(b) {
+                    if a.optional != b.optional || a.rest != b.rest {
+                        return RelationResult::NotAssignable;
+                    }
+                    result = result_and(result, identity(a.value, b.value));
+                }
+                result
+            }
+            (
+                SemanticNodeData::Signature {
+                    kind: a,
+                    is_abstract: aa,
+                    ..
+                },
+                SemanticNodeData::Signature {
+                    kind: b,
+                    is_abstract: ab,
+                    ..
+                },
+            ) if a == b && aa == ab => match self.signature_types_identical(source, target, *a) {
+                Some(true) => assignable(&[]),
+                Some(false) => RelationResult::NotAssignable,
+                None => RelationResult::Unknown,
+            },
+            (SemanticNodeData::Union(a), SemanticNodeData::Union(b)) => {
+                self.identical_composite_members(a, b)
+            }
+            (SemanticNodeData::Intersection(a), SemanticNodeData::Intersection(b)) => {
+                self.identical_composite_members(a, b)
+            }
+            (SemanticNodeData::Conditional { .. }, SemanticNodeData::Conditional { .. }) => {
+                match (
+                    exact_reading(self.conditional_outcome(source)),
+                    exact_reading(self.conditional_outcome(target)),
+                ) {
+                    (Some(ConditionalReading::Reduced(a)), _) => identity(a, target),
+                    (_, Some(ConditionalReading::Reduced(b))) => identity(source, b),
+                    (
+                        Some(ConditionalReading::Deferred(a)),
+                        Some(ConditionalReading::Deferred(b)),
+                    ) => {
+                        if a.distributive != b.distributive {
+                            return RelationResult::NotAssignable;
+                        }
+                        let mut result = assignable(&[]);
+                        for (a, b) in [
+                            (a.check, b.check),
+                            (a.extends, b.extends),
+                            (a.true_branch, b.true_branch),
+                            (a.false_branch, b.false_branch),
+                        ] {
+                            result = result_and(result, identity(a, b));
+                        }
+                        result
+                    }
+                    _ => RelationResult::Unknown,
                 }
             }
-            // A nominal subject against anything else is left to the
-            // structural-identity authority: `typeof K` versus `symbol` is a
-            // STRUCTURAL question this bounded reduction does not answer.
-            _ => RelationResult::Unknown,
+            _ => {
+                let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+                let mut budget = super::canonical_algebra::COMPARE_WORK_BUDGET;
+                let result = super::canonical_algebra::compare_structural(
+                    graph,
+                    source,
+                    target,
+                    &mut evidence,
+                    &mut budget,
+                );
+                self.deposit_canonical_evidence(evidence);
+                match result {
+                    super::canonical_algebra::StructuralIdentity::Equal => assignable(&[]),
+                    super::canonical_algebra::StructuralIdentity::Distinct => {
+                        if is_deferred(a.as_ref()) || is_deferred(b.as_ref()) {
+                            RelationResult::Unknown
+                        } else {
+                            RelationResult::NotAssignable
+                        }
+                    }
+                    super::canonical_algebra::StructuralIdentity::Incomplete => {
+                        RelationResult::Unknown
+                    }
+                }
+            }
+        }
+    }
+
+    fn identical_composite_members<K: crate::semantic_query::composite::CompositeKind>(
+        &self,
+        a: &crate::semantic_query::composite::CompositeList<K>,
+        b: &crate::semantic_query::composite::CompositeList<K>,
+    ) -> RelationResult {
+        let mut result = assignable(&[]);
+        // Both directions retain set identity even if a producer kept a
+        // duplicate. Signature overload lists are compared positionally above.
+        for (a, b) in [(a, b), (b, a)] {
+            for a in a.iter() {
+                let mut matched = RelationResult::NotAssignable;
+                for b in b.iter() {
+                    if !self.charge_relation_work(1) {
+                        return RelationResult::Unknown;
+                    }
+                    let pair = match self.relate_type_identity(*a, *b) {
+                        Some(true) => assignable(&[]),
+                        Some(false) => RelationResult::NotAssignable,
+                        None => RelationResult::Unknown,
+                    };
+                    matched = result_or(matched, pair);
+                    if matches!(matched, RelationResult::Assignable { .. }) {
+                        break;
+                    }
+                }
+                result = result_and(result, matched);
+                if matches!(result, RelationResult::NotAssignable) {
+                    return result;
+                }
+            }
+        }
+        result
+    }
+
+    /// A pure identity question inside another relation or signature read.
+    /// The binding barrier keeps surrounding inference sessions rigid; an
+    /// assumed edge remains owned by the relation transaction's SCC.
+    pub(super) fn relate_type_identity(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+    ) -> Option<bool> {
+        match self.execute_relate_pair_kind(source, target, RelationKind::Identity) {
+            RelationStep::Assignable { .. } | RelationStep::Assumed(_) => Some(true),
+            RelationStep::NotAssignable => Some(false),
+            RelationStep::Unknown => None,
+            RelationStep::BudgetExceeded(cap) => {
+                let mut txn = self.dispatch_txn.borrow_mut();
+                if let Some(depth) = txn.reentry().depth().checked_sub(1) {
+                    txn.reentry_mut().note_budget_edge(depth, cap);
+                }
+                None
+            }
         }
     }
 
@@ -7621,7 +7996,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult {
         if let Some(target_conditional) = target_conditional {
-            if source.extends == target_conditional.extends {
+            let Some(identical) =
+                self.relate_type_identity(source.extends, target_conditional.extends)
+            else {
+                return RelationResult::Unknown;
+            };
+            if identical {
                 let checks = match self.relate_member(
                     source.check,
                     target_conditional.check,
@@ -7818,11 +8198,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// Whether `node` is a type no constraint or reduction stands behind: a
-    /// primitive, a literal, or an object, array, tuple or function type.
+    /// primitive, a literal, an object, array, tuple or function type, or a
+    /// union composed only of those. A closed union's rejected conditional
+    /// target is a complete negative, including a deferred conditional's
+    /// default constraint (`1 | 2`), never a reason to lose that verdict.
     fn relation_source_is_closed(&self, node: SemanticNodeId) -> bool {
-        matches!(
-            self.graph().node_data(node).as_deref(),
-            Some(
+        let terminal = |data: &SemanticNodeData| {
+            matches!(
+                data,
                 SemanticNodeData::Primitive(_)
                     | SemanticNodeData::Literal(_)
                     | SemanticNodeData::EnumLiteral(_)
@@ -7831,7 +8214,33 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     | SemanticNodeData::Tuple { .. }
                     | SemanticNodeData::Signature { .. }
             )
-        )
+        };
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return false;
+        };
+        if terminal(&data) {
+            return true;
+        }
+        let SemanticNodeData::Union(members) = data.as_ref() else {
+            return false;
+        };
+        let mut pending = members.to_vec();
+        let mut seen = FxHashSet::default();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node) {
+                continue;
+            }
+            let Some(data) = graph.node_data(node) else {
+                return false;
+            };
+            if let SemanticNodeData::Union(members) = data.as_ref() {
+                pending.extend(members.iter().copied());
+            } else if !terminal(&data) {
+                return false;
+            }
+        }
+        true
     }
 
     /// `source` related to a deferred conditional target
@@ -7939,12 +8348,12 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// The arms are read as the checker holds them: a nested intersection
     /// flattens and a name stands for the type it resolves to, so an
     /// intersection of union aliases is weighed by those unions. A product
-    /// taken whole under the checker's limit stays under it however the
-    /// checker divides it, so only a product at the limit is weighed as the
-    /// checker weighs it
-    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)).
+    /// taken whole under the checker's limit is accepted from its widths
+    /// alone; only one at the limit is weighed as the one distribution
+    /// authority weighs it
+    /// ([`intersection_cross_product_refused`](super::canonical_algebra::intersection_cross_product_refused)),
+    /// building only the halves it divides into and paying for them first.
     pub(super) fn intersection_too_complex(&self, node: SemanticNodeId) -> Option<SemanticNodeId> {
-        use crate::semantic_query::checker_policy::{cross_product_union, ProductFactor};
         let graph = self.graph();
         let mut arms: Vec<SemanticNodeId> = Vec::new();
         let mut stack: Vec<SemanticNodeId> = vec![node];
@@ -7992,18 +8401,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 _ => arms.push(resolved),
             }
         }
-        if !any_union {
-            return None;
-        }
-        let whole = cross_product_union(
-            arms.iter()
-                .map(|arm| match graph.node_data(*arm).as_deref() {
-                    Some(SemanticNodeData::Union(members)) => ProductFactor::Union(members.len()),
-                    _ => ProductFactor::Single,
-                }),
-            crate::semantic_query::CheckerDiagnosticOperation::Intersection,
-        );
-        if whole.is_ok() {
+        // A product taken whole under the checker's limit stays under it
+        // however the checker divides or simplifies it: accepted from the
+        // widths alone, with nothing built or charged.
+        if !any_union || super::canonical_algebra::cross_product_under_limit(graph, &arms) {
             return None;
         }
         let nullability =
@@ -8020,6 +8421,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             graph,
             &arms,
             nullability,
+            self.construction_meter(),
             &mut evidence,
         );
         self.deposit_canonical_evidence(evidence);
@@ -8093,10 +8495,22 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 }
             }
         }
-        let reduced_source =
-            super::canonical_algebra::reduced_authored_intersection(graph, source, nullability);
-        let reduced_target =
-            super::canonical_algebra::reduced_authored_intersection(graph, target, nullability);
+        let mut evidence = super::canonical_algebra::CanonicalEvidence::default();
+        let reduced_source = super::canonical_algebra::reduced_authored_intersection_charged(
+            graph,
+            source,
+            nullability,
+            self.construction_meter(),
+            &mut evidence,
+        );
+        let reduced_target = super::canonical_algebra::reduced_authored_intersection_charged(
+            graph,
+            target,
+            nullability,
+            self.construction_meter(),
+            &mut evidence,
+        );
+        self.deposit_canonical_evidence(evidence);
         (reduced_source.is_some() || reduced_target.is_some()).then(|| {
             (
                 reduced_source.unwrap_or(source),
@@ -8128,6 +8542,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             Some(SemanticNodeData::Opaque(err)) => !matches!(
                 query_error_disposition(err),
                 QueryErrorDisposition::Failure
+                    | QueryErrorDisposition::PermissiveWildcard
                     | QueryErrorDisposition::CheckerRecovery
                     | QueryErrorDisposition::BudgetRecovery
                     | QueryErrorDisposition::RecursionCarrier
@@ -9240,6 +9655,157 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         }
     }
 
+    /// A naked variable in an intersection is inferred only when it is the
+    /// sole naked variable, at the checker's lower NakedTypeVariable priority.
+    /// Direct candidates elsewhere (for example a callable return) win over it.
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        let naked: Vec<_> = {
+            let txn = self.dispatch_txn.borrow();
+            members
+                .iter()
+                .copied()
+                .filter(|member| {
+                    txn.active_session()
+                        .is_some_and(|session| session.infers(*member))
+                })
+                .collect()
+        };
+        let mut result = assignable(bindings);
+        for member in members {
+            if !self.charge_relation_work(1) {
+                return RelationResult::Unknown;
+            }
+            let step = if naked.contains(member) {
+                if naked.len() == 1 {
+                    self.matched_union_inference(source, *member, bindings)
+                } else {
+                    assignable(bindings)
+                }
+            } else {
+                self.relate_intersection_target_arm(source, *member, bindings)
+            };
+            result = result_and(result, step);
+        }
+        result
+    }
+
+    /// Exact value membership for a literal-only union. The index neither
+    /// reorders members nor unwraps carriers: mixed/deferred/enum members and
+    /// inference retain the ordinary authority. Reuse deposits every file
+    /// root inspected by a negative proof and consumes the shared cost receipt.
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        use super::canonical_algebra::LiteralValueIdentity;
+        use super::cost_receipt::{CostIdentity, DemandCostReceipt, LogicalUsage, Nesting};
+
+        if self.relation_session_active() {
+            return None;
+        }
+        let graph = self.graph();
+        let source_data = graph.node_data(source)?;
+        if !matches!(source_data.as_ref(), SemanticNodeData::Literal(_)) {
+            return None;
+        }
+        let target_data = graph.node_data(target)?;
+        let SemanticNodeData::Union(members) = target_data.as_ref() else {
+            return None;
+        };
+        let cached = self.literal_union_indexes.borrow().get(&target).cloned();
+        let index = match cached.filter(|index| {
+            self.admits_served(&crate::semantic_query::ReadReceipt::Priced(Arc::clone(
+                &index.receipt,
+            )))
+        }) {
+            Some(index) => index,
+            None => {
+                let identity = CostIdentity::of_key(LiteralUnionIndexKey(target))
+                    .with_roots(graph.root_nodes([target]).expect("relation target is live"));
+                // A warm sibling can replay preparation after its operation
+                // released the index. Rebuild without paying it twice, but
+                // preserve its full cold price for future independent demands.
+                let already_paid = self.connected_demand.is_paid(&identity);
+                let recording =
+                    (!already_paid).then(|| self.connected_demand.record_cost(identity.clone()));
+                let mut usage = LogicalUsage::default();
+                let entry_bytes = 2 * std::mem::size_of::<LiteralValueIdentity>();
+                let mut values = Some(FxHashSet::default());
+                for member in members.iter() {
+                    #[cfg(any(test, feature = "test-support"))]
+                    RELATION_UNION_ARM_VISITS.with(|count| count.set(count.get() + 1));
+                    if !self.charge_relation_work(u64::from(!already_paid)) {
+                        return Some(RelationResult::Unknown);
+                    }
+                    usage.work += 1;
+                    let Some(data) = graph.node_data(*member) else {
+                        values = None;
+                        break;
+                    };
+                    if !matches!(data.as_ref(), SemanticNodeData::Literal(_)) {
+                        values = None;
+                        break;
+                    }
+                    // The keys share immutable payloads, including text.
+                    // Reserve logical hash-table backing before inserting.
+                    if self
+                        .connected_demand
+                        .reserve_bytes(if already_paid { 0 } else { entry_bytes })
+                        .is_err()
+                    {
+                        self.note_relation_budget_exceeded(u64::from(self.connected_trip_limit()));
+                        return Some(RelationResult::Unknown);
+                    }
+                    usage.bytes += entry_bytes as u64;
+                    values
+                        .as_mut()
+                        .expect("literal prefix")
+                        .insert(LiteralValueIdentity::new(data));
+                }
+                let roots = if values.is_some() {
+                    self.observed_self_roots_from_nodes(members.iter().copied())
+                } else {
+                    Vec::new()
+                };
+                let receipt = match recording {
+                    Some(recording) => {
+                        let request = crate::request_context::current_request_budget();
+                        recording.finish(true, request.as_deref())?
+                    }
+                    None => DemandCostReceipt::new(identity, usage, Vec::new()),
+                };
+                self.connected_demand
+                    .record_prerequisite(&receipt, Nesting::Entered);
+                let index = Arc::new(LiteralUnionIndex {
+                    values,
+                    roots,
+                    receipt,
+                });
+                self.literal_union_indexes
+                    .borrow_mut()
+                    .insert(target, Arc::clone(&index));
+                index
+            }
+        };
+        let values = index.values.as_ref()?;
+        self.deposit_operand_self_roots(&index.roots);
+        self.deposit_operand_self_roots(&self.observed_self_roots_from_nodes([source, target]));
+        Some(
+            if values.contains(&LiteralValueIdentity::new(source_data)) {
+                assignable(bindings)
+            } else {
+                RelationResult::NotAssignable
+            },
+        )
+    }
+
     /// An intersection source: a member that relates alone, else the one
     /// object the members compose, as the checker relates an intersection
     /// source structurally after its members — against an object target or
@@ -10045,246 +10611,273 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &self,
             id: SemanticNodeId,
         ) -> IdentityCarrierUnwrap {
-            let graph = self.graph();
-            let transit = ProjectionReductionContext::structural_transit();
-            let mut current = id;
-            let mut seen = FxHashSet::default();
-            while seen.insert(current) {
-                let Some(data) = graph.node_data(current) else {
-                    return IdentityCarrierUnwrap::Unresolvable;
-                };
-                let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
-                    SemanticNodeData::Alias(inner) => {
-                        current = *inner;
-                        continue;
+            self.unwrap_identity_carrier_walk(id, &mut |_| {})
+        }
+    }
+
+    /// [`Self::unwrap_identity_carrier_for_relation`], reporting each node
+    /// the walk reaches to `on_step` before it reads anything for that node:
+    /// a reached node is where a walk that stopped there resumes.
+    pub(super) fn unwrap_identity_carrier_walk(
+        &self,
+        id: SemanticNodeId,
+        on_step: &mut dyn FnMut(SemanticNodeId),
+    ) -> IdentityCarrierUnwrap {
+        let graph = self.graph();
+        let transit = ProjectionReductionContext::structural_transit();
+        let mut current = id;
+        let mut seen = FxHashSet::default();
+        while seen.insert(current) {
+            on_step(current);
+            let Some(data) = graph.node_data(current) else {
+                return IdentityCarrierUnwrap::Unresolvable;
+            };
+            let (identity, args): (DeclIdentity, Arc<[SemanticNodeId]>) = match &*data {
+                SemanticNodeData::BareRef(_) | SemanticNodeData::ImportType(_) => {
+                    drop(data);
+                    let resolved = self.resolve_carrier_subject_fact(
+                        current,
+                        transit.with_mode(crate::semantic_query::ProjectionMode::Navigate),
+                    );
+                    if !resolved.status.is_complete() {
+                        return IdentityCarrierUnwrap::Unresolvable;
                     }
-                    // A class expression's instance relates through its surface.
-                    SemanticNodeData::ClassExpressionInstance { surface, .. } => {
-                        let surface = *surface;
-                        drop(data);
-                        current = self
-                            .class_expression_read_surface(current)
-                            .unwrap_or(surface);
-                        continue;
+                    if resolved.node == current {
+                        return IdentityCarrierUnwrap::Concrete(current);
                     }
-                    SemanticNodeData::MergedDecl { contributors } => {
-                        let contributors = Arc::clone(contributors.as_arc());
-                        drop(data);
-                        current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
-                        continue;
-                    }
-                    SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    current = resolved.node;
+                    continue;
+                }
+                SemanticNodeData::Alias(inner) => {
+                    current = *inner;
+                    continue;
+                }
+                // A class expression's instance relates through its surface.
+                SemanticNodeData::ClassExpressionInstance { surface, .. } => {
+                    let surface = *surface;
+                    drop(data);
+                    current = self
+                        .class_expression_read_surface(current)
+                        .unwrap_or(surface);
+                    continue;
+                }
+                SemanticNodeData::MergedDecl { contributors } => {
+                    let contributors = Arc::clone(contributors.as_arc());
+                    drop(data);
+                    current = super::walk::reduce_merged_decl_with_graph(graph, &contributors);
+                    continue;
+                }
+                SemanticNodeData::Opaque(QueryError::DeclPlaceholder {
+                    canonical_id,
+                    owner,
+                    name,
+                    whole_hash,
+                }) => (
+                    DeclIdentity {
+                        canonical_id: canonical_id.clone(),
+                        owner: *owner,
+                        whole_hash: *whole_hash,
+                        decl_name: name.clone(),
+                    },
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                // A lowering-time self-reference sentinel (`interface Num {
+                // compareTo(other: Num): number }` — the `Num` inside its
+                // own body) names its declaration but not its file; the
+                // node's origin scope, recorded at intern time, supplies
+                // it. Resolving through the shared `Instantiate` dispatch
+                // makes the sentinel relate exactly like the `DeclRef` the
+                // same reference lowers to from any OTHER file position; a
+                // genuinely in-flight cycle re-enters the relation whose
+                // identity is already open and closes coinductively. A
+                // scope-less sentinel stays concrete (fail-closed Unknown
+                // downstream, never a fabricated verdict).
+                SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
+                    let Some(crate::semantic_query::NodeScopeId::File {
                         canonical_id,
                         owner,
-                        name,
                         whole_hash,
-                    }) => (
+                        ..
+                    }) = graph.node_scope(current)
+                    else {
+                        return IdentityCarrierUnwrap::Concrete(current);
+                    };
+                    (
                         DeclIdentity {
-                            canonical_id: canonical_id.clone(),
-                            owner: *owner,
-                            whole_hash: *whole_hash,
-                            decl_name: name.clone(),
-                        },
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    ),
-                    // A lowering-time self-reference sentinel (`interface Num {
-                    // compareTo(other: Num): number }` — the `Num` inside its
-                    // own body) names its declaration but not its file; the
-                    // node's origin scope, recorded at intern time, supplies
-                    // it. Resolving through the shared `Instantiate` dispatch
-                    // makes the sentinel relate exactly like the `DeclRef` the
-                    // same reference lowers to from any OTHER file position; a
-                    // genuinely in-flight cycle re-enters the relation whose
-                    // identity is already open and closes coinductively. A
-                    // scope-less sentinel stays concrete (fail-closed Unknown
-                    // downstream, never a fabricated verdict).
-                    SemanticNodeData::Opaque(QueryError::RecursiveRef { name, args }) => {
-                        let Some(crate::semantic_query::NodeScopeId::File {
                             canonical_id,
                             owner,
                             whole_hash,
-                            ..
-                        }) = graph.node_scope(current)
-                        else {
-                            return IdentityCarrierUnwrap::Concrete(current);
-                        };
-                        (
-                            DeclIdentity {
-                                canonical_id,
-                                owner,
-                                whole_hash,
-                                decl_name: name.clone(),
-                            },
-                            Arc::from(args.operands()),
+                            decl_name: name.clone(),
+                        },
+                        Arc::from(args.operands()),
+                    )
+                }
+                SemanticNodeData::DeclRef { identity } => (
+                    identity.clone(),
+                    Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
+                ),
+                SemanticNodeData::InstantiationRef { base, args } => {
+                    (base.clone(), Arc::clone(args.as_arc()))
+                }
+                // An indexed access over a type that is not generic is the
+                // property type it reads (`Box['lit']` IS `2`, and an
+                // optional `opt?: 3` reads `3 | undefined`): the checker
+                // resolves it where it is written, so a relation compares
+                // that type — read at `Navigate`, which keeps the member's
+                // type, never at `Shallow`, whose one-level surface of a
+                // union member (`Local | { $: number }`) is the empty object
+                // its arms share. One the deferred evaluator cannot read
+                // further (`T['k']` over an open `T`) stays the operand it
+                // is, and so does an access of a type parameter it reads as
+                // a miss: the checker keeps that access generic, and a
+                // relation reads it through the parameter's constraint.
+                SemanticNodeData::DeferredCallable(_) => {
+                    drop(data);
+                    let materialized = self.materialize_returned_callable(current);
+                    if materialized == current {
+                        return IdentityCarrierUnwrap::Unresolvable;
+                    }
+                    current = materialized;
+                    continue;
+                }
+                SemanticNodeData::IndexedAccess { object, .. } => {
+                    let mut root = *object;
+                    while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
+                        graph.node_data(root).as_deref()
+                    {
+                        root = *object;
+                    }
+                    let of_type_param = matches!(
+                        graph.node_data(root).as_deref(),
+                        Some(SemanticNodeData::TypeParam { .. })
+                    );
+                    drop(data);
+                    let read = self
+                        .evaluate_deferred_semantic_node_with_context(
+                            current,
+                            ProjectionReductionContext::structural_transit_with_mode(
+                                crate::semantic_query::ProjectionMode::Navigate,
+                            ),
                         )
-                    }
-                    SemanticNodeData::DeclRef { identity } => (
-                        identity.clone(),
-                        Arc::from(Vec::<SemanticNodeId>::new().into_boxed_slice()),
-                    ),
-                    SemanticNodeData::InstantiationRef { base, args } => {
-                        (base.clone(), Arc::clone(args.as_arc()))
-                    }
-                    // An indexed access over a type that is not generic is the
-                    // property type it reads (`Box['lit']` IS `2`, and an
-                    // optional `opt?: 3` reads `3 | undefined`): the checker
-                    // resolves it where it is written, so a relation compares
-                    // that type — read at `Navigate`, which keeps the member's
-                    // type, never at `Shallow`, whose one-level surface of a
-                    // union member (`Local | { $: number }`) is the empty object
-                    // its arms share. One the deferred evaluator cannot read
-                    // further (`T['k']` over an open `T`) stays the operand it
-                    // is, and so does an access of a type parameter it reads as
-                    // a miss: the checker keeps that access generic, and a
-                    // relation reads it through the parameter's constraint.
-                    SemanticNodeData::DeferredCallable(_) => {
-                        drop(data);
-                        let materialized = self.materialize_returned_callable(current);
-                        if materialized == current {
-                            return IdentityCarrierUnwrap::Unresolvable;
-                        }
-                        current = materialized;
-                        continue;
-                    }
-                    SemanticNodeData::IndexedAccess { object, .. } => {
-                        let mut root = *object;
-                        while let Some(SemanticNodeData::IndexedAccess { object, .. }) =
-                            graph.node_data(root).as_deref()
-                        {
-                            root = *object;
-                        }
-                        let of_type_param = matches!(
-                            graph.node_data(root).as_deref(),
-                            Some(SemanticNodeData::TypeParam { .. })
+                        .into_active_query_build_node(self);
+                    let missed = of_type_param
+                        && matches!(
+                            graph.node_data(read).as_deref(),
+                            Some(SemanticNodeData::Opaque(QueryError::Miss))
                         );
-                        drop(data);
-                        let read = self
-                            .evaluate_deferred_semantic_node_with_context(
-                                current,
-                                ProjectionReductionContext::structural_transit_with_mode(
-                                    crate::semantic_query::ProjectionMode::Navigate,
-                                ),
-                            )
-                            .into_active_query_build_node(self);
-                        let missed = of_type_param
-                            && matches!(
-                                graph.node_data(read).as_deref(),
-                                Some(SemanticNodeData::Opaque(QueryError::Miss))
-                            );
-                        if read == current || missed {
-                            return IdentityCarrierUnwrap::Concrete(current);
-                        }
-                        current = read;
-                        continue;
+                    if read == current || missed {
+                        return IdentityCarrierUnwrap::Concrete(current);
                     }
-                    // `keyof` over a type whose keys settle is that key set
-                    // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
-                    SemanticNodeData::KeyOf { base } => {
-                        let base = *base;
-                        drop(data);
-                        match self.key_set_of(base) {
-                            Some(keys) if keys != current => {
-                                current = keys;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    // A written intersection is the type the checker constructs
-                    // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
-                    SemanticNodeData::Intersection(_) => {
-                        drop(data);
-                        match self.reduced_authored_relation_pair(current, current) {
-                            Some((reduced, _)) if reduced != current => {
-                                current = reduced;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    // A homomorphic mapped type over a closed object is the
-                    // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
-                    // the checker resolves its members, so a relation compares
-                    // them. Any other mapped type stays the operand it is.
-                    SemanticNodeData::Mapped { source, mapper } => {
-                        let (source, mapper) = (*source, mapper.clone());
-                        drop(data);
-                        match self
-                            .identity_mapped_object_for_relation(source, &mapper)
-                            .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
-                        {
-                            Some(object) if object != current => {
-                                current = object;
-                                continue;
-                            }
-                            _ => return IdentityCarrierUnwrap::Concrete(current),
-                        }
-                    }
-                    _ => return IdentityCarrierUnwrap::Concrete(current),
-                };
-                drop(data);
-                // The lib `Function` global's carrier is its own terminal
-                // identity for relations: the `__builtin__` base names no
-                // declaration the Instantiate dispatch can serve, so the
-                // dispatch would MISS non-cacheably and taint every
-                // enclosing build's warm admission for a carrier the
-                // checker publishes as an ordinary type (`typeof x ===
-                // "function"` over `object` narrows to `Function`). Relations
-                // decide it by identity / tag, never by a body it does not
-                // have. Every OTHER non-file base (the remaining runtime
-                // nominals, the global sentinel) keeps dispatching — its
-                // Unresolvable verdict is the measured relation behavior
-                // those carriers' consumers pin.
-                if self.runtime_nominal_identity(&identity)
-                    == Some(crate::intrinsic_registry::RuntimeNominal::Function)
-                {
-                    return IdentityCarrierUnwrap::Concrete(current);
+                    current = read;
+                    continue;
                 }
-                // A string mapping the reducer keeps (`Uppercase<string>`) is
-                // the checker's string mapping type itself: relations decide it
-                // by the mapping ([`Self::string_mapping_relation`]), never by a
-                // body it does not have.
-                if self.string_mapping_of(current).is_some() {
-                    return IdentityCarrierUnwrap::Concrete(current);
-                }
-                let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
-                    self.type_slot_for(
-                        identity.canonical_id.clone(),
-                        identity.owner,
-                        identity.decl_name.clone(),
-                    ),
-                    args,
-                    self.instantiate_context_for(&identity.canonical_id, transit),
-                ));
-                // `execute_type_node` IS the shared read boundary (dispatch
-                // counters + the universal build-local taint fold); a bespoke
-                // re-fold here would double-count the same read.
-                let unwrapped = match self.execute_type_node(key) {
-                    QueryResult::Value(SemanticQueryOutput {
-                        value: unwrapped, ..
-                    }) => {
-                        // A nominal `typeof` carrier IS the type it denotes, so
-                        // the deferred evaluator must not be handed it: that
-                        // evaluator's job is to resolve a shell to its content,
-                        // and this carrier's content is the widened `symbol`
-                        // primitive, which is exactly the declaring identity the
-                        // relation is about to read.
-                        if self.node_is_nominal_typeof(unwrapped) {
-                            unwrapped
-                        } else {
-                            self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
-                                .into_active_query_build_node(self)
+                // `keyof` over a type whose keys settle is that key set
+                // (`keyof Face` IS `"a" | "b"`), whichever carrier prints it.
+                SemanticNodeData::KeyOf { base } => {
+                    let base = *base;
+                    drop(data);
+                    match self.key_set_of(base) {
+                        Some(keys) if keys != current => {
+                            current = keys;
+                            continue;
                         }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
                     }
-                    _ => return IdentityCarrierUnwrap::Unresolvable,
-                };
-                if unwrapped == current {
-                    return IdentityCarrierUnwrap::Unresolvable;
                 }
-                current = unwrapped;
+                // A written intersection is the type the checker constructs
+                // from it (`1 & (1 | 2)` IS `1`) when that differs from it.
+                SemanticNodeData::Intersection(_) => {
+                    drop(data);
+                    match self.reduced_authored_relation_pair(current, current) {
+                        Some((reduced, _)) if reduced != current => {
+                            current = reduced;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                // A homomorphic mapped type over a closed object is the
+                // object its keys map to (`Partial<Face>` IS `{ a?: 1 }`):
+                // the checker resolves its members, so a relation compares
+                // them. Any other mapped type stays the operand it is.
+                SemanticNodeData::Mapped { source, mapper } => {
+                    let (source, mapper) = (*source, mapper.clone());
+                    drop(data);
+                    match self
+                        .identity_mapped_object_for_relation(source, &mapper)
+                        .or_else(|| self.index_key_mapped_object_for_relation(&mapper, transit))
+                    {
+                        Some(object) if object != current => {
+                            current = object;
+                            continue;
+                        }
+                        _ => return IdentityCarrierUnwrap::Concrete(current),
+                    }
+                }
+                _ => return IdentityCarrierUnwrap::Concrete(current),
+            };
+            drop(data);
+            // The lib `Function` global's carrier is its own terminal
+            // identity for relations: the `__builtin__` base names no
+            // declaration the Instantiate dispatch can serve, so the
+            // dispatch would MISS non-cacheably and taint every
+            // enclosing build's warm admission for a carrier the
+            // checker publishes as an ordinary type (`typeof x ===
+            // "function"` over `object` narrows to `Function`). Relations
+            // decide it by identity / tag, never by a body it does not
+            // have. Every OTHER non-file base (the remaining runtime
+            // nominals, the global sentinel) keeps dispatching — its
+            // Unresolvable verdict is the measured relation behavior
+            // those carriers' consumers pin.
+            if self.runtime_nominal_identity(&identity)
+                == Some(crate::intrinsic_registry::RuntimeNominal::Function)
+            {
+                return IdentityCarrierUnwrap::Concrete(current);
             }
-            IdentityCarrierUnwrap::Unresolvable
+            // A string mapping the reducer keeps (`Uppercase<string>`) is
+            // the checker's string mapping type itself: relations decide it
+            // by the mapping ([`Self::string_mapping_relation`]), never by a
+            // body it does not have.
+            if self.string_mapping_of(current).is_some() {
+                return IdentityCarrierUnwrap::Concrete(current);
+            }
+            let key = SemanticQueryKey::Instantiate(crate::semantic_query::InstantiateKey::new(
+                self.type_slot_for(
+                    identity.canonical_id.clone(),
+                    identity.owner,
+                    identity.decl_name.clone(),
+                ),
+                args,
+                self.instantiate_context_for(&identity.canonical_id, transit),
+            ));
+            // `execute_type_node` IS the shared read boundary (dispatch
+            // counters + the universal build-local taint fold); a bespoke
+            // re-fold here would double-count the same read.
+            let unwrapped = match self.execute_type_node(key) {
+                QueryResult::Value(SemanticQueryOutput {
+                    value: unwrapped, ..
+                }) => {
+                    // A nominal `typeof` carrier IS the type it denotes, so
+                    // the deferred evaluator must not be handed it: that
+                    // evaluator's job is to resolve a shell to its content,
+                    // and this carrier's content is the widened `symbol`
+                    // primitive, which is exactly the declaring identity the
+                    // relation is about to read.
+                    if self.node_is_nominal_typeof(unwrapped) {
+                        unwrapped
+                    } else {
+                        self.evaluate_deferred_semantic_node_with_context(unwrapped, transit)
+                            .into_active_query_build_node(self)
+                    }
+                }
+                _ => return IdentityCarrierUnwrap::Unresolvable,
+            };
+            if unwrapped == current {
+                return IdentityCarrierUnwrap::Unresolvable;
+            }
+            current = unwrapped;
         }
+        IdentityCarrierUnwrap::Unresolvable
     }
 
     /// The object an identity mapped type over a closed object surface
@@ -12936,6 +13529,12 @@ fn recursion_identity_fingerprint(identity: &DeclIdentity) -> u64 {
 /// Only the structural reducer's finite semantic demands. The concrete
 /// implementation retains the root authority and transaction owner.
 trait RelationDemandDriver {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult>;
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -13070,6 +13669,12 @@ trait RelationDemandDriver {
         members: &[SemanticNodeId],
         bindings: &mut Vec<InferBinding>,
     ) -> RelationResult;
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult;
     fn relate_unknown_source(
         &self,
         target: SemanticNodeId,
@@ -13163,6 +13768,14 @@ trait RelationDemandDriver {
 impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     for ProjectSemanticDispatch<'_, C>
 {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        ProjectSemanticDispatch::relate_literal_to_union(self, source, target, bindings)
+    }
     fn apparent_source_step(
         &self,
         source: SemanticNodeId,
@@ -13395,6 +14008,14 @@ impl<C: crate::resolver_core::ResolverCapabilities> RelationDemandDriver
     ) -> RelationResult {
         ProjectSemanticDispatch::relate_to_union_target(self, source, members, bindings)
     }
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        ProjectSemanticDispatch::relate_intersection_target(self, source, members, bindings)
+    }
     fn relate_unknown_source(
         &self,
         target: SemanticNodeId,
@@ -13565,6 +14186,15 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities>
     }
 }
 impl<D: RelationDemandDriver> RelationCx<'_, D> {
+    fn relate_literal_to_union(
+        &self,
+        source: SemanticNodeId,
+        target: SemanticNodeId,
+        bindings: &[InferBinding],
+    ) -> Option<RelationResult> {
+        self.driver
+            .relate_literal_to_union(source, target, bindings)
+    }
     fn graph(&self) -> &super::arena_ops::ArenaOps<'_> {
         &self.arena
     }
@@ -13808,6 +14438,15 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
     ) -> RelationResult {
         self.driver
             .relate_to_union_target(source, members, bindings)
+    }
+    fn relate_intersection_target(
+        &self,
+        source: SemanticNodeId,
+        members: &[SemanticNodeId],
+        bindings: &mut Vec<InferBinding>,
+    ) -> RelationResult {
+        self.driver
+            .relate_intersection_target(source, members, bindings)
     }
     fn relate_unknown_source(
         &self,
@@ -15163,6 +15802,16 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             return;
         }
 
+        if matches!(
+            (&*source_data, &*target_data),
+            (SemanticNodeData::Literal(_), SemanticNodeData::Union(_))
+        ) {
+            if let Some(result) = self.relate_literal_to_union(source, target, bindings) {
+                results.push(result);
+                return;
+            }
+        }
+
         // ── Union/Intersection distribution ────────────────────────────
         if let SemanticNodeData::Union(members) = &*source_data {
             let target_is_union = matches!(&*target_data, SemanticNodeData::Union(_));
@@ -15261,6 +15910,10 @@ impl<D: RelationDemandDriver> RelationCx<'_, D> {
             let members = members.members_arc();
             drop(source_data);
             drop(target_data);
+            if self.relation_session_active() {
+                results.push(self.relate_intersection_target(source, &members, bindings));
+                return;
+            }
             distribute_and(
                 work,
                 results,

@@ -48,15 +48,13 @@ impl VerterHost {
             import_source,
             verter_session_query::resolution::ResolveRequestKind::TypeImport,
         ) {
-            verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                admitted.into_result()?
-            }
             verter_workspace::ResolutionPublication::Refused(_) => {
                 verter_type_engine::fact_tracing::note_non_cacheable_read_fan_out(
                     verter_session_query::facts::reuse::NonCacheableReadReason::UnrootableRoute,
                 );
                 return None;
             }
+            publication => publication.into_delivered().flatten()?,
         };
 
         tracked_deps.insert(dep_canonical.clone());
@@ -166,12 +164,12 @@ impl VerterHost {
             .collect();
         for specifier in specifiers {
             match self.resolve_type_dependency_canonical(owner_canonical, specifier.as_str()) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    if let Some(dep_canonical) = admitted.into_result() {
+                verter_workspace::ResolutionPublication::Refused(_) => return,
+                publication => {
+                    if let Some(dep_canonical) = publication.into_delivered().flatten() {
                         let _ = ctx.ensure_indexed_ready_serve(dep_canonical.as_str());
                     }
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => return,
             }
         }
     }

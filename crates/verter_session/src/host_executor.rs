@@ -630,6 +630,11 @@ impl StageExecutor for HostStageExecutor {
                 verter_workspace::ResolutionPublication::Admitted(admitted) => admitted
                     .into_result()
                     .map(|resolution| resolution.source_id),
+                // Stage ordering is import-graph bookkeeping: it takes every
+                // complete answer, retained or not.
+                verter_workspace::ResolutionPublication::Unretained(unretained) => unretained
+                    .into_result()
+                    .map(|resolution| resolution.source_id),
                 verter_workspace::ResolutionPublication::Refused(_) => None,
             }
         };

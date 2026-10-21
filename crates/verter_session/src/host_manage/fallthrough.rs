@@ -208,13 +208,14 @@ impl VerterHost {
                 import.source.as_str(),
                 verter_session_query::resolution::ResolveRequestKind::EsmImport,
             ) {
-                verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                    let Some(dep_canonical) = admitted.into_result() else {
+                verter_workspace::ResolutionPublication::Refused(_) => return None,
+                // The reference answers this read and retains nothing.
+                publication => {
+                    let Some(dep_canonical) = publication.into_delivered().flatten() else {
                         continue;
                     };
                     dep_canonical
                 }
-                verter_workspace::ResolutionPublication::Refused(_) => return None,
             };
             for binding in import.bindings.iter() {
                 if binding.is_type_only || matches!(binding.kind, ImportBindingKind::Namespace) {

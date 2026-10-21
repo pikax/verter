@@ -312,6 +312,8 @@ pub(crate) struct ComponentMetaRefusalEffects {
     pub(crate) request: Option<RequestSpent>,
     pub(crate) work: usize,
     pub(crate) bytes: u64,
+    /// The part of `bytes` that is advisory construction footprint.
+    pub(crate) advisory_bytes: u64,
     pub(crate) trip: PartialReasonSet,
 }
 
@@ -321,6 +323,7 @@ impl Default for ComponentMetaRefusalEffects {
             request: None,
             work: 0,
             bytes: 0,
+            advisory_bytes: 0,
             trip: PartialReasonSet::empty(),
         }
     }

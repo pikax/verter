@@ -1457,7 +1457,11 @@ impl crate::traits::WorkspaceRead for FrozenFilesystemResolutionReader<'_> {
     }
 
     fn resolution_event_bridge_complete(&self) -> bool {
-        self.complete() && self.revalidate()
+        // Replay reads immutable captured inputs. Its creators independently
+        // validate them before replay and at the operation's commit fence.
+        // This coverage query is used repeatedly during resolution. Validating
+        // here would rescan all captured filesystem observations on each call.
+        self.complete()
     }
 
     fn resolution_population(&self) -> verter_session_query::resolution::ResolutionPopulation {

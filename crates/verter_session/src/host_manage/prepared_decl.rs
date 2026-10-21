@@ -1033,10 +1033,11 @@ impl VerterHost {
                     target.source_specifier.as_str(),
                     resolution,
                 ) {
-                    verter_workspace::ResolutionPublication::Admitted(admitted) => {
-                        admitted.into_result()
-                    }
                     verter_workspace::ResolutionPublication::Refused(_) => return None,
+                    // The bundle roots on the owner's import-route witness,
+                    // which an unretained resolution leaves unrootable, so
+                    // the edge serves this build and is never retained.
+                    publication => publication.into_delivered().flatten(),
                 };
                 preferred.or_else(|| {
                     if Self::import_route_is_known_miss(resolution) {
@@ -3433,6 +3434,10 @@ impl VerterHost {
             // inadmissible negative state, fail-closed.
             let mut unrooted_route_walk = false;
             let mut resolution_refused = false;
+            // A direct import resolved to a complete answer the retention
+            // account declined to keep: the surface is served, never
+            // admitted.
+            let mut resolution_unretained = false;
             for (local_name, target) in shallow.import_targets.iter() {
                 // The resolution is made inside a witness scope, so a skip
                 // is rooted on the very transaction that decided it — the
@@ -3453,6 +3458,13 @@ impl VerterHost {
                     verter_workspace::ResolutionPublication::Admitted(admitted) => {
                         let Some(canonical) = admitted.into_result() else {
                             skip(&target_witness);
+                            continue;
+                        };
+                        canonical
+                    }
+                    verter_workspace::ResolutionPublication::Unretained(unretained) => {
+                        resolution_unretained = true;
+                        let Some(canonical) = unretained.into_result() else {
                             continue;
                         };
                         canonical
@@ -3521,6 +3533,7 @@ impl VerterHost {
                 unrootable_skip,
                 unrooted_route_walk,
                 resolution_refused,
+                resolution_unretained,
             )
         };
         let (
@@ -3531,10 +3544,28 @@ impl VerterHost {
             unrootable_skip,
             unrooted_route_walk,
             resolution_refused,
+            resolution_unretained,
         ) = cold_body();
 
         if resolution_refused {
             return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::Failed;
+        }
+
+        // The surface is the complete answer; the retention account
+        // declined to keep a resolution it binds, so it is served and
+        // never admitted.
+        if resolution_unretained {
+            let surface = crate::owner_import_surface::build_owner_import_surface(
+                Arc::from(owner_canonical),
+                whole_hash,
+                entries,
+                chain_facts,
+                validated_at_generation,
+            );
+            return verter_type_engine::cache_runtime::singleflight::ComputeAdmission::ReturnOnly {
+                value: surface,
+                reason: verter_audit::NonAdmissionReason::RetentionPressure,
+            };
         }
 
         // A per-binding route walk returning the empty-facts strict-admission

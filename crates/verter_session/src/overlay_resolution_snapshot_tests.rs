@@ -249,9 +249,7 @@ fn the_overlay_type_route_normalizes_an_esm_fallback_like_the_workspace_one() {
     );
     let workspace_route = match host.resolve_type_dependency_canonical(owner, "runtimedep") {
         verter_workspace::ResolutionPublication::Admitted(admitted) => admitted.into_result(),
-        verter_workspace::ResolutionPublication::Refused(refusal) => {
-            panic!("precondition: the workspace type-route admits: {refusal:?}")
-        }
+        other => panic!("precondition: the workspace type-route admits: {other:?}"),
     };
     assert_eq!(
         workspace_route.as_deref(),

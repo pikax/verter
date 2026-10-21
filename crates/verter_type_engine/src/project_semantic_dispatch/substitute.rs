@@ -1295,11 +1295,20 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         return (*built, true);
                     }
                 }
+                // A template with a hole still open keeps it; its literal
+                // holes fold into its text all the same.
+                let (quasis, new_expressions) =
+                    match self.folded_literal_holes(quasis, &new_expressions) {
+                        Some((folded, holes)) => {
+                            (verter_type_expr::OwnedSlice::from(folded.as_slice()), holes)
+                        }
+                        None => ((*quasis).clone(), new_expressions),
+                    };
                 (
                     self.graph().intern_preserving_scope(
                         node,
                         SemanticNodeData::TemplateLiteral {
-                            quasis: (*quasis).clone(),
+                            quasis,
                             expressions: crate::semantic_query::PayloadArray::from(
                                 new_expressions.into_boxed_slice(),
                             ),
@@ -1381,8 +1390,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     }
                     other => (other, false),
                 };
-                let any_changed =
-                    source_changed || key_space_changed || value_expr_changed || name_remap_changed;
+                let (sub_modifiers_type, modifiers_type_changed) = match mapper.modifiers_type {
+                    Some(m) => {
+                        let (sub, c) = self.substitute_with_change_tracking(m, parameter_node, arg);
+                        (Some(sub), c)
+                    }
+                    None => (None, false),
+                };
+                let any_changed = source_changed
+                    || key_space_changed
+                    || value_expr_changed
+                    || name_remap_changed
+                    || modifiers_type_changed;
                 if !any_changed {
                     return (node, false);
                 }
@@ -1418,6 +1437,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                                 // variable; the mapping stays homomorphic
                                 // over its instantiation.
                                 over_type_variable: mapper.over_type_variable,
+                                modifiers_type: sub_modifiers_type,
                             },
                         },
                     ),
@@ -1982,6 +2002,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     if let Some(remap) = mapper.name_remap {
                         stack.push(remap);
                     }
+                    stack.extend(mapper.modifiers_type);
                 }
                 // A construction program is not an infer-binding boundary:
                 // an `infer` inside a program effect declares for the
@@ -2201,6 +2222,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     let shadowed = mapper.parameter_node == target;
                     stack.push(*source);
                     stack.push(mapper.key_space);
+                    stack.extend(mapper.modifiers_type);
                     if !shadowed {
                         stack.push(mapper.value_expr);
                         if let Some(remap) = mapper.name_remap {
