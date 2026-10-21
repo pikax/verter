@@ -324,7 +324,7 @@ fn writes_replace_reaching_state_and_kill_only_explicit_narrowing() {
     let fact = FlowNarrowingFact {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([Arc::from("member")]),
-        narrowed_to: number,
+        narrowed_to: FlowNarrowed::Node(number),
         fresh_literal: None,
     };
     let mut state = execution.empty_state();
@@ -379,7 +379,7 @@ fn failed_transfer_bundles_preserve_prior_state_and_never_seal_evidence() {
     let facts = [number, string].map(|narrowed_to| FlowNarrowingFact {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
-        narrowed_to,
+        narrowed_to: FlowNarrowed::Node(narrowed_to),
         fresh_literal: None,
     });
     let result = execution.apply_transfers(
@@ -461,7 +461,7 @@ fn continuation_joins_use_actual_predecessors_and_preserve_domain_rules() {
         FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
             binding: key.binding().unwrap().clone(),
             path: Arc::from([]),
-            narrowed_to: number,
+            narrowed_to: FlowNarrowed::Node(number),
             fresh_literal: None,
         }])),
     )
@@ -535,7 +535,7 @@ fn product_snapshots_and_evidence_are_predecessor_permutation_invariant() {
                         FlowProductValue::Narrowing(NarrowingProduct::new([FlowNarrowingFact {
                             binding: key.binding().unwrap().clone(),
                             path: Arc::from([]),
-                            narrowed_to: number,
+                            narrowed_to: FlowNarrowed::Node(number),
                             fresh_literal: None,
                         }]))
                     }
@@ -837,7 +837,7 @@ fn narrowing_facts_follow_runtime_aliases_without_rewriting_declaration_evidence
     let fact = FlowNarrowingFact {
         binding: keys[0].binding().unwrap().clone(),
         path: Arc::from([]),
-        narrowed_to: number,
+        narrowed_to: FlowNarrowed::Node(number),
         fresh_literal: None,
     };
     put(
@@ -988,7 +988,7 @@ fn alias_normalization_precedes_narrowing_width_accounting() {
     let facts = keys.iter().map(|key| FlowNarrowingFact {
         binding: key.binding().unwrap().clone(),
         path: Arc::from([]),
-        narrowed_to: number,
+        narrowed_to: FlowNarrowed::Node(number),
         fresh_literal: None,
     });
     let mut state = execution.empty_state();

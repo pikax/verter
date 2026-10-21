@@ -8954,14 +8954,16 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
 
         // (6) D10-AC4, the COLD half: ONE heritage read per arm per cold
-        // edge. `Chain3 | string` under `instanceof Chain1` runs the
-        // guard over a THREE-level hierarchy, and the depth is invisible
-        // to the bound — the recursive walk lives in the heritage
-        // authority behind the single read and is memoized per dispatch,
-        // so the guard pays one read for `Chain3`, one for the tested
-        // class, and NONE for the declaration-less `string` arm, on each
-        // of the two edges the guard applies. Nothing is charged per
-        // ancestor, per member, per relation, or per re-ask.
+        // evaluation, and one for the tested class per edge. `Chain3 |
+        // string` under `instanceof Chain1` runs the guard over a
+        // THREE-level hierarchy, and the depth is invisible to the bound —
+        // the recursive walk lives in the heritage authority behind the
+        // single read and is memoized per dispatch, so the guard pays one
+        // read for `Chain3`, which the subject's arm index takes once for
+        // both edges, NONE for the declaration-less `string` arm, and one
+        // for the tested class on each of the two edges the guard applies.
+        // Nothing is charged per ancestor, per member, per relation, or per
+        // re-ask.
         let key = whole_return_key(dispatch, CANONICAL, "chain");
         INSTANCEOF_HERITAGE_READS.with(|reads| reads.set(0));
         let result = flow_result_value(dispatch, key.clone());
@@ -8973,7 +8975,7 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
         );
         assert_eq!(
             cold_reads, COLD_CHAIN_HERITAGE_READS,
-            "the cold guard reads heritage once per arm per edge"
+            "the cold guard reads each arm's heritage once and the tested class's once per edge"
         );
         assert_eq!(
             dispatch
@@ -9021,16 +9023,17 @@ function chain(x: Chain3 | string) { if (x instanceof Chain1) return x; return 0
 
 /// D10-AC4's cold bound, as case (6) of
 /// [`instanceof_heritage_decides_both_edges_and_bounds_its_reads`]
-/// measures it: one heritage read per ARM per cold EDGE.
+/// measures it: one heritage read per ARM per cold evaluation, and one for
+/// the tested class per EDGE.
 ///
-/// Two edges × (the `Chain3` arm + the tested class `Chain1`) = 4; the
+/// The `Chain3` arm once + two edges × the tested class `Chain1` = 3; the
 /// `string` arm carries no declaration and asks nothing. The subject's
 /// three-level hierarchy does NOT appear in this number — that is the
 /// point of the bound, and of putting the recursive ancestry walk behind
 /// one memoized heritage-authority read. A guard that starts charging per
 /// ancestor, per member, per relation or per re-ask fails here rather
 /// than silently paying for it.
-const COLD_CHAIN_HERITAGE_READS: usize = 4;
+const COLD_CHAIN_HERITAGE_READS: usize = 3;
 
 /// A heritage hop this generation can neither ROOT nor READ — a
 /// cross-file base whose declaration the walk's `ReturnOnly` accessor

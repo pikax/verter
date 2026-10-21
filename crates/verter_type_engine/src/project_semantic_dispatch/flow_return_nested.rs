@@ -569,6 +569,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             carrier_unwraps: std::rc::Rc::clone(&self.carrier_unwraps),
             discriminant_members: std::rc::Rc::clone(&self.discriminant_members),
             guard_relations: std::rc::Rc::clone(&self.guard_relations),
+            arm_indexes: std::rc::Rc::clone(&self.arm_indexes),
             canonical: self.canonical,
             owner: self.owner,
             nullability: self.nullability,

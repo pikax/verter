@@ -3,14 +3,16 @@
 //! grows with the chain, not with the chain times the arms each guard
 //! passes over:
 //!
-//! - every guard enumerates the subject's remaining arms, as the checker's
-//!   `filterType` does, but an arm's carrier unwrap, its tested member and
-//!   its relation to a predicate's target are read once per evaluation,
-//!   never once per guard;
-//! - an `instanceof` guard decides by heritage and pays no relation for
-//!   the arms it passes over once an arm survives by derivation;
-//! - a discriminant test past a negated one answers the arms whose tag is
-//!   one of the remaining tags without a relation per remaining tag.
+//! - the subject's arms are indexed once per evaluation by the fact each
+//!   guard family decides them by — class heritage, own property keys, a
+//!   string-literal tag — and a guard visits only the arms its operand can
+//!   decide differently, every other arm keeping the verdict the index
+//!   proves for it;
+//! - an excluding edge keeps the arms it did not exclude unbuilt, so no
+//!   guard rebuilds or re-enumerates the shrinking union;
+//! - a user type predicate relates through the shared authority only the
+//!   arms declaring every property its target requires: an arm lacking
+//!   one is proved not assignable without a relation.
 //!
 //! Each demand is the named demand the semantic benchmark makes
 //! (`__Probe = ReturnType<typeof f>` resolved by name and projected to its
@@ -18,16 +20,18 @@
 //! program under `--strict`: each guard's return value, and `undefined`
 //! for the end of the body, which stays reachable to the checker.
 //!
-//! The growth proofs compare three sizes, each double the one before. A
-//! user type predicate must relate every remaining arm to its target at
-//! every guard, as the checker's `getNarrowedType` does, so that chain's
-//! relation count is quadratic by definition; its proof bounds the count
-//! to one relation per guard and remaining arm, and its cold builds
-//! linearly.
+//! The growth proofs compare three sizes, each double the one before, over
+//! every counter of the work a chain does: semantic reads, cold builds,
+//! connected work, relations, union enumeration and construction, index
+//! preparation and the arms guards visit — so a memo cannot hide a
+//! traversal that still grows with the chain times the arms.
 
 use std::sync::Arc;
 
-use verter_type_engine::project_semantic_dispatch::flow_return::guard_applications_for_tests;
+use verter_type_engine::project_semantic_dispatch::flow_return::{
+    guard_applications_for_tests, index_preparation_for_tests, indexed_arm_visits_for_tests,
+    union_construction_members_for_tests, union_leaf_visits_for_tests,
+};
 use verter_type_engine::project_semantic_dispatch::raise::{
     enable_dispatch_trace_for_test, DISPATCH_TRACE,
 };
@@ -108,6 +112,21 @@ struct Work {
     cold_builds: u64,
     relation_checks: u64,
     guards: u64,
+    enumerated_arms: u64,
+    union_members: u64,
+    index_preparation: u64,
+    arm_visits: u64,
+}
+
+/// The flow evaluator's arm-traversal counters on this thread.
+fn arm_counters() -> [u64; 4] {
+    [
+        union_leaf_visits_for_tests(),
+        union_construction_members_for_tests(),
+        index_preparation_for_tests(),
+        indexed_arm_visits_for_tests(),
+    ]
+    .map(|count| count as u64)
 }
 
 /// Resolve `__Probe = ReturnType<typeof f>` in a fresh strict project
@@ -131,6 +150,7 @@ fn chain_probe(source: &str) -> (Vec<TypeExpr>, Work) {
         .expect("fixture admitted");
     let _trace = enable_dispatch_trace_for_test();
     let guards_before = guard_applications_for_tests();
+    let arms_before = arm_counters();
     let ((outcome, _), usage) =
         verter_type_engine::project_semantic_dispatch::connected_demand::with_connected_work_capture_for_tests(
             || {
@@ -139,6 +159,9 @@ fn chain_probe(source: &str) -> (Vec<TypeExpr>, Work) {
             },
         );
     let guards = (guard_applications_for_tests() - guards_before) as u64;
+    let arms_after = arm_counters();
+    let [enumerated_arms, union_members, index_preparation, arm_visits] =
+        [0, 1, 2, 3].map(|counter| arms_after[counter] - arms_before[counter]);
     let node = outcome
         .expect("the named demand completes")
         .expect("the probe exists");
@@ -159,6 +182,10 @@ fn chain_probe(source: &str) -> (Vec<TypeExpr>, Work) {
             cold_builds: stats.misses,
             relation_checks: stats.relation_check_count,
             guards,
+            enumerated_arms,
+            union_members,
+            index_preparation,
+            arm_visits,
         },
     )
 }
@@ -246,8 +273,9 @@ fn sizes(smallest: usize) -> [usize; 3] {
     [smallest, smallest * 2, smallest * 4]
 }
 
-/// Measure a chain at three sizes, asserting each answer, and prove its
-/// reads, cold builds and connected work linear in the chain.
+/// Measure a chain at three sizes, asserting each answer, and prove every
+/// counter of its work linear in the chain: relations too, unless the
+/// chain asks none at any size.
 fn assert_chain_linear(
     label: &str,
     smallest: usize,
@@ -276,6 +304,22 @@ fn assert_chain_linear(
     assert_linear(label, "query reads", &series(|work| work.query_reads));
     assert_linear(label, "cold builds", &series(|work| work.cold_builds));
     assert_linear(label, "connected work", &series(|work| work.connected_work));
+    assert_linear(
+        label,
+        "enumerated arms",
+        &series(|work| work.enumerated_arms),
+    );
+    assert_linear(label, "union members", &series(|work| work.union_members));
+    assert_linear(
+        label,
+        "index preparation",
+        &series(|work| work.index_preparation),
+    );
+    assert_linear(label, "arm visits", &series(|work| work.arm_visits));
+    let relations = series(|work| work.relation_checks);
+    if relations.iter().any(|(_, relations)| *relations > 0) {
+        assert_linear(label, "relation checks", &relations);
+    }
     measured
 }
 
@@ -304,28 +348,15 @@ fn router_discriminant_chain_narrows_in_linear_work() {
     assert_chain_linear("router", 25, router_chain, assert_router_answer);
 }
 
-/// Every guard relates each remaining arm to its target once, its
-/// negated edge reusing its positive edge's relations, and every class
-/// is built once.
+/// Each guard relates only the arm declaring its target's property — its
+/// target itself, which needs no relation — and proves every other arm off
+/// its positive edge by the property it lacks.
 #[test]
-fn predicate_chain_relates_each_arm_once_per_guard() {
-    let measured: Vec<(usize, Work)> = sizes(15)
-        .into_iter()
-        .map(|size| {
-            let (arms, work) = chain_probe(&predicate_chain(size));
-            assert_literals_and_undefined(&format!("predicate over {size}"), &arms, size);
-            let pairs = (size * (size - 1) / 2) as u64;
-            assert!(
-                work.relation_checks > 0 && work.relation_checks <= pairs,
-                "predicate over {size}: {} relations for {pairs} guard and remaining-arm pairs",
-                work.relation_checks
-            );
-            (size, work)
-        })
-        .collect();
-    let cold: Vec<(usize, u64)> = measured
-        .iter()
-        .map(|(size, work)| (*size, work.cold_builds))
-        .collect();
-    assert_linear("predicate", "cold builds", &cold);
+fn predicate_chain_narrows_in_linear_work() {
+    assert_chain_linear(
+        "predicate",
+        25,
+        predicate_chain,
+        assert_literals_and_undefined,
+    );
 }
