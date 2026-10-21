@@ -14,8 +14,7 @@
 //! the diagnosis benchmark.
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-use std::sync::atomic::AtomicU32;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use parking_lot::Mutex;
