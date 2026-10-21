@@ -512,20 +512,30 @@ impl Drop for ObserverGuard {
 /// argument or payload is built and no code is emitted. The body
 /// therefore stays valid in default builds, and values it borrows count
 /// as used.
+///
+/// The body is a callback in either build: `return` exits only that callback.
+/// Its payload locals stay outside the emitting caller's debug stack frame.
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe {
     ($M:ty => on $receiver:expr => |$obs:ident| $body:expr) => {{
         if <$M as $crate::observe::ObserveExec>::CAPTURED {
-            if let ::core::option::Option::Some($obs) = $receiver {
-                $body;
+            if let ::core::option::Option::Some(observer) = $receiver {
+                // Keep callback returns local and payload temporaries out of
+                // recursive callers' debug stack frames.
+                #[allow(clippy::redundant_closure_call)]
+                (|$obs: &dyn $crate::AuditObserver| {
+                    $body;
+                })(observer);
             }
         }
     }};
     (|$obs:ident| $body:expr) => {{
         if let ::core::option::Option::Some(observer) = $crate::observer::current_observer() {
-            let $obs: &dyn $crate::AuditObserver = &*observer;
-            $body;
+            #[allow(clippy::redundant_closure_call)]
+            (|$obs: &dyn $crate::AuditObserver| {
+                $body;
+            })(&*observer);
         }
     }};
 }

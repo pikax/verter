@@ -2834,13 +2834,20 @@ pub fn installed_root_selected_mode() -> Option<verter_audit::observe::ObserveMo
 /// installed or the request is uncaptured). Without it the body is
 /// type-checked inside a closure that is never built or called, so the
 /// request-context TLS slot is not read and nothing is recorded.
+/// The body remains a callback with local `return` control flow and payload
+/// locals outside the emitting caller's debug stack frame.
 #[cfg(feature = "semantic-observe")]
 #[macro_export]
 macro_rules! observe_request {
     ($M:ty => on $receiver:expr => |$ctx:ident| $body:expr) => {{
         if <$M as $crate::request_context::ObserveExec>::CAPTURED {
-            if let ::core::option::Option::Some($ctx) = $receiver {
-                $body;
+            if let ::core::option::Option::Some(context) = $receiver {
+                // Preserve callback control flow and keep its payload locals
+                // off the recursive caller's debug stack frame.
+                #[allow(clippy::redundant_closure_call)]
+                (|$ctx: &$crate::request_context::RequestContext| {
+                    $body;
+                })(context);
             }
         }
     }};
@@ -2983,6 +2990,36 @@ impl Drop for NestedAuditGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_observer_callback_return_keeps_the_callers_control_flow() {
+        use std::cell::Cell;
+        use verter_audit::observe::{Captured, Uncaptured};
+
+        fn invoke<M: ObserveExec>(_request: &RequestContext, seen: &Cell<u32>, after: &Cell<bool>) {
+            crate::observe_request!(M => on Some(_request) => |_context| {
+                seen.set(seen.get() + 1);
+                if seen.get() == 1 {
+                    return;
+                }
+                seen.set(99);
+            });
+            after.set(true);
+        }
+
+        let request = make_ctx(200, true);
+        let seen = Cell::new(0);
+        let after = Cell::new(false);
+        invoke::<Captured>(&request, &seen, &after);
+        assert!(after.get(), "return belongs to the observation callback");
+        assert_eq!(seen.get(), u32::from(cfg!(feature = "semantic-observe")));
+
+        seen.set(0);
+        after.set(false);
+        invoke::<Uncaptured>(&request, &seen, &after);
+        assert!(after.get());
+        assert_eq!(seen.get(), 0);
+    }
 
     #[test]
     fn task_completeness_preserves_sticky_deferral_across_polls() {
