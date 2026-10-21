@@ -131,6 +131,15 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
         use verter_session_query::inputs::shallow::LexicalValueBinding;
         let canonical = value_root.scope.canonical_id.as_ref();
         let owner = value_root.scope.owner;
+        if let Some(augmentation) = Self::ambient_value_scope(&value_root.scope, &shallow.headers) {
+            return self.namespace_object(
+                canonical,
+                owner,
+                Some(augmentation),
+                value_root.name.as_ref(),
+                context,
+            );
+        }
         match shallow.visible_value_binding(owner, value_root.name.as_ref()) {
             Some(LexicalValueBinding::Import(target)) if target.is_namespace => {
                 let interop = !target.is_import_equals();
@@ -572,10 +581,18 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             .into_iter()
             .map(|member| {
                 let qualified = format!("{name}.{member}");
-                (
-                    Arc::from(member.as_str()),
-                    file_root(canonical, owner, &qualified),
-                )
+                let mut root = file_root(canonical, owner, &qualified);
+                if let Some(verter_session_query::declarations::AugmentationScopeKind::Module(
+                    specifier,
+                )) = scope
+                {
+                    root.scope.binder_scope_id =
+                        crate::semantic_query::BinderScopeId::augmentation_module_scope(
+                            owner,
+                            specifier.as_str().into(),
+                        );
+                }
+                (Arc::from(member.as_str()), root)
             })
             .collect();
         let node_scope = NodeScopeId::File {

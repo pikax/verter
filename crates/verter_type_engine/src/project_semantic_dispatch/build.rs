@@ -1692,19 +1692,29 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // A member of one of the file's `declare module "…"` blocks is a
         // value the root's identity names too (an import of the ambient
         // module reaches it here).
-        let has_value = ambient_scope.is_some()
-            || matches!(
-                visible_value,
-                Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
-            )
-            || (visible_value.is_none()
-                && matches!(
-                    shallow.value_fallback_augmentation_scope(
-                        value_root.scope.owner,
-                        value_root.name.as_ref()
-                    ),
-                    Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
-                ));
+        let has_value = match ambient_scope {
+            Some(augmentation) => shallow
+                .headers
+                .augmentation_value_header_in(
+                    augmentation,
+                    value_root.scope.owner,
+                    value_root.name.as_ref(),
+                )
+                .is_some(),
+            None => {
+                matches!(
+                    visible_value,
+                    Some(verter_session_query::inputs::shallow::LexicalValueBinding::Local(_))
+                ) || (visible_value.is_none()
+                    && matches!(
+                        shallow.value_fallback_augmentation_scope(
+                            value_root.scope.owner,
+                            value_root.name.as_ref()
+                        ),
+                        Some(verter_session_query::declarations::AugmentationScopeKind::Module(_))
+                    ))
+            }
+        };
         let has_import_local = matches!(
             visible_value,
             Some(verter_session_query::inputs::shallow::LexicalValueBinding::Import(_))
@@ -2437,6 +2447,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 &prepared,
                 is_class,
                 std::mem::take(&mut global_peers),
+                ambient_scope,
             );
             match self.lower_value_signatures_or_suspend(
                 signatures,
@@ -2736,6 +2747,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         prepared: &verter_retention::heap_size::OwnedValue<
             verter_session_query::type_solver::PreparedValueDecl,
         >,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Vec<SignatureJob> {
         let identity = &prepared.root_identity;
         let by_block = identity.symbol_name.contains('.')
@@ -2772,8 +2784,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         verter_type_expr::span_origins::FunctionSpansOrigin::Synthetic(_) => None,
                     })
                     .flatten();
-                let locator = verter_type_expr::locators::AuthoredBodyLocator::DeclBody(
-                    verter_type_expr::locators::TypeBodySlot {
+                let locator = scoped_type_body_locator(
+                    &verter_type_expr::locators::TypeBodySlot {
                         anchor: verter_type_expr::locators::AuthoredAnchor {
                             canonical_id: identity.canonical_id.clone(),
                             owner: identity.owner,
@@ -2789,6 +2801,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             .into_boxed_slice(),
                         ),
                     },
+                    augmentation,
                 );
                 SignatureJob {
                     prepared: prepared.clone(),
@@ -2823,7 +2836,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             )?;
             signatures
                 .jobs
-                .extend(self.value_signature_jobs(&peer_prepared));
+                .extend(self.value_signature_jobs(&peer_prepared, None));
         }
     }
 
@@ -8871,6 +8884,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return None;
         };
+        if matches!(local_scope, NodeLocalScopeId::Lexical(_)) {
+            return None;
+        }
         let indexed = self
             .ctx
             .ensure_indexed_ready_serve(canonical_id.as_ref())?
@@ -22140,11 +22156,12 @@ impl SignatureLowering {
         >,
         is_class: bool,
         global_peers: Vec<ResolvedRootIdentity>,
+        augmentation: Option<&verter_session_query::declarations::AugmentationScopeKind>,
     ) -> Self {
         Self {
             own: own.clone(),
             is_class,
-            jobs: dispatch.value_signature_jobs(own).into(),
+            jobs: dispatch.value_signature_jobs(own, augmentation).into(),
             peers: global_peers.into(),
             groups: Vec::new(),
             current_block: None,

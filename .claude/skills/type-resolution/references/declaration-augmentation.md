@@ -108,6 +108,11 @@ augmentation-value reader with `typeof`. Enum literals retain the declaring
 module specifier alongside their declaration identity through interning, stable
 keys, union printing, publication proof and widening, so subsequent enum demands
 cannot fall back to a file-global enum of the same qualified name.
+Function value signature jobs carry that same known augmentation into their
+authored body locators, including ambient default exports. Their return and
+parameter demands never reconstruct a file-scope locator for a scoped root.
+A scoped namespace root is composed from its namespace inventory, not prepared
+as an ordinary value declaration; each member retains the module binder.
 Namespace classes retain both their instance type and constructor value through
 the ordinary class header and body lowerers, including explicit exports and
 generic defaults.
