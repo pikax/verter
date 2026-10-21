@@ -9163,16 +9163,16 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             IdentityCarrierUnwrap::Unresolvable if target_is_binder => source,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
         };
-        let source = if preserve_source_reference {
-            source_reference
-        } else {
-            source
-        };
         let target = match target_unwrap {
             IdentityCarrierUnwrap::Concrete(id) if source_is_binder && !intrinsic(id) => target,
             IdentityCarrierUnwrap::Concrete(id) => id,
             IdentityCarrierUnwrap::Unresolvable if source_is_binder => target,
             IdentityCarrierUnwrap::Unresolvable => return RelationResult::Unknown,
+        };
+        let source = if preserve_source_reference {
+            source_reference
+        } else {
+            source
         };
         // A declaration naming a homomorphic mapped type over a parameter
         // the session infers reverse-maps where it is unwrapped.
