@@ -19,7 +19,10 @@
 | `resolver_node_cache_misses`, `component_meta_resolved_state_recomputes`; `HostWorkSnapshot` | none; tooling host work discrimination | OPTIONAL | two counters per host, reset with existing provenance reset | `src/meta_provenance.rs`, `src/host_manage/component_meta_methods.rs` | `soak-support` or `semantic-observe`; full provenance remains observation-only |
 
 The standalone session-soak compile-contract lane executes the public runtime
-proof without dev-feature unification. No graph metric is a component-meta
+proof without dev-feature unification; the session-observe lane runs the same
+behavior twin with capture compiled in through its dependency edge and checks
+the narrow work readers' agreement with the full snapshots, once per boundary.
+No graph metric is a component-meta
 producer proxy. The host resolver metric counts request results; recomputes
 count producer entry, including early returns. Graph misses count memo claim
 misses, which may include recursive requests or subscribers. Joined waits count

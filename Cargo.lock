@@ -3379,6 +3379,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "verter_compile_contracts_session_observe"
+version = "0.0.1-beta.7"
+dependencies = [
+ "trybuild",
+ "verter_audit",
+ "verter_session",
+ "verter_type_engine",
+]
+
+[[package]]
 name = "verter_compile_contracts_session_soak"
 version = "0.0.1-beta.7"
 dependencies = [

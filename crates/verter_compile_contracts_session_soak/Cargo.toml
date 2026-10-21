@@ -9,9 +9,6 @@ authors.workspace = true
 description = "Soak-support feature-profile compile contracts for verter_session"
 publish = false
 
-[features]
-semantic-observe = ["verter_session/semantic-observe"]
-
 [[bin]]
 name = "verter_compile_contracts_session_soak"
 path = "src/main.rs"

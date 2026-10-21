@@ -12,9 +12,7 @@ fn main() {
     let tests = trybuild::TestCases::new();
     tests.pass(fixture_root.join("narrow_work_observations.rs"));
     tests.pass(fixture_root.join("work_observation_behavior.rs"));
-    if !cfg!(feature = "semantic-observe") {
-        tests.compile_fail(fixture_root.join("full_work_readers_absent_with_narrow_support.rs"));
-    }
+    tests.compile_fail(fixture_root.join("full_work_readers_absent_with_narrow_support.rs"));
     if std::env::args().any(|arg| arg == "narrow-work") {
         return;
     }

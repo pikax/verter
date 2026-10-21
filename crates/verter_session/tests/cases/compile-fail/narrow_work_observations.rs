@@ -386,72 +386,27 @@ fn run() {
             .misses,
         0
     );
-    #[cfg(not(feature = "semantic-observe"))]
-    {
-        assert_eq!(
-            verter_session::capture::availability(),
-            verter_audit::CaptureAvailability::Unavailable
-        );
-        assert_eq!(
-            std::mem::size_of::<verter_audit::observe::ObservedU64>(),
-            0,
-            "unrelated optional storage stays absent"
-        );
-        assert_eq!(
-            std::mem::size_of::<verter_audit::observe::WorkObservedU64>(),
-            8
-        );
-    }
-    #[cfg(feature = "semantic-observe")]
-    {
-        assert_eq!(
-            verter_session::capture::availability(),
-            verter_audit::CaptureAvailability::Available
-        );
-    }
+    // Capture stays off in this profile; the capture-available agreement
+    // proof lives in the observation contract crate's fixture, which builds
+    // the full readers through its own dependency edge.
+    assert_eq!(
+        verter_session::capture::availability(),
+        verter_audit::CaptureAvailability::Unavailable
+    );
+    assert_eq!(
+        std::mem::size_of::<verter_audit::observe::ObservedU64>(),
+        0,
+        "unrelated optional storage stays absent"
+    );
+    assert_eq!(
+        std::mem::size_of::<verter_audit::observe::WorkObservedU64>(),
+        8
+    );
     non_admitted_entries_are_real_host_work();
     complete_and_warm_graph_work();
     retained_refusals();
     joins_require_a_real_subscriber();
     cancellation_and_unwind_drain();
-    #[cfg(feature = "semantic-observe")]
-    {
-        let host = VerterHost::new_standalone(HostConfig {
-            audit_enabled: true,
-            footprint_capture: true,
-            ..HostConfig::default()
-        });
-        upsert(
-            &host,
-            OWNER,
-            "<script setup lang=\"ts\">defineProps<{ x: string }>()</script>",
-            FileLanguage::vue(),
-        );
-        let (answer, _) = host
-            .get_component_meta_with_resolution(OWNER)
-            .expect("captured answer");
-        assert!(answer.is_complete());
-        let narrow = host.work_snapshot();
-        let full = host.provenance_snapshot();
-        assert_eq!(
-            narrow.resolver_node_cache_misses,
-            full.resolver_node_cache_misses
-        );
-        assert_eq!(
-            narrow.component_meta_resolved_state_recomputes,
-            full.component_meta_resolved_state_recomputes
-        );
-        assert_eq!(
-            narrow.component_meta_resolved_state_recomputes, 1,
-            "support and capture never double count"
-        );
-        let graph = host.project_type_store().semantic_graph();
-        assert_eq!(graph.work_snapshot().misses, graph.stats_snapshot().misses);
-        assert_eq!(
-            graph.work_snapshot().joined_waits,
-            graph.stats_snapshot().joined_waits
-        );
-    }
 }
 
 fn main() {

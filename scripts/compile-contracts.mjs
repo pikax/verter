@@ -117,4 +117,22 @@ if (sessionSoak.error) {
   failed = true;
 }
 
+process.stderr.write("\nCOMPILE CONTRACTS: session-observe\n");
+const sessionObserve = spawnSync(
+  "cargo",
+  ["run", "--locked", "-p", "verter_compile_contracts_session_observe"],
+  { stdio: "inherit", windowsHide: true },
+);
+if (sessionObserve.error) {
+  process.stderr.write(
+    `COMPILE CONTRACTS: could not start cargo: ${sessionObserve.error.message}\n`,
+  );
+  failed = true;
+} else if (sessionObserve.signal) {
+  process.stderr.write(`COMPILE CONTRACTS: cargo was killed by ${sessionObserve.signal}\n`);
+  failed = true;
+} else if (sessionObserve.status !== 0) {
+  failed = true;
+}
+
 process.exitCode = failed ? 1 : 0;

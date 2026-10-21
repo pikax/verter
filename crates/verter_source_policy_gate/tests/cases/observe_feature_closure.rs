@@ -788,6 +788,100 @@ fn narrow_work_feature_closure_keeps_capture_and_general_support_off() {
     }
 }
 
+// The planted negative control for the check above: the same closure reader
+// must see a narrow consumer that forwards `semantic-observe` through its
+// normal dependency edge, so the green pass above observes the soak crate's
+// real manifest rather than failing to see forwarding at all.
+#[test]
+fn narrow_work_feature_closure_detects_a_planted_capture_edge() {
+    let root = verter_test_support::unique_temp_dir("observe-feature-closure");
+    write_member(
+        &root,
+        "verter_audit",
+        r#"[package]
+name = "verter_audit"
+version = "0.0.0"
+edition = "2021"
+[features]
+semantic-observe = []
+test-support = []
+soak-support = []
+"#,
+    );
+    write_member(
+        &root,
+        "verter_session",
+        r#"[package]
+name = "verter_session"
+version = "0.0.0"
+edition = "2021"
+[features]
+soak-support = ["verter_audit/soak-support"]
+semantic-observe = ["verter_audit/semantic-observe"]
+[dependencies]
+verter_audit = { path = "../verter_audit" }
+"#,
+    );
+    for (name, features) in [
+        ("planted_consumer", "\"soak-support\", \"semantic-observe\""),
+        ("control_consumer", "\"soak-support\""),
+    ] {
+        write_member(
+            &root,
+            name,
+            &format!(
+                r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+verter_session = {{ path = "../verter_session", features = [{features}] }}
+"#
+            ),
+        );
+    }
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"verter_audit\", \"verter_session\", \"planted_consumer\", \"control_consumer\"]\nresolver = \"2\"\n",
+    )
+    .unwrap();
+    let metadata = resolve_metadata(&root, &[], false);
+    let target = host_target(Path::new(env!("CARGO_MANIFEST_DIR")));
+    let session = metadata
+        .packages
+        .iter()
+        .find(|package| package.name == "verter_session")
+        .unwrap();
+    let planted = closure(
+        &root,
+        "planted_consumer",
+        &target,
+        None,
+        false,
+        &[],
+        &metadata,
+    );
+    assert!(
+        planted.contains(&(session.id.clone(), "semantic-observe".into())),
+        "the planted capture edge is seen and would fail the check above"
+    );
+    assert!(
+        planted.contains(&(session.id.clone(), "soak-support".into())),
+        "the planted consumer keeps its narrow support visible too"
+    );
+    let control = closure(
+        &root,
+        "control_consumer",
+        &target,
+        None,
+        false,
+        &[],
+        &metadata,
+    );
+    assert!(!control.contains(&(session.id.clone(), "semantic-observe".into())));
+    assert!(control.contains(&(session.id.clone(), "soak-support".into())));
+}
+
 fn write_member(root: &Path, name: &str, manifest: &str) {
     let package = root.join(name);
     fs::create_dir_all(package.join("src")).unwrap();

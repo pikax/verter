@@ -24,11 +24,19 @@ as measured zero. Full graph statistics, provenance, histories, origin edges,
 reservoirs and timers keep their existing gates. Current production occupancy
 and ownership readers remain independent of these OPTIONAL work counters.
 
-The existing `node scripts/compile-contracts.mjs` lane binds the foreign
-session-soak consumer proof. A focused invocation is
-`cargo run --locked -p verter_compile_contracts_session_soak -- narrow-work`;
-adding `--features semantic-observe` before `--` exercises the same public
-boundaries with capture available and checks agreement with full snapshots.
+The existing `node scripts/compile-contracts.mjs` lane binds both foreign
+consumer proofs. A focused narrow invocation is
+`cargo run --locked -p verter_compile_contracts_session_soak -- narrow-work`.
+The capture-available invocation is
+`cargo run --locked -p verter_compile_contracts_session_observe`, whose
+normal dependency carries `soak-support` and `semantic-observe` together:
+trybuild copies a crate's `[dependencies]` into the fixture project verbatim
+but cannot forward a `--features` argument to a `cargo run` bin (its feature
+discovery needs a hash-suffixed test-binary `argv[0]`) and strips non-`dep:`
+entries from the copied feature table, so the observation configuration must
+ride the dependency edge itself. That run checks the same public boundaries
+with capture available, the narrow readers' agreement with the full
+snapshots, and that support and capture never double count.
 
 This is the binding classification policy for semantic state and instrumentation.
 Classify each field, store, hook, counter or trace by its actual consumer, not its

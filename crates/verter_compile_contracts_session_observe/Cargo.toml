@@ -1,0 +1,30 @@
+[package]
+name = "verter_compile_contracts_session_observe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Semantic-observe feature-profile compile contracts for verter_session"
+publish = false
+
+[[bin]]
+name = "verter_compile_contracts_session_observe"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+trybuild = "1.0"
+verter_audit = { path = "../verter_audit" }
+# The observation profile rides this normal dependency edge, not a crate
+# feature: trybuild copies `[dependencies]` verbatim into the fixture
+# project, but strips non-`dep:` entries from the copied `[features]` table
+# and cannot forward `--features` to a `cargo run` bin (its feature
+# discovery needs a hash-suffixed test-binary argv[0]). A feature on the
+# crate itself therefore never reaches the fixture; this dependency line
+# does, building `verter_session` with the narrow work readers and the full
+# observation snapshots in one foreign consumer.
+verter_session = { path = "../verter_session", features = ["soak-support", "semantic-observe"] }
+verter_type_engine = { path = "../verter_type_engine" }

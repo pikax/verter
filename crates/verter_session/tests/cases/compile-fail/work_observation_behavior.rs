@@ -83,12 +83,12 @@ fn run() {
     context.cancel();
     {
         let _guard = verter_type_engine::request_context::RequestContextGuard::install(context);
-        if let Some(cancelled) = host.get_component_meta("/fixture.vue") {
-            let FactStatus::Unavailable(reasons) = cancelled.status() else {
-                panic!("cancelled request published {:?}", cancelled.status());
-            };
-            assert!(reasons.get().contains(PartialReasonSet::CANCELLED));
-        }
+        // The published contract is the same typed outcome in both feature
+        // configurations: an aborted computation publishes nothing.
+        assert!(
+            host.get_component_meta("/fixture.vue").is_none(),
+            "a cancelled request publishes nothing"
+        );
     }
     let recovered = host
         .get_component_meta("/fixture.vue")
