@@ -14,9 +14,10 @@
 use std::sync::Arc;
 
 use verter_session::{HostConfig, UpsertRequest, VerterHost};
+use verter_session_query::retention::owned::OwnedHandles;
 use verter_session_query::retention::shared::CallerHold;
-use verter_session_query::retention::witness::{AllocationCharge, Reach};
-use verter_session_query::retention::{ChargeClass, SemanticRetentionAccount};
+use verter_session_query::retention::witness::{AllocationCharge, ChargeObserver, Reach};
+use verter_session_query::retention::{ChargeClass, RetentionCharge, SemanticRetentionAccount};
 use verter_type_engine::project_semantic_dispatch::ProjectSemanticDispatch;
 use verter_type_engine::semantic_query::{
     BinderScopeId, CacheRead, FlowReturnResult, QueryResult, ResolveDeclKey,
@@ -449,85 +450,184 @@ fn copies_keep_exactly_the_measured_charge_through_retirement_in_either_order() 
             last, other_before,
             "{order}: the last reader keeps exactly the payload charge"
         );
-        let pinned = host.accounts().2;
         drop(other);
         host.retire();
-        let pinned_after = host.accounts().2;
-        assert!(
-            pinned - pinned_after
-                >= last.payload().charged_bytes() + last.root_metadata().charged_bytes(),
-            "{order}: the last reader releases the payload and its bookkeeping"
-        );
     }
 }
 
-/// A corruption applied to an observed transfer at one entry.
-type Corruption = fn(&mut Vec<AllocationCharge>, usize);
+/// What a delivery's readers leave charged once they have gone. `readers`
+/// answers of one cached delivery are held while the cache retires; every
+/// reader but the last then drops in turn, and the last either drops or is
+/// kept. Returns the process account's pinned bytes at the end, what each
+/// earlier drop released beside the bookkeeping its witness named, and the
+/// last reader's witness.
+struct Drained {
+    pinned: usize,
+    earlier_drops: Vec<(usize, usize)>,
+    last: HeldChargeWitness,
+}
 
-/// A transfer corrupted the same way in two identical executions still
-/// fails the oracle in each: the expectation is each allocation's own
-/// measurement, so two transfers that agree with each other prove nothing.
+fn drained(readers: usize, keep_last: bool) -> Drained {
+    let host = ClosingHost::settled();
+    let mut answers: Vec<_> = (0..readers).map(|_| flow_return(&host, 1)).collect();
+    host.retire();
+    let mut earlier_drops = Vec::new();
+    while answers.len() > 1 {
+        let answer = answers.remove(0);
+        let bookkeeping = HeldChargeWitness::of_flow_return(&answer)
+            .root_metadata()
+            .charged_bytes();
+        let before = host.accounts().2;
+        drop(answer);
+        host.retire();
+        earlier_drops.push((before - host.accounts().2, bookkeeping));
+    }
+    let last = answers.pop().expect("a last reader");
+    let witness = HeldChargeWitness::of_flow_return(&last);
+    let _kept = keep_last.then_some(last);
+    host.retire();
+    Drained {
+        pinned: host.accounts().2,
+        earlier_drops,
+        last: witness,
+    }
+}
+
+/// The last reader's drop releases every charge its witness named, and
+/// nothing else is left behind: with every reader gone the account holds
+/// exactly what a host that served one answer and released it holds. An
+/// earlier reader's drop releases exactly its own bookkeeping, the shared
+/// payload staying charged for the readers left. A leaked payload or
+/// bookkeeping charge — the control keeps the last reader alive while the
+/// rest of its delivery drains — is left in the residual, which is exact, so
+/// the unobserved store backing released beside the observed charges
+/// cannot hide it.
+#[test]
+fn the_last_reader_releases_every_observed_charge_exactly() {
+    let _serial = serial();
+    let reference = drained(1, false).pinned;
+    let released = drained(3, false);
+    assert_eq!(
+        released.pinned, reference,
+        "with every reader gone no observed charge is left behind"
+    );
+    for (dropped, bookkeeping) in &released.earlier_drops {
+        assert_eq!(
+            dropped, bookkeeping,
+            "an earlier reader releases exactly its bookkeeping"
+        );
+    }
+    assert_eq!(released.earlier_drops.len(), 2);
+
+    let leaked = drained(3, true);
+    let witnessed =
+        leaked.last.payload().charged_bytes() + leaked.last.root_metadata().charged_bytes();
+    assert!(
+        witnessed > 0 && leaked.pinned >= reference + witnessed,
+        "the control leaves the last reader's charges in place: {} against {reference}",
+        leaked.pinned
+    );
+    assert_ne!(
+        leaked.pinned, reference,
+        "the exact residual rejects the leaked charges"
+    );
+}
+
+/// The corruption a live transfer suffers in the account itself.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Fault {
+    None,
+    Dropped,
+    Doubled,
+    Partial,
+}
+
+/// Bytes the allocation under test measures.
+const MEASURED: usize = 4096;
+
+/// One allocation's charge carried through the live account from retained to
+/// pinned — the transfer a cache's retirement makes — with `fault` applied
+/// to the account's own charge, observed through the same observer the
+/// witness reads allocations with. Returns the observations around the
+/// transfer and the pinned bytes the account moved by while the charge was
+/// live.
+fn live_transfer(fault: Fault) -> (Vec<AllocationCharge>, Vec<AllocationCharge>, usize) {
+    let account = SemanticRetentionAccount::process_local();
+    let allocation = Arc::new(());
+    let observe = |charge: Option<&RetentionCharge>| {
+        let mut observer = ChargeObserver::new();
+        observer.self_charged(
+            &allocation,
+            Reach::Direct,
+            charge,
+            MEASURED,
+            &OwnedHandles::default(),
+        );
+        observer.finish().entries().to_vec()
+    };
+    let pinned_start = account.snapshot().pinned_bytes;
+    let charged = match fault {
+        Fault::Doubled => 2 * MEASURED,
+        Fault::Partial => MEASURED / 2,
+        Fault::None | Fault::Dropped => MEASURED,
+    };
+    let mut charge = account.pin(charged);
+    charge
+        .try_adopt_retained()
+        .expect("the account has headroom to retain the charge");
+    let before = observe(Some(&charge));
+    charge.transfer_to_pinned();
+    let after = if fault == Fault::Dropped {
+        drop(charge);
+        observe(None)
+    } else {
+        observe(Some(&charge))
+    };
+    let live = account.snapshot().pinned_bytes - pinned_start;
+    (before, after, live)
+}
+
+/// A transfer whose account charge is dropped, doubled or partial fails the
+/// exact-transfer oracle even when two executions share the corruption: the
+/// expectation is the allocation's own measurement, so two transfers that
+/// agree with each other prove nothing. Each corruption is applied to the
+/// live charge, and the account's own movement shows it applied.
 #[test]
 fn dropped_doubled_and_partial_transfers_fail_even_when_two_transfers_agree() {
     let _serial = serial();
-    let transfer = || {
-        let host = ClosingHost::settled();
-        let held = flow_return(&host, 1);
-        let before = HeldChargeWitness::of_flow_return(&held);
-        host.retire();
-        let after = HeldChargeWitness::of_flow_return(&held);
-        exact_witness_transfer(&before, &after).expect("the real transfer is exact");
-        (
-            before.payload().entries().to_vec(),
-            after.payload().entries().to_vec(),
-        )
-    };
-    let ((before_a, after_a), (before_b, after_b)) = (transfer(), transfer());
-    let figures = |entries: &[AllocationCharge]| {
-        let mut figures: Vec<_> = entries
-            .iter()
-            .map(|entry| (entry.reach, entry.class, entry.charged_bytes))
-            .collect();
-        figures.sort_by_key(|figure| format!("{figure:?}"));
-        figures
-    };
-    let carrier = |entries: &[AllocationCharge]| {
-        entries
-            .iter()
-            .position(|entry| entry.reach == Reach::Direct)
-            .expect("a carrier is observed")
-    };
-    let controls: [(&str, Corruption); 3] = [
-        ("dropped", |entries, at| {
-            entries.remove(at);
-        }),
-        ("doubled", |entries, at| {
-            let entry = entries[at];
-            entries.push(entry);
-        }),
-        ("partial", |entries, at| {
-            entries[at].charged_bytes /= 2;
-        }),
-    ];
-    for (name, corrupt) in controls {
-        let mut corrupted_a = after_a.clone();
-        corrupt(&mut corrupted_a, carrier(&after_a));
-        let mut corrupted_b = after_b.clone();
-        corrupt(&mut corrupted_b, carrier(&after_b));
-        assert_ne!(corrupted_a, after_a, "{name}: the control applied");
-        assert_ne!(corrupted_b, after_b, "{name}: the control applied");
+    let (before, after, live) = live_transfer(Fault::None);
+    exact_transfer(&before, &after).expect("the uncorrupted transfer is exact");
+    assert_eq!(
+        live, MEASURED,
+        "the clean transfer pins exactly what it measures"
+    );
+
+    for (fault, expected_live) in [
+        (Fault::Dropped, 0),
+        (Fault::Doubled, 2 * MEASURED),
+        (Fault::Partial, MEASURED / 2),
+    ] {
+        let (first, second) = (live_transfer(fault), live_transfer(fault));
+        for (before, after, live) in [&first, &second] {
+            assert_eq!(
+                *live, expected_live,
+                "{fault:?}: the account's own charge is corrupted"
+            );
+            assert!(
+                exact_transfer(before, after).is_err(),
+                "{fault:?}: the oracle rejects the corrupted transfer"
+            );
+        }
+        let figures = |entries: &[AllocationCharge]| {
+            entries
+                .iter()
+                .map(|entry| (entry.class, entry.charged_bytes, entry.measured_bytes))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            figures(&corrupted_a),
-            figures(&corrupted_b),
-            "{name}: the two corrupted transfers agree with each other"
-        );
-        assert!(
-            exact_transfer(&before_a, &corrupted_a).is_err(),
-            "{name}: the oracle rejects the first corrupted transfer"
-        );
-        assert!(
-            exact_transfer(&before_b, &corrupted_b).is_err(),
-            "{name}: the oracle rejects the second corrupted transfer"
+            figures(&first.1),
+            figures(&second.1),
+            "{fault:?}: the two corrupted transfers agree with each other"
         );
     }
 }
@@ -540,6 +640,12 @@ fn dropped_doubled_and_partial_transfers_fail_even_when_two_transfers_agree() {
 #[test]
 fn a_read_keeps_its_carriers_receipts_and_bookkeeping_exactly_through_retirement() {
     let _serial = serial();
+    let pinned_reference = {
+        let host = ClosingHost::settled();
+        drop(read(&host, 1));
+        host.retire();
+        host.accounts().2
+    };
     let host = ClosingHost::settled();
     let (_, retained_baseline, _) = host.accounts();
     drop(read(&host, 1));
@@ -602,5 +708,10 @@ fn a_read_keeps_its_carriers_receipts_and_bookkeeping_exactly_through_retirement
         host.accounts().1,
         retained_baseline,
         "the last reader releases every retained charge it kept"
+    );
+    assert_eq!(
+        host.accounts().2,
+        pinned_reference,
+        "the last reader releases every pinned carrier and bookkeeping charge it kept"
     );
 }
