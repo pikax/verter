@@ -2819,9 +2819,14 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                 else {
                     return self.opaque(QueryError::Miss);
                 };
-                let Some(key) =
-                    self.typeof_reference_key(canonical_id, *owner, value_ref, reduction_context)
-                else {
+                let Some(key) = self.typeof_reference_key_in_scope(
+                    canonical_id,
+                    *owner,
+                    Some(name_resolution),
+                    scope_payload,
+                    value_ref,
+                    reduction_context,
+                ) else {
                     return self.opaque(QueryError::Miss);
                 };
                 let mut result = match self.execute_type_node(key) {

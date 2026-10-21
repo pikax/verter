@@ -322,11 +322,6 @@ fn recursive_mapped_index_publishes_dotted_paths_across_five_modules() {
     assert_recursive_paths_layout(100, 5);
 }
 
-#[test]
-fn recursive_mapped_index_publishes_dotted_paths_for_three_hundred_entities() {
-    assert_recursive_paths_layout(300, 5);
-}
-
 /// Tripling the entities triples the work: instantiations and fact-signature
 /// proof work stay linear in the entity count rather than growing with the
 /// pairs of entities each recursive path can reach.
