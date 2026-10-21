@@ -1959,9 +1959,21 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     },
                     NodeScopeId::Global => return self.opaque(QueryError::Miss),
                 };
+                // A name an enclosing namespace declares heads the path at
+                // that namespace's member.
+                let (root_name, rest) = match self.namespace_scoped_value_root(
+                    ctx.name_resolution,
+                    ctx.scope_payload,
+                    root_scope.canonical_id.as_ref(),
+                    root_scope.owner,
+                    &value_ref.path,
+                ) {
+                    Some((qualified, consumed)) => (qualified, &value_ref.path[consumed..]),
+                    None => (verter_type_expr::OwnedStr::from(root.as_str()), rest),
+                };
                 let value_root = ValueRootKey {
                     scope: root_scope,
-                    name: verter_type_expr::OwnedStr::from(root.as_str()),
+                    name: root_name,
                 };
                 let path: Arc<[Arc<str>]> = rest.iter().map(|s| Arc::from(s.as_str())).collect();
                 let type_args = self.lower_locator_shape_args(&value_ref.type_args, ctx);
@@ -2586,69 +2598,84 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         // shadowing wins over the global lib heads below by resolution
         // order. This resolves WHO the name is (a slot), never WHAT it
         // means (no `ResolveDecl` / `Instantiate` execution).
-        let resolved: Option<(ResolvedRootIdentity, HashValue)> = ctx
-            .name_resolution
-            .and_then(|map| map.get(name.as_ref()))
-            .and_then(|direct| {
-                // A map entry whose canonical does not name a live file is
-                // not a usable identity — e.g. an empty canonical, or an
-                // ambient string-literal module SPECIFIER the bundle
-                // canonicalization stored verbatim at prep time. Fall
-                // through to the full in-scope resolver, which resolves the
-                // specifier through the live dependency/ambient-module
-                // authority.
-                if direct.canonical_id.is_empty() {
-                    return None;
-                }
-                // Facts-returning form + tracer record: the route-chain
-                // facts (every barrel/re-export participant's version) enter
-                // the active fact tracer and land in the enclosing
-                // `LowerLocator` entry's `ReadSetSignature`, so a barrel
-                // retarget with the owner unchanged MISSES the warm shape.
-                let final_identity =
-                    if direct.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
-                        let (routed, route_facts) = self.ctx.resolve_imported_type_root_with_facts(
-                            &direct.canonical_id,
-                            &direct.symbol_name,
-                        );
-                        self.ctx.observe_borrowed_signature(&route_facts);
-                        routed.unwrap_or_else(|| direct.clone())
-                    } else {
-                        direct.clone()
-                    };
-                // ONE leaf shallow-state retrieval: this read is BOTH the
-                // liveness gate (the permitted first canonical shallow
-                // materialization — at most once per content generation)
-                // AND the versioned-identity hash source. It builds the
-                // versioned `DeclIdentity` + correct invalidation facts;
-                // it never lowers the target's declaration bodies.
-                let state = self.ctx.shallow_file_state(&final_identity.canonical_id)?;
-                Some((final_identity, state.whole_hash))
-            })
-            .or_else(|| match scope {
-                NodeScopeId::File { canonical_id, .. } => {
-                    let ri = resolve_bare_name_in_scope(
-                        self.ctx,
-                        self,
-                        canonical_id.as_ref(),
-                        scope
-                            .top_level_owner()
-                            .expect("file scope carries an authored owner"),
-                        ctx.scope_payload,
-                        name.as_ref(),
-                    )?;
-                    // Same single retrieval on the bare-name path: one
-                    // state read supplies the versioned-identity hash (an
-                    // unknown file keeps the default hash — the identity
-                    // is still deterministic within the generation).
-                    let whole_hash = self
-                        .ctx
-                        .shallow_file_state(ri.canonical_id.as_ref())
-                        .map_or(HashValue::default(), |s| s.whole_hash);
-                    Some((ri, whole_hash))
-                }
-                NodeScopeId::Global => None,
-            });
+        let enclosing_member = self.enclosing_namespace_binding(
+            scope,
+            ctx.scope_payload,
+            name.as_ref(),
+            ctx.name_resolution.and_then(|map| map.get(name.as_ref())),
+        );
+        let resolved: Option<(ResolvedRootIdentity, HashValue)> =
+            if let Some(member) = enclosing_member {
+                let whole_hash = self
+                    .ctx
+                    .shallow_file_state(member.canonical_id.as_ref())
+                    .map_or(HashValue::default(), |state| state.whole_hash);
+                Some((member, whole_hash))
+            } else {
+                ctx.name_resolution
+                    .and_then(|map| map.get(name.as_ref()))
+                    .and_then(|direct| {
+                        // A map entry whose canonical does not name a live file is
+                        // not a usable identity — e.g. an empty canonical, or an
+                        // ambient string-literal module SPECIFIER the bundle
+                        // canonicalization stored verbatim at prep time. Fall
+                        // through to the full in-scope resolver, which resolves the
+                        // specifier through the live dependency/ambient-module
+                        // authority.
+                        if direct.canonical_id.is_empty() {
+                            return None;
+                        }
+                        // Facts-returning form + tracer record: the route-chain
+                        // facts (every barrel/re-export participant's version) enter
+                        // the active fact tracer and land in the enclosing
+                        // `LowerLocator` entry's `ReadSetSignature`, so a barrel
+                        // retarget with the owner unchanged MISSES the warm shape.
+                        let final_identity =
+                            if direct.owner == verter_type_expr::TopLevelOwnerId::ordinary_file() {
+                                let (routed, route_facts) =
+                                    self.ctx.resolve_imported_type_root_with_facts(
+                                        &direct.canonical_id,
+                                        &direct.symbol_name,
+                                    );
+                                self.ctx.observe_borrowed_signature(&route_facts);
+                                routed.unwrap_or_else(|| direct.clone())
+                            } else {
+                                direct.clone()
+                            };
+                        // ONE leaf shallow-state retrieval: this read is BOTH the
+                        // liveness gate (the permitted first canonical shallow
+                        // materialization — at most once per content generation)
+                        // AND the versioned-identity hash source. It builds the
+                        // versioned `DeclIdentity` + correct invalidation facts;
+                        // it never lowers the target's declaration bodies.
+                        let state = self.ctx.shallow_file_state(&final_identity.canonical_id)?;
+                        Some((final_identity, state.whole_hash))
+                    })
+                    .or_else(|| match scope {
+                        NodeScopeId::File { canonical_id, .. } => {
+                            let ri = resolve_bare_name_in_scope(
+                                self.ctx,
+                                self,
+                                canonical_id.as_ref(),
+                                scope
+                                    .top_level_owner()
+                                    .expect("file scope carries an authored owner"),
+                                ctx.scope_payload,
+                                name.as_ref(),
+                            )?;
+                            // Same single retrieval on the bare-name path: one
+                            // state read supplies the versioned-identity hash (an
+                            // unknown file keeps the default hash — the identity
+                            // is still deterministic within the generation).
+                            let whole_hash = self
+                                .ctx
+                                .shallow_file_state(ri.canonical_id.as_ref())
+                                .map_or(HashValue::default(), |s| s.whole_hash);
+                            Some((ri, whole_hash))
+                        }
+                        NodeScopeId::Global => None,
+                    })
+            };
         use crate::project_semantic_dispatch::carrier::RefHeadResolution;
         if let Some((ri, whole_hash)) = resolved {
             let identity = DeclIdentity {
