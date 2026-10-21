@@ -1328,3 +1328,12 @@ expose `semanticNodeRoots`, `semanticNodeInternalEdges` and
 `semanticNodePermanentNodes`. These required current counts add no observation
 history. See the [ownership reference](../type-resolution/references/counted-node-ownership.md)
 for the ownership contract, the close and the sidecar cleanup.
+
+## Workspace source capture
+
+A scheduler file stage binds source capture once from its installed winning
+request. The bound loader forwards request identity and timing to
+`WorkspaceRead::read_file_captured`; ordinary reads use the uncaptured
+specialization and never consult optional context state or the sink registry.
+Session dependency-source reads use their existing typed capture receivers.
+Both entries execute the same overlay/snapshot/disk read algorithm.

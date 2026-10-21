@@ -2092,7 +2092,11 @@ impl VerterHost {
         {
             return Some(Arc::clone(&indexed.raw_source));
         }
-        if let Some(source) = self.ws().read_file(resolved_canonical_id) {
+        if let Some(source) = crate::capture::read_file_in::<M>(
+            self.ws().as_ref(),
+            observation,
+            resolved_canonical_id,
+        ) {
             return Some(source);
         }
 
@@ -2122,7 +2126,7 @@ impl VerterHost {
                 self.artifact_current_indexed::<M>(observation, &dep_id)
                     .map(|indexed| Arc::clone(&indexed.raw_source))
             })
-            .or_else(|| self.ws().read_file(&dep_id))
+            .or_else(|| crate::capture::read_file_in::<M>(self.ws().as_ref(), observation, &dep_id))
     }
 
     /// Populate `resolved_canonical_id` on each import in the snapshot

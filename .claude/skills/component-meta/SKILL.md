@@ -48,6 +48,12 @@ match-all project. Guards: `crates/verter_napi/src/project_config_tests.rs`,
 
 ## Audit & footprint
 
+Uncaptured component-meta fallback records carry `RequestKindPayload::None`
+for unavailable, disabled, filtered and missing/evicted-record paths. Only
+genuinely captured records carry a `ComponentMetaPayload`, including its
+legacy zero-valued compatibility fields.
+
+
 Per-request semantic footprint observability splits across two crates:
 
 - **`verter_audit`** (substrate) — owns `RequestAuditRecord` envelope, `RequestKind` / `RequestKindPayload` discriminants, all per-kind payload structs (`ComponentMetaPayload`, `TypeResolutionPayload`, `SemanticAnalysisPayload`, `CompilePayload`, `WorkspacePayload`, `LspRequestPayload`, `McpToolPayload`, `BundlerBatchPayload`), producer-side `AuditObserver` trait + `AuditEvent` counter hook, `StructuredAuditEvent` enum + variant payloads (in `verter_audit::origin_graph`), `AuditConfig` + `AuditConsumerFilter`, trivial `NoOpObserver`.

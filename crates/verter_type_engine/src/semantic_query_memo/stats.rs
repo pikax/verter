@@ -13,9 +13,9 @@
 //! `EntriesLockGuard` wraps the entries mutex with wait/hold timing for
 //! the diagnosis benchmark.
 
-use std::sync::atomic::Ordering;
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 
 #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
 use parking_lot::Mutex;
@@ -39,28 +39,10 @@ use crate::semantic_query::{SemanticGraphStats, SemanticNodeId};
 /// zero-size value whose `fetch_add` compiles to nothing and which has no
 /// reader at all, so an unobserved build carries no counter and cannot
 /// substitute zero for one it never kept.
-#[derive(Default)]
-pub(crate) struct Tally {
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    value: AtomicU64,
-}
-
-impl Tally {
-    /// Add `amount` to the counter. A no-op without the observation gate.
-    #[inline(always)]
-    pub(crate) fn fetch_add(&self, amount: u64, order: Ordering) {
-        #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-        self.value.fetch_add(amount, order);
-        #[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
-        let _ = (amount, order);
-    }
-
-    /// Read the counter. Exists only where the counter is kept.
-    #[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
-    pub(crate) fn load(&self, order: Ordering) -> u64 {
-        self.value.load(order)
-    }
-}
+#[cfg(any(test, feature = "test-support", feature = "semantic-observe"))]
+pub(crate) type Tally = verter_audit::observe::Counter<std::sync::atomic::AtomicU64>;
+#[cfg(not(any(test, feature = "test-support", feature = "semantic-observe")))]
+pub(crate) type Tally = verter_audit::observe::Counter<()>;
 
 /// Bounded sample reservoir for histogram-style metrics (path length /
 /// projection depth). Cap = 8192 samples per metric; once full, new

@@ -316,6 +316,7 @@
           "crates/verter_napi/src/meta.rs",
           "crates/verter_session/examples/signature_kernel_bench.rs",
           "crates/verter_session/examples/signature_kernel_contention_probe.rs",
+          "crates/verter_session/src/capture.rs",
           "crates/verter_session/src/component_meta_flow_return_admission_tests.rs",
           "crates/verter_session/src/component_meta_host.rs",
           "crates/verter_session/src/component_meta_host_tests.rs",

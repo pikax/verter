@@ -779,8 +779,7 @@ impl ComponentMetaSession {
 /// Build the cheap default-filled [`crate::component_meta_audit::RequestAuditRecord`]
 /// the audited component-meta seam returns on its no-record paths
 /// (audit disabled, non-fault miss, or evicted record). No per-request
-/// counters are collected. An unavailable build carries no kind payload;
-/// instrumented refusals retain the compatibility default payload, with
+/// counters are collected. Uncaptured records carry no kind payload, with
 /// `capture_state` recording why no full record was captured.
 fn cheap_component_meta_record(
     canonical_id: &str,
@@ -803,11 +802,6 @@ fn cheap_component_meta_record(
         scheduler: None,
         files: Vec::new(),
         waits: None,
-        #[cfg(feature = "semantic-observe")]
-        kind_payload: verter_audit::RequestKindPayload::ComponentMeta(
-            crate::component_meta_audit::ComponentMetaPayload::default(),
-        ),
-        #[cfg(not(feature = "semantic-observe"))]
         kind_payload: verter_audit::RequestKindPayload::None,
         capture_state,
         trace_id: String::new(),

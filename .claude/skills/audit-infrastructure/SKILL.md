@@ -20,7 +20,8 @@ Inventory files are `crates/*/observe-inventory/*.md`; extend the owning file,
 not a shared table. Required validity, budgets, diagnostic data and current
 occupancy/ownership charges remain independent of capture.
 
-`verter_audit::observe::CaptureAvailability::compiled()` reports `Unavailable`
+`verter_session::capture::availability()` re-exports the single substrate capability
+authority, `verter_audit::observe::CaptureAvailability::compiled()`. It reports `Unavailable`
 when `semantic-observe` is off and `Available` when on. `observe::capture`
 returns `None` without calling its collector when off; it returns the collected
 payload when on, never fabricated zero metrics. `ObserveMode` supplies the
@@ -44,6 +45,11 @@ receivers across task resumptions, and graph/session helpers pass the borrow
 through their typed operations. Untyped forms are for once-per-request and
 once-per-phase boundaries only. See docs/arch/semantic-observe.md →
 "Concrete execution modes".
+VFS reads follow the same split: plain `WorkspaceRead::read_file` is uncaptured;
+`read_file_captured` borrows bound `VfsReadCapture` identity/timing. Source jobs
+bind the captured loader once after installing their winner context, and
+session dependency reads pass their existing capture targets. Uncaptured reads
+never lock the sink registry, poll timing/context TLS, or build read details.
 The whole audit envelope compiles only under `semantic-observe`: the observer
 TLS, `HostAuditRuntime`, the record store, the per-request accumulator, the
 scheduler and VFS audit sinks and the request context's audit counters are

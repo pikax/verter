@@ -196,20 +196,17 @@ pub(crate) struct WorkspaceSourceLoader {
 
 impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
     fn load(&self, canonical_id: &str) -> Option<Arc<str>> {
-        let workspace = self.workspace.read();
-        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
-        // IS the scheduler / dep-graph file id of a registered ambient lib.
-        // It is served from the ambient registry, which is the content
-        // authority for that id; the plain registration canonical stays
-        // invisible to `read_file` (a user file at that path shadows the
-        // lib instead).
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some((project, canonical)) =
-            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
-        {
-            return workspace.read_ambient_lib(project, canonical.as_ref());
-        }
-        workspace.read_file(canonical_id)
+        self.load_through(canonical_id, |workspace| workspace.read_file(canonical_id))
+    }
+
+    #[cfg(feature = "semantic-observe")]
+    fn load_captured(&self, canonical_id: &str, request_id: u64, timing: bool) -> Option<Arc<str>> {
+        self.load_through(canonical_id, |workspace| {
+            workspace.read_file_captured(
+                canonical_id,
+                &verter_workspace::audit_sink::VfsReadCapture { request_id, timing },
+            )
+        })
     }
 
     fn exists(&self, canonical_id: &str) -> bool {
@@ -231,6 +228,29 @@ impl verter_scheduler::source_loader::SourceLoader for WorkspaceSourceLoader {
 
     fn realpath(&self, canonical_id: &str) -> Option<String> {
         self.workspace.read().realpath(canonical_id)
+    }
+}
+
+impl WorkspaceSourceLoader {
+    fn load_through(
+        &self,
+        canonical_id: &str,
+        read: impl FnOnce(&dyn verter_workspace::WorkspaceAccess) -> Option<Arc<str>>,
+    ) -> Option<Arc<str>> {
+        let workspace = self.workspace.read();
+        // An ambient virtual canonical (`ambient:/<project-tag>/<canonical>`)
+        // IS the scheduler / dep-graph file id of a registered ambient lib.
+        // It is served from the ambient registry, which is the content
+        // authority for that id; the plain registration canonical stays
+        // invisible to `read_file` (a user file at that path shadows the
+        // lib instead).
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((project, canonical)) =
+            verter_workspace::parse_ambient_virtual_canonical_id(canonical_id)
+        {
+            return workspace.read_ambient_lib(project, canonical.as_ref());
+        }
+        read(workspace.as_ref())
     }
 }
 

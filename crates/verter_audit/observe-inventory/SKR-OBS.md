@@ -97,7 +97,7 @@ this row supersedes that owner's gate column.
 | item (field, store, hook, counter, trace) | production consumer | classification | lifetime | owner module | gate |
 | --- | --- | --- | --- | --- | --- |
 | Aggregate owner probe and compaction examination counter (`OwnerEntries.examined`) | none; the crate's own tests | OPTIONAL | Per aggregate token | `src/cancellation.rs` | `cfg(test)` — a test-only proof counter needs no capture gate |
-| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner`, `current_timing_enabled` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
+| `RequestContextLike::capture_enabled` / `timing_enabled` / `record_cache_event` / `on_dedup_joiner` | Audit record construction; `timing_enabled` gates optional timing | OPTIONAL | Per request context | `src/request_context.rs` | `cfg(feature = "semantic-observe")` |
 | `cancellation_token`, opaque context install/clear guards | Cancellation and request-context carriage | REQUIRED / REQUIRED-lifetime | Per dispatch | `src/request_context.rs` | always |
 
 ## verter_semantic_source
@@ -234,3 +234,25 @@ default builds, or work this sweep could not finish, with the reason.
    (`a_live_dispatchers_discarded_results_release_while_retained_ones_outlive_it`)
    runs in both builds. The explanation state is relation-owned and recorded
    here for the relation inventory.
+
+## Optional counter storage
+
+`observe::Counter<S>` owns the common u64 counter operations. Each owner selects
+`AtomicU64`, `Arc<AtomicU64>` or zero-size `()` storage through its existing
+compile gate: audit `ObservedU64` uses `semantic-observe`, engine `Tally` and
+`OccupancyCounter` use the observation gate. Only retained storage has a reader;
+shared clones retain the same atomic. The narrower u32/u16/flag primitives
+keep their typed operations. Availability is computed only by the audit
+substrate and re-exported by the session.
+
+## VFS capture execution
+
+Plain workspace reads are uncaptured. `WorkspaceRead::read_file_captured` takes
+bound `VfsReadCapture` identity/timing; both entries share the same typed read
+implementation. `VfsReadProbe<Uncaptured>` touches no clock, request slot or
+sink registry. Read-detail strings are likewise absent from production defaults
+and skipped by instrumented uncaptured reads; the workspace unit-test seam
+retains its existing detail assertions. Source jobs bind `CapturedSourceLoader`
+at their execution boundary after the winning request context is installed;
+the session loader forwards that data, and typed dependency-source reads borrow
+their existing capture targets. There is no per-read timing-context accessor.

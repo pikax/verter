@@ -432,3 +432,8 @@ pub struct AuditConfig {
 `HostConfig` exposes `audit_enabled` + `footprint_capture` as the
 top-level toggles; both must be on for `getComponentMetaWithAudit`
 to produce a populated record.
+
+Uncaptured component-meta fallback records have no kind payload, including in
+instrumented binaries when audit is disabled or filtered, a session is closed,
+or a captured record is unavailable from the bounded store. Legacy zero-valued
+ComponentMeta compatibility fields occur only in genuinely captured records.

@@ -33,6 +33,18 @@ pub trait SourceLoader: Send + Sync {
     /// Load file content by canonical ID.
     fn load(&self, canonical_id: &str) -> Option<Arc<str>>;
 
+    /// Load with capture data bound at the job boundary. Uncaptured jobs
+    /// call `load` and never query optional capture state per read.
+    #[cfg(feature = "semantic-observe")]
+    fn load_captured(
+        &self,
+        canonical_id: &str,
+        _request_id: u64,
+        _timing: bool,
+    ) -> Option<Arc<str>> {
+        self.load(canonical_id)
+    }
+
     /// Check whether a file exists.
     fn exists(&self, canonical_id: &str) -> bool;
 
