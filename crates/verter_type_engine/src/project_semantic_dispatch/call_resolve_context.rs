@@ -1908,6 +1908,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
             );
         let surface = |node| match self.normalize_node_for_structural_fact_demand(node, transit) {
             super::super::evaluate::StructuralFactDemandOutcome::Complete(node) => {
+                let node = self.regularized_empty_object_program(node);
                 match self.graph().node_data(node)?.as_ref() {
                     SemanticNodeData::Object(view) => Some(view.clone()),
                     _ => None,

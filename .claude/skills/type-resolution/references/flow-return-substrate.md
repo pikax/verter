@@ -219,9 +219,11 @@ array, tuple and union nodes with a memoized postorder walk. Spread construction
 programs record whether they still denote a literal expression; regularization
 clears that bit and their direct-member origins without expanding spread operands.
 An effect-free construction program becomes an ordinary empty object surface at
-publication. Relation checks and subtype-reduction views use that same empty
-surface, so a fresh `{}` still absorbs a primitive sibling where the checker
+publication. Relation checks, subtype-reduction views and call-diagnostic
+structural readers use that same empty surface, so a fresh `{}` still absorbs
+a primitive sibling and reports required missing properties where the checker
 does, without losing its literal provenance before object normalization.
+The empty construction and its regular surface both display as `{}`.
 Thus separately declared object values do not normalize against later siblings.
 Member-granular and whole-value publication apply the same rule through nested
 object properties, without a depth cutoff. Class fields normalize as independent
