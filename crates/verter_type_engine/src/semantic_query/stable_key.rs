@@ -1575,6 +1575,9 @@ fn encode_data(graph: &SemanticGraphStore, id: SemanticNodeId, data: &SemanticNo
             for child in children {
                 enc.child(child);
             }
+            if !program.is_literal {
+                enc.bool(false);
+            }
         }
         SemanticNodeData::TypeOf(_) => {
             enc.header(category::AUTHORED, subtag::TYPEOF);

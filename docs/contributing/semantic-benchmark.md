@@ -294,8 +294,10 @@ benchmark's tsc arm, by `scripts/benchmark/semantic-perf/measure-expected.mjs`
 in all four `strictNullChecks` × `noImplicitAny` settings. The default reference is
 `scripts/benchmark/semantic-perf/expected.json`, which holds the catalog's golden
 answers. Add a measured four-setting cell there when adding a scenario.
-`--reference <file>` selects a fresh measurement outside the checkout. The run records its path and digest,
-which the standalone validator checks again. Every cell carries its own
+`--expected <file>` (also accepted as `--reference <file>`) selects a fresh
+measurement outside the checkout. The run records its path and digest,
+which the standalone validator checks again when given the same reference
+through `--expected <file>`. Every cell carries its own
 immutable provenance (the method — measuring suffix, library, verified tsc
 executable, platform, limits, launcher — plus the tsconfig and source digests
 and a digest of tsc's type output). A scenario may carry its own `method`;
@@ -815,6 +817,20 @@ in `expected.json`; do not refresh unrelated committed records to make a check p
 
 The run fails validation until the reference matches the scenario sources,
 the library and the method.
+
+The committed `expected.json` contains the catalog's measured golden answers.
+For an experiment, the measurer's `--out <file>` writes a separate reference;
+the benchmark's `--expected <file>` reads it with the same source, compiler and
+method validation. The standalone validator uses the committed reference unless
+`--expected <file>` explicitly selects an alternate; a run's recorded reference
+path does not select its validation oracle.
+For the fresh object literal union reproduction:
+
+```bash
+node scripts/benchmark/semantic-perf/measure-expected.mjs --only edge-array-literal-normalization --out .feedback/literal-union-reference.json --work .feedback/literal-union-reference
+node scripts/benchmark/semantic-perf.mjs --only edge-array-literal-normalization --arms verter,tsc-api --settings all --expected .feedback/literal-union-reference.json
+node scripts/benchmark/semantic-perf/validate.mjs <results.json> --require-all-matched --expected .feedback/literal-union-reference.json
+```
 
 ## Evidence runs
 

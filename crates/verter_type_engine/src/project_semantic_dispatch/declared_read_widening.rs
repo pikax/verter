@@ -158,6 +158,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 Some(SemanticNodeData::ObjectSpreadProgram(program)),
                 DeclaredReadStep::Member { key, at },
             ) => {
+                let is_literal = program.is_literal;
                 let mut effects: Vec<ObjectConstructionEffect> = program
                     .effects
                     .iter()
@@ -190,6 +191,7 @@ impl<C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<'_, 
                 graph.intern_preserving_scope(
                     node,
                     SemanticNodeData::ObjectSpreadProgram(ObjectSpreadProgram {
+                        is_literal,
                         effects: crate::semantic_query::PayloadArray::from(effects),
                     }),
                 )

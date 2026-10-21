@@ -127,6 +127,7 @@ mod never_callee_tests;
 mod node_domain_tests;
 mod object_literal_accessor_tests;
 mod object_literal_key_tests;
+mod object_literal_union_tests;
 mod object_spread_projection_eval_tests;
 mod openness_depth_tests;
 mod overload_scale_tests;

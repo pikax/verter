@@ -1835,6 +1835,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         substitutions: &mut Vec<(Arc<str>, SemanticNodeId)>,
         frames: &mut Vec<LowerFrame<'e>>,
     ) -> LowerStep<'e> {
+        if object.empty_literal && object.properties.is_empty() {
+            return LowerStep::Value(self.graph().intern_node_with_scope(
+                SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
+                    effects: crate::semantic_query::PayloadArray::from(
+                        Vec::new().into_boxed_slice(),
+                    ),
+                }),
+                lowering.scope.clone(),
+            ));
+        }
         while let Some(member) = object.properties.get(next) {
             match member {
                 ObjectMember::Property(prop) => {

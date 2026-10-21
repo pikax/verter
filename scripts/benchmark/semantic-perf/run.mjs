@@ -112,7 +112,8 @@ export const USAGE = `usage: node scripts/benchmark/semantic-perf.mjs [options]
                           every tier: 1 warmup + 3 measured fresh processes per arm, 3 warm repeats in one
                           live process per arm; deadline 60 s (quick), 120 s (standard), 600 s (stress)
   --out <dir>             output directory (default: target/semantic-perf/<timestamp>)
-  --reference <file>      measured CLI reference (default: scripts/benchmark/semantic-perf/expected.json)
+  --expected <file>       measured reference (default: the committed expected.json)
+  --reference <file>      alias for --expected
   --only <a,b>            only these scenarios and sessions (id or id prefix, from the whole catalog;
                           overrides --tier)
   --settings <s>          strict (default) | all  (the four strictNullChecks x noImplicitAny settings)
@@ -148,11 +149,11 @@ process per invocation in the verter, verter-observe and tsc-api arms (tsc incre
 The verter-observe arm is the probe built with semantic-observe (capture compiled in) in its own target
 directory; the production probe has it physically compiled out.`;
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = {
     tier: "quick",
     out: null,
-    reference: EXPECTED_FILE,
+    expected: EXPECTED_FILE,
     only: [],
     settings: "strict",
     arms: DEFAULT_ARMS,
@@ -195,7 +196,8 @@ function parseArgs(argv) {
         opts.out = resolve(next());
         break;
       case "--reference":
-        opts.reference = resolve(next());
+      case "--expected":
+        opts.expected = resolve(next());
         break;
       case "--only":
         opts.only = next().split(",").filter(Boolean);
@@ -600,7 +602,7 @@ export async function main(argv) {
     console.log(USAGE);
     return 0;
   }
-  const { value: expected, sha256: expectedHash } = loadExpected(opts.reference);
+  const { value: expected, sha256: expectedHash } = loadExpected(opts.expected);
   if (process.platform === "darwin" && !opts.allowSampled) {
     throw new Error(
       "macOS has no kernel-enforced process-tree memory cap: the supervisor samples. Re-run with --allow-sampled to consent; every record will say `containment: sampled`.",
@@ -885,7 +887,7 @@ export async function main(argv) {
       binaries,
       binariesAfter,
       expected: {
-        file: opts.reference,
+        file: opts.expected,
         sha256: expectedHash,
         schema: expected.schema,
         measuredWith: expected.measuredWith,
@@ -912,7 +914,7 @@ export async function main(argv) {
   };
   run.summary = summarize(run, expected, scenarios, sessions);
   const validation = validateRun(run, expected, scenarios, { sessions });
-  if (sha256File(opts.reference) !== expectedHash) {
+  if (sha256File(opts.expected) !== expectedHash) {
     validation.failures.push("the measured reference changed during the run");
     validation.ok = false;
   }

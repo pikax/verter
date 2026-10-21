@@ -1236,6 +1236,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                             &mut substitutions,
                             context,
                         );
+                        let node = self.normalize_widened_object_literals(
+                            node,
+                            self.nullability_for(job.prepared.root_identity.canonical_id.as_ref()),
+                        );
                         signatures.record(node);
                     }
                 }
@@ -1369,6 +1373,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                         (QueryResult::Error(QueryError::Miss), empty_signature()).into(),
                     ));
                 };
+                let node = self.normalize_inferred_value_type(&build.prepared, node);
                 let output = self.typeof_output(
                     node,
                     false,
@@ -1419,7 +1424,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             };
             let (node, roots, unobservable) = match &mut build.then {
                 TypeofThen::Value => (
-                    self.widen_declared_read_positions(node, &build.prepared),
+                    self.normalize_inferred_value_type(
+                        &build.prepared,
+                        self.widen_declared_read_positions(node, &build.prepared),
+                    ),
                     Vec::new(),
                     false,
                 ),
@@ -1453,6 +1461,10 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     )));
                 }
                 TypeofThen::Signatures(signatures) => {
+                    let node = self.normalize_widened_object_literals(
+                        node,
+                        self.nullability_for(build.prepared.root_identity.canonical_id.as_ref()),
+                    );
                     signatures.record(node);
                     match self.next_value_signature(signatures) {
                         Some(Some(job)) => {
@@ -2515,6 +2527,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         } else {
             return (QueryResult::Error(QueryError::Miss), empty_signature()).into();
         };
+        let node_id = self.normalize_inferred_value_type(&prepared, node_id);
         // A namespace of a class's name merges into its value: the
         // namespace's exported values are properties of the class's static
         // side (a function's join in `finish_value_signatures`).
@@ -2556,6 +2569,99 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             observed_hash,
         );
         self.with_augmentation_roots(output, augmentation_roots, augmentation_unobservable)
+    }
+
+    /// Inferred declarations widen their object literals in the same context
+    /// as return and yield joins. Authored annotations keep their own types.
+    fn normalize_inferred_value_type(
+        &self,
+        prepared: &verter_session_query::type_solver::PreparedValueDecl,
+        node: SemanticNodeId,
+    ) -> SemanticNodeId {
+        if matches!(
+            prepared.type_annotation.annotation,
+            Some(verter_type_expr::facts::SemanticTypeSource::Authored(_))
+        ) {
+            return node;
+        }
+        let nullability = self.nullability_for(prepared.root_identity.canonical_id.as_ref());
+        self.normalize_inferred_initializer_type(node, nullability)
+    }
+
+    fn normalize_inferred_initializer_type(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let normalized = self.normalize_widened_object_literals(node, nullability);
+        self.regularized_source_node_with_policy(normalized, nullability)
+    }
+
+    /// Class surfaces publish each field as an independent initializer. Work
+    /// only on the shape already lowered; reference carriers stay deferred.
+    fn normalize_class_initializers(
+        &self,
+        node: SemanticNodeId,
+        nullability: verter_session_query::flow::policy::NullabilityPolicy,
+    ) -> SemanticNodeId {
+        let graph = self.graph();
+        let Some(data) = graph.node_data(node) else {
+            return node;
+        };
+        let normalized = match data.as_ref() {
+            SemanticNodeData::Object(view) => {
+                let entries = view
+                    .entries
+                    .iter()
+                    .map(|entry| match entry {
+                        SurfaceEntry::Member(member) => SurfaceEntry::Member(SurfaceMember {
+                            value: self
+                                .normalize_inferred_initializer_type(member.value, nullability),
+                            ..member.clone()
+                        }),
+                        SurfaceEntry::ConstructSignature(signature) => {
+                            SurfaceEntry::ConstructSignature(
+                                self.normalize_widened_object_literals(*signature, nullability),
+                            )
+                        }
+                        _ => entry.clone(),
+                    })
+                    .collect();
+                SemanticNodeData::Object(SurfaceView::from_entries(
+                    entries,
+                    view.keyspace,
+                    view.has_known_index_signature(),
+                ))
+            }
+            SemanticNodeData::Intersection(arms) => {
+                let normalized: Arc<[_]> = arms
+                    .iter()
+                    .map(|arm| self.normalize_class_initializers(*arm, nullability))
+                    .collect();
+                if arms.iter().eq(normalized.iter()) {
+                    return node;
+                }
+                SemanticNodeData::Intersection(
+                    crate::semantic_query::composite::CompositeList::rebuilt_from(
+                        arms.origin_category(),
+                        normalized,
+                    ),
+                )
+            }
+            SemanticNodeData::MergedDecl { contributors } => SemanticNodeData::MergedDecl {
+                contributors: contributors
+                    .iter()
+                    .map(|contributor| self.normalize_class_initializers(*contributor, nullability))
+                    .collect::<Vec<_>>()
+                    .into(),
+            },
+            _ => return node,
+        };
+        if normalized == *data {
+            node
+        } else {
+            graph.intern_preserving_scope(node, normalized)
+        }
     }
 
     /// The type of a value whose declared type is its initializer's
@@ -4304,6 +4410,7 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             &mut substitutions,
             None,
         );
+        let shape = self.normalize_class_initializers(shape, self.nullability_for(canonical));
         if context.mode != ProjectionMode::Expanded {
             return Some(shape);
         }
@@ -10230,6 +10337,18 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             substitutions,
             augmentation,
         );
+        let substituted = if decl_kind == verter_session_query::declarations::TypeDeclKind::Class {
+            let canonical = scope.canonical_file();
+            verter_debug_assert!(
+                canonical.is_some(),
+                "a class initializer has an owning file"
+            );
+            canonical.map_or(substituted, |canonical| {
+                self.normalize_class_initializers(substituted, self.nullability_for(&canonical))
+            })
+        } else {
+            substituted
+        };
 
         // 3. Plan the projection of the demanded view: per-arm
         //    ProjectionStamp application + deferred-carrier evaluation under
@@ -10663,6 +10782,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
                     &mut substitutions,
                     context.with_merge_role(crate::semantic_query::MemberMergeRole::OwnBody),
                 );
+                let value = self
+                    .normalize_inferred_initializer_type(value, self.nullability_for(canonical));
                 own.push(SurfaceEntry::Member(SurfaceMember {
                     key: crate::semantic_query::AuthoredPropertyKey::from_known(key.clone()),
                     value,
@@ -11070,11 +11191,23 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     }
 
     /// The member surface of the values `members` lowered.
-    fn finish_value_members(&self, members: ValueMembers, scope: NodeScopeId) -> SemanticNodeId {
-        self.graph().intern_node_with_scope(
+    fn finish_value_members(
+        &self,
+        mut members: ValueMembers,
+        scope: NodeScopeId,
+    ) -> SemanticNodeId {
+        let nullability = self.nullability_for(members.canonical.as_ref());
+        for entry in &mut members.own {
+            let SurfaceEntry::Member(member) = entry else {
+                continue;
+            };
+            member.value = self.normalize_widened_object_literals(member.value, nullability);
+        }
+        let node = self.graph().intern_node_with_scope(
             SemanticNodeData::Object(SurfaceView::from_entries(members.own, None, false)),
             scope,
-        )
+        );
+        self.regularized_source_node_with_policy(node, nullability)
     }
 
     construction_ordinal_seam! {

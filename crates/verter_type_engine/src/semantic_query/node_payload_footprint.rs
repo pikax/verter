@@ -546,7 +546,10 @@ impl PayloadHeap for verter_type_expr::facts::ValueDeclIdentityPart {
 
 impl PayloadHeap for ObjectSpreadProgram {
     fn visit_payload_heap(&self, visitor: &mut dyn PayloadHeapVisitor) {
-        let Self { effects } = self;
+        let Self {
+            effects,
+            is_literal: _,
+        } = self;
         effects.visit_payload_heap(visitor);
     }
 }

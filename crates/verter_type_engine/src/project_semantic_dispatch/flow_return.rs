@@ -8069,6 +8069,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// when it names none, or when its carrier does not resolve).
     pub(super) fn resolved_reduction_view(&self, view: SemanticNodeId) -> SemanticNodeId {
         match self.graph().node_data(view).as_deref() {
+            Some(SemanticNodeData::ObjectSpreadProgram(_)) => {
+                return self.regularized_empty_object_program(view);
+            }
             Some(
                 SemanticNodeData::Alias(_)
                 | SemanticNodeData::DeclRef { .. }
@@ -8077,7 +8080,9 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
             _ => return view,
         }
         match self.unwrap_identity_carrier_for_relation(view) {
-            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => resolved,
+            super::relation::IdentityCarrierUnwrap::Concrete(resolved) => {
+                self.regularized_empty_object_program(resolved)
+            }
             super::relation::IdentityCarrierUnwrap::Unresolvable => view,
         }
     }
@@ -8087,8 +8092,8 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
     /// flag: a fresh object literal source is excess-checked, so a
     /// property the target neither lists nor admits through an index
     /// signature refuses the pair; an object literal target admits no
-    /// source property it does not list. Either side must be a plain
-    /// object surface for the rules to apply.
+    /// source property it does not list. Both operands must expose a
+    /// known object member surface for the rules to apply.
     fn literal_arm_lists_an_unknown_property(
         &self,
         (source, source_literal): (SemanticNodeId, bool),
@@ -8103,8 +8108,17 @@ impl<'a, C: crate::resolver_core::ResolverCapabilities> ProjectSemanticDispatch<
         else {
             return false;
         };
-        let SemanticNodeData::Object(target_surface) = &*target_data else {
-            return false;
+        let target_surface = match &*target_data {
+            SemanticNodeData::Object(surface) => surface.clone(),
+            SemanticNodeData::ObjectSpreadProgram(program)
+                if target_literal && program.is_literal && program.effects.is_empty() =>
+            {
+                // The empty literal has an exact empty key domain, just as
+                // a plain literal surface does, and must not absorb a sibling
+                // before their missing properties can be normalized.
+                crate::semantic_query::SurfaceView::from_entries(Vec::new(), None, false)
+            }
+            _ => return false,
         };
         // A spread-built source lists the members its construction
         // program surfaces (`{ ...s, a: 2 }` over `s: { z: number }` lists
@@ -10850,6 +10864,7 @@ pub(super) trait FlowDemandDriver {
         node: SemanticNodeId,
     ) -> Option<verter_type_expr::facts::ValueDeclIdentityPart>;
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap;
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId;
     fn value_read_widens(
         &self,
         canonical: &str,
@@ -11549,6 +11564,9 @@ impl<C: crate::resolver_core::ResolverCapabilities> FlowDemandDriver
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         ProjectSemanticDispatch::unwrap_identity_carrier_for_relation(self, id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        ProjectSemanticDispatch::regularized_empty_object_program(self, node)
     }
     fn value_read_widens(
         &self,
@@ -12339,6 +12357,9 @@ impl<D: FlowDemandDriver> FlowDemandDriver for FlowCx<'_, D> {
     }
     fn unwrap_identity_carrier_for_relation(&self, id: SemanticNodeId) -> IdentityCarrierUnwrap {
         self.driver.unwrap_identity_carrier_for_relation(id)
+    }
+    fn regularized_empty_object_program(&self, node: SemanticNodeId) -> SemanticNodeId {
+        self.driver.regularized_empty_object_program(node)
     }
     fn value_read_widens(
         &self,
@@ -15060,6 +15081,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
             super::relation::IdentityCarrierUnwrap::Concrete(node) => node,
             super::relation::IdentityCarrierUnwrap::Unresolvable => operand,
         };
+        let resolved = self.dispatch.regularized_empty_object_program(resolved);
         let surface = match self.dispatch.arena().node_data(resolved).as_deref() {
             Some(SemanticNodeData::Object(surface))
                 if surface.index_signatures.is_empty()
@@ -15230,12 +15252,13 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
                 .any(|member| self.value_mentions_receiver(member.value, receiver.binder))
         });
         self.receiver = enclosing_receiver;
-        if spread_seen {
+        if spread_seen || entries.is_empty() {
             if late_bound.any() {
                 return Positional::Unmodeled;
             }
             return Positional::Value(self.dispatch.graph().intern_node_with_scope(
                 SemanticNodeData::ObjectSpreadProgram(crate::semantic_query::ObjectSpreadProgram {
+                    is_literal: true,
                     effects: crate::semantic_query::PayloadArray::from(effects.into_boxed_slice()),
                 }),
                 self.binder_env.scope.clone(),
@@ -20353,6 +20376,7 @@ impl<'d, 'b, D: FlowDemandDriver> FlowEvaluator<'d, 'b, D> {
     fn empty_object_node(&mut self) -> SemanticNodeId {
         self.lower_body_type(&verter_type_expr::TypeExpr::Object(Arc::new(
             verter_type_expr::ObjectExpr {
+                empty_literal: false,
                 properties: Vec::new(),
             },
         )))

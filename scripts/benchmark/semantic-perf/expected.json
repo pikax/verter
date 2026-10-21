@@ -6894,267 +6894,64 @@
     }
    }
   },
-  "core-satisfies-widen": {
-   "sourceSha256": "a37662e0b62da8d93f5044c224b761bca53d5a6da4f9720603866f54c3246482",
+  "edge-array-literal-normalization": {
+   "sourceSha256": "9c46185e9d9fa30c06e1315cc907bd66fc16f0ba2eddb3810ba0ccabd1fd5354",
    "settings": {
     "strict": {
      "never": false,
      "codes": [],
      "receipt": {
       "exit": 1,
-      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
-      "stdoutBytes": 293,
+      "stdoutSha256": "310bd8e858946473f5e585bef7794338129a8824e5ccf8264da798a8e7cc93b2",
+      "stdoutBytes": 347,
       "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
-      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "sourceSha256": "7e4370c86e2d3556a8c907b41c41830663d6b1e3e03dcd5eff5d02292bb2048a",
       "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
       "termination": null
      },
-     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+     "printed": "[({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]]"
     },
     "snc-off": {
      "never": false,
      "codes": [],
      "receipt": {
       "exit": 1,
-      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
-      "stdoutBytes": 293,
+      "stdoutSha256": "310bd8e858946473f5e585bef7794338129a8824e5ccf8264da798a8e7cc93b2",
+      "stdoutBytes": 347,
       "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
-      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "sourceSha256": "7e4370c86e2d3556a8c907b41c41830663d6b1e3e03dcd5eff5d02292bb2048a",
       "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
       "termination": null
      },
-     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+     "printed": "[({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]]"
     },
     "nia-off": {
      "never": false,
      "codes": [],
      "receipt": {
       "exit": 1,
-      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
-      "stdoutBytes": 293,
+      "stdoutSha256": "310bd8e858946473f5e585bef7794338129a8824e5ccf8264da798a8e7cc93b2",
+      "stdoutBytes": 347,
       "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
-      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "sourceSha256": "7e4370c86e2d3556a8c907b41c41830663d6b1e3e03dcd5eff5d02292bb2048a",
       "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
       "termination": null
      },
-     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+     "printed": "[({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]]"
     },
     "both-off": {
      "never": false,
      "codes": [],
      "receipt": {
       "exit": 1,
-      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
-      "stdoutBytes": 293,
+      "stdoutSha256": "310bd8e858946473f5e585bef7794338129a8824e5ccf8264da798a8e7cc93b2",
+      "stdoutBytes": 347,
       "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
-      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "sourceSha256": "7e4370c86e2d3556a8c907b41c41830663d6b1e3e03dcd5eff5d02292bb2048a",
       "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
       "termination": null
      },
-     "printed": "[{ a: number; b: string; c: boolean[]; }]"
-    }
-   }
-  },
-  "edge-any-infer-pattern": {
-   "sourceSha256": "a08951ed2800726319f7d87af0c03bf471b578aac7209312fe6962aaea8234df",
-   "settings": {
-    "strict": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
-      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[unknown]"
-    },
-    "snc-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
-      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[unknown]"
-    },
-    "nia-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
-      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[unknown]"
-    },
-    "both-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
-      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[unknown]"
-    }
-   },
-   "method": {
-    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
-    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
-    "tscExeSha256": "a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2",
-    "tscVersion": "Version 7.0.2",
-    "platform": "darwin-arm64",
-    "memMb": 8192,
-    "timeoutMs": 300000,
-    "launcher": "verter-supervise"
-   }
-  },
-  "edge-equal-identity-idiom": {
-   "sourceSha256": "548bf604f4764e6601000cc4c2ec603110a58301a987553296b575e703d7dcfb",
-   "settings": {
-    "strict": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
-      "stdoutBytes": 224,
-      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
-      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[true]"
-    },
-    "snc-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
-      "stdoutBytes": 224,
-      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
-      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[true]"
-    },
-    "nia-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
-      "stdoutBytes": 224,
-      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
-      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[true]"
-    },
-    "both-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
-      "stdoutBytes": 224,
-      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
-      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[true]"
-    }
-   },
-   "method": {
-    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
-    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
-    "tscExeSha256": "a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2",
-    "tscVersion": "Version 7.0.2",
-    "platform": "darwin-arm64",
-    "memMb": 8192,
-    "timeoutMs": 300000,
-    "launcher": "verter-supervise"
-   }
-  },
-  "edge-let-widens-const-literal": {
-   "sourceSha256": "1bc8f84f30cbfa3966418491c197d724c6cc62297934df4a442cda7c930ed03c",
-   "settings": {
-    "strict": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
-      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[string]"
-    },
-    "snc-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
-      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[string]"
-    },
-    "nia-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
-      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[string]"
-    },
-    "both-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
-      "stdoutBytes": 229,
-      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
-      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[string]"
+     "printed": "[({ a: number; b?: undefined; } | { a?: undefined; b: string; })[]]"
     }
    }
   },
@@ -12967,67 +12764,6 @@
     }
    }
   },
-  "vue-return-literal-widening": {
-   "sourceSha256": "441bc3e47fbf5c76b5a37f3bac964cefec181f45b9f9c7d7497fa04364772a98",
-   "settings": {
-    "strict": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
-      "stdoutBytes": 369,
-      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
-      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
-    },
-    "snc-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
-      "stdoutBytes": 369,
-      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
-      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
-    },
-    "nia-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
-      "stdoutBytes": 369,
-      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
-      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
-    },
-    "both-off": {
-     "never": false,
-     "codes": [],
-     "receipt": {
-      "exit": 1,
-      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
-      "stdoutBytes": 369,
-      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
-      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
-      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
-      "termination": null
-     },
-     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
-    }
-   }
-  },
   "vue-setup-store-remap-10": {
    "sourceSha256": "317e07d094b70bb9d4d2e0f70fc905ce56719f04d4a141fcefe4c00c16816cc2",
    "settings": {
@@ -13269,6 +13005,331 @@
       "termination": null
      },
      "printed": "[readonly [string]] | [readonly [number]]"
+    }
+   }
+  },
+  "edge-any-infer-pattern": {
+   "sourceSha256": "a08951ed2800726319f7d87af0c03bf471b578aac7209312fe6962aaea8234df",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
+      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[unknown]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
+      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[unknown]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
+      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[unknown]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "0c6fd141b753a57ddae53457bcb9dfa4d7e40c52c18468467a684b60b05245e5",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
+      "sourceSha256": "68f0ed4fe9dab3d78ecb8c881da74b94591f309ed6774eed7772acf20a38c776",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[unknown]"
+    }
+   },
+   "method": {
+    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
+    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
+    "tscExeSha256": "a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2",
+    "tscVersion": "Version 7.0.2",
+    "platform": "darwin-arm64",
+    "memMb": 8192,
+    "timeoutMs": 300000,
+    "launcher": "verter-supervise"
+   }
+  },
+  "edge-equal-identity-idiom": {
+   "sourceSha256": "548bf604f4764e6601000cc4c2ec603110a58301a987553296b575e703d7dcfb",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
+      "stdoutBytes": 224,
+      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
+      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[true]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
+      "stdoutBytes": 224,
+      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
+      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[true]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
+      "stdoutBytes": 224,
+      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
+      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[true]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "3ae26b01de2071768dd98bdb306b7cf38142eaacf9ac7fc78c491eeed9ddf86c",
+      "stdoutBytes": 224,
+      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
+      "sourceSha256": "82cd9a048402b3eb394add14bf002ad2ce5270159826c29f8abe77f1d0023aba",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"darwin-arm64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[true]"
+    }
+   },
+   "method": {
+    "measuringSuffixSha256": "5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3",
+    "libSha256": "1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e",
+    "tscExeSha256": "a82f731365ad69d5c4c15f5e18fba4584bf3b7b839960172a76c3462b5114bf2",
+    "tscVersion": "Version 7.0.2",
+    "platform": "darwin-arm64",
+    "memMb": 8192,
+    "timeoutMs": 300000,
+    "launcher": "verter-supervise"
+   }
+  },
+  "core-satisfies-widen": {
+   "sourceSha256": "a37662e0b62da8d93f5044c224b761bca53d5a6da4f9720603866f54c3246482",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
+      "stdoutBytes": 293,
+      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
+      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
+      "stdoutBytes": 293,
+      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
+      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
+      "stdoutBytes": 293,
+      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
+      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "74ec71b737c6a77c1c0c083ee12dd9916db3c7777eea78fa9fcf78c3394ef547",
+      "stdoutBytes": 293,
+      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
+      "sourceSha256": "2dfa54fd28587bc6fd5cc666804dff977ea12c9930e5799218ddd79b3b282b9b",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ a: number; b: string; c: boolean[]; }]"
+    }
+   }
+  },
+  "edge-let-widens-const-literal": {
+   "sourceSha256": "1bc8f84f30cbfa3966418491c197d724c6cc62297934df4a442cda7c930ed03c",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
+      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[string]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
+      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[string]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
+      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[string]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "54513dc464c069963ae10fc68a82196117a731c085203126d25b68a755e826aa",
+      "stdoutBytes": 229,
+      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
+      "sourceSha256": "9e0ea4d8846eb43da29a80a10188a9bec68abb0d46698607eb07ec9bf5f10d75",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[string]"
+    }
+   }
+  },
+  "vue-return-literal-widening": {
+   "sourceSha256": "441bc3e47fbf5c76b5a37f3bac964cefec181f45b9f9c7d7497fa04364772a98",
+   "settings": {
+    "strict": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
+      "stdoutBytes": 369,
+      "tsconfigSha256": "5ccc5ca0e1d17984a54bdc600c4323877762986a75236a8d8051aa1bbc809821",
+      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
+    },
+    "snc-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
+      "stdoutBytes": 369,
+      "tsconfigSha256": "3586c0b87114094b32dd5a86a465fd45a3f0e16aee5d16a6553cf4376b2c7d64",
+      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
+    },
+    "nia-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
+      "stdoutBytes": 369,
+      "tsconfigSha256": "6c4f3339638ec5b0a42678371fdb470d3d098621e9774bdc80f65c13d5f26ea8",
+      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
+    },
+    "both-off": {
+     "never": false,
+     "codes": [],
+     "receipt": {
+      "exit": 1,
+      "stdoutSha256": "85d6a43d90e5500f157135509b84d1a77d787f57a5a13776fab951f83b28aebf",
+      "stdoutBytes": 369,
+      "tsconfigSha256": "b28a228cbf00f2861e8922c4a94ae1c88a584b17f1b1ca1ffa9a271b4f4c1a94",
+      "sourceSha256": "59e5f6534a38ef30663f8964c83d1fcfae8f205afc32ab8751d4d5945d5e4995",
+      "method": "{\"measuringSuffixSha256\":\"5a2d6a2f446c87be35593eb1612bc2f973c421c6834752cf429935ccafd97ef3\",\"libSha256\":\"1bc6a7f0f47a23044e087d09853d7aa15f91c8c446f7275d25ad6babcbd14f1e\",\"tscExeSha256\":\"f9ecfbdc93753d2c972d66a8d0d75f5bd737fd4a5f88b422d9091ea282bcb2c7\",\"tscVersion\":\"Version 7.0.2\",\"platform\":\"win32-x64\",\"memMb\":8192,\"timeoutMs\":300000,\"launcher\":\"verter-supervise\"}",
+      "termination": null
+     },
+     "printed": "[{ f: () => boolean; g: (n: number) => boolean; h: () => string; i: () => 1; }]"
     }
    }
   }

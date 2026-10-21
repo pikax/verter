@@ -497,6 +497,7 @@ fn structural_hash_discriminates_spread_operand_identity() {
     let data = |operand| {
         SemanticNodeData::ObjectSpreadProgram(
             verter_type_engine::semantic_query::ObjectSpreadProgram {
+                is_literal: true,
                 effects: verter_type_engine::semantic_query::PayloadArray::from([
                     verter_type_engine::semantic_query::ObjectConstructionEffect::DirectProperty(
                         verter_type_engine::semantic_query::AuthoredPropertyEffect {
